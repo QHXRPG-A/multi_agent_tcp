@@ -1,0 +1,7 @@
+{
+  "agent_id": "worker-listen-1",
+  "broker_host": "127.0.0.1",
+  "broker_port": 9123,
+  "role": "logger",
+  "mode": "listen"
+}

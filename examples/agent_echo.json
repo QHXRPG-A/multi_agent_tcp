@@ -1,0 +1,7 @@
+{
+  "agent_id": "worker-echo-1",
+  "broker_host": "127.0.0.1",
+  "broker_port": 9123,
+  "role": "echo-demo",
+  "mode": "echo"
+}

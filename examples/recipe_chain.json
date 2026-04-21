@@ -1,0 +1,15 @@
+{
+  "broker_host": "127.0.0.1",
+  "broker_port": 9123,
+  "self_id": "orch-cli",
+  "role": "recipe-runner",
+  "steps": [
+    {
+      "send_to": "worker-echo-1",
+      "body": { "prompt": "ping from orchestrate recipe" }
+    },
+    {
+      "wait_for": { "from": "worker-echo-1", "timeout_sec": 60 }
+    }
+  ]
+}

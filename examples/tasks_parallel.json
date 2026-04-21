@@ -1,0 +1,20 @@
+[
+  {
+    "to": "cm1",
+    "body": {
+      "prompt": "在 gclient/ 目录下搜索 GameChooseWindow 类定义在哪个 Python 文件里，给出相对路径。"
+    }
+  },
+  {
+    "to": "cm2",
+    "body": {
+      "prompt": "在 gclient/ 目录下搜索 GameLogicBlasting 类定义在哪个 Python 文件里，给出相对路径。"
+    }
+  },
+  {
+    "to": "cm3",
+    "body": {
+      "prompt": "在 gclient/ 目录下搜索 mapbase_mark_comp 相关的 Python 文件路径，给出相对路径。"
+    }
+  }
+]

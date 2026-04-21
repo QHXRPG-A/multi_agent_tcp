@@ -1,0 +1,15 @@
+{
+  "agent_id": "codemaker-worker-1",
+  "broker_host": "127.0.0.1",
+  "broker_port": 9123,
+  "role": "codemaker",
+  "mode": "codemaker-worker",
+  "codemaker": {
+    "command": "codemaker",
+    "cwd": ".",
+    "model": "netease-codemaker/kimi-k2.5",
+    "base_args": ["run", "--format", "json"],
+    "prompt_via_file": "auto",
+    "timeout_sec": 3600
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "broker_host": "127.0.0.1",
+  "broker_port": 9123,
+  "self_id": "orch-batch",
+  "role": "recipe-runner",
+  "steps": [
+    {
+      "batch_gather": {
+        "id": "demo-gather-1",
+        "timeout_sec": 30,
+        "items": [
+          { "to": "alpha", "body": { "task": "A" } },
+          { "to": "beta", "body": { "task": "B" } }
+        ]
+      }
+    }
+  ]
+}

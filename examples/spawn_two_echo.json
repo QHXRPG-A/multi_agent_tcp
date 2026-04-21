@@ -1,0 +1,8 @@
+{
+  "broker_host": "127.0.0.1",
+  "broker_port": 9123,
+  "agents": [
+    { "agent_id": "alpha", "role": "demo", "mode": "echo" },
+    { "agent_id": "beta", "role": "demo", "mode": "echo" }
+  ]
+}

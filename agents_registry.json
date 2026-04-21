@@ -1,0 +1,30 @@
+{
+  "$comment": "multi_agent_tcp agents 配置表 — Cursor/CodeMaker 拉起 agents 时只能从此表中选取",
+  "skill_list_dir": "skill_list",
+  "agents": {
+    "agent-1": {
+      "display_name": "助手 Alpha",
+      "model": "netease-codemaker/claude-sonnet-4-6",
+      "cwd": "F:/src/Package/Script/Python",
+      "skills": [],
+      "timeout_sec": 1800,
+      "enabled": true
+    },
+    "agent-2": {
+      "display_name": "助手 Beta",
+      "model": "netease-codemaker/claude-sonnet-4-6",
+      "cwd": "F:/src/Package/Script/Python",
+      "skills": [],
+      "timeout_sec": 1800,
+      "enabled": true
+    },
+    "agent-3": {
+      "display_name": "助手 Gamma",
+      "model": "netease-codemaker/claude-sonnet-4-6",
+      "cwd": "F:/src/Package/Script/Python",
+      "skills": [],
+      "timeout_sec": 1800,
+      "enabled": true
+    }
+  }
+}

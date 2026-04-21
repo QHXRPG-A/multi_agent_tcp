@@ -1,0 +1,6 @@
+logs/
+sessions/
+skill_list/
+__pycache__/
+*.py[cod]
+*.pyo
