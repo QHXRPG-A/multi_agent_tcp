@@ -19,5 +19,5 @@ See `examples/HOWTO.txt` and `GUIDE_FOR_CODEMAKER.md`.
 
 ## Configuration
 
-- Edit `agents_registry.json` for agent ids, `cwd`, models, and skills.
+- Edit `agents_registry.json` for agent ids, **`cwd` (use an absolute path to your repo root in practice)**, models, and skills. The committed file uses `"."` as a placeholder.
 - Run `python -m multi_agent_tcp.init_skill_list` to populate `skill_list/` (gitignored by default).
