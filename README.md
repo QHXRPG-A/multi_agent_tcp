@@ -15,7 +15,7 @@ python -m multi_agent_tcp show-registry
 python -m multi_agent_tcp dispatch --tasks path/to/tasks.json
 ```
 
-See `examples/HOWTO.txt` and `GUIDE_FOR_CODEMAKER.md`.
+See `examples/HOWTO.txt` and `GUIDE_FOR_CODEMAKER.md`. Optional local reference `codemaker_cli.md` is **not** in the public repo (gitignored); keep your own copy beside this package if you use it.
 
 ## Configuration
 
