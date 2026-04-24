@@ -1,0 +1,32 @@
+{
+    "name": "@types/npmcli__arborist",
+    "version": "6.3.3",
+    "description": "TypeScript definitions for @npmcli/arborist",
+    "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/npmcli__arborist",
+    "license": "MIT",
+    "contributors": [
+        {
+            "name": "Emily M Klassen",
+            "githubUsername": "forivall",
+            "url": "https://github.com/forivall"
+        }
+    ],
+    "main": "",
+    "types": "index.d.ts",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+        "directory": "types/npmcli__arborist"
+    },
+    "scripts": {},
+    "dependencies": {
+        "@npm/types": "^1",
+        "@types/cacache": "*",
+        "@types/node": "*",
+        "@types/npmcli__package-json": "*",
+        "@types/pacote": "*"
+    },
+    "peerDependencies": {},
+    "typesPublisherContentHash": "67394cabbc0a3634cd0939fa28e63ee43db2994355b723834ccd751b6b68dc90",
+    "typeScriptVersion": "5.2"
+}

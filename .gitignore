@@ -4,6 +4,16 @@ codemaker_cli.md
 logs/
 sessions/
 skill_list/
+.venv_vendor_ryven/
+GuLiCode/node_modules/
+GuLiCode/**/node_modules/
+GuLiCode/dist/
+GuLiCode/**/dist/
+GuLiCode/.turbo/
+GuLiCode/.next/
+GuLiCode/.sst/
+GuLiCode/coverage/
+GuLiCode/.cache/
 __pycache__/
 *.py[cod]
 *.pyo

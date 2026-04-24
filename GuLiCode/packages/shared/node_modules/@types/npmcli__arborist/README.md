@@ -1,0 +1,15 @@
+# Installation
+> `npm install --save @types/npmcli__arborist`
+
+# Summary
+This package contains type definitions for @npmcli/arborist (https://github.com/npm/cli/tree/latest/workspaces/arborist#readme).
+
+# Details
+Files were exported from https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/npmcli__arborist.
+
+### Additional Details
+ * Last updated: Wed, 18 Feb 2026 23:03:27 GMT
+ * Dependencies: [@npm/types](https://npmjs.com/package/@npm/types), [@types/cacache](https://npmjs.com/package/@types/cacache), [@types/node](https://npmjs.com/package/@types/node), [@types/npmcli__package-json](https://npmjs.com/package/@types/npmcli__package-json), [@types/pacote](https://npmjs.com/package/@types/pacote)
+
+# Credits
+These definitions were written by [Emily M Klassen](https://github.com/forivall).

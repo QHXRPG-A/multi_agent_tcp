@@ -1,0 +1,73 @@
+{
+  "name": "@thisbeyond/solid-dnd",
+  "version": "0.7.5",
+  "description": "A lightweight drag and drop toolkit for Solid.",
+  "homepage": "https://github.com/thisbeyond/solid-dnd#readme",
+  "license": "MIT",
+  "author": "Martin Pengelly-Phillips",
+  "keywords": [
+    "drag and drop",
+    "dnd",
+    "sortable",
+    "reorder",
+    "reorderable",
+    "solid",
+    "solidjs"
+  ],
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "browser": {},
+  "exports": {
+    "solid": {
+      "development": "./dist/dev.jsx",
+      "import": "./dist/index.jsx"
+    },
+    "development": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/dev.js"
+      }
+    },
+    "import": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "typesVersions": {},
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "watch": "tsup --watch",
+    "prepublishOnly": "pnpm run build",
+    "release": "release-it"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thisbeyond/solid-dnd.git"
+  },
+  "peerDependencies": {
+    "solid-js": "^1.5"
+  },
+  "devDependencies": {
+    "@release-it/keep-a-changelog": "^3.1.0",
+    "prettier": "^2.7.1",
+    "release-it": "^15.5.0",
+    "tsup": "^6.5.0",
+    "tsup-preset-solid": "^0.1.4",
+    "solid-js": "^1.5",
+    "typescript": "^4.8.4"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "pnpm@8.6.0",
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.6.0"
+  }
+}
