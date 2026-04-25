@@ -18,3 +18,38 @@ GuLiCode/.cache/
 __pycache__/
 *.py[cod]
 *.pyo
+
+# ---- OS / 编辑器（不影响 GuLiCode / multi_agent_tcp 运行）----
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.idea/
+*.iml
+.vs/
+
+# ---- Python 本地虚拟环境与工具缓存 ----
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+htmlcov/
+*.egg-info/
+.eggs/
+
+# ---- GuLiCode 构建、测试、本地缓存（依赖仍由 bun install 生成）----
+GuLiCode/.vite/
+GuLiCode/**/.vite/
+GuLiCode/**/.artifacts/
+GuLiCode/**/playwright-report/
+GuLiCode/**/test-results/
+GuLiCode/**/.playwright/
+GuLiCode/**/.eslintcache
+GuLiCode/**/*.tsbuildinfo
+GuLiCode/**/storybook-static/
+GuLiCode/packages/*/out/
+GuLiCode/packages/desktop-electron/out/
+GuLiCode/packages/desktop-electron/release/
+*.log
