@@ -1,4 +1,6 @@
 [install]
+# 本目录独立安装，避免继承全局 ~/.npmrc 指向内网源时与 Bun 缓存交互触发 EPERM（Windows）
+registry = "https://registry.npmjs.org/"
 exact = true
 
 [test]

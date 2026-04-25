@@ -53,3 +53,18 @@ GuLiCode/packages/*/out/
 GuLiCode/packages/desktop-electron/out/
 GuLiCode/packages/desktop-electron/release/
 *.log
+
+# ---- Python 测试覆盖率 / 本地环境（勿进库）----
+.coverage
+coverage.xml
+*.lcov
+.env
+!.env.example
+
+# ---- 合并与编辑器临时备份 ----
+*.orig
+*.swp
+*~
+
+# ---- GuLiCode 可选部署工具缓存 ----
+GuLiCode/**/.vercel/
