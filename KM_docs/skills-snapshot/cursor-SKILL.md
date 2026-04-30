@@ -472,6 +472,12 @@ python -m multi_agent_tcp.test_skill_injection [--agent-id agent-1] [--skill exc
 - **Per-agent permission**：每个 agent 可声明"我接受谁发的任务、什么类型的任务"。
 - **多模态消息**：当前协议只承载 JSON 文本；后续新增 `blob_put` / `blob_get` 帧（base64 + blob store）以支持图像/音频。
 - **节点化工作流（headless）**：把"agent 调用 + 消息处理"建模成 DAG，节点编译到 `run_parallel` / `run_chain` / `run_single`。
+  - **节点四类**（与 brainstorm §4.1 对齐）：
+    - **Agent 节点**（重点）：节点系统里**唯一负责装载一个对等 agent CLI 的节点类型**——可视化编辑器里**用户拖出一个 Agent 节点 = 拉起一个 agent**。用户在节点检视面板上声明 `cli_kind`（codemaker / claude_code / codex / custom）/ `model` / `cwd` / `agent_id` / `skills` / `timeout_sec` / `adapter_options` / `extra_env`，并定义输入端口（`prompt` / `attachments` / `context`）与输出端口（`answer` / `attachments_out` / `status` / `raw`）。底层对应 `WorkerConfig` + `CLIAdapter`，与 `agents_registry.json` 共享 schema。完整字段表见 `KM_docs/multi-cli-node-workflow-brainstorm.md` §4.1.1。
+    - **处理节点**（pure function）：纯函数式 message 转换，例 `Jinja2Render` / `JsonPathPick` / `MdStrip` / `ImageResize` / `JsonMerge`。
+    - **路由节点**：控制流，例 `FanOut` / `FanIn` / `Switch`（对应 ROADMAP P2 条件路由的 `when=`）。
+    - **I/O 节点**：与外部世界交互，例 `FileRead` / `FileWrite` / `HttpGet` / `McpCall` / `BlobPut` / `BlobGet`。
+  - **可视化编辑器**：本框架不自研 UI；可视化阶段复用 vendored Ryven（MVP 第 ⑤ 步可选交付），节点定义复用 §4.1.1 / §4.2 schema，不重写编辑器。
 
 ## Windows 编码注意
 

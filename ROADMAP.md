@@ -206,7 +206,7 @@ from multi_agent_tcp import DAG, Node
 
 dag = DAG()
 
-# 定义节点
+# 定义节点（worker= 绑定的就是 P3 节点化工作流里的 “Agent 节点”——见下方术语锚定）
 search = dag.add("search", worker="cm1", prompt="搜索所有 UIWindow 子类")
 check  = dag.add("check",  worker="cm2", prompt="验证搜索结果的准确性")
 deep   = dag.add("deep",   worker="cm3", prompt="对不准确的结果深入分析")
@@ -223,6 +223,11 @@ dag.edge(deep,  done)
 result = await cluster.run_dag(dag)
 ```
 
+**术语锚定（重要）**：上面 `dag.add(...)` 的 `worker=` 参数绑定的节点就是 P3「节点化工作流」里的 **Agent 节点**——即"装载一个对等 agent CLI 的节点类型"。详见 [`KM_docs/multi-cli-node-workflow-brainstorm.md` §4.1.1](KM_docs/multi-cli-node-workflow-brainstorm.md#411-agent-节点的可视化配置面重点)。两层叙事对应关系：
+
+- **P2 这里（Python API）**：用户用 `dag.add(name, worker="cm1", prompt=..., ...)` 在代码里描述节点；`worker=` 是 Agent 节点的"绑定哪个对等 agent"字段。
+- **P3 那里（节点化工作流）**：用户在可视化编辑器里**拖出一个 Agent 节点 = 拉起一个 agent**；同样的 `worker` / `prompt` / 输入输出端口走表单/引脚化呈现，背后编译目标仍是 P2 DAG。
+
 **设计要点**：
 
 - `when` 是用户写的普通 Python 函数，不是 LLM 推理——**框架不做决策**
@@ -230,7 +235,7 @@ result = await cluster.run_dag(dag)
 - 支持 fan-out（一个节点多条出边）、fan-in（多条入边汇聚）、条件跳过
 - DAG 必须无环（框架校验），避免无限循环；如果需要循环重试，用 P1 的 `should_retry`
 
-**不做**：不做图的可视化渲染、不做自动拓扑推断。
+**不做**：不做图的可视化渲染、不做自动拓扑推断（P3 节点化工作流里也仅在最后阶段把 vendored Ryven 复用为编辑器，**不**自研 UI；详见下方 P3 与 ROADMAP「不做清单」）。
 
 ---
 
@@ -305,7 +310,36 @@ WorkerConfig(
 
 **与 P2 DAG 的关系**：P2 DAG 是 Python API；P3 节点化工作流是更高一层的"节点定义 + 端口契约 + 编译器"，编译目标就是 P2 DAG（再向下编译到 `run_parallel` / `run_chain` / `run_single`）。
 
+#### 节点四类（与 brainstorm §4.1 对齐）
+
+| 类别 | 职责 | 例子 |
+|------|------|------|
+| **Agent 节点**（重点，详见下） | 装载一个对等 agent CLI；调它跑一段 prompt，输出 `WorkerResult` | `CodeMakerAgent` / `ClaudeCodeAgent` / `CodexAgent` |
+| **处理节点（pure function）** | 纯函数式 message 转换 | `Jinja2Render` / `JsonPathPick` / `MdStrip` / `ImageResize` / `JsonMerge` |
+| **路由节点** | 控制流 | `FanOut` / `FanIn` / `Switch`（对应 P2 条件路由的 `when=`） |
+| **I/O 节点** | 与外部世界交互 | `FileRead` / `FileWrite` / `HttpGet` / `McpCall` / `BlobPut` / `BlobGet` |
+
+> **节点系统不重新实现 LLM 推理 / tool calling / 任务规划**——这些仍由 Agent 节点背后的 CLI 自己完成；节点系统只做"消息怎么进出 agent"。
+
+#### Agent 节点（spotlight）
+
+**Agent 节点是节点四类中唯一负责"装载一个对等 agent CLI"的节点类型**——即可视化编辑器里**用户拖出一个 Agent 节点 = 拉起一个 agent**。它在面板上要由用户声明的字段大致与 [`agents_registry.json`](agents_registry.json) 对齐：
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `cli_kind` | ✅ | 选择装载哪种对等 agent CLI：`codemaker` / `claude_code` / `codex` / `custom`（依赖 P0 CLI Adapter 抽象落地）|
+| `model` | ✅ | 依 `cli_kind` 联动下拉；CodeMaker 体系强制 `netease-codemaker/<...>` 前缀 |
+| `cwd` | ✅ | 该 agent 子进程工作目录；CodeMaker 体系下需有 `codemaker.json` + `permission: "allow"` |
+| `agent_id` | ⚠️ | broker 内寻址用；可视化编辑器默认用节点 id 派生，可手动覆写以挂接已有 registry 条目 |
+| 输入端口 | — | `prompt`（text/*，必备）/ `attachments`（image/* / audio/* / file/*，可多端口）/ `context`（来自 chain 上一步） |
+| 输出端口 | — | `answer`（text/*）/ `attachments_out`（多模态 envelope）/ `status` / `raw`（debug） |
+| `skills` / `timeout_sec` / `adapter_options` / `extra_env` | ⭕ | 对应 [`agents_registry.json`](agents_registry.json) 同名字段；adapter 决定如何使用 |
+
+**完整字段表 + 端口 schema + 与 `WorkerConfig` / `agents_registry.json` 的关系**详见 [`KM_docs/multi-cli-node-workflow-brainstorm.md` §4.1.1](KM_docs/multi-cli-node-workflow-brainstorm.md#411-agent-节点的可视化配置面重点)。
+
 **MVP 5 步**详见脑暴文档 §8，本 ROADMAP 不重复。
+
+**可视化编辑器** 的位置：本 ROADMAP「不做清单」明确"不自研可视化 UI"——但**接入 vendored Ryven** 作为节点图编辑器是 MVP 第 ⑤ 步的可选交付，节点定义复用 brainstorm §4.1.1 / §4.2 的 schema，不重写编辑器。
 
 ---
 

@@ -106,12 +106,69 @@ class CLIAdapter:
 
 | 类别 | 职责 | 例子 |
 |------|------|------|
-| **Agent 节点** | 调一个 CLI 跑一段 prompt，输出 `WorkerResult` | `CodeMakerAgent` / `ClaudeCodeAgent` / `CodexAgent` |
+| **Agent 节点**（详见 §4.1.1） | 调一个 CLI 跑一段 prompt，输出 `WorkerResult` | `CodeMakerAgent` / `ClaudeCodeAgent` / `CodexAgent` |
 | **处理节点（pure function）** | 纯函数式 message 转换 | 模板填充 `Jinja2Render`、字段抽取 `JsonPathPick`、Markdown→纯文本 `MdStrip`、image resize `ImageResize`、image → base64 `ImageEncodeBase64`、JSON merge `JsonMerge` |
 | **路由节点** | 控制流 | `FanOut`（一份输入复制成 N 份）、`FanIn`（N 份合并）、`Switch`（按用户提供的 `when` 谓词分支，对应 ROADMAP P2 的条件路由） |
 | **I/O 节点** | 与外部世界交互 | `FileRead` / `FileWrite` / `HttpGet` / `McpCall` / `BlobPut` / `BlobGet` |
 
 > **不在节点系统里重新实现 LLM 推理 / tool calling / 任务规划**——这些仍由 Agent 节点背后的 CLI 自己完成，节点系统只做"消息怎么进出 agent"。
+
+### 4.1.1 Agent 节点的可视化配置面（重点）
+
+**Agent 节点是节点系统里唯一负责"装载一个对等 agent CLI"的节点类型**——即用户在可视化编辑器里**拖出来一个 Agent 节点 = 拉起一个 agent**。它对应的运行时实体就是 §3 的 `WorkerConfig` + `CLIAdapter` 组合（一个 Agent 节点 ≈ 一个 worker + 它的 adapter）。
+
+#### 用户在 Agent 节点上要声明的字段（节点检视面板）
+
+| 字段 | 必填 | 控件类型 | 来源 / 联动 |
+|------|------|----------|-------------|
+| `cli_kind` | ✅ | 下拉 | `codemaker` / `claude_code` / `codex` / `custom`；决定下面字段的可选范围与默认值（见 §3.4） |
+| `model` | ✅ | 联动下拉 | 依 `cli_kind` 决定候选；如 `cli_kind=codemaker` → 必须 `netease-codemaker/<...>` 前缀（CodeMaker CLI 强制） |
+| `cwd` | ✅ | 路径选择器 | spawn 该 agent 子进程的工作目录；CodeMaker 体系下需有 `codemaker.json` 且 `permission: "allow"` |
+| `agent_id` | ⚠️ | 文本（节点 id 默认派生） | broker 内寻址；同图内不能重复；可视化编辑器默认用节点 id，允许覆写以连入已有 `agents_registry.json` |
+| `skills` | ⭕ | 多选弹窗 | 仅 CodeMaker / OpenCode 体系生效；Claude / Codex 走各自 adapter 内置 skill 机制（§7.2） |
+| `timeout_sec` | ⭕ | 数字 | 单次 prompt 最大执行时间 |
+| `adapter_options` | ⭕ | 折叠面板（按 `cli_kind` 渲染不同字段） | 例：CodeMaker 的 `prompt_via_file` / `anchor_message` / `run_stub_message` 等 |
+| `extra_env` | ⭕ | key/value 表 | 注入子进程环境变量（如 `CODEMAKER_AUTH_TOKEN`） |
+
+> **检视面板渲染规则**：选完 `cli_kind` 后，整张面板按对应 `CLIAdapter.cli_kind` 重新渲染——这与 §3.4 `agents_registry.json.adapter_options` 是同一份 schema，仅承载形态从 JSON 改成节点表单。
+
+#### 输入端口（用户在节点上看到的"左侧引脚"）
+
+| 端口名 | 必备 | accepts | 含义 |
+|--------|------|---------|------|
+| `prompt` | ✅ | `text/plain` / `text/markdown`（自动转 plain） | 给该 agent 的指令；可来自上游处理节点（模板填充、字段抽取）或用户内联文本 |
+| `attachments` | ⭕ | `image/*` / `audio/*`（次要） / `application/octet-stream` / `file/*` | 多端口或单 list 端口；adapter 在 spawn 前调 `materialize_attachments` 把它们落地为 CLI 能消费的形式（文件路径 / inline base64 / @file 引用） |
+| `context` | ⭕ | `application/json` 或 `text/*` | `run_chain` 风格上一步的结构化上下文（可选，由 GraphCompiler 自动接入） |
+| `gather_id` | ⭕（编排器用） | `text/plain` | broker `batch_gather` 元信息；通常由编译器自动接入，用户不直接连 |
+
+#### 输出端口（用户在节点上看到的"右侧引脚"）
+
+| 端口名 | emits | 含义 |
+|--------|-------|------|
+| `answer` | `text/plain` / `text/markdown` | adapter `parse_output` 后的最终文本（CodeMaker NDJSON 提取的 `type:"text"` 文本；Claude/Codex 由各自 adapter 自定 schema） |
+| `attachments_out` | `image/*` / `file/*` 等 `MultiModalEnvelope` 列表 | agent 在执行过程中产出的图像 / 文件（如调 `ImageDescribe` 生成图等场景）。CodeMaker 当前不产 attachments，端口可空连 |
+| `status` | `text/plain` 枚举 | `success` / `error` / `timeout` / `empty` |
+| `raw` | `application/json` | 调试/审计用 `WorkerResult.to_raw_dict()`：含 `raw_stdout` / `stderr` / `elapsed_sec`；通常不接，仅 trace 节点订阅 |
+
+#### 与 `agents_registry.json` 的关系
+
+- **Agent 节点 = registry 条目的可视化包装**：可视化编辑器里"新建 Agent 节点"在底层就是写一条 `WorkerConfig`；保存图时把节点上的字段反写到一份临时或正式的 `agents_registry.json`。
+- **两种使用模式**：
+  - **挂接已有 agent**：把节点 `agent_id` 指向 registry 中现有条目（`cli_kind` / `model` / `cwd` 等字段从 registry 读出，节点面板只读展示 + 可覆写 `prompt` / `attachments` 端口）。
+  - **新建 agent**：节点面板填全字段，保存时追加到 registry（或保存到图本地的"图内 agents"块，避免污染全局 registry）。
+- 与 [`registry_ui.py`](../registry_ui.py) 的关系：可视化节点编辑器**不替代** `registry_ui.py`；前者编辑"图 + 节点配置"，后者编辑"全局 agent 池"。两者通过同一份 `WorkerConfig` schema 互通。
+
+#### 编译目标
+
+每个 Agent 节点最终被 GraphCompiler 编译为：
+
+- 单 Agent 节点 → `cluster.run_single(agent_id, body)`
+- 多 Agent 节点共享一个 fan-out 上游 → `cluster.run_parallel([(agent_id, body), ...])`
+- 线性 Agent 节点链 → `cluster.run_chain([(agent_id, body), ...])`
+- fan-out → reduce Agent → `cluster.run_parallel_reduce(...)`
+- 任意 DAG / 含 `Switch(when=...)` → ROADMAP P2 的 `cluster.run_dag(...)`
+
+详见 §6.1 编译表。
 
 ### 4.2 端口数据契约：`MultiModalEnvelope`
 
@@ -206,14 +263,14 @@ class CLIAdapter:
 
 ### 6.1 编译思路
 
-节点图（DAG）由 GraphCompiler 拍平成现有编排原语的组合：
+节点图（DAG）由 GraphCompiler 拍平成现有编排原语的组合。表中所有"Agent 节点"均指 [§4.1.1 定义](#411-agent-节点的可视化配置面重点) 的"装载一个对等 agent CLI 的节点类型"——即用户在可视化编辑器里**拖出来一个 Agent 节点 = 拉起一个 agent**。
 
 | DAG 模式 | 编译目标 |
 |----------|----------|
-| 多 Agent 节点共享一个上游"扇出"节点 | `cluster.run_parallel(...)` + `MultiModalEnvelope` 注入 |
-| 多个 Agent 节点 fan-out → 一个汇聚 Agent | `cluster.run_parallel_reduce(...)` |
-| 线性 Agent 节点链 | `cluster.run_chain(...)`，`prev_context` 携带 `MultiModalEnvelope` |
-| 单 Agent 节点 | `cluster.run_single(...)` |
+| 多 [Agent 节点](#411-agent-节点的可视化配置面重点) 共享一个 fan-out 节点 | `cluster.run_parallel(...)` + `MultiModalEnvelope` 注入 |
+| 多个 [Agent 节点](#411-agent-节点的可视化配置面重点) fan-out → 一个汇聚 [Agent 节点](#411-agent-节点的可视化配置面重点) | `cluster.run_parallel_reduce(...)` |
+| 线性 [Agent 节点](#411-agent-节点的可视化配置面重点) 链 | `cluster.run_chain(...)`，`prev_context` 携带 `MultiModalEnvelope` |
+| 单 [Agent 节点](#411-agent-节点的可视化配置面重点) | `cluster.run_single(...)` |
 | 含 `Switch(when=...)` 的非线性图 | 对应 ROADMAP P2 的 `DAG.run_dag(...)`；`when` 是用户函数（可在节点里写普通 Python） |
 | 含处理节点 / I/O 节点 | 在编排原语外层做（GraphCompiler 自己执行，不进 broker） |
 
