@@ -1,11 +1,24 @@
-CodeMaker CLI multi-worker orchestration framework
-===================================================
+multi_agent_tcp — Peer agent CLI communication bus
+==================================================
 
-Quick Start with CodeMakerCluster (recommended)
-------------------------------------------------
+Project pivot (2026-04-30): the framework is no longer framed as "Cursor /
+CodeMaker as upstream orchestrator + N CodeMaker workers". It is now
+positioned as a peer-to-peer agent CLI communication bus: any agent CLI
+(CodeMaker / Claude Code / Codex / custom) or external script can connect
+to a shared broker and act as both receiver and initiator. CodeMaker is
+currently the only fully-supported CLI adapter; Claude Code / Codex
+adapters are tracked in ROADMAP.md (P0). This file documents the existing
+broker / agent / cluster / orchestrate primitives, all of which work the
+same as before -- only the narrative changed. Commands and config are
+unchanged.
 
-The simplest way to use the framework is through CodeMakerCluster, which
-manages broker + worker processes for you.
+Quick Start with CodeMakerCluster (recommended initiator entrypoint)
+--------------------------------------------------------------------
+
+CodeMakerCluster is one convenient initiator-side entrypoint: it manages a
+broker plus N agent processes for you. Today the agent processes are
+CodeMaker workers; once the CLI Adapter abstraction lands (ROADMAP P0)
+other CLIs will be selectable through the same class.
 
 Python API — parallel tasks (returns ParallelResult):
 
@@ -144,9 +157,11 @@ Low-level components
    Client -> broker: register | send | broadcast | ping | batch_gather
    Broker -> client: registered | message | broadcast | error | pong | gather_result
 
-   batch_gather (orchestrator / Cursor script): one RPC to deliver different bodies to
-   many agents and wait until every distinct target has replied with gather_reply, then
-   receive a single gather_result on the same connection.
+   batch_gather (peer-to-peer fan-out primitive): one RPC issued by any initiator
+   (an external Python script, a CI job, or another agent CLI calling out via its
+   bash tool) to deliver different bodies to many peer agents and wait until every
+   distinct target has replied with gather_reply, then receive a single
+   gather_result on the same connection.
 
    Initiator -> broker::
 
