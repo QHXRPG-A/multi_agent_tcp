@@ -74,7 +74,7 @@ class NodeListWidget(QWidget):
 
         # search for the tree
         self.search_line_tree = QLineEdit(self)
-        self.search_line_tree.setPlaceholderText('search packages...')
+        self.search_line_tree.setPlaceholderText('搜索节点包...')
         self.search_line_tree.textChanged.connect(self.search_pkg_tree)
 
         # tree view
@@ -115,11 +115,11 @@ class NodeListWidget(QWidget):
 
         # adding all stuff to the layout
         self.search_line_edit = QLineEdit(self)
-        self.search_line_edit.setPlaceholderText('search for node...')
+        self.search_line_edit.setPlaceholderText('搜索节点...')
         self.search_line_edit.textChanged.connect(self._update_view)
         nodes_widget.layout().addWidget(self.search_line_edit)
         
-        self.current_pack_label = QLabel('Package: None')
+        self.current_pack_label = QLabel('节点包: 无')
         self.current_pack_label.setFont(text_font())
         nodes_widget.layout().addWidget(self.current_pack_label)
         
@@ -162,7 +162,7 @@ class NodeListWidget(QWidget):
             if not pack_nodes or self.package_nodes == pack_nodes:
                 return
             self.package_nodes = pack_nodes
-            self.current_pack_label.setText(f'Package: {pkg_name}')
+            self.current_pack_label.setText(f'节点包: {pkg_name}')
             self._update_view()
 
         return select_nodes
@@ -175,7 +175,7 @@ class NodeListWidget(QWidget):
         self.tree_items.clear()
 
         model = NodeStandardItemModel()
-        model.setHorizontalHeaderLabels(["Packages"])
+        model.setHorizontalHeaderLabels(["节点包"])
         root_item = model.invisibleRootItem()
 
         # should be dict[str, QStandardItem | (QStandardItem, list)] in 3.9+

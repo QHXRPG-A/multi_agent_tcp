@@ -47,7 +47,7 @@ class FlowsListWidget(QWidget):
         # line edit
 
         self.new_flow_title_lineedit = QLineEdit()
-        self.new_flow_title_lineedit.setPlaceholderText('new flow\'s title')
+        self.new_flow_title_lineedit.setPlaceholderText('新流程标题')
         self.new_flow_title_lineedit.returnPressed.connect(self.create_flow)
 
         main_layout.addWidget(self.new_flow_title_lineedit)
@@ -81,9 +81,8 @@ class FlowsListWidget(QWidget):
         self.recreate_list()
 
     def del_flow(self, flow, flow_widget):
-        msg_box = QMessageBox(QMessageBox.Warning, 'sure about deleting flow?',
-                              'You are about to delete a flow. This cannot be undone, all content will be lost. '
-                              'Do you want to continue?', QMessageBox.Cancel | QMessageBox.Yes, self)
+        msg_box = QMessageBox(QMessageBox.Warning, '确认删除流程吗？',
+                              '你即将删除一个流程。此操作无法撤销，所有内容都会丢失。是否继续？', QMessageBox.Cancel | QMessageBox.Yes, self)
         msg_box.setDefaultButton(QMessageBox.Cancel)
         ret = msg_box.exec_()
         if ret != QMessageBox.Yes:

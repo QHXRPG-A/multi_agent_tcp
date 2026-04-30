@@ -262,7 +262,7 @@ class FlowView(GUIBase, QGraphicsView):
         menu_layout_widget = self._create_no_background_widget("FlowMenu")
         # just to add some space for the button
         menu_layout_widget.setLayout(QHBoxLayout())
-        menu_button = QPushButton("Menu")
+        menu_button = QPushButton("菜单")
         self._menu_button = menu_button
         menu_layout_widget.layout().addWidget(menu_button)
 

@@ -40,7 +40,7 @@ class FlowsList_FlowWidget(QWidget):
         #   title line edit
 
         self.title_line_edit = ListWidget_NameLineEdit(flow.title, self)
-        self.title_line_edit.setPlaceholderText('title')
+        self.title_line_edit.setPlaceholderText('标题')
         self.title_line_edit.setEnabled(False)
         self.title_line_edit.editingFinished.connect(self.title_line_edit_editing_finished)
 
@@ -80,7 +80,7 @@ class FlowsList_FlowWidget(QWidget):
     def contextMenuEvent(self, event: QEvent):
         menu: QMenu = QMenu(self)
 
-        delete_action = QAction('delete')
+        delete_action = QAction('删除')
         delete_action.triggered.connect(self.action_delete_triggered)
 
         actions = [delete_action]

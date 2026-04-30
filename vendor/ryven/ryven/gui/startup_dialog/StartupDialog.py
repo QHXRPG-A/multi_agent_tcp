@@ -37,8 +37,8 @@ from ryven.main.packages.nodes_package import process_nodes_packages
 from ryven.gui.styling.window_theme import apply_stylesheet
 
 
-LBL_CREATE_PROJECT = '<create new project>'
-LBL_DEFAULT_FLOW_THEME = '<default>'
+LBL_CREATE_PROJECT = '<创建新项目>'
+LBL_DEFAULT_FLOW_THEME = '<默认>'
 
 
 class ElideLabel(QLabel):
@@ -112,10 +112,10 @@ class ShowCommandDialog(QDialog):
         layout.addWidget(self.config_text_edit)
 
         buttons_layout = QHBoxLayout()
-        save_config_button = QPushButton('save config')
+        save_config_button = QPushButton('保存配置')
         save_config_button.clicked.connect(self.on_save_config_clicked)
         buttons_layout.addWidget(save_config_button)
-        close_button = QPushButton('close')
+        close_button = QPushButton('关闭')
         close_button.clicked.connect(self.accept)
         buttons_layout.addWidget(close_button)
         layout.addLayout(buttons_layout)
@@ -127,9 +127,9 @@ class ShowCommandDialog(QDialog):
 
         file = QFileDialog.getSaveFileName(
             self,
-            'select config file',
+            '选择配置文件',
             ryven_dir_path(),
-            'ryven config files (*.cfg)',
+            'Ryven 配置文件 (*.cfg)',
         )[0]
 
         if file != '':
@@ -187,16 +187,14 @@ class StartupDialog(QDialog):
         info_text_edit.setHtml(f'''
             <div style="font-family: Corbel; font-size: large;">
                 <img style="float:right;" height=120 src="{abs_path_from_package_dir('resources/pics/Ryven_icon_blurred.png')}"
-                >Ryven is not a stable piece of software, it's experimental, and nothing is
-                guaranteed to work as expected. Make sure to save frequently, and to
-                different files. If you spot an issue, please report it on the 
-                <a href="https://github.com/leon-thomm/ryven/issues">GitHub page</a>.
+                >Ryven 目前仍属于实验性软件，并非稳定版本，无法保证所有功能都按预期工作。
+                请务必频繁保存，并尽量另存为不同文件。如果你发现问题，请到
+                <a href="https://github.com/leon-thomm/ryven/issues">GitHub 页面</a> 提交反馈。
                 <br><br>
-                Ryven doesn't come with batteries (nodes) included. It provides some
-                small examples but nothing more. Development of large node packages
-                is not part of the Ryven editor project itself.
-                See the GitHub for a quickstart guide.
-                Cheers.
+                Ryven 本身不自带完整的节点包。它只提供少量示例，其余内容需要你自行导入。
+                大型节点包的开发并不属于 Ryven 编辑器项目本身的一部分。
+                可前往 GitHub 查看快速上手指南。
+                祝你使用顺利。
             </div>
         ''')
         info_text_edit.setReadOnly(True)
@@ -206,7 +204,7 @@ class StartupDialog(QDialog):
         fbox = QFormLayout()
 
         # Project
-        project_label = QLabel('Project:')
+        project_label = QLabel('项目:')
 
         project_layout = QVBoxLayout()
 
@@ -219,19 +217,19 @@ class StartupDialog(QDialog):
 
         project_buttons_widget = QDialogButtonBox()
 
-        self.create_project_button = QPushButton('New')
-        self.create_project_button.setToolTip('Create a new project')
+        self.create_project_button = QPushButton('新建')
+        self.create_project_button.setToolTip('创建一个新项目')
         self.create_project_button.setDefault(True)
         self.create_project_button.clicked.connect(self.on_create_project_button_clicked)
         project_buttons_widget.addButton(self.create_project_button, QDialogButtonBox.ActionRole)
 
-        load_project_button = QPushButton('Load')
-        load_project_button.setToolTip('Load an existing project')
+        load_project_button = QPushButton('加载')
+        load_project_button.setToolTip('加载一个已有项目')
         load_project_button.clicked.connect(self.on_load_project_button_clicked)
         project_buttons_widget.addButton(load_project_button, QDialogButtonBox.ActionRole)
 
-        load_example_project_button = QPushButton('Example')
-        load_example_project_button.setToolTip('Load a Ryven example')
+        load_example_project_button = QPushButton('示例')
+        load_example_project_button.setToolTip('加载一个 Ryven 示例项目')
         load_example_project_button.clicked.connect(self.on_load_example_project_button_clicked)
         project_buttons_widget.addButton(load_example_project_button, QDialogButtonBox.ActionRole)
 
@@ -240,7 +238,7 @@ class StartupDialog(QDialog):
         fbox.addRow(project_label, project_layout)
 
         # Nodes packages
-        packages_label = QLabel('Nodes packages:')
+        packages_label = QLabel('节点包:')
 
         packages_layout = QVBoxLayout()
         packages_sublayout = QHBoxLayout()
@@ -248,9 +246,9 @@ class StartupDialog(QDialog):
         # FIXME: The three following columns should have half their default size!
         # ???: How is that achieved?
         packages_imported_layout = QVBoxLayout()
-        label_imported = QLabel('Imported:')
+        label_imported = QLabel('已导入:')
         label_imported.setToolTip(
-            'Nodes packages which are required by the project and are found'
+            '项目所需且已找到的节点包'
         )
         label_imported.setAlignment(Qt.AlignCenter)
         packages_imported_layout.addWidget(label_imported)
@@ -259,9 +257,9 @@ class StartupDialog(QDialog):
         packages_sublayout.addLayout(packages_imported_layout)
 
         packages_missing_layout = QVBoxLayout()
-        label_missing = QLabel('Missing:')
+        label_missing = QLabel('缺失:')
         label_missing.setToolTip(
-            'Nodes packages which are required by the project but could not be found'
+            '项目所需但当前未找到的节点包'
         )
         label_missing.setAlignment(Qt.AlignCenter)
         packages_missing_layout.addWidget(label_missing)
@@ -270,11 +268,11 @@ class StartupDialog(QDialog):
         packages_sublayout.addLayout(packages_missing_layout)
 
         packages_manually_layout = QVBoxLayout()
-        label_manually = QLabel('Manually imported:')
+        label_manually = QLabel('手动导入:')
         label_manually.setToolTip(
-            '''Nodes packages which are manually imported
-            They will override the packages required by the project
-            Additional packages can be imported later.'''
+            '''手动导入的节点包
+            它们会覆盖项目要求的同名节点包
+            之后仍可继续导入额外的节点包。'''
         )
         label_manually.setAlignment(Qt.AlignCenter)
         packages_manually_layout.addWidget(label_manually)
@@ -288,30 +286,30 @@ class StartupDialog(QDialog):
         packages_layout.addLayout(packages_sublayout)
 
         packages_buttons_widget = QDialogButtonBox()
-        self.autodiscover_packages_button = QPushButton('Find')
+        self.autodiscover_packages_button = QPushButton('查找')
         self.autodiscover_packages_button.setToolTip(
-            'Automatically find and import missing packages'
+            '自动查找并导入缺失的节点包'
         )
         self.autodiscover_packages_button.clicked.connect(self.on_autodiscover_package_clicked)
         packages_buttons_widget.addButton(self.autodiscover_packages_button, QDialogButtonBox.ActionRole)
         self.autodiscover_packages_button.setEnabled(False)
         
-        import_package_button = QPushButton('Import')
-        import_package_button.setToolTip('Manually load a nodes package')
+        import_package_button = QPushButton('导入')
+        import_package_button.setToolTip('手动加载一个节点包')
         import_package_button.clicked.connect(self.on_import_package_clicked)
         packages_buttons_widget.addButton(import_package_button, QDialogButtonBox.ActionRole)
 
-        self.remove_packages_button = QPushButton('Remove')
+        self.remove_packages_button = QPushButton('移除')
         self.remove_packages_button.setToolTip(
-            'Remove manually imported nodes packages'
+            '移除手动导入的节点包'
         )
         self.remove_packages_button.clicked.connect(self.on_remove_packages_clicked)
         self.remove_packages_button.setEnabled(False)
         packages_buttons_widget.addButton(self.remove_packages_button, QDialogButtonBox.ActionRole)
 
-        self.clear_packages_button = QPushButton('Clear')
+        self.clear_packages_button = QPushButton('清空')
         self.clear_packages_button.setToolTip(
-            'Clear the list of manually imported nodes packages '
+            '清空手动导入的节点包列表 '
         )
         self.clear_packages_button.clicked.connect(self.on_clear_packages_clicked)
         self.clear_packages_button.setEnabled(False)
@@ -321,7 +319,7 @@ class StartupDialog(QDialog):
         fbox.addRow(packages_label, packages_layout)
 
         # Window theme
-        windowtheme_label = QLabel('Window theme:')
+        windowtheme_label = QLabel('窗口主题:')
         windowtheme_layout = QHBoxLayout()
         windowtheme_button_group = QButtonGroup(windowtheme_layout)
         self.window_theme_rbs = {
@@ -335,10 +333,10 @@ class StartupDialog(QDialog):
         fbox.addRow(windowtheme_label, windowtheme_layout)
 
         # Flow theme
-        flowtheme_label = QLabel('Flow theme:')
+        flowtheme_label = QLabel('流程主题:')
         flowtheme_widget = QComboBox()
         flowtheme_widget.setToolTip(
-            'Select the theme of the flow display\nCan also be changed later …'
+            '选择流程显示主题\n稍后也可以在界面中修改 …'
         )
         flowtheme_widget.addItems(
             [LBL_DEFAULT_FLOW_THEME] + list(self.conf.get_available_flow_themes())
@@ -348,7 +346,7 @@ class StartupDialog(QDialog):
         fbox.addRow(flowtheme_label, flowtheme_widget)
 
         # Performance mode
-        performance_label = QLabel('Performance mode:')
+        performance_label = QLabel('性能模式:')
         performance_layout = QHBoxLayout()
         performance_button_group = QButtonGroup(performance_layout)
         self.perf_mode_rbs = {
@@ -362,39 +360,36 @@ class StartupDialog(QDialog):
         fbox.addRow(performance_label, performance_layout)
 
         # Animations
-        animations_label = QLabel('Animations:')
-        animations_cb = QCheckBox('Animations')
+        animations_label = QLabel('动画:')
+        animations_cb = QCheckBox('启用动画')
         animations_cb.toggled.connect(self.on_animations_toggled)
         fbox.addRow(animations_label, animations_cb)
 
         # Title
-        title_label = QLabel('Window title:')
+        title_label = QLabel('窗口标题:')
         self.title_lineedit = QLineEdit()
         self.title_lineedit.textChanged.connect(self.on_title_changed)
         fbox.addRow(title_label, self.title_lineedit)
 
         # Verbose
-        verbose_output_label = QLabel('Verbose:')
-        verbose_output_cb = QCheckBox('Enable verbose output')
+        verbose_output_label = QLabel('详细输出:')
+        verbose_output_cb = QCheckBox('启用详细输出')
         verbose_output_cb.setToolTip(
-            f'''Choose whether verbose output should be displayed. 
-            Verbose output prevents stdout and stderr from being
-            displayed in the in-editor console, that usually means
-            all output goes to the terminal from which Ryven was
-            launched. Also, it causes lots of debug info to be 
-            printed.'''
+            f'''选择是否显示详细输出。
+            启用后，stdout 和 stderr 通常不会显示在编辑器内置控制台中，
+            而是输出到启动 Ryven 的终端中。
+            同时还会打印大量调试信息。'''
         )
         verbose_output_cb.toggled.connect(self.on_verbose_toggled)
         fbox.addRow(verbose_output_label, verbose_output_cb)
 
         # Defer source code loading
-        defer_code_label = QLabel('Defer SCL:')
-        defer_code_cb = QCheckBox('Enable defer source code loading')
+        defer_code_label = QLabel('延迟加载源码:')
+        defer_code_cb = QCheckBox('启用延迟源码加载')
         defer_code_cb.setToolTip(
-            f'''Choose whether source code will be loaded on package
-            import or when the user manually attempt to inspect the
-            source on a specific node. Helps reduce package import
-            time.'''
+            f'''选择是在导入节点包时加载源码，
+            还是在用户手动查看某个节点源码时再加载。
+            这有助于减少节点包导入时间。'''
         )
         defer_code_cb.toggled.connect(self.on_defer_toggled)
         fbox.addRow(defer_code_label, defer_code_cb)
@@ -403,7 +398,7 @@ class StartupDialog(QDialog):
 
         # Buttons
         buttons_layout = QHBoxLayout()
-        gen_config_button = QPushButton('generate / save config')
+        gen_config_button = QPushButton('生成 / 保存配置')
         gen_config_button.clicked.connect(self.gen_config_clicked)
         buttons_layout.addWidget(gen_config_button)
         buttons = QDialogButtonBox(
@@ -455,7 +450,7 @@ class StartupDialog(QDialog):
         defer_code_cb.setChecked(self.conf.defer_code_loading)
         
         # Set window title and icon
-        self.setWindowTitle('Ryven')
+        self.setWindowTitle('Ryven 启动')
         self.setWindowIcon(
             QIcon(abs_path_from_package_dir('resources/pics/Ryven_icon.png'))
         )
@@ -483,7 +478,7 @@ class StartupDialog(QDialog):
         """Call-back method, whenever the 'Example' button was clicked."""
         # Load an example project, starting in the ryven's example directory
         project_path = self.get_project(
-            abs_path_from_package_dir('example_projects'), title='Select Ryven example'
+            abs_path_from_package_dir('example_projects'), title='选择 Ryven 示例项目'
         )
 
         if project_path is not None:
@@ -514,9 +509,9 @@ class StartupDialog(QDialog):
         # Import a nodes package, starting in the user's ryven directory
         file_name = QFileDialog.getOpenFileName(
             self,
-            'Select',
+            '选择',
             abs_path_from_ryven_dir('packages'),
-            'ryven nodes package (nodes.py)',
+            'Ryven 节点包 (nodes.py)',
         )[0]
 
         if file_name:
@@ -604,7 +599,7 @@ class StartupDialog(QDialog):
     #
 
     def get_project(
-        self, base_dir: str, title='Select project file'
+        self, base_dir: str, title='选择项目文件'
     ) -> Optional[pathlib.Path]:
         """Get a project file from the user.
 
@@ -755,7 +750,7 @@ class StartupDialog(QDialog):
         if missing_packages:
             # There are still packages missing
             self.ok_button.setEnabled(False)
-            self.ok_button.setToolTip('Import all missing packages first')
+            self.ok_button.setToolTip('请先导入所有缺失的节点包')
             self.autodiscover_packages_button.setEnabled(True)
         else:
             # No missing packages

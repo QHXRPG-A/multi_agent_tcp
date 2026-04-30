@@ -158,14 +158,14 @@ The editor console can still be used for commands.
         
     def print_info(self):
         print('''
-CONTROLS
-    nodes dialog: right mouse in scene
-    place nodes: drag and drop from left
-        or hit enter in scene dialog
-    select: left mouse
-    pan / navigating scene: right mouse
-    save: ctrl+s
-    import: ctrl+i
+控制说明
+    节点面板：在场景中单击右键
+    放置节点：从左侧拖放
+        或在场景弹窗中按回车
+    选择：鼠标左键
+    平移 / 浏览场景：鼠标右键
+    保存：ctrl+s
+    导入：ctrl+i
         ''')
 
     # UI
@@ -190,11 +190,11 @@ CONTROLS
             self.set_flow_ui_template(template)
 
         self.flow_ui_template_menu = QMenu()
-        self.flow_ui_template_menu.setTitle('Flow Template')
+        self.flow_ui_template_menu.setTitle('流程模板')
 
-        restore_default = QAction('Restore Default', self)
+        restore_default = QAction('恢复默认', self)
         restore_default.triggered.connect(unset_flow_template)
-        save_current = QAction('Save Current', self)
+        save_current = QAction('保存当前布局', self)
         save_current.triggered.connect(set_flow_template)
 
         self.flow_ui_template_menu.addAction(save_current)
@@ -223,9 +223,9 @@ CONTROLS
 
         # add widget actions to menu
         all_dock_widgets: list[QDockWidget] = [d for d in self.findChildren(QDockWidget)]
-        open_all_docks = QAction('Open All', self)
+        open_all_docks = QAction('打开全部', self)
         open_all_docks.triggered.connect(self.open_docks)
-        close_all_docks = QAction('Close All Tabs', self)
+        close_all_docks = QAction('关闭所有标签页', self)
         close_all_docks.triggered.connect(self.close_docks)
         self.ui.menuDocks.addActions([open_all_docks, close_all_docks])
         self.ui.menuDocks.addActions([w.toggleViewAction() for w in all_dock_widgets])
@@ -247,7 +247,7 @@ CONTROLS
             
     def setup_menu_actions(self):
         # flow designs
-        light_themes_menu = QMenu('light')
+        light_themes_menu = QMenu('浅色', self)
         for d in self.session_gui.design.flow_themes:
             design_action = QAction(d.name, self)
             if d.type_ == 'dark':
@@ -279,10 +279,10 @@ CONTROLS
             self.on_performance_mode_value_changed
         )
 
-        self.ac_perf_mode_fast = QAction('Fast', self)
+        self.ac_perf_mode_fast = QAction('快速', self)
         self.ac_perf_mode_fast.setCheckable(True)
 
-        self.ac_perf_mode_pretty = QAction('Pretty', self)
+        self.ac_perf_mode_pretty = QAction('美观', self)
         self.ac_perf_mode_pretty.setCheckable(True)
 
         perf_mode_ag = QActionGroup(self)
@@ -294,7 +294,7 @@ CONTROLS
 
         perf_mode_ag.triggered.connect(self.on_performance_mode_changed)
 
-        perf_menu = QMenu('Performance Mode', self)
+        perf_menu = QMenu('性能模式', self)
         perf_menu.addAction(self.ac_perf_mode_fast)
         perf_menu.addAction(self.ac_perf_mode_pretty)
 
@@ -302,10 +302,10 @@ CONTROLS
         self.session_gui.design.set_performance_mode(self.config.performance_mode)
 
         # animations
-        self.ac_anims_active = QAction('Enabled', self)
+        self.ac_anims_active = QAction('启用', self)
         self.ac_anims_active.setCheckable(True)
 
-        self.ac_anims_inactive = QAction('Disabled', self)
+        self.ac_anims_inactive = QAction('禁用', self)
         self.ac_anims_inactive.setCheckable(True)
 
         anims_ag = QActionGroup(self)
@@ -317,7 +317,7 @@ CONTROLS
 
         anims_ag.triggered.connect(self.on_animation_enabling_changed)
 
-        animations_menu = QMenu('Animations', self)
+        animations_menu = QMenu('动画', self)
         animations_menu.addAction(self.ac_anims_active)
         animations_menu.addAction(self.ac_anims_inactive)
 
@@ -351,9 +351,9 @@ CONTROLS
     def on_import_nodes_triggered(self):
         file_path = QFileDialog.getOpenFileName(
             self,
-            'select nodes file',
+            '选择节点文件',
             abs_path_from_ryven_dir('nodes'),
-            'Python File (*.py)',
+            'Python 文件 (*.py)',
         )[0]
         if file_path != '':
             self.import_nodes(path=os.path.dirname(file_path))
@@ -361,9 +361,9 @@ CONTROLS
     def on_import_example_nodes_triggered(self):
         file_path = QFileDialog.getOpenFileName(
             self,
-            'select nodes file',
+            '选择节点文件',
             abs_path_from_package_dir('example_nodes'),
-            'Python File (*.py)',
+            'Python 文件 (*.py)',
         )[0]
         if file_path != '':
             self.import_nodes(path=os.path.dirname(file_path))
@@ -395,7 +395,7 @@ CONTROLS
         if len(self.core_session.flows) == 0:
             return
 
-        file_path = QFileDialog.getSaveFileName(self, 'select file', '', 'PNG(*.png)')[0]
+        file_path = QFileDialog.getSaveFileName(self, '选择文件', '', 'PNG(*.png)')[0]
         flow = self.ui.flows_tab_widget.currentWidget().flow
         view = self.session_gui.flow_views[flow]
         img = view.get_viewport_img()
@@ -406,7 +406,7 @@ CONTROLS
         if len(self.core_session.flows) == 0:
             return
 
-        file_path = QFileDialog.getSaveFileName(self, 'select file', '', 'PNG(*.png)')[0]
+        file_path = QFileDialog.getSaveFileName(self, '选择文件', '', 'PNG(*.png)')[0]
         flow = self.ui.flows_tab_widget.currentWidget().flow
         view = self.session_gui.flow_views[flow]
         img = view.get_whole_scene_img()
@@ -415,7 +415,7 @@ CONTROLS
     def on_save_project_triggered(self):
         file_name = QFileDialog.getSaveFileName(
             self,
-            'select location and give file name',
+            '选择保存位置并输入文件名',
             abs_path_from_ryven_dir('saves'),
             'JSON(*.json)',
         )[0]
@@ -426,7 +426,7 @@ CONTROLS
             self.save_project(file_name)
 
     def on_new_flow_triggered(self):
-        new_flow_title = GetTextDialog('choose unique title', '', 'new flow title', self).get_text()
+        new_flow_title = GetTextDialog('请输入唯一标题', '', '新流程标题', self).get_text()
 
         if self.core_session.flow_title_valid(new_flow_title):
             self.core_session.create_flow(new_flow_title)
@@ -435,20 +435,19 @@ CONTROLS
             self.focus_on_flow(flow)
 
     def on_rename_flow_triggered(self):
-        flow = ChooseFlowDialog('choose flow', self.core_session.flows, self).get_flow()
-        new_title = GetTextDialog('new title', flow.title, 'new flow title', self).get_text()
+        flow = ChooseFlowDialog('选择流程', self.core_session.flows, self).get_flow()
+        new_title = GetTextDialog('输入新标题', flow.title, '新流程标题', self).get_text()
 
         if self.core_session.flow_title_valid(new_title):
             self.core_session.rename_flow(flow, new_title)
 
     def on_delete_flow_triggered(self):
-        flow = ChooseFlowDialog('choose flow', self.core_session.flows, self).get_flow()
+        flow = ChooseFlowDialog('选择流程', self.core_session.flows, self).get_flow()
 
         msg_box = QMessageBox(
             QMessageBox.Warning,
-            'sure about deleting flow?',
-            'You are about to delete a flow. This cannot be undone, all content will be gone. '
-            'Do you want to continue?',
+            '确认删除流程吗？',
+            '你即将删除一个流程。此操作无法撤销，所有内容都会丢失。是否继续？',
             QMessageBox.Cancel | QMessageBox.Yes,
             self,
         )
@@ -509,7 +508,7 @@ CONTROLS
         except ModuleNotFoundError as e:
             msg_box = QMessageBox(
                 QMessageBox.Warning,
-                'Missing Python module',
+                '缺少 Python 模块',
                 str(e),
                 QMessageBox.Ok,
                 self,

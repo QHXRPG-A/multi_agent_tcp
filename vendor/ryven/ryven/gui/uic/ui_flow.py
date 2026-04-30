@@ -95,10 +95,10 @@ class Ui_flow_widget(object):
     # setupUi
 
     def retranslateUi(self, flow_widget):
-        flow_widget.setWindowTitle(QCoreApplication.translate("flow_widget", u"Form", None))
-        self.log_groupBox.setTitle(QCoreApplication.translate("flow_widget", u"Log", None))
-        self.source_code_groupBox.setTitle(QCoreApplication.translate("flow_widget", u"Source Code", None))
-        self.settings_groupBox.setTitle(QCoreApplication.translate("flow_widget", u"Settings", None))
-        self.variables_group_box.setTitle(QCoreApplication.translate("flow_widget", u"Variables", None))
+        flow_widget.setWindowTitle(QCoreApplication.translate("flow_widget", u"表单", None))
+        self.log_groupBox.setTitle(QCoreApplication.translate("flow_widget", u"日志", None))
+        self.source_code_groupBox.setTitle(QCoreApplication.translate("flow_widget", u"源代码", None))
+        self.settings_groupBox.setTitle(QCoreApplication.translate("flow_widget", u"设置", None))
+        self.variables_group_box.setTitle(QCoreApplication.translate("flow_widget", u"变量", None))
     # retranslateUi
 

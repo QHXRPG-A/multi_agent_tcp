@@ -79,11 +79,11 @@ class Ui_FlowWindow(object):
 
     def retranslateUi(self, FlowWindow):
         _translate = QtCore.QCoreApplication.translate
-        FlowWindow.setWindowTitle(_translate("FlowWindow", "MainWindow"))
-        self.inspector_dock.setWindowTitle(_translate("FlowWindow", "Inspector"))
-        self.undo_history_dock.setWindowTitle(_translate("FlowWindow", "Undo History"))
-        self.settings_dock.setWindowTitle(_translate("FlowWindow", "Settings"))
-        self.variables_dock.setWindowTitle(_translate("FlowWindow", "Variables"))
-        self.logger_dock.setWindowTitle(_translate("FlowWindow", "Log"))
-        self.source_dock.setWindowTitle(_translate("FlowWindow", "Source Code"))
+        FlowWindow.setWindowTitle(_translate("FlowWindow", "流程窗口"))
+        self.inspector_dock.setWindowTitle(_translate("FlowWindow", "检查器"))
+        self.undo_history_dock.setWindowTitle(_translate("FlowWindow", "撤销历史"))
+        self.settings_dock.setWindowTitle(_translate("FlowWindow", "设置"))
+        self.variables_dock.setWindowTitle(_translate("FlowWindow", "变量"))
+        self.logger_dock.setWindowTitle(_translate("FlowWindow", "日志"))
+        self.source_dock.setWindowTitle(_translate("FlowWindow", "源代码"))
         self.actionxc.setText(_translate("FlowWindow", "xc"))

@@ -15,17 +15,17 @@ class FlowViewStylusModesWidget(QWidget):
         self.stylus_buttons_visible = True
 
         # stylus button
-        self.stylus_button = QPushButton('stylus')  # show/hide
+        self.stylus_button = QPushButton('手写')  # show/hide
         self.stylus_button.clicked.connect(self.on_stylus_button_clicked)
 
         # mode
-        self.set_stylus_mode_comment_button = QPushButton('comment')
+        self.set_stylus_mode_comment_button = QPushButton('批注')
         self.set_stylus_mode_comment_button.clicked.connect(self.on_comment_button_clicked)
-        self.set_stylus_mode_edit_button = QPushButton('edit')
+        self.set_stylus_mode_edit_button = QPushButton('编辑')
         self.set_stylus_mode_edit_button.clicked.connect(self.on_edit_button_clicked)
 
         # pen style
-        self.pen_color_button = QPushButton('color')
+        self.pen_color_button = QPushButton('颜色')
         self.pen_color_button.clicked.connect(self.on_choose_color_clicked)
         self.pen_width_slider = QSlider(Qt.Horizontal)
         self.pen_width_slider.setRange(1, 100)
@@ -109,7 +109,7 @@ class FlowViewStylusModesWidget(QWidget):
 
     def on_choose_color_clicked(self):
         self.pen_color = QColorDialog.getColor(self.pen_color, options=QColorDialog.ShowAlphaChannel,
-                                               title='Choose pen color')
+                                               title='选择画笔颜色')
         self.update_color_button_SS()
 
 

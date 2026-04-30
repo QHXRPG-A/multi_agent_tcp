@@ -16,11 +16,11 @@ class NodeBase(Node):
 
 
 class GetVar_Node(NodeBase):
-    """Gets the value of a script variable"""
+    """获取脚本变量的值"""
 
     version = 'v0.2'
 
-    title = 'get var'
+    title = '取变量'
     init_inputs = [
         NodeInputType(),
     ]
@@ -54,11 +54,11 @@ class GetVar_Node(NodeBase):
 
 
 class Result_Node(NodeBase):
-    """Simply shows a value converted to str"""
+    """仅用于显示转换为字符串后的值"""
 
     version = 'v0.2'
 
-    title = 'result'
+    title = '结果'
     init_inputs = [
         NodeInputType(type_='data'),
     ]
@@ -77,11 +77,11 @@ class Result_Node(NodeBase):
 
 
 class Val_Node(NodeBase):
-    """Evaluates a string from the input field"""
+    """对输入框中的字符串进行求值"""
 
     version = 'v0.2'
 
-    title = 'val'
+    title = '值'
     init_inputs = [
         # NodeInputType(default=Data()),
     ]
@@ -112,11 +112,11 @@ class Val_Node(NodeBase):
 
 
 class SetVar_Node(NodeBase):
-    """Sets the value of a script variable"""
+    """设置脚本变量的值"""
 
     version = 'v0.1'
 
-    title = 'set var'
+    title = '设变量'
     init_inputs = [
         NodeInputType(type_='exec'),
         NodeInputType(label='var'),
@@ -176,11 +176,11 @@ class SetVar_Node(NodeBase):
 
 
 class SetVarsPassive_Node(NodeBase):
-    """Sets the values of multiple script variables"""
+    """设置多个脚本变量的值"""
 
     version = 'v0.1'
 
-    title = 'set vars passive'
+    title = '批量设变量'
     init_inputs = []
     init_outputs = []
 

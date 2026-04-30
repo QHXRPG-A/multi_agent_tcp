@@ -18,8 +18,8 @@ class EditVal_Dialog(QDialog):
         try:
             val_str = str(init_val)
         except Exception as e:
-            msg_box = QMessageBox(QMessageBox.Warning, 'Value parsing failed',
-                                  'Couldn\'t stringify value', QMessageBox.Ok, self)
+            msg_box = QMessageBox(QMessageBox.Warning, '值解析失败',
+                                  '无法将值转换为字符串', QMessageBox.Ok, self)
             msg_box.setDefaultButton(QMessageBox.Ok)
             msg_box.exec_()
             self.reject()
@@ -38,7 +38,7 @@ class EditVal_Dialog(QDialog):
         self.setLayout(main_layout)
         self.resize(450, 300)
 
-        self.setWindowTitle('edit val')
+        self.setWindowTitle('编辑值')
 
     def save_triggered(self):
         self.accept()

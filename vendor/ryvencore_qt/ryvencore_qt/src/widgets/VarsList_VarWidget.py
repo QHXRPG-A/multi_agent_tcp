@@ -44,7 +44,7 @@ class VarsList_VarWidget(QWidget):
         #   name line edit
 
         self.name_line_edit = ListWidget_NameLineEdit(self.var.name, self)
-        self.name_line_edit.setPlaceholderText('name')
+        self.name_line_edit.setPlaceholderText('名称')
         self.name_line_edit.setEnabled(False)
         self.name_line_edit.editingFinished.connect(self.name_line_edit_editing_finished)
 
@@ -79,8 +79,8 @@ class VarsList_VarWidget(QWidget):
             try:
                 val_str = str(self.var.get())
             except Exception as e:
-                val_str = "couldn't stringify value"
-            self.setToolTip('val type: '+str(type(self.var.get()))+'\nval: '+shorten(val_str, 3000, line_break=True))
+                val_str = "无法将值转换为字符串"
+            self.setToolTip('值类型: '+str(type(self.var.get()))+'\n值: '+shorten(val_str, 3000, line_break=True))
 
         return QWidget.event(self, event)
 
@@ -88,10 +88,10 @@ class VarsList_VarWidget(QWidget):
     def contextMenuEvent(self, event: QEvent):
         menu: QMenu = QMenu(self)
 
-        delete_action = QAction('delete')
+        delete_action = QAction('删除')
         delete_action.triggered.connect(self.action_delete_triggered)
 
-        edit_value_action = QAction('edit value')
+        edit_value_action = QAction('编辑值')
         edit_value_action.triggered.connect(self.action_edit_val_triggered)
 
         actions = [delete_action, edit_value_action]

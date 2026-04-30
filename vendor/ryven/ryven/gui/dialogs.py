@@ -2,6 +2,7 @@ from qtpy.QtWidgets import QDialog, QVBoxLayout, QLineEdit, QPushButton
 
 
 class GetTextDialog(QDialog):
+    """Simple text input dialog. Strings are supplied by callers for localization."""
     def __init__(self, window_title='', init_text='', placeholder_text='', parent=None):
         super().__init__(parent=parent)
         self.text = ''

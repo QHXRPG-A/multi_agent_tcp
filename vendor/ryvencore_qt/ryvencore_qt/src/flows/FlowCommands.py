@@ -131,7 +131,7 @@ class MoveComponents_Command(FlowUndoCommand):
         self.p_from = p_from
         self.p_to = p_to
         self.last_item_group_pos = p_to
-        self.setText(undo_text_multi(self.items_list, 'Move'))
+        self.setText(undo_text_multi(self.items_list, '移动'))
 
     def undo_(self):
         items_group = self.items_group()
@@ -173,7 +173,7 @@ class PlaceNode_Command(FlowUndoCommand):
             self.flow.add_node(self.node)
         else:
             self.node = self.flow.create_node(self.node_class)
-        self.setText(f'Create {self.node.gui.item}')
+        self.setText(f'创建 {self.node.gui.item}')
 
 
 class PlaceDrawing_Command(FlowUndoCommand):
@@ -205,7 +205,7 @@ class SelectComponents_Command(FlowUndoCommand):
         super().__init__(flow_view)
         self.items = new_items
         self.prev_items = prev_items
-        self.setText(undo_text_multi(self.items, 'Select'))
+        self.setText(undo_text_multi(self.items, '选择'))
         
     def redo_(self):
         self.flow_view.select_items(self.items)
@@ -219,7 +219,7 @@ class RemoveComponents_Command(FlowUndoCommand):
         super().__init__(flow_view)
         self.items = items
         self.selection = flow_view._current_selected
-        self.setText(undo_text_multi(self.items, 'Delete'))
+        self.setText(undo_text_multi(self.items, '删除'))
         
         self.broken_connections = (
             set()
@@ -345,11 +345,11 @@ class ConnectPorts_Command(FlowUndoCommand):
             else:
                 # connection hasn't been created yet
                 self.connection = self.flow.connect_nodes(self.out, self.inp)
-            self.setText(f'Connect {self.flow_view.connection_items[self.connection]}')
+            self.setText(f'连接 {self.flow_view.connection_items[self.connection]}')
             
         else:
             # remove existing connection
-            self.setText(f'Disconnect {self.flow_view.connection_items[self.connection]}')
+            self.setText(f'断开 {self.flow_view.connection_items[self.connection]}')
             self.flow.remove_connection(self.connection)
         
 
@@ -360,7 +360,7 @@ class Paste_Command(FlowUndoCommand):
         self.data = data
         self.modify_data_positions(offset_for_middle_pos)
         self.pasted_components = None
-        self.setText('Paste')
+        self.setText('粘贴')
 
     def modify_data_positions(self, offset):
         """adds the offset to the components' positions in data"""
