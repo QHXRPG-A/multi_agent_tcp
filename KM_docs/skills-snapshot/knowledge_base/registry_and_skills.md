@@ -15,10 +15,59 @@
       "model": "netease-codemaker/kimi-k2.5",
       "cwd": "F:/src/Package/Script/Python",
       "skills": ["excel-export-flow", "messiah-ui-dev"],
+      "skill_selection": {
+        "mode": "selected",
+        "skill_hashes": ["excel-export-flow", "messiah-ui-dev"]
+      },
       "timeout_sec": 1800,
       "enabled": true
     }
   }
+}
+```
+
+## Agent skill selection
+
+`AgentProfile` 与 `AgentNode` 共享 `AgentSkillSelection` 的用户侧模型：
+
+- `none`：不暴露任何 skill。
+- `all`：暴露当前 `skill_list/manifest.json` 中的全部 skill。
+- `selected`：只暴露用户显式选择的 skill。
+- `upstream`：由图运行时上游超级 agent 分配 skill；registry 静态注入阶段不解析。
+
+兼容规则：
+
+- 旧配置中的 `skills: [...]` 会继续被读取，并按 `selected` 解释。
+- registry 体系里的 skill 标识仍是 `skill_list` 中的 skill 名称；为了与图运行时模型复用，当前存放在 `skill_selection.skill_hashes` 字段。
+- `show-registry` 与 session snapshot 会输出 `skill_selection`，同时保留解析后的 `skills` 描述列表。
+
+示例：
+
+```json
+{
+  "skill_selection": {"mode": "none"}
+}
+```
+
+```json
+{
+  "skill_selection": {"mode": "all"}
+}
+```
+
+```json
+{
+  "skill_selection": {
+    "mode": "selected",
+    "skill_hashes": ["excel-export-flow"]
+  },
+  "skills": ["excel-export-flow"]
+}
+```
+
+```json
+{
+  "skill_selection": {"mode": "upstream"}
 }
 ```
 
@@ -67,7 +116,8 @@ Total: 2 skill(s). Use the `read` tool to load the full SKILL.md when needed.
 - 卡片网格
 - 编辑对话框
 - model 实时下拉
-- skill 多选弹窗
+- skill mode 下拉：`none` / `all` / `selected` / `upstream`
+- `selected` 模式下的 skill 多选弹窗、全选和清空
 
 ## 相关知识
 

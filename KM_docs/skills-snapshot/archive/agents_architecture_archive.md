@@ -4,6 +4,68 @@
 
 ## 变更记录
 
+### 2026-05-03 — AgentNode skill selection 模型同步到 registry 与 registry-ui
+
+#### 摘要
+1. `AgentNode` 的用户可配置 skill 从单一 `skills` 列表升级为 `AgentSkillSelection`，支持 `none` / `all` / `selected` / `upstream` 四种模式；旧 `skills` 列表继续兼容为 `selected`。
+2. `AgentNode.node_id` 改为框架自动分配，避免把图内部节点 ID 暴露为用户必填字段。
+3. `registry.py` 新增 profile 级 `skill_selection` 解析：`none` 不注入 skill，`all` 注入 manifest 中全部 skill，`selected` 注入显式选择项，`upstream` 留给图运行时超级 agent 授权解析。
+4. `registry_ui.py` 的 agent 编辑界面新增 skill mode 下拉选择，可直接选择 `none` / `all` / `selected` / `upstream`；`selected` 模式保留 skill 多选，并提供全选与清空。
+5. `show-registry` / session snapshot 输出携带 `skill_selection`，同时保留 legacy `skills` 镜像，便于旧配置与旧调用路径平滑过渡。
+
+#### 涉及
+- `graph_runtime.py`
+- `registry.py`
+- `registry_ui.py`
+- `__init__.py`
+- `test_agent_runtime.py`
+- `test_registry_skill_selection.py`
+
+#### 验证
+1. `python -m py_compile registry.py registry_ui.py test_registry_skill_selection.py`
+2. `python -m pytest test_agent_runtime.py test_codex_cli_smoke.py test_skill_injection.py test_skill_space.py test_workspace_manager.py test_registry_skill_selection.py -q`：`39 passed`
+
+#### 当前边界
+1. registry 层的 skill 标识仍是 `skill_list/manifest.json` 中的 skill 名称；为复用图运行时模型，暂存在 `AgentSkillSelection.skill_hashes` 字段中。
+2. `upstream` 在 registry 静态 prompt 注入中不会解析 skill，实际授权仍由图运行时 `SuperAgentProfile.validate_assignment()` 负责。
+3. registry-ui 目前只保存模式，不判断当前 agent 是否确实有超级 agent 上游；该约束保留在运行时。
+
+---
+
+### 2026-05-03 — CodexAdapter 最小执行器落地：接入 `codex exec` 与 `codex-worker`
+
+#### 摘要
+1. 基于此前 Codex CLI spike，新增真实 `CodexAdapter` 与 `codex_bridge.py`，把 `codex exec` 纳入现有 `CLIAdapter` 边界。
+2. 支持 `cli_kind=codex` / `mode=codex-worker` 的 worker 启动路径，`__main__.py agent --mode` 已开放 `codex-worker`。
+3. `WorkerConfig(cli_kind="codex", model=...)` 会序列化为 Codex 运行配置，并将 `AgentNode.model` 映射到 `codex exec --model`。
+4. `codex_bridge.py` 支持 stdin prompt、`--json`、`--output-last-message`、`--cd`、`--model`、`--image`、超时杀进程树、可选临时/指定 `CODEX_HOME`。
+5. `WorkerResult` 解析新增 `body.codex.final_text` / `last_message` 路径，使 `run_single`、`run_parallel`、`run_parallel_reduce` 上层结果视图保持统一。
+6. `AgentSkillView` 新增 Codex 执行上下文与 adapter options 生成方法，先以 prompt preamble + execution_context 方式暴露授权 skill view，不暴露 SkillSpace 私有路径。
+
+#### 涉及
+- `codex_bridge.py`
+- `adapters.py`
+- `cluster.py`
+- `__main__.py`
+- `skill_space.py`
+- `__init__.py`
+- `test_agent_runtime.py`
+- `test_skill_space.py`
+- `test_codex_cli_smoke.py`
+
+#### 验证
+1. `python -m py_compile adapters.py codex_bridge.py cluster.py __main__.py skill_space.py __init__.py`
+2. `python -m pytest test_agent_runtime.py test_codex_cli_smoke.py test_skill_injection.py test_skill_space.py test_workspace_manager.py -q`：`31 passed`
+3. `python -m multi_agent_tcp agent --help` 已显示 `codex-worker`。
+
+#### 当前边界
+1. Codex adapter 仍采用 per-message `codex exec` 子进程；`CLIAdapter` 边界是长生命周期 worker 对象，不代表 Codex CLI 内部会话已持久复用。
+2. `AgentSkillView` 已接入 Codex prompt/context，但临时 `CODEX_HOME` 的自动隔离策略尚未和运行时 workspace 生命周期完整联动。
+3. Claude CLI 仍未确认，不能预设调用方式。
+4. registry-ui 尚未按 `cli_kind` 渲染差异化字段与 model 候选。
+
+---
+
 ### 2026-04-30 — 基于 `KM_docs` 同步 skill：新增知识库模块、短期任务目录与仓库镜像快照
 
 #### 摘要
@@ -273,6 +335,75 @@
 ---
 
 ## 当前主架构知识
+
+---
+
+### 2026-05-03 — 节点运行时、共享工作区与 SkillSpace 阶段落地
+
+#### 摘要
+
+本轮把多 CLI / 节点化方向从文档任务推进为一组可测试的运行时 primitives，并为后续 CodexAdapter 与蓝图执行器建立隔离边界。
+
+#### 已落地
+
+1. **Adapter 边界**
+   - 新增 `adapters.py`。
+   - 落地 `CLIAdapter`、`CodeMakerAdapter`、`AgentMessage`、`AdapterResult`。
+   - `CodeMakerAdapter` 继续兼容现有 `codemaker run` per-message 执行方式。
+
+2. **节点运行时 primitives**
+   - 新增 `graph_runtime.py`。
+   - 落地 `AgentNode`、`AgentInstance`、`GraphRuntime`、`BrokerAgentRuntime`。
+   - 支持 `execution_mode: blocking | nonblocking`。
+   - 新增 `GraphJob`、`GraphEvent`、`WorkspaceManifest`。
+   - 新增 `MultiModalEnvelope` / `normalize_envelope`。
+   - 新增 `RouteNode`、`GraphEdge`、`GraphDefinition`、`GraphExecutor`。
+
+3. **共享工作区生命周期**
+   - 新增 `dulwich_vendor.py` 与 `workspace_manager.py`。
+   - vendored Dulwich 到 `vendor/dulwich`，通过 `.gitignore` 排除第三方源码。
+   - 支持用户指定长期共享工作区 `workspace_root`；默认 `<project>/.multi_agent_workspace/`。
+   - 长期共享工作区允许 agent 读取，但不允许写入；当前为 runtime policy，OS ACL / 沙箱级强制尚未实现。
+   - 每次蓝图运行创建 `runs/active/<run_id>`。
+   - 每个 job 创建隔离 `jobs/<job_id>/worktree`。
+   - 支持完整目录归档到 `runs/archived/<run_id>` 或 `runs/failed/<run_id>`。
+   - 支持 diff、scope 校验、文本三方 merge、冲突检测。
+
+4. **SkillSpace 与 agent 独立目录**
+   - 新增 `skill_space.py`。
+   - `SkillSpace` 私有维护 `hash -> skill` 映射。
+   - 下游 agent 只拿到 hash 列表，框架负责将授权 skill 复制到 agent 独立目录。
+   - agent 独立目录位于 `runs/active/<run_id>/agents/<agent_id>/`。
+   - `AgentSkillView` 生成 agent 可见 context 与 catalog prompt。
+   - `SuperAgentProfile` 支持查看可分配 skill catalog，并校验给下游 agent 指定的 skill hash 列表。
+
+5. **Codex adapter spike**
+   - 本机确认 Codex CLI：`codex-cli 0.125.0`。
+   - `codex exec` 支持 stdin prompt、`--json`、`--output-last-message`、`--cd`、`--model`、`--image`。
+   - Claude CLI 当前未在 PATH 中发现，不预设调用方式。
+
+#### 测试覆盖
+
+- `test_agent_runtime.py`
+- `test_workspace_manager.py`
+- `test_skill_space.py`
+- `test_codex_cli_smoke.py`
+
+当前相关测试通过：`26 passed`。
+
+#### 当前边界
+
+1. 还没有真实 `CodexAdapter` / `ClaudeAdapter`。
+2. SkillSpace 尚未接入 CodexAdapter 的临时 `CODEX_HOME` 强隔离。
+3. 共享工作区还没有 lock / lease、OS ACL / 沙箱级只读强制、持久 runner、Dulwich commit/ref merge、归档删除 API。
+4. 图运行时还不是完整图编译器；处理节点、I/O 节点、条件路由、事件总线仍待实现。
+5. 超级 agent 当前只实现 skill 分配权限模型，其它下游 agent 配置能力后续再做。
+
+#### 维护建议
+
+1. 近期重点转向 `CodexAdapter`：`cli_kind=codex`、`mode=codex-worker`、model 映射、prompt contract、SkillSpace view 注入。
+2. AgentNode 对下游 agent 应屏蔽框架技术细节，只暴露上下文、用户设置、授权 skills、接口文档与输出格式。
+3. `multi-agent-tcp` 框架维护 skill 不应默认注入普通下游 agent，避免泄露框架内部实现。
 
 ### 背景
 

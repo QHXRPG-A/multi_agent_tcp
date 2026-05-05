@@ -73,6 +73,15 @@ def _parse_codemaker_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("codemaker.run_stub_message must be a non-empty string when set")
     else:
         run_stub = str(stub).strip()
+    extra_env = raw.get("extra_env")
+    if extra_env is None:
+        extra_env = cfg.get("extra_env")
+    if extra_env is None:
+        extra_env_dict: Dict[str, str] = {}
+    elif isinstance(extra_env, dict):
+        extra_env_dict = {str(k): str(v) for k, v in extra_env.items()}
+    else:
+        raise ValueError("codemaker.extra_env must be an object when set")
     return {
         "command": command,
         "base_args": list(base_args),
@@ -82,6 +91,7 @@ def _parse_codemaker_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "prompt_via_file": str(pvf),
         "anchor_message": anchor_prefix,
         "run_stub_message": run_stub,
+        "extra_env": extra_env_dict,
     }
 
 
@@ -210,6 +220,9 @@ async def codemaker_run(
         )
 
     child_env = {**os.environ, "PYTHONUTF8": "1"}
+    extra_env = codemaker_cfg.get("extra_env")
+    if isinstance(extra_env, dict):
+        child_env.update({str(k): str(v) for k, v in extra_env.items()})
     t0 = time.monotonic()
     proc = await asyncio.create_subprocess_exec(
         *cmd,

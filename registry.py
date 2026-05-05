@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .cluster import WorkerConfig
+from .graph_runtime import AgentSkillSelection
 
 log = logging.getLogger(__name__)
 
@@ -66,9 +67,30 @@ class AgentProfile:
     model: str
     cwd: str
     skills: List[str] = field(default_factory=list)
+    skill_selection: AgentSkillSelection = field(default_factory=AgentSkillSelection)
     timeout_sec: float = 1800.0
     enabled: bool = True
+    cli_kind: str = "codemaker"
+    adapter_options: Dict[str, Any] = field(default_factory=dict)
+    extra_env: Dict[str, str] = field(default_factory=dict)
     extra: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.skills = [str(s).strip() for s in self.skills if str(s).strip()]
+        if not isinstance(self.skill_selection, AgentSkillSelection):
+            self.skill_selection = AgentSkillSelection.from_value(
+                self.skill_selection,
+                legacy_skills=self.skills,
+            )
+        elif self.skills and self.skill_selection.mode == "none":
+            self.skill_selection = AgentSkillSelection.from_value(
+                None,
+                legacy_skills=self.skills,
+            )
+        if self.skill_selection.mode == "selected":
+            self.skills = list(self.skill_selection.skill_hashes)
+        else:
+            self.skills = []
 
     def to_worker_config(self) -> WorkerConfig:
         return WorkerConfig(
@@ -76,6 +98,9 @@ class AgentProfile:
             cwd=Path(self.cwd),
             model=self.model,
             timeout_sec=self.timeout_sec,
+            cli_kind=self.cli_kind,
+            adapter_options=dict(self.adapter_options),
+            extra_env=dict(self.extra_env),
         )
 
 
@@ -116,17 +141,31 @@ class AgentsRegistry:
 
         agents: Dict[str, AgentProfile] = {}
         for aid, cfg in raw.get("agents", {}).items():
+            skill_selection = AgentSkillSelection.from_value(
+                cfg.get("skill_selection"),
+                legacy_skills=cfg.get("skills", []),
+            )
+            selected_skills = (
+                list(skill_selection.skill_hashes)
+                if skill_selection.mode == "selected"
+                else []
+            )
             agents[aid] = AgentProfile(
                 agent_id=aid,
                 display_name=cfg.get("display_name", aid),
                 model=cfg.get("model", "netease-codemaker/kimi-k2.5"),
                 cwd=cfg.get("cwd", str(_MODULE_DIR.parent)),
-                skills=cfg.get("skills", []),
+                skills=selected_skills,
+                skill_selection=skill_selection,
                 timeout_sec=cfg.get("timeout_sec", 1800.0),
                 enabled=cfg.get("enabled", True),
+                cli_kind=cfg.get("cli_kind", "codemaker"),
+                adapter_options=cfg.get("adapter_options", {}),
+                extra_env={str(k): str(v) for k, v in cfg.get("extra_env", {}).items()},
                 extra={k: v for k, v in cfg.items()
                        if k not in ("display_name", "model", "cwd", "skills",
-                                    "timeout_sec", "enabled")},
+                                    "skill_selection", "timeout_sec", "enabled",
+                                    "cli_kind", "adapter_options", "extra_env")},
             )
         return cls(agents, skill_list_dir, manifest, raw)
 
@@ -186,6 +225,29 @@ class AgentsRegistry:
         """Return sorted list of skill names in skill_list/."""
         return sorted(self.skill_manifest.keys())
 
+    def resolve_agent_skill_names(self, agent_id: str) -> List[str]:
+        """Resolve an agent's skill selection to registry skill names.
+
+        Registry skill identifiers are the names in ``skill_list/manifest.json``.
+        They are stored in ``AgentSkillSelection.skill_hashes`` for parity with
+        the graph runtime model, which uses hashes inside ``SkillSpace``.
+        ``upstream`` is resolved by the graph runtime, so it has no static
+        registry prompt injection.
+        """
+        prof = self.agents.get(agent_id)
+        if prof is None:
+            return []
+        selection = prof.skill_selection
+        if selection.mode == "none":
+            return []
+        if selection.mode == "all":
+            return self.list_available_skills()
+        if selection.mode == "selected":
+            return list(selection.skill_hashes or prof.skills)
+        if selection.mode == "upstream":
+            return []
+        return []
+
     # ------------------------------------------------------------------
     # Catalog-based skill preamble (lightweight, agent reads on-demand)
     # ------------------------------------------------------------------
@@ -197,8 +259,8 @@ class AgentsRegistry:
         this produces a table (~50 chars/skill) with file paths so the
         agent can ``read`` any skill it needs on-demand.
         """
-        prof = self.agents.get(agent_id)
-        if not prof or not prof.skills:
+        skills = self.resolve_agent_skill_names(agent_id)
+        if not skills:
             return ""
 
         lines: List[str] = [
@@ -211,7 +273,7 @@ class AgentsRegistry:
         ]
 
         valid_count = 0
-        for sname in prof.skills:
+        for sname in skills:
             info = self.skill_manifest.get(sname)
             if info is None:
                 log.warning("skill %r not in manifest, skipping", sname)
@@ -236,8 +298,8 @@ class AgentsRegistry:
 
         Prefer ``build_skill_catalog()`` for >=2 skills.
         """
-        prof = self.agents.get(agent_id)
-        if not prof or not prof.skills:
+        skills = self.resolve_agent_skill_names(agent_id)
+        if not skills:
             return ""
         sep = "\n\n" + "=" * 60 + "\n"
         parts: List[str] = [
@@ -245,7 +307,7 @@ class AgentsRegistry:
             "The following skills are loaded for this session. "
             "Use them when relevant to the task.\n",
         ]
-        for sname in prof.skills:
+        for sname in skills:
             try:
                 content = self.read_skill(sname)
                 parts.append(f"## Skill: {sname}{sep}{content}")
@@ -335,7 +397,7 @@ class AgentsRegistry:
         snapshot: Dict[str, Any] = {}
         for a in enabled:
             skill_descs = []
-            for sname in a.skills:
+            for sname in self.resolve_agent_skill_names(a.agent_id):
                 info = self.skill_manifest.get(sname)
                 skill_descs.append({
                     "name": sname,
@@ -343,7 +405,9 @@ class AgentsRegistry:
                 })
             snapshot[a.agent_id] = {
                 "display_name": a.display_name,
+                "cli_kind": a.cli_kind,
                 "model": a.model,
+                "skill_selection": a.skill_selection.to_dict(),
                 "skills": skill_descs,
                 "cwd": a.cwd,
                 "timeout_sec": a.timeout_sec,
@@ -462,7 +526,7 @@ def show_registry_response(reg: "AgentsRegistry") -> Dict[str, Any]:
     agents_out: List[Dict[str, Any]] = []
     for prof in reg.list_agents(enabled_only=True):
         skill_descs = []
-        for sname in prof.skills:
+        for sname in reg.resolve_agent_skill_names(prof.agent_id):
             info = reg.skill_manifest.get(sname)
             skill_descs.append({
                 "name": sname,
@@ -471,7 +535,9 @@ def show_registry_response(reg: "AgentsRegistry") -> Dict[str, Any]:
         agents_out.append({
             "agent_id": prof.agent_id,
             "display_name": prof.display_name,
+            "cli_kind": prof.cli_kind,
             "model": prof.model,
+            "skill_selection": prof.skill_selection.to_dict(),
             "skills": skill_descs,
             "cwd": prof.cwd,
             "timeout_sec": prof.timeout_sec,

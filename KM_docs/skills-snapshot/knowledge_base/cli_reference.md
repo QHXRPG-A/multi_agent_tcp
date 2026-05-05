@@ -46,7 +46,15 @@ python -m multi_agent_tcp.orchestrate --recipe multi_agent_tcp/examples/recipe_c
 ```text
 python -m multi_agent_tcp registry-ui
 python -m multi_agent_tcp.registry_ui
+python -m multi_agent_tcp ryven
+python -m multi_agent_tcp ryven --skip-dialog
 ```
+
+## Ryven 启动说明
+
+- 对于 vendored `Ryven`，优先使用 `python -m multi_agent_tcp ryven`
+- 该入口会统一处理 `sys.path` 注入、`PySide6` 默认选择，以及缺失 `ryven` 包元数据时的兼容逻辑
+- 若关闭启动对话框后出现 `Start-up screen dismissed`，通常属于正常退出而非启动失败
 
 ## Skill 合并
 

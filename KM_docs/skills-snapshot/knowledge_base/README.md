@@ -18,4 +18,5 @@
 - `runtime_notes.md`：编码、日志、进程树、心跳、重试与 `codemaker run` 易错点
 - `multi_cli_workflow.md`：多 CLI 接入、节点化工作流、`CLIAdapter` 与 `MultiModalEnvelope` 方向
 - `vendor_ryven_ui.md`：vendored `ryvencore_qt` / `Ryven` 的节点外观、主题与视觉层知识
+- `agent_node_ryven_integration.md`：`AgentNode` 接入 Ryven 节点 UI、Start/End 自动注入、删除保护、Ryven Flow -> `GraphDefinition` 编译与 runnable graph 校验
 - `blueprint_gap_notes.md`：对标 UE5 蓝图时的类型系统、编辑效率与信息密度改进方向

@@ -35,7 +35,7 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
 
@@ -56,7 +56,7 @@ _IS_WIN = sys.platform == "win32"
 
 @dataclass
 class WorkerConfig:
-    """Configuration for one CodeMaker CLI worker process."""
+    """Configuration for one CLI-backed worker process."""
 
     agent_id: str
     cwd: Path
@@ -64,23 +64,53 @@ class WorkerConfig:
     timeout_sec: float = 1800.0
     prompt_via_file: str = "auto"
     command: str = "codemaker"
+    cli_kind: str = "codemaker"
+    adapter_options: Dict[str, Any] = field(default_factory=dict)
+    extra_env: Dict[str, str] = field(default_factory=dict)
 
     def to_agent_json(self, host: str, port: int) -> Dict[str, Any]:
         """Serialize to the JSON config consumed by ``__main__.py agent``."""
+        cli_kind = str(self.cli_kind or "codemaker").strip().lower()
+        command = str(self.command or "").strip()
+        if cli_kind == "codex" and (not command or command == "codemaker"):
+            command = "codex"
+        elif not command:
+            command = "codemaker"
+
+        codemaker_cfg = {
+            "command": command,
+            "cwd": str(self.cwd),
+            "model": self.model,
+            "base_args": ["run", "--format", "json"],
+            "prompt_via_file": self.prompt_via_file,
+            "timeout_sec": self.timeout_sec,
+        }
+        codex_cfg = {
+            "command": command,
+            "cwd": str(self.cwd),
+            "model": self.model,
+            "base_args": ["exec"],
+            "timeout_sec": self.timeout_sec,
+            "json": True,
+            "output_last_message": True,
+            "ephemeral": True,
+        }
+        adapter_options = dict(self.adapter_options or {})
+        if cli_kind == "codex":
+            codex_cfg.update(adapter_options)
+        else:
+            codemaker_cfg.update(adapter_options)
         return {
             "agent_id": self.agent_id,
             "broker_host": host,
             "broker_port": port,
-            "role": "codemaker",
-            "mode": "codemaker-worker",
-            "codemaker": {
-                "command": self.command,
-                "cwd": str(self.cwd),
-                "model": self.model,
-                "base_args": ["run", "--format", "json"],
-                "prompt_via_file": self.prompt_via_file,
-                "timeout_sec": self.timeout_sec,
-            },
+            "role": cli_kind,
+            "mode": f"{cli_kind}-worker" if cli_kind != "codemaker" else "codemaker-worker",
+            "cli_kind": cli_kind,
+            "codemaker": codemaker_cfg,
+            "codex": codex_cfg,
+            "adapter_options": adapter_options,
+            "extra_env": self.extra_env or {},
         }
 
 
@@ -298,6 +328,31 @@ def _parse_worker_result(agent_id: str, reply: Dict[str, Any]) -> WorkerResult:
             worker=agent_id, status="error", answer="",
             stderr=body,
         )
+
+    codex = body.get("codex", {})
+    if isinstance(codex, dict) and codex:
+        stdout = codex.get("stdout", "")
+        stderr = codex.get("stderr", "")
+        answer = str(codex.get("final_text") or codex.get("last_message") or "")
+        is_timeout = codex.get("timeout", False)
+        ok = body.get("ok", False)
+        if is_timeout:
+            status = "timeout"
+        elif not ok:
+            status = "error"
+        elif not answer.strip():
+            status = "empty"
+        else:
+            status = "success"
+        return WorkerResult(
+            worker=agent_id,
+            status=status,
+            answer=answer,
+            raw_stdout=stdout,
+            stderr=stderr,
+            elapsed_sec=codex.get("elapsed_sec", 0.0),
+        )
+
     cm = body.get("codemaker", {})
     stdout = cm.get("stdout", "")
     stderr = cm.get("stderr", "")
@@ -465,6 +520,7 @@ class CodeMakerCluster:
         self._broker_proc: Optional[subprocess.Popen] = None
         self._agent_procs: List[subprocess.Popen] = []
         self._tmp_files: List[Path] = []
+        self._work_dir: Optional[Path] = None
         self._owns_processes: bool = False
         self._client: Optional[AgentTCPClient] = None
         self._self_id: str = "orchestrator"
@@ -483,13 +539,14 @@ class CodeMakerCluster:
         host: str = "127.0.0.1",
         port: int = 9140,
         verbose: bool = False,
+        allow_empty: bool = False,
     ) -> "CodeMakerCluster":
         """Start a broker + N worker subprocesses.
 
         The returned cluster owns the processes; call ``stop()`` (or use as
         async context manager) to tear them down.
         """
-        if not workers:
+        if not workers and not allow_empty:
             raise ValueError("workers list must be non-empty")
         inst = cls()
         inst._host = host
@@ -612,6 +669,7 @@ class CodeMakerCluster:
 
         work = Path(tempfile.gettempdir()) / "multi_agent_tcp_cluster"
         work.mkdir(parents=True, exist_ok=True)
+        self._work_dir = work
 
         py = sys.executable
         env = {**os.environ, "PYTHONUTF8": "1"}
@@ -641,20 +699,10 @@ class CodeMakerCluster:
                 f"Kill old processes or use a different port."
             )
 
-        for w in self._workers:
-            cfg_path = work / f"agent_{w.agent_id}_{self._port}.json"
-            cfg_path.write_text(
-                json.dumps(w.to_agent_json(self._host, self._port), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            self._tmp_files.append(cfg_path)
-            acmd = [
-                py, "-m", "multi_agent_tcp", *extra_v,
-                "agent", "--config", str(cfg_path),
-            ]
-            self._agent_procs.append(
-                _spawn(acmd, f"AGENT {w.agent_id}", verbose=self._verbose, env=env)
-            )
+        initial_workers = list(self._workers)
+        self._workers = []
+        for w in initial_workers:
+            await self.ensure_worker(w)
 
         settle = 4.0 if _IS_WIN else 1.5
         await asyncio.sleep(settle)
@@ -663,6 +711,49 @@ class CodeMakerCluster:
             "cluster ready host=%s port=%s workers=%s",
             self._host, self._port, [w.agent_id for w in self._workers],
         )
+
+    async def ensure_worker(self, worker: WorkerConfig) -> None:
+        """Ensure a worker process is registered for this cluster.
+
+        For graph execution this provides lazy AgentNode startup: the first
+        traversal can call this method, and later traversals reuse the same
+        broker-registered worker process.
+        """
+        if worker.agent_id in self.worker_ids:
+            return
+        if not self._owns_processes:
+            raise RuntimeError(
+                f"cannot start worker {worker.agent_id!r}: cluster does not own processes"
+            )
+        if self._broker_proc is None or self._broker_proc.poll() is not None:
+            raise RuntimeError("cannot start worker: broker process is not running")
+
+        work = self._work_dir or (Path(tempfile.gettempdir()) / "multi_agent_tcp_cluster")
+        work.mkdir(parents=True, exist_ok=True)
+        cfg_path = work / f"agent_{worker.agent_id}_{self._port}.json"
+        cfg_path.write_text(
+            json.dumps(
+                worker.to_agent_json(self._host, self._port),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        self._tmp_files.append(cfg_path)
+        extra_v = ["-v"] if self._verbose else []
+        acmd = [
+            sys.executable, "-m", "multi_agent_tcp", *extra_v,
+            "agent", "--config", str(cfg_path),
+        ]
+        env = {**os.environ, "PYTHONUTF8": "1"}
+        env.update(worker.extra_env or {})
+        self._agent_procs.append(
+            _spawn(acmd, f"AGENT {worker.agent_id}", verbose=self._verbose, env=env)
+        )
+        self._workers.append(worker)
+        settle = 4.0 if _IS_WIN else 1.5
+        await asyncio.sleep(settle)
+        log.info("worker ready agent_id=%s cli_kind=%s", worker.agent_id, worker.cli_kind)
 
     async def _ensure_client(self) -> AgentTCPClient:
         """Return a connected orchestrator client, creating one if needed."""
@@ -980,6 +1071,9 @@ class CodeMakerCluster:
                 timeout_sec=float(w.get("timeout_sec", 1800.0)),
                 prompt_via_file=str(w.get("prompt_via_file", "auto")),
                 command=str(w.get("command", "codemaker")),
+                cli_kind=str(w.get("cli_kind", "codemaker")),
+                adapter_options=dict(w.get("adapter_options", {})),
+                extra_env={str(k): str(v) for k, v in w.get("extra_env", {}).items()},
             ))
         return out
 

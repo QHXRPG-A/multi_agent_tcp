@@ -106,7 +106,7 @@ class CLIAdapter:
 
 | 类别 | 职责 | 例子 |
 |------|------|------|
-| **Agent 节点**（详见 §4.1.1） | 调一个 CLI 跑一段 prompt，输出 `WorkerResult` | `CodeMakerAgent` / `ClaudeCodeAgent` / `CodexAgent` |
+| **Agent 节点**（详见 §4.1.1） | 绑定并装载一个长生命周期 CLI agent 实例；图运行期间多次经过该节点时复用同一实例收发消息，输出 `WorkerResult` / 会话消息 | `CodeMakerAgent` / `ClaudeCodeAgent` / `CodexAgent` |
 | **处理节点（pure function）** | 纯函数式 message 转换 | 模板填充 `Jinja2Render`、字段抽取 `JsonPathPick`、Markdown→纯文本 `MdStrip`、image resize `ImageResize`、image → base64 `ImageEncodeBase64`、JSON merge `JsonMerge` |
 | **路由节点** | 控制流 | `FanOut`（一份输入复制成 N 份）、`FanIn`（N 份合并）、`Switch`（按用户提供的 `when` 谓词分支，对应 ROADMAP P2 的条件路由） |
 | **I/O 节点** | 与外部世界交互 | `FileRead` / `FileWrite` / `HttpGet` / `McpCall` / `BlobPut` / `BlobGet` |
@@ -115,7 +115,35 @@ class CLIAdapter:
 
 ### 4.1.1 Agent 节点的可视化配置面（重点）
 
-**Agent 节点是节点系统里唯一负责"装载一个对等 agent CLI"的节点类型**——即用户在可视化编辑器里**拖出来一个 Agent 节点 = 拉起一个 agent**。它对应的运行时实体就是 §3 的 `WorkerConfig` + `CLIAdapter` 组合（一个 Agent 节点 ≈ 一个 worker + 它的 adapter）。
+**Agent 节点是节点系统里唯一负责"装载一个对等 agent CLI"的节点类型**——即用户在可视化编辑器里**拖出来一个 Agent 节点 = 声明一个可在图运行期间被拉起并复用的 agent 实例**。它对应的运行时实体就是 §3 的 `WorkerConfig` + `CLIAdapter` 组合（一个 Agent 节点 ≈ 一个 worker + 它的 adapter + 图运行期会话状态）。
+
+关键生命周期语义：
+
+- 第一次经过某个 Agent 节点时，GraphRuntime 按该节点配置拉起或绑定对应 CLI agent 实例。
+- 同一次蓝图运行中再次经过该 Agent 节点时，不重新 spawn，也不关闭进程，而是直接把新消息发送到该节点已绑定的 agent 实例。
+- Agent 节点可以出现在循环、反馈、协作链路中；循环每次回到同一 Agent 节点时应复用该 agent 的上下文与进程状态。
+- 整张蓝图运行结束、取消或失败收尾时，GraphRuntime 统一关闭本次运行创建的 agent 实例；挂接到外部已有 agent 的节点只解除绑定，不擅自销毁外部实例。
+- `timeout_sec` 约束单次消息处理，不代表 agent 实例生命周期上限。
+
+#### Agent 节点执行模式：blocking / nonblocking
+
+Agent 节点不是只有一种执行语义。按对当前分支控制流的影响，至少分为：
+
+- **阻塞 AgentNode**：触发后阻塞当前执行分支，等待本轮消息结果，再决定当前分支继续、失败、驳回或进入其它路径；它不阻塞整张蓝图，也不阻塞其它并行分支。典型用途是审批技术提案、评审实现方案、汇总多路结果、质量门禁、决定后续 AgentNode 是否可以实施。
+- **非阻塞 AgentNode**：触发后启动或复用 agent 实例并提交后台任务，当前执行分支立即继续。它通常承担执行者职责，例如开发某个模块、生成资产、跑长时间验证、后台调研。当前分支短期内不等待其结果；完成后通过事件和共享工作区 manifest 反馈给蓝图。
+
+推荐新增字段：
+
+| 字段 | 值 | 含义 |
+|------|----|------|
+| `execution_mode` | `blocking` / `nonblocking` | 是否阻塞当前执行分支等待本轮结果 |
+| `completion_event` | bool | 非阻塞任务完成后是否发事件 |
+| `event_topic` | string | 完成/失败/进度事件主题 |
+| `workspace_id` | string | 该节点使用的共享工作区 |
+| `read_scope` / `write_scope` / `artifact_scope` | glob list | 该节点允许读取、写入、产出的位置 |
+| `result_policy` | `return` / `event` / `manifest` | 本轮结果如何回流 |
+
+阻塞 AgentNode 的直接输出应包含 `completed` / `failed` / `answer` / `result` / `status`，用于驱动当前分支。非阻塞 AgentNode 的直接输出应包含 `started` / `failed_to_start` / `job_ref` / `agent_ref` / `workspace_ref`，最终结果通过事件总线和共享工作区回流。
 
 #### 用户在 Agent 节点上要声明的字段（节点检视面板）
 
@@ -129,6 +157,9 @@ class CLIAdapter:
 | `timeout_sec` | ⭕ | 数字 | 单次 prompt 最大执行时间 |
 | `adapter_options` | ⭕ | 折叠面板（按 `cli_kind` 渲染不同字段） | 例：CodeMaker 的 `prompt_via_file` / `anchor_message` / `run_stub_message` 等 |
 | `extra_env` | ⭕ | key/value 表 | 注入子进程环境变量（如 `CODEMAKER_AUTH_TOKEN`） |
+| `execution_mode` | ✅ | 分段控件 | `blocking` / `nonblocking`；决定执行线是否等待本轮结果 |
+| `workspace_id` | ⭕ | 下拉/文本 | 非阻塞任务写 manifest 与产物的共享工作区 |
+| `read_scope` / `write_scope` / `artifact_scope` | ⭕ | glob 列表 | 约束该 AgentNode 在共享工作区内的读写与产物边界 |
 
 > **检视面板渲染规则**：选完 `cli_kind` 后，整张面板按对应 `CLIAdapter.cli_kind` 重新渲染——这与 §3.4 `agents_registry.json.adapter_options` 是同一份 schema，仅承载形态从 JSON 改成节点表单。
 
@@ -137,7 +168,7 @@ class CLIAdapter:
 | 端口名 | 必备 | accepts | 含义 |
 |--------|------|---------|------|
 | `prompt` | ✅ | `text/plain` / `text/markdown`（自动转 plain） | 给该 agent 的指令；可来自上游处理节点（模板填充、字段抽取）或用户内联文本 |
-| `attachments` | ⭕ | `image/*` / `audio/*`（次要） / `application/octet-stream` / `file/*` | 多端口或单 list 端口；adapter 在 spawn 前调 `materialize_attachments` 把它们落地为 CLI 能消费的形式（文件路径 / inline base64 / @file 引用） |
+| `attachments` | ⭕ | `image/*` / `audio/*`（次要） / `application/octet-stream` / `file/*` | 多端口或单 list 端口；adapter 在首次启动前或每次发送消息前调 `materialize_attachments` 把它们落地为 CLI 能消费的形式（文件路径 / inline base64 / @file 引用） |
 | `context` | ⭕ | `application/json` 或 `text/*` | `run_chain` 风格上一步的结构化上下文（可选，由 GraphCompiler 自动接入） |
 | `gather_id` | ⭕（编排器用） | `text/plain` | broker `batch_gather` 元信息；通常由编译器自动接入，用户不直接连 |
 
@@ -149,6 +180,9 @@ class CLIAdapter:
 | `attachments_out` | `image/*` / `file/*` 等 `MultiModalEnvelope` 列表 | agent 在执行过程中产出的图像 / 文件（如调 `ImageDescribe` 生成图等场景）。CodeMaker 当前不产 attachments，端口可空连 |
 | `status` | `text/plain` 枚举 | `success` / `error` / `timeout` / `empty` |
 | `raw` | `application/json` | 调试/审计用 `WorkerResult.to_raw_dict()`：含 `raw_stdout` / `stderr` / `elapsed_sec`；通常不接，仅 trace 节点订阅 |
+| `job_ref` | `application/json` | 非阻塞模式提交后台任务后的句柄，包含 `job_id` / `node_id` / `agent_id` / `workspace_id` |
+| `agent_ref` | `application/json` | 该节点绑定的运行期 agent 实例引用，供 `ResetAgent` / `StopAgent` / `InspectAgent` 等高级节点使用 |
+| `workspace_ref` | `application/json` | 非阻塞任务对应共享工作区引用 |
 
 #### 与 `agents_registry.json` 的关系
 
@@ -160,15 +194,70 @@ class CLIAdapter:
 
 #### 编译目标
 
-每个 Agent 节点最终被 GraphCompiler 编译为：
+每个 Agent 节点最终被 GraphCompiler 编译为"agent 实例声明 + 消息发送步骤"，而不是"每次经过节点就 spawn 一次 CLI"：
 
-- 单 Agent 节点 → `cluster.run_single(agent_id, body)`
-- 多 Agent 节点共享一个 fan-out 上游 → `cluster.run_parallel([(agent_id, body), ...])`
-- 线性 Agent 节点链 → `cluster.run_chain([(agent_id, body), ...])`
-- fan-out → reduce Agent → `cluster.run_parallel_reduce(...)`
+- 单 Agent 节点 → ensure/bind `agent_id`，随后向该实例发送一次消息；同次图运行中后续经过继续复用
+- 多 Agent 节点共享一个 fan-out 上游 → 先确保各 Agent 实例存在，再并行发送消息，可复用 `cluster.run_parallel([(agent_id, body), ...])` 作为消息调度原语
+- 线性 Agent 节点链 → 先确保链上 Agent 实例存在，再按链路发送消息；`cluster.run_chain([(agent_id, body), ...])` 只能表示消息拓扑，不表示逐节点 spawn/teardown
+- fan-out → reduce Agent → 先确保 fan-out 与 reduce Agent 实例存在，再执行 `cluster.run_parallel_reduce(...)` 风格的消息汇聚
 - 任意 DAG / 含 `Switch(when=...)` → ROADMAP P2 的 `cluster.run_dag(...)`
 
+阻塞模式下，GraphRuntime 等待本轮消息结果再推进当前分支；非阻塞模式下，GraphRuntime 只确保任务已提交并返回 `job_ref`，当前分支继续，后台完成后发 `TaskCompleted` / `TaskFailed` / `WorkspaceChanged` 等事件。
+
 详见 §6.1 编译表。
+
+### 4.1.2 共享工作区：blackboard + 文件空间
+
+共享工作区不是普通临时目录，而是多 Agent 协作的 blackboard 与版本化文件空间。它需要让后台 AgentNode 的成果可发现、可审计、可继续处理。
+
+建议最小结构：
+
+```text
+workspace_root/
+  source/       # 真实源码或挂载入口
+  artifacts/    # 生成物、图片、报告、导出文件
+  logs/         # agent 运行日志、stderr/stdout 摘要
+  temp/         # 临时文件
+  manifests/    # job manifest 与 workspace manifest
+```
+
+非阻塞 AgentNode 完成后必须写 job manifest：
+
+```jsonc
+{
+  "job_id": "job-123",
+  "run_id": "run-001",
+  "node_id": "frontend-worker",
+  "agent_id": "agent-2",
+  "workspace_id": "main-workspace",
+  "status": "completed",
+  "changed_files": ["src/ui/Panel.tsx"],
+  "created_files": [],
+  "deleted_files": [],
+  "artifacts": [],
+  "summary": "Implemented panel layout and state handling.",
+  "risks": ["Mobile layout not visually verified."],
+  "tests": ["npm test -- Panel"],
+  "completed_at": "2026-05-02T..."
+}
+```
+
+事件至少包含：
+
+- `TaskStarted`
+- `TaskProgress`
+- `TaskCompleted`
+- `TaskFailed`
+- `WorkspaceChanged`
+- `ReviewRequested`
+
+事件 payload 至少带 `run_id`、`branch_id`、`node_id`、`agent_id`、`job_id`、`workspace_id`、`manifest_path`、`changed_files`、`status`。相关 AgentNode 收到事件后不应盲扫整个工作区，而应先读取 manifest，再按需读取改动文件。
+
+写入边界按阶段推进：
+
+1. 第一版：`read_scope` / `write_scope` / `artifact_scope` 检查 + manifest 记录。
+2. 第二版：文件锁或 lease，避免两个非阻塞 AgentNode 同时改同一路径。
+3. 第三版：每个 AgentNode 独立 worktree，完成后通过 merge/review 节点合并。
 
 ### 4.2 端口数据契约：`MultiModalEnvelope`
 
@@ -263,14 +352,16 @@ class CLIAdapter:
 
 ### 6.1 编译思路
 
-节点图（DAG）由 GraphCompiler 拍平成现有编排原语的组合。表中所有"Agent 节点"均指 [§4.1.1 定义](#411-agent-节点的可视化配置面重点) 的"装载一个对等 agent CLI 的节点类型"——即用户在可视化编辑器里**拖出来一个 Agent 节点 = 拉起一个 agent**。
+节点图（DAG）由 GraphCompiler 拍平成"图运行期 agent 实例表 + 消息调度步骤"。表中所有"Agent 节点"均指 [§4.1.1 定义](#411-agent-节点的可视化配置面重点) 的"装载一个对等 agent CLI 的节点类型"——即用户在可视化编辑器里**拖出来一个 Agent 节点 = 声明一个图运行期 agent 实例**。
+
+GraphRuntime 必须维护本次蓝图运行的 `node_id -> agent_instance/session` 映射。第一次经过节点时启动或绑定实例；之后再次经过同一节点只发送消息；整图结束时再统一 teardown 本次运行创建的实例。
 
 | DAG 模式 | 编译目标 |
 |----------|----------|
-| 多 [Agent 节点](#411-agent-节点的可视化配置面重点) 共享一个 fan-out 节点 | `cluster.run_parallel(...)` + `MultiModalEnvelope` 注入 |
-| 多个 [Agent 节点](#411-agent-节点的可视化配置面重点) fan-out → 一个汇聚 [Agent 节点](#411-agent-节点的可视化配置面重点) | `cluster.run_parallel_reduce(...)` |
-| 线性 [Agent 节点](#411-agent-节点的可视化配置面重点) 链 | `cluster.run_chain(...)`，`prev_context` 携带 `MultiModalEnvelope` |
-| 单 [Agent 节点](#411-agent-节点的可视化配置面重点) | `cluster.run_single(...)` |
+| 多 [Agent 节点](#411-agent-节点的可视化配置面重点) 共享一个 fan-out 节点 | ensure/bind 多个 agent 实例，然后用 `cluster.run_parallel(...)` 风格并行发送消息 + `MultiModalEnvelope` 注入 |
+| 多个 [Agent 节点](#411-agent-节点的可视化配置面重点) fan-out → 一个汇聚 [Agent 节点](#411-agent-节点的可视化配置面重点) | ensure/bind fan-out 与 reduce agent 实例，然后用 `cluster.run_parallel_reduce(...)` 风格汇聚消息 |
+| 线性 [Agent 节点](#411-agent-节点的可视化配置面重点) 链 | ensure/bind 链上 agent 实例，然后按 `cluster.run_chain(...)` 风格传递消息，`prev_context` 携带 `MultiModalEnvelope` |
+| 单 [Agent 节点](#411-agent-节点的可视化配置面重点) | ensure/bind 该 agent 实例，然后用 `cluster.run_single(...)` 风格发送本次消息 |
 | 含 `Switch(when=...)` 的非线性图 | 对应 ROADMAP P2 的 `DAG.run_dag(...)`；`when` 是用户函数（可在节点里写普通 Python） |
 | 含处理节点 / I/O 节点 | 在编排原语外层做（GraphCompiler 自己执行，不进 broker） |
 

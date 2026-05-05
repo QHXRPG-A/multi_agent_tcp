@@ -4,6 +4,56 @@
 
 ## 变更记录
 
+### 2026-05-04 — Ryven Flow 编译为 GraphDefinition 第一版
+
+#### 摘要
+1. 新增 `compile_ryven_flow()`，把 live Ryven flow 编译为后端 `GraphDefinition`，形成“Ryven 前端 + GraphRuntime 后端 + GraphDefinition 中间层”的第一阶段桥接。
+2. 编译映射规则落地：`BlueprintStart` / `BlueprintEnd` -> `BlueprintTerminalNode`，Ryven `AgentNode` wrapper -> 后端 `graph_runtime.AgentNode`，Ryven connection -> `GraphEdge`。
+3. `GraphEdge` 新增 `edge_type`，从 Ryven port `type_` 保留 `exec` / `data` 语义；端口 label 会进入 `output_port` / `input_port`。
+4. `GraphDefinition.validate_runnable()` 调整为只使用 `exec` 边校验 Start -> End 控制流路径，避免把 data 线误判为可运行路径。
+5. AgentNode 前后端一致性边界明确：Ryven wrapper 保存后端 `AgentNode.to_dict()` schema，编译时通过 `RuntimeAgentNode.from_dict()` 还原；UI 当前只暴露后端 schema 的字段子集。
+6. 当前完成度结论更新：第一步“Ryven Flow -> `GraphDefinition` 编译 + `validate_runnable`”已完成；第二步应推进只跑 blocking `AgentNode` 的最小链路。
+
+#### 涉及
+- `multi_agent_tcp/ryven_blueprint.py`
+- `multi_agent_tcp/graph_runtime.py`
+- `multi_agent_tcp/ryven_blueprint_nodes/nodes.py`
+- `multi_agent_tcp/test_agent_runtime.py`
+- `knowledge_base/agent_node_ryven_integration.md`
+- `tasks/node_runtime_tasks.md`
+- `tasks/vendor_ryven_tasks.md`
+
+#### 验证
+- `python -m pytest -q test_agent_runtime.py test_registry_skill_selection.py test_skill_space.py test_workspace_manager.py`：`42 passed`
+- 覆盖 Ryven live flow 编译、Start/End terminal、两个 AgentNode、`exec` 边、`data` 边与 `validate_runnable()` 的 exec-only 路径校验。
+
+---
+
+### 2026-05-04 — AgentNode 接入 Ryven 节点 UI 第一版
+
+#### 摘要
+1. 新增本地 Ryven nodes package 路径 `multi_agent_tcp/ryven_blueprint_nodes/`，通过 `export_nodes()` 导出 `BlueprintStart`、`BlueprintEnd` 和可拖拽的 Ryven wrapper `AgentNode`。
+2. `ryven_launcher.py` 默认追加 `-n ryven_blueprint_nodes`，因此 `python -m multi_agent_tcp ryven` 启动后左侧节点库常驻显示 `AgentNode`；Start/End 被标记为隐藏节点，不进入节点库。
+3. 新增 `ryven_blueprint.py` hook：自动为每个 flow 补 Start/End，过滤节点库隐藏项，并在 UI 删除路径、`RemoveComponents_Command` 和 core `Flow.remove_node()` 层保护 Start/End 不被删除。
+4. `graph_runtime.GraphDefinition` 新增 `BlueprintTerminalNode`、`terminal_nodes` 与 `validate_runnable()`，后端可表达“恰好一个 start、恰好一个 end、DAG、且 start 到 end 有有向路径”的 runnable blueprint 约束。
+5. 结论更新：原始 `GraphDefinition` 数据结构不完整支持 Start/End 机制；新增 terminal node 语义和 runnable 校验后可以支持。
+6. 针对本轮变更补充长期知识文档 `knowledge_base/agent_node_ryven_integration.md`，记录 Ryven 节点包、flow 生命周期、删除保护、序列化和 GUI/no-gui 验证注意事项。
+
+#### 涉及
+- `multi_agent_tcp/ryven_blueprint_nodes/nodes.py`
+- `multi_agent_tcp/ryven_blueprint_nodes/gui.py`
+- `multi_agent_tcp/ryven_blueprint.py`
+- `multi_agent_tcp/ryven_launcher.py`
+- `multi_agent_tcp/graph_runtime.py`
+- `knowledge_base/agent_node_ryven_integration.md`
+
+#### 验证
+- `python -m pytest D:\agents\multi_agent_tcp\test_agent_runtime.py`：`24 passed`
+- no-gui 模式下 `import_nodes_package(directory=ryven_blueprint_nodes)` 可导出 `Start / End / AgentNode`
+- GUI 独立导入会受 Ryven code editor 初始化断言影响，正式验证路径应使用 `python -m multi_agent_tcp ryven`
+
+---
+
 ### 2026-04-26 — 仅文档/skill 同步：对齐当前仓库路径与 vendored Ryven 工作结论
 
 #### 摘要

@@ -14,6 +14,17 @@
 
 ## 三条主线
 
+### 0. Agent 节点执行语义
+
+AgentNode 对标 UE5 蓝图时，不应理解为普通函数节点或 pure node，而更接近带状态的异步任务节点 / latent action 节点 + 一个运行期对象实例引用。
+
+它至少需要区分：
+
+- 阻塞 AgentNode：只阻塞当前执行分支，不阻塞整张蓝图；适合审批、决策、评审、汇总、计划、质量门禁等会决定当前分支后续走向的任务。
+- 非阻塞 AgentNode：触发后后台执行，当前分支继续；完成后通过事件和共享工作区 manifest 反馈给蓝图。适合开发、调研、生成、验证等执行者任务。
+
+蓝图层应显式暴露等待与事件节点，而不是把非阻塞任务的完成结果隐式塞回原执行线。相关节点包括 `WaitForJob`、`WaitForAllJobs`、`OnAgentTaskCompleted`、`WorkspaceManifest`、`WorkspaceDiff`、`ReviewChanges`。
+
 ### 1. 类型系统与连线安全
 
 建议把类型问题拆成四层：
@@ -50,6 +61,17 @@
 - 基于 `FlowCommands` 的批量重构能力
 - Inspector 里更强的解释与数据预览
 
+### 4. 共享工作区与事件反馈
+
+多 Agent 蓝图需要一个共享工作区模型，类似 blackboard + 版本化文件空间。它不是单纯目录，而是文件系统、任务账本、事件流和写入边界的组合。
+
+优先沉淀：
+
+- job manifest schema：记录非阻塞 AgentNode 的完成状态、改动文件、产物、摘要、风险、测试与后续建议。
+- event schema：记录 `run_id`、`branch_id`、`node_id`、`agent_id`、`job_id`、`workspace_id`、`manifest_path`、`changed_files`、`status`。
+- scope 规则：`read_scope`、`write_scope`、`artifact_scope`、锁策略和合并策略。
+- UI 反馈：节点完成事件、工作区变更提示、可点击 manifest、Inspector 数据预览。
+
 ## 对 skill 的意义
 
 这部分内容不应直接写成“已实现”，但应作为稳定参考知识沉淀下来，因为它会持续影响：
@@ -63,4 +85,5 @@
 
 - 节点工作流方向：[`multi_cli_workflow.md`](multi_cli_workflow.md)
 - vendored UI 视觉层：[`vendor_ryven_ui.md`](vendor_ryven_ui.md)
+- AgentNode 接入 Ryven 节点 UI：[`agent_node_ryven_integration.md`](agent_node_ryven_integration.md)
 - 近期目标任务：[`../tasks/current_goals.md`](../tasks/current_goals.md)

@@ -44,6 +44,7 @@ C = {
 CARD_W = 240
 CARD_H = 170
 CARD_PAD = 14
+SKILL_SELECTION_MODES = ("none", "all", "selected", "upstream")
 
 
 # -------------------------------------------------------------------
@@ -107,6 +108,56 @@ def _collect_models(registry: Dict[str, Any]) -> List[str]:
         if m:
             models.add(m)
     return sorted(models)
+
+
+def _skill_selection_from_agent(data: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """Return ``(mode, selected_skill_names)`` from new or legacy registry data."""
+    raw = data.get("skill_selection")
+    legacy = [str(s).strip() for s in data.get("skills", []) if str(s).strip()]
+
+    mode = "selected" if legacy else "none"
+    selected = legacy
+    if isinstance(raw, str):
+        mode = raw.strip().lower() or mode
+        selected = []
+    elif isinstance(raw, dict):
+        raw_skills = raw.get("skill_hashes", raw.get("skills", [])) or []
+        if isinstance(raw_skills, list):
+            selected = [str(s).strip() for s in raw_skills if str(s).strip()]
+        mode = str(raw.get("mode", "selected" if selected else "none")).strip().lower()
+    elif raw is not None:
+        mode = "none"
+        selected = []
+
+    if mode not in SKILL_SELECTION_MODES:
+        mode = "none"
+        selected = []
+    if mode == "selected" and not selected:
+        selected = legacy
+    if mode != "selected":
+        selected = []
+    return mode, selected
+
+
+def _skill_selection_payload(mode: str, selected_skills: List[str]) -> Dict[str, Any]:
+    mode = mode.strip().lower()
+    if mode not in SKILL_SELECTION_MODES:
+        mode = "none"
+    payload: Dict[str, Any] = {"mode": mode}
+    if mode == "selected":
+        payload["skill_hashes"] = selected_skills[:]
+    return payload
+
+
+def _skill_selection_summary(data: Dict[str, Any], *, total_skills: int) -> str:
+    mode, selected = _skill_selection_from_agent(data)
+    if mode == "all":
+        return f"all ({total_skills})"
+    if mode == "selected":
+        return f"selected ({len(selected)})"
+    if mode == "upstream":
+        return "upstream"
+    return "none"
 
 
 
@@ -213,6 +264,18 @@ class SkillPickerPopup(tk.Toplevel):
         btn_frame.pack(fill="x", padx=12, pady=10)
 
         tk.Button(
+            btn_frame, text="Select All", command=self._select_all,
+            bg=C["surface1"], fg=C["text"], font=("Segoe UI", 10),
+            relief="flat", padx=14, pady=4, cursor="hand2",
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            btn_frame, text="Clear", command=self._clear_all,
+            bg=C["surface1"], fg=C["text"], font=("Segoe UI", 10),
+            relief="flat", padx=14, pady=4, cursor="hand2",
+        ).pack(side="left", padx=4)
+
+        tk.Button(
             btn_frame, text="OK", command=self._on_ok,
             bg=C["accent"], fg=C["topbar"], font=("Segoe UI", 10, "bold"),
             relief="flat", padx=20, pady=4, cursor="hand2",
@@ -223,6 +286,14 @@ class SkillPickerPopup(tk.Toplevel):
             bg=C["surface1"], fg=C["text"], font=("Segoe UI", 10),
             relief="flat", padx=20, pady=4, cursor="hand2",
         ).pack(side="right", padx=4)
+
+    def _select_all(self) -> None:
+        for var in self._vars.values():
+            var.set(True)
+
+    def _clear_all(self) -> None:
+        for var in self._vars.values():
+            var.set(False)
 
     def _on_ok(self) -> None:
         self.result = sorted(n for n, v in self._vars.items() if v.get())
@@ -259,9 +330,12 @@ class AgentDetailDialog(tk.Toplevel):
 
         self.result: Optional[Tuple[str, Dict[str, Any]]] = None
         self._is_new = is_new
+        self._original_data = copy.deepcopy(agent_data)
         self._all_skills = all_skills
         self._known_models = known_models
-        self._selected_skills: List[str] = list(agent_data.get("skills", []))
+        skill_mode, selected_skills = _skill_selection_from_agent(agent_data)
+        self._skill_mode_var = tk.StringVar(value=skill_mode)
+        self._selected_skills: List[str] = selected_skills
 
         self._build(agent_id, agent_data)
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
@@ -356,14 +430,26 @@ class AgentDetailDialog(tk.Toplevel):
 
         # Skills
         self._field_label(body, "Skills")
+        self._skill_mode_cb = ttk.Combobox(
+            body, textvariable=self._skill_mode_var,
+            values=SKILL_SELECTION_MODES, state="readonly",
+            font=("Segoe UI", 10),
+        )
+        self._skill_mode_cb.pack(fill="x", padx=12, pady=2)
+        self._skill_mode_cb.bind(
+            "<<ComboboxSelected>>",
+            lambda _: self._update_skill_controls(),
+        )
+
         self._skills_btn = tk.Button(
             body, text=self._skills_btn_text(), command=self._pick_skills,
             bg=C["surface0"], fg=C["text"], font=("Segoe UI", 10),
             relief="flat", anchor="w", padx=8, pady=4, cursor="hand2",
             highlightthickness=1, highlightcolor=C["accent"],
-            highlightbackground=C["surface2"],
+            highlightbackground=C["surface2"], disabledforeground=C["subtext"],
         )
         self._skills_btn.pack(fill="x", padx=12, pady=2)
+        self._update_skill_controls()
 
         # Bottom buttons
         btn_frame = tk.Frame(self, bg=C["bg"])
@@ -396,6 +482,13 @@ class AgentDetailDialog(tk.Toplevel):
         self._model_cb["values"] = fresh
 
     def _skills_btn_text(self) -> str:
+        mode = self._skill_mode_var.get().strip().lower()
+        if mode == "none":
+            return "No skills"
+        if mode == "all":
+            return f"All skills ({len(self._all_skills)})"
+        if mode == "upstream":
+            return "Assigned by upstream super agent"
         n = len(self._selected_skills)
         if n == 0:
             return "Click to select skills..."
@@ -404,7 +497,27 @@ class AgentDetailDialog(tk.Toplevel):
             names = names[:57] + "..."
         return f"{n} skill(s): {names}"
 
+    def _update_skill_controls(self) -> None:
+        mode = self._skill_mode_var.get().strip().lower()
+        if mode not in SKILL_SELECTION_MODES:
+            self._skill_mode_var.set("none")
+            mode = "none"
+        if mode == "selected":
+            self._skills_btn.configure(
+                state="normal",
+                cursor="hand2",
+                text=self._skills_btn_text(),
+            )
+        else:
+            self._skills_btn.configure(
+                state="disabled",
+                cursor="",
+                text=self._skills_btn_text(),
+            )
+
     def _pick_skills(self) -> None:
+        if self._skill_mode_var.get().strip().lower() != "selected":
+            return
         popup = SkillPickerPopup(self, self._all_skills, self._selected_skills)
         self.wait_window(popup)
         if popup.result is not None:
@@ -427,14 +540,29 @@ class AgentDetailDialog(tk.Toplevel):
         if " " in aid:
             messagebox.showwarning("Validation", "Agent ID must not contain spaces.", parent=self)
             return
-        self.result = (aid, {
+        skill_mode = self._skill_mode_var.get().strip().lower()
+        if skill_mode not in SKILL_SELECTION_MODES:
+            messagebox.showwarning("Validation", "Invalid skill mode.", parent=self)
+            return
+        if skill_mode == "selected" and not self._selected_skills:
+            messagebox.showwarning(
+                "Validation",
+                "Selected skill mode requires at least one skill. Choose none instead.",
+                parent=self,
+            )
+            return
+        selected_skills = self._selected_skills[:] if skill_mode == "selected" else []
+        updated = copy.deepcopy(self._original_data)
+        updated.update({
             "display_name": self._name_var.get().strip(),
             "model": self._model_var.get().strip(),
             "cwd": self._cwd_var.get().strip(),
-            "skills": self._selected_skills[:],
+            "skills": selected_skills,
+            "skill_selection": _skill_selection_payload(skill_mode, selected_skills),
             "timeout_sec": self._timeout_var.get(),
             "enabled": self._enabled_var.get(),
         })
+        self.result = (aid, updated)
         self.destroy()
 
     def _on_cancel(self) -> None:
@@ -652,10 +780,9 @@ class RegistryUI(tk.Tk):
             font=("Segoe UI", 9), bg=C["card"], fg=C["subtext"], anchor="w",
         ).pack(fill="x", padx=12, pady=1)
 
-        # skills count
-        skills = data.get("skills", [])
+        # skills selection
         tk.Label(
-            card, text=f"Skills: {len(skills)}",
+            card, text=f"Skills: {_skill_selection_summary(data, total_skills=len(self._manifest))}",
             font=("Segoe UI", 9), bg=C["card"], fg=C["subtext"], anchor="w",
         ).pack(fill="x", padx=12, pady=1)
 
@@ -798,6 +925,7 @@ class RegistryUI(tk.Tk):
                 "model": models[0] if models else "",
                 "cwd": str(_MODULE_DIR.parent),
                 "skills": [],
+                "skill_selection": {"mode": "none"},
                 "timeout_sec": 1800,
                 "enabled": True,
             },

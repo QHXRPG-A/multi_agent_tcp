@@ -3,13 +3,17 @@ CLI — CodeMaker CLI multi-worker orchestration framework.
 
 Low-level (broker / agent plumbing):
   python -m multi_agent_tcp broker --config path/to/broker.json
-  python -m multi_agent_tcp agent --config path/to/agent.json [--mode echo|listen|codemaker-worker]
+  python -m multi_agent_tcp agent --config path/to/agent.json [--mode echo|listen|codemaker-worker|codex-worker]
   python -m multi_agent_tcp spawn --config path/to/spawn.json
 
 High-level (CodeMakerCluster):
   python -m multi_agent_tcp cluster start --config cluster.json
   python -m multi_agent_tcp run-parallel --config cluster.json --tasks tasks.json [-o result.json]
   python -m multi_agent_tcp run-chain   --config cluster.json --tasks tasks.json [-o result.json]
+
+GUI:
+  python -m multi_agent_tcp registry-ui
+  python -m multi_agent_tcp ryven
 
 Config files are JSON (UTF-8). See multi_agent_tcp/examples/*.json
 """
@@ -30,7 +34,7 @@ from typing import Any, Dict, List, Optional
 
 from .broker import Broker
 from .client import AgentTCPClient
-from .codemaker_bridge import codemaker_run, load_codemaker_runtime
+from .adapters import CLIAdapter, adapter_from_agent_config, body_to_agent_message
 from .log_setup import setup_logging
 from ._proc_utils import terminate_and_wait
 
@@ -141,23 +145,9 @@ async def _agent_loop_listen(client: AgentTCPClient) -> None:
         log.info("recv %s", msg)
 
 
-def _body_to_prompt_and_context(body: Any) -> tuple[str, Optional[str]]:
-    if isinstance(body, str):
-        return body.strip(), None
-    if isinstance(body, dict):
-        prompt = body.get("prompt")
-        if isinstance(prompt, str) and prompt.strip():
-            ctx = body.get("context")
-            if ctx is not None and not isinstance(ctx, str):
-                ctx = json.dumps(ctx, ensure_ascii=False)
-            return prompt.strip(), ctx if isinstance(ctx, str) else None
-        # whole dict as instruction
-        return json.dumps(body, ensure_ascii=False), None
-    return json.dumps(body, ensure_ascii=False), None
-
-
-async def _agent_loop_codemaker(client: AgentTCPClient, cm_rt: Dict[str, Any]) -> None:
+async def _agent_loop_adapter(client: AgentTCPClient, adapter: CLIAdapter) -> None:
     aid = client.agent_id
+    await adapter.start()
     async for msg in client.incoming():
         t = msg.get("type")
         if t == "error":
@@ -172,35 +162,30 @@ async def _agent_loop_codemaker(client: AgentTCPClient, cm_rt: Dict[str, Any]) -
         body = msg.get("body")
         gid = _gather_reply_id(msg)
         try:
-            prompt, stdin_ctx = _body_to_prompt_and_context(body)
-            if not prompt:
+            message = body_to_agent_message(body)
+            if not message.prompt:
                 raise ValueError("empty prompt")
             log.info(
-                "[chain] agent=%s recv type=%s from=%s gather_reply=%s prompt_chars=%s has_context=%s",
+                "[chain] agent=%s recv type=%s from=%s gather_reply=%s prompt_chars=%s has_context=%s adapter=%s",
                 aid,
                 t,
                 sender,
                 gid,
-                len(prompt.encode("utf-8")),
-                bool(stdin_ctx),
+                len(message.prompt.encode("utf-8")),
+                bool(message.context),
+                adapter.cli_kind,
             )
-            log.info("[chain] agent=%s -> codemaker_run START (subprocess will log [cil])", aid)
-            result = await codemaker_run(
-                prompt,
-                stdin_context=stdin_ctx,
-                codemaker_cfg=cm_rt,
-            )
+            log.info("[chain] agent=%s -> adapter.send_message START", aid)
+            result = await adapter.send_message(message)
             log.info(
-                "[chain] agent=%s <- codemaker_run END rc=%s timeout=%s stdout_chars=%s stderr_chars=%s",
+                "[chain] agent=%s <- adapter.send_message END ok=%s status=%s",
                 aid,
-                result.get("returncode"),
-                result.get("timeout"),
-                len(str(result.get("stdout", ""))),
-                len(str(result.get("stderr", ""))),
+                result.ok,
+                result.status,
             )
-            reply = {"ok": result["returncode"] == 0, "codemaker": result, "via": t}
+            reply = {**result.payload, "via": t}
         except (FileNotFoundError, ValueError, OSError, RuntimeError) as e:
-            log.error("[chain] agent=%s codemaker_run FAILED before/without CIL: %s", aid, e)
+            log.error("[chain] agent=%s adapter FAILED: %s", aid, e)
             reply = {"ok": False, "error": str(e), "via": t}
         if isinstance(sender, str) and sender:
             try:
@@ -214,6 +199,15 @@ async def _agent_loop_codemaker(client: AgentTCPClient, cm_rt: Dict[str, Any]) -
                 await client.send_to(sender, reply, gather_reply=gid)
             except (ConnectionError, OSError, RuntimeError) as e:
                 log.warning("[chain] agent=%s reply send_to FAILED: %s", aid, e)
+    await adapter.close()
+
+
+async def _agent_loop_codemaker(client: AgentTCPClient, adapter: CLIAdapter) -> None:
+    await _agent_loop_adapter(client, adapter)
+
+
+async def _agent_loop_codex(client: AgentTCPClient, adapter: CLIAdapter) -> None:
+    await _agent_loop_adapter(client, adapter)
 
 
 async def _cmd_agent(cfg: Dict[str, Any], mode: str) -> None:
@@ -229,18 +223,23 @@ async def _cmd_agent(cfg: Dict[str, Any], mode: str) -> None:
     client = AgentTCPClient(agent_id, host, port, role=role)
     await client.connect()
     log.info("connected agent_id=%s -> %s:%s mode=%s", agent_id, host, port, mode)
-    cm_rt: Optional[Dict[str, Any]] = None
-    if mode == "codemaker-worker":
-        cm_rt = load_codemaker_runtime(cfg)
+    adapter: Optional[CLIAdapter] = None
+    if mode in ("codemaker-worker", "codex-worker"):
+        adapter = adapter_from_agent_config({**cfg, "mode": mode})
     try:
         if mode == "echo":
             await _agent_loop_echo(client)
         elif mode == "codemaker-worker":
-            assert cm_rt is not None
-            await _agent_loop_codemaker(client, cm_rt)
+            assert adapter is not None
+            await _agent_loop_codemaker(client, adapter)
+        elif mode == "codex-worker":
+            assert adapter is not None
+            await _agent_loop_codex(client, adapter)
         else:
             await _agent_loop_listen(client)
     finally:
+        if adapter is not None:
+            await adapter.close()
         await client.close()
 
 
@@ -272,9 +271,16 @@ def _cmd_spawn(cfg_path: Path, verbose: bool) -> None:
             "broker_port": broker_port,
             "role": a.get("role"),
             "mode": a.get("mode", "echo"),
+            "cli_kind": a.get("cli_kind", "codemaker"),
         }
         if "codemaker" in a:
             agent_cfg["codemaker"] = a["codemaker"]
+        if "codex" in a:
+            agent_cfg["codex"] = a["codex"]
+        if "adapter_options" in a:
+            agent_cfg["adapter_options"] = a["adapter_options"]
+        if "extra_env" in a:
+            agent_cfg["extra_env"] = a["extra_env"]
         tmp = root / f"_spawn_agent_{agent_cfg['agent_id']}.json"
         tmp_cfgs.append(tmp)
         with tmp.open("w", encoding="utf-8") as f:
@@ -835,7 +841,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     p_agent.add_argument("--config", type=Path, required=True)
     p_agent.add_argument(
         "--mode",
-        choices=("echo", "listen", "codemaker-worker"),
+        choices=("echo", "listen", "codemaker-worker", "codex-worker"),
         default="echo",
     )
 
@@ -851,6 +857,8 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     # -- GUI -----------------------------------------------------------------
     sub.add_parser("registry-ui", help="open the graphical agents registry editor")
+    p_ryven = sub.add_parser("ryven", help="launch the vendored Ryven node editor")
+    p_ryven.add_argument("ryven_args", nargs=argparse.REMAINDER, help="arguments forwarded to Ryven")
 
     # -- show-registry / dispatch (recommended LLM flow) ---------------------
     p_sr = sub.add_parser(
@@ -982,7 +990,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.cmd == "agent":
         cfg = _load_json(args.config)
         mode = str(cfg.get("mode", args.mode))
-        if mode not in ("echo", "listen", "codemaker-worker"):
+        if mode not in ("echo", "listen", "codemaker-worker", "codex-worker"):
             mode = "echo"
         try:
             asyncio.run(_cmd_agent(cfg, mode))
@@ -1005,6 +1013,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.cmd == "registry-ui":
         from .registry_ui import main as _ui_main
         _ui_main()
+        return
+
+    if args.cmd == "ryven":
+        from .ryven_launcher import run as _run_ryven
+        _run_ryven(args.ryven_args)
         return
 
     if args.cmd == "show-registry":
