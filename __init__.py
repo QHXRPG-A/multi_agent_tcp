@@ -52,6 +52,7 @@ from .graph_runtime import (
     normalize_envelope,
 )
 from .ryven_blueprint import RyvenFlowCompileError, compile_ryven_flow
+from .ryven_blueprint import BlueprintRunController, BlueprintRunResult
 from .workspace_manager import (
     DulwichWorkspaceManager,
     FileChange,
@@ -107,6 +108,8 @@ __all__ = (
     "GraphExecutor",
     "RyvenFlowCompileError",
     "compile_ryven_flow",
+    "BlueprintRunController",
+    "BlueprintRunResult",
     "DulwichWorkspaceManager",
     "ProjectWorkspace",
     "RunWorkspace",

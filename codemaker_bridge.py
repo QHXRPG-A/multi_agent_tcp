@@ -82,6 +82,9 @@ def _parse_codemaker_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         extra_env_dict = {str(k): str(v) for k, v in extra_env.items()}
     else:
         raise ValueError("codemaker.extra_env must be an object when set")
+    execution_context = raw.get("execution_context")
+    if execution_context is not None and not isinstance(execution_context, dict):
+        raise ValueError("codemaker.execution_context must be an object when set")
     return {
         "command": command,
         "base_args": list(base_args),
@@ -92,13 +95,35 @@ def _parse_codemaker_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "anchor_message": anchor_prefix,
         "run_stub_message": run_stub,
         "extra_env": extra_env_dict,
+        "prompt_preamble": raw.get("prompt_preamble"),
+        "execution_context": dict(execution_context or {}),
     }
 
 
-def _merge_prompt(prompt: str, stdin_context: Optional[str]) -> str:
-    if not stdin_context:
-        return prompt
-    return f"{prompt}\n\n---\n{stdin_context}"
+def _format_execution_context(context: Dict[str, Any]) -> str:
+    if not context:
+        return ""
+    return (
+        "# Agent Execution Context\n\n"
+        "The framework provided this execution context for the current agent run.\n\n"
+        "```json\n"
+        f"{_json.dumps(context, ensure_ascii=False, indent=2, default=str)}\n"
+        "```"
+    )
+
+
+def _merge_prompt(prompt: str, stdin_context: Optional[str], rt: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    preamble = rt.get("prompt_preamble")
+    if isinstance(preamble, str) and preamble.strip():
+        parts.append(preamble.strip())
+    context_block = _format_execution_context(rt.get("execution_context", {}))
+    if context_block:
+        parts.append(context_block)
+    parts.append(prompt)
+    if stdin_context:
+        parts.append(f"# Upstream Context\n\n{stdin_context}")
+    return "\n\n---\n\n".join(parts)
 
 
 def _build_cmd_argv_only(prompt: str, rt: Dict[str, Any]) -> List[str]:
@@ -167,7 +192,7 @@ async def codemaker_run(
     codemaker_cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Run one non-interactive `codemaker run ...`; return stdout/stderr/returncode."""
-    text = _merge_prompt(prompt, stdin_context)
+    text = _merge_prompt(prompt, stdin_context, codemaker_cfg)
     mode = codemaker_cfg.get("prompt_via_file", "auto")
     use_file = mode == "always" or (mode == "auto" and _needs_file_for_unicode(text))
     if mode == "never" and _needs_file_for_unicode(text):

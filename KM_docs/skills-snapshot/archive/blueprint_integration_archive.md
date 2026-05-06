@@ -144,3 +144,50 @@ multi_agent_tcp/
    - 节点端口类型
    - 媒体引用/大对象传输方式
    - 图执行与缓存
+# 2026-05-06 Archive Note — Blueprint Workspace API and shared read/write locks
+
+## Summary
+
+1. Aligned blueprint workspace semantics around three run-scoped roles:
+   - `agents/<agent_id>/private/` is disposable private scratch and CLI state.
+   - `shared/code/`, `shared/artifacts/`, and `shared/reports/` are archived outcome areas.
+   - private scratch is discarded before archive and is not auto-merged as output.
+2. Replaced "teach agents physical shared paths" with a framework-maintained Workspace API contract:
+   - repository API document: `docs/workspace_api.md`;
+   - controlled CLI: `workspace_api.py` with `publish`, `publish-file`, `read`, and `list`;
+   - AgentNode startup injects the Workspace API document and command contract;
+   - AgentNode `cwd` is private scratch, while shared publishing goes through the API.
+3. The blueprint runtime writes `shared/reports/blueprint_result.json` before archive.
+4. CodeMaker and Codex adapters both consume injected `prompt_preamble` and `execution_context`.
+5. Shared writes go through manager-owned manifest/lease APIs.
+6. Added per-path read/write locking:
+   - concurrent readers are allowed;
+   - writers block readers and writers;
+   - active readers block writers.
+7. Added path write versions:
+   - `read --json` returns `version`;
+   - `publish --expected-version N` and `publish-file --expected-version N` fail on stale writes.
+
+## Affected Code
+
+- `multi_agent_tcp/workspace_manager.py`
+- `multi_agent_tcp/workspace_api.py`
+- `multi_agent_tcp/ryven_blueprint.py`
+- `multi_agent_tcp/codemaker_bridge.py`
+- `multi_agent_tcp/codex_bridge.py`
+- `multi_agent_tcp/docs/workspace_api.md`
+- `multi_agent_tcp/test_workspace_api.py`
+- `multi_agent_tcp/test_workspace_manager.py`
+- `multi_agent_tcp/test_agent_runtime.py`
+
+## Validation
+
+- `python -m py_compile workspace_manager.py workspace_api.py test_workspace_manager.py test_workspace_api.py ryven_blueprint.py`
+- Direct scripts verified text publishing, binary publishing, concurrent readers, reader-blocks-writer, writer-blocks-reader, and stale version conflict.
+- Full `pytest` was not run in the current Python environment because `pytest` is not installed.
+
+## Current Conclusion
+
+The minimum workspace-control loop is now implemented as a controlled local CLI API plus prompt/API-document injection. This is stronger than plain prompt guidance because shared outcomes go through manager-owned lease, manifest, and version checks. It is still not a full security boundary; a stronger future version should move the Workspace API behind broker/runtime-owned RPC or tool calls and add OS/sandbox-level filesystem restrictions.
+
+---

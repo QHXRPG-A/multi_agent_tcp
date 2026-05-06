@@ -30,6 +30,8 @@ from multi_agent_tcp import (
 )
 
 from multi_agent_tcp.skill_space import SkillSpace, SuperAgentProfile
+from multi_agent_tcp.codemaker_bridge import _merge_prompt as _merge_codemaker_prompt
+from multi_agent_tcp.codemaker_bridge import load_codemaker_runtime
 
 
 def test_body_to_agent_message_preserves_prompt_context_and_attachments() -> None:
@@ -67,6 +69,26 @@ def test_worker_config_serializes_adapter_fields() -> None:
     assert cfg["mode"] == "codemaker-worker"
     assert cfg["codemaker"]["anchor_message"] == "Use attached prompt"
     assert cfg["extra_env"] == {"CODEMAKER_AUTH_TOKEN": "token"}
+
+
+def test_codemaker_runtime_merges_blueprint_context_into_prompt(tmp_path: Path) -> None:
+    runtime = load_codemaker_runtime(
+        {
+            "codemaker": {
+                "cwd": str(tmp_path),
+                "prompt_preamble": "Blueprint workspace contract",
+                "execution_context": {"shared_code": str(tmp_path / "shared" / "code")},
+            }
+        }
+    )
+
+    merged = _merge_codemaker_prompt("Do the task", "Upstream result", runtime)
+
+    assert "Blueprint workspace contract" in merged
+    assert "Agent Execution Context" in merged
+    assert "shared_code" in merged
+    assert "Do the task" in merged
+    assert "Upstream result" in merged
 
 
 def test_worker_config_serializes_codex_worker_and_model() -> None:
@@ -501,6 +523,49 @@ async def test_graph_executor_routes_to_cluster_primitives() -> None:
     assert cluster.parallel_tasks == [tasks]
     assert cluster.chain_tasks == [tasks]
     assert cluster.reduce_tasks == [(tasks, "a", "merge {results}")]
+
+
+@pytest.mark.asyncio
+async def test_graph_executor_runs_minimal_blueprint_and_prestarts_all_agents() -> None:
+    cluster = _FakeCluster()
+    runtime = GraphRuntime(cluster)
+    executor = GraphExecutor(runtime)
+    graph = GraphDefinition(
+        terminal_nodes={
+            "start": BlueprintTerminalNode("start", "start"),
+            "end": BlueprintTerminalNode("end", "end"),
+        },
+        agent_nodes={
+            "a": AgentNode(node_id="a", prompt="first", timeout_sec=12),
+            "b": AgentNode(node_id="b", prompt="second", timeout_sec=13),
+        },
+        edges=[
+            GraphEdge("start", "a", output_port="next", input_port="in", edge_type="exec"),
+            GraphEdge("a", "b", output_port="out", input_port="in", edge_type="exec"),
+            GraphEdge("a", "b", output_port="result", input_port="prompt", edge_type="data"),
+            GraphEdge("b", "end", output_port="out", input_port="done", edge_type="exec"),
+        ],
+    )
+    events = []
+
+    result = await executor.run_blueprint(graph, event_callback=events.append)
+
+    assert result["ok"] is True
+    assert result["executed_nodes"] == ["a", "b"]
+    assert cluster.started == ["a", "b"]
+    assert cluster.sent[0] == ("a", {"prompt": "first"}, 12)
+    assert cluster.sent[1][0] == "b"
+    assert "prompt" in cluster.sent[1][1]
+    assert [event.event_type for event in events] == [
+        "BlueprintStarted",
+        "NodeQueued",
+        "NodeRunning",
+        "NodeCompleted",
+        "NodeQueued",
+        "NodeRunning",
+        "NodeCompleted",
+        "BlueprintCompleted",
+    ]
 
 
 @pytest.mark.asyncio

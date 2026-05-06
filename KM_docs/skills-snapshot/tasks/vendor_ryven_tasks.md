@@ -6,6 +6,21 @@
 
 ## 近期任务
 
+### 最小闭环优先路径
+
+Ryven / UI 这边短期不要一口气做重度蓝图编辑器，先只完成这条链路：
+
+1. 节点库里能拖出 `Start` / `AgentNode` / `End`
+2. `AgentNode` 的配置能稳定保存和恢复
+3. `Run Blueprint` 能触发后端编译和执行
+4. 执行结果能回写到节点外观或一个最简结果面板
+5. 不可删除的 terminal 节点仍要受保护
+
+这意味着：
+- 先做执行闭环，不先做完整美术改造
+- 先做状态反馈，不先做大型 Inspector
+- 先做单图单路径，不先做复杂多分支编辑体验
+
 1. 基于 `vendor-ryvencore-qt-node-appearance.md`，梳理视觉层改造入口：
    - `Design.py`
    - `FlowTheme.py`
@@ -54,13 +69,25 @@
 2. 正式启动入口已经沉淀；易用性封装和常用 project 预加载仍未做。
 3. `AgentNode` 已能进入节点库并保存基础后端配置，Ryven flow 已能编译为 `GraphDefinition`；但还没有 UI 运行按钮、blocking 最小执行链路和事件展示。
 
+### 最小闭环方案备忘
+
+短期可行方案优先级如下：
+
+1. 把 `Run Blueprint` 按钮加到 Ryven 侧，作为统一运行入口
+2. 按当前 flow 编译出 `GraphDefinition`
+3. 只执行单一 `exec` 主链，先支持 `Start -> AgentNode -> End`
+4. 执行时把节点状态标成 running / done / failed
+5. 把最终结果显示在节点 widget 或下方最简结果区
+6. 先不要做复杂主题和交互打磨，先保证“点一下能跑通”
+
 未完成 / 下一步：
 
-1. 还未对 `Design.py`、`FlowTheme.py`、`NodeItem.py`、`PortItem.py` 做实际外观改造。
-2. 编辑期类型检查、兼容矩阵、端口错误反馈、从 pin 拉线的上下文推荐、Inspector 解释与数据预览尚未实现。
-3. 尚未实现运行按钮、blocking `AgentNode` 最小执行链路、执行事件展示和 AgentNode 输出端口结果展示。
-4. registry-ui 的 agent profile / skill selection 控件尚未与 Ryven `AgentNode` 配置表单打通。
-5. `--skip-dialog` 推荐封装、Windows `.bat` 一键启动脚本、常用 project 预加载入口尚未实现。
+1. 先实现 `Run Blueprint` 和 blocking 最小执行链路。
+2. 先把节点运行状态和最终结果显示出来。
+3. 之后再补 `Design.py`、`FlowTheme.py`、`NodeItem.py`、`PortItem.py` 的外观改造。
+4. 再做编辑期类型检查、兼容矩阵、端口错误反馈、从 pin 拉线的上下文推荐、Inspector 解释与数据预览。
+5. 再让 registry-ui 的 agent profile / skill selection 控件和 Ryven `AgentNode` 配置表单联动。
+6. 最后再补 `--skip-dialog` 推荐封装、Windows `.bat` 一键启动脚本和常用 project 预加载入口。
 
 ## 依赖知识
 

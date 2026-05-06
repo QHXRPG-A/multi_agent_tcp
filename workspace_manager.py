@@ -10,18 +10,30 @@ from __future__ import annotations
 import filecmp
 import fnmatch
 import json
+import os
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from .dulwich_vendor import ensure_dulwich_path
+from .dulwich_vendor import ensure_dulwich_path, has_dulwich_vendor
 
-ensure_dulwich_path()
+_DULWICH_AVAILABLE = False
+if has_dulwich_vendor():
+    ensure_dulwich_path()
+    try:
+        from dulwich.repo import NotGitRepository, Repo  # type: ignore  # noqa: E402
 
-from dulwich.repo import NotGitRepository, Repo  # type: ignore  # noqa: E402
+        _DULWICH_AVAILABLE = True
+    except Exception:  # pragma: no cover - fallback when vendored checkout is absent
+        NotGitRepository = Exception  # type: ignore[assignment]
+        Repo = None  # type: ignore[assignment]
+else:
+    NotGitRepository = Exception  # type: ignore[assignment]
+    Repo = None  # type: ignore[assignment]
 
 
 WORKSPACE_DIRNAME = ".multi_agent_workspace"
@@ -206,6 +218,11 @@ class RunWorkspace:
     integration_dir: Path
     jobs_dir: Path
     agents_dir: Path
+    shared_dir: Optional[Path] = None
+    shared_code_dir: Optional[Path] = None
+    shared_artifacts_dir: Optional[Path] = None
+    shared_reports_dir: Optional[Path] = None
+    shared_locks_dir: Optional[Path] = None
     status: str = "created"
     long_term_workspace_root: Optional[Path] = None
 
@@ -234,12 +251,51 @@ class JobWorkspace:
         }
 
 
+@dataclass
+class SharedWriteLease:
+    lease_id: str
+    owner: str
+    path: str
+    lock_path: Path
+    expires_at: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "lease_id": self.lease_id,
+            "owner": self.owner,
+            "path": self.path,
+            "lock_path": str(self.lock_path),
+            "expires_at": self.expires_at,
+            "mode": "write",
+        }
+
+
+@dataclass
+class SharedReadLease:
+    lease_id: str
+    owner: str
+    path: str
+    lock_path: Path
+    expires_at: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "lease_id": self.lease_id,
+            "owner": self.owner,
+            "path": self.path,
+            "lock_path": str(self.lock_path),
+            "expires_at": self.expires_at,
+            "mode": "read",
+        }
+
+
 class DulwichWorkspaceManager:
     """Manage long-term and per-run shared workspaces.
 
-    The first implementation creates isolated job directories from a run base
-    snapshot, detects file diffs, merges into a run integration directory, and
-    archives the full run directory at completion.
+    The current model separates per-agent private scratch space from the
+    per-run shared outcome space. Legacy job worktrees remain for compatibility
+    with the earlier merge tests, but blueprint runs should publish outcomes
+    into ``run.shared_dir`` rather than merging private scratch directories.
     """
 
     def __init__(
@@ -285,11 +341,13 @@ class DulwichWorkspaceManager:
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         for rel in ("runs/active", "runs/archived", "runs/failed"):
             (self.workspace_root / rel).mkdir(parents=True, exist_ok=True)
-        git_detected = True
-        try:
-            Repo(str(self.project_root))
-        except NotGitRepository:
-            git_detected = False
+        git_detected = False
+        if _DULWICH_AVAILABLE and Repo is not None:
+            git_detected = True
+            try:
+                Repo(str(self.project_root))
+            except NotGitRepository:
+                git_detected = False
         _write_json(
             self.workspace_root / MANIFEST_NAME,
             {
@@ -323,7 +381,11 @@ class DulwichWorkspaceManager:
         if run_path.exists():
             raise FileExistsError(f"run workspace already exists: {run_path}")
         base_dir = run_path / "base"
-        integration_dir = run_path / "integration"
+        shared_dir = run_path / "shared"
+        integration_dir = shared_dir / "code"
+        shared_artifacts_dir = shared_dir / "artifacts"
+        shared_reports_dir = shared_dir / "reports"
+        shared_locks_dir = shared_dir / ".locks"
         jobs_dir = run_path / "jobs"
         agents_dir = run_path / "agents"
         run_path.mkdir(parents=True)
@@ -333,12 +395,29 @@ class DulwichWorkspaceManager:
             excluded_roots=[self.workspace_root],
         )
         _copy_project_tree(base_dir, integration_dir)
+        shared_artifacts_dir.mkdir(parents=True)
+        shared_reports_dir.mkdir(parents=True)
+        shared_locks_dir.mkdir(parents=True)
         jobs_dir.mkdir()
         agents_dir.mkdir()
+        _write_json(
+            shared_dir / "manifest.json",
+            {
+                "run_id": run_id,
+                "created_at": _utc_now(),
+                "writes": [],
+                "locks": [],
+            },
+        )
         data = {
             "run_id": run_id,
             "workspace_id": self.workspace_id,
             "long_term_workspace_root": str(self.workspace_root),
+            "base_dir": str(base_dir),
+            "shared_dir": str(shared_dir),
+            "shared_code_dir": str(integration_dir),
+            "shared_artifacts_dir": str(shared_artifacts_dir),
+            "shared_reports_dir": str(shared_reports_dir),
             "agent_access": {
                 "path": str(self.workspace_root),
                 "mode": "readonly",
@@ -346,6 +425,7 @@ class DulwichWorkspaceManager:
             "status": "running",
             "created_at": _utc_now(),
             "archive_mode": "full_directory",
+            "private_workspace_retention": "discard_on_archive",
         }
         _write_json(run_path / "run_manifest.json", data)
         return RunWorkspace(
@@ -355,6 +435,11 @@ class DulwichWorkspaceManager:
             integration_dir=integration_dir,
             jobs_dir=jobs_dir,
             agents_dir=agents_dir,
+            shared_dir=shared_dir,
+            shared_code_dir=integration_dir,
+            shared_artifacts_dir=shared_artifacts_dir,
+            shared_reports_dir=shared_reports_dir,
+            shared_locks_dir=shared_locks_dir,
             status="running",
             long_term_workspace_root=self.workspace_root,
         )
@@ -367,21 +452,54 @@ class DulwichWorkspaceManager:
             run_id=run_id,
             path=run_path,
             base_dir=run_path / "base",
-            integration_dir=run_path / "integration",
+            integration_dir=run_path / "shared" / "code",
             jobs_dir=run_path / "jobs",
             agents_dir=run_path / "agents",
+            shared_dir=run_path / "shared",
+            shared_code_dir=run_path / "shared" / "code",
+            shared_artifacts_dir=run_path / "shared" / "artifacts",
+            shared_reports_dir=run_path / "shared" / "reports",
+            shared_locks_dir=run_path / "shared" / ".locks",
             status=_read_json(run_path / "run_manifest.json", {}).get("status", "running"),
             long_term_workspace_root=self.workspace_root,
         )
 
     def agent_workspace_dir(self, run: RunWorkspace, agent_id: str) -> Path:
-        """Return the independent per-agent directory for this run."""
+        """Return the per-agent private scratch directory for this run.
+
+        This directory is intentionally not an outcome worktree. It is for
+        cache, temporary files, authorized skill views, and CLI-local state.
+        It is discarded before the run is archived.
+        """
         safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in agent_id)
         if not safe:
             raise ValueError("agent_id must not be empty")
-        path = run.agents_dir / safe
+        path = run.agents_dir / safe / "private"
         path.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            path.parent / "agent_workspace.json",
+            {
+                "agent_id": agent_id,
+                "private_workspace": str(path),
+                "shared_workspace": str(run.shared_dir or (run.path / "shared")),
+                "retention": "discard_on_archive",
+                "updated_at": _utc_now(),
+            },
+        )
         return path
+
+    def shared_access_context(self, run: RunWorkspace, *, agent_private_dir: Optional[Path] = None) -> Dict[str, Any]:
+        """Return the paths that define this run's collaboration workspace."""
+        shared_dir = run.shared_dir or (run.path / "shared")
+        return {
+            "private_workspace": str(agent_private_dir) if agent_private_dir else None,
+            "shared_workspace": str(shared_dir),
+            "shared_code": str(run.integration_dir),
+            "shared_artifacts": str(run.shared_artifacts_dir or (shared_dir / "artifacts")),
+            "shared_reports": str(run.shared_reports_dir or (shared_dir / "reports")),
+            "shared_manifest": str(shared_dir / "manifest.json"),
+            "long_term_workspace": str(self.workspace_root),
+        }
 
     def prepare_job(
         self,
@@ -416,13 +534,346 @@ class DulwichWorkspaceManager:
         return job
 
     def agent_access_context(self, job: JobWorkspace) -> Dict[str, Any]:
-        """Return workspace paths that may be exposed to an agent."""
+        """Return legacy job-worktree paths that may be exposed to an agent."""
         return {
             "writable_worktree": str(job.worktree_dir),
             "readonly_shared_workspaces": list(job.readonly_shared_paths),
             "write_scope": list(job.write_scope),
             "artifact_scope": list(job.artifact_scope),
         }
+
+    def _shared_lock_name(self, rel_path: str) -> str:
+        normalized = rel_path.replace("\\", "/").strip("/")
+        safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in normalized)
+        return safe or "root"
+
+    def _shared_write_lock_path(self, run: RunWorkspace, rel_path: str) -> Path:
+        shared_locks_dir = run.shared_locks_dir or ((run.shared_dir or run.path / "shared") / ".locks")
+        return shared_locks_dir / f"{self._shared_lock_name(rel_path)}.write.lock"
+
+    def _shared_readers_dir(self, run: RunWorkspace, rel_path: str) -> Path:
+        shared_locks_dir = run.shared_locks_dir or ((run.shared_dir or run.path / "shared") / ".locks")
+        return shared_locks_dir / f"{self._shared_lock_name(rel_path)}.readers"
+
+    def _active_write_lock(self, lock_path: Path, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        now = time.time() if now is None else now
+        if not lock_path.exists():
+            return None
+        data = _read_json(lock_path, {})
+        expires_at = float(data.get("expires_at", 0.0))
+        if expires_at > now:
+            return data
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        return None
+
+    def _active_reader_locks(self, readers_dir: Path, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        now = time.time() if now is None else now
+        if not readers_dir.is_dir():
+            return []
+        active: List[Dict[str, Any]] = []
+        for lock_path in readers_dir.glob("*.read.lock"):
+            data = _read_json(lock_path, {})
+            expires_at = float(data.get("expires_at", 0.0))
+            if expires_at > now:
+                active.append(data)
+                continue
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+        return active
+
+    def _shared_target(self, run: RunWorkspace, rel_path: str) -> Path:
+        shared_dir = run.shared_dir or (run.path / "shared")
+        target = (shared_dir / rel_path).resolve()
+        if not _path_within(target, shared_dir.resolve()):
+            raise ValueError(f"shared path escapes run shared workspace: {rel_path}")
+        if run.shared_locks_dir and _path_within(target, run.shared_locks_dir):
+            raise ValueError("shared .locks directory is reserved")
+        return target
+
+    def acquire_shared_lease(
+        self,
+        run: RunWorkspace,
+        rel_path: str,
+        *,
+        owner: str,
+        ttl_sec: float = 300.0,
+    ) -> SharedWriteLease:
+        """Acquire an exclusive write lease for a shared workspace path."""
+        shared_locks_dir = run.shared_locks_dir or ((run.shared_dir or run.path / "shared") / ".locks")
+        shared_locks_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self._shared_write_lock_path(run, rel_path)
+        readers_dir = self._shared_readers_dir(run, rel_path)
+        now = time.time()
+        data = self._active_write_lock(lock_path, now)
+        if data is not None:
+            raise FileExistsError(
+                f"shared path is write-locked by {data.get('owner')}: {rel_path}"
+            )
+        lease = SharedWriteLease(
+            lease_id=f"lease-{uuid.uuid4().hex[:12]}",
+            owner=str(owner),
+            path=str(rel_path).replace("\\", "/").strip("/"),
+            lock_path=lock_path,
+            expires_at=now + float(ttl_sec),
+        )
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            fd = os.open(str(lock_path), flags)
+        except FileExistsError as exc:
+            raise FileExistsError(f"shared path is write-locked: {rel_path}") from exc
+        try:
+            payload = {**lease.to_dict(), "mode": "write"}
+            os.write(fd, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+        finally:
+            os.close(fd)
+        active_readers = self._active_reader_locks(readers_dir, now)
+        if active_readers:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+            owners = ", ".join(str(item.get("owner")) for item in active_readers[:3])
+            raise FileExistsError(f"shared path has active readers ({owners}): {rel_path}")
+        self._record_shared_manifest(run, "lock_acquired", lease.to_dict())
+        return lease
+
+    def release_shared_lease(self, run: RunWorkspace, lease: SharedWriteLease) -> None:
+        data = _read_json(lease.lock_path, {})
+        if data.get("lease_id") == lease.lease_id:
+            try:
+                lease.lock_path.unlink()
+            except OSError:
+                pass
+            self._record_shared_manifest(run, "lock_released", lease.to_dict())
+
+    def acquire_shared_read_lease(
+        self,
+        run: RunWorkspace,
+        rel_path: str,
+        *,
+        owner: str,
+        ttl_sec: float = 300.0,
+    ) -> SharedReadLease:
+        """Acquire a shared read lease unless a writer owns the path."""
+        shared_locks_dir = run.shared_locks_dir or ((run.shared_dir or run.path / "shared") / ".locks")
+        shared_locks_dir.mkdir(parents=True, exist_ok=True)
+        write_lock = self._shared_write_lock_path(run, rel_path)
+        readers_dir = self._shared_readers_dir(run, rel_path)
+        readers_dir.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        writer = self._active_write_lock(write_lock, now)
+        if writer is not None:
+            raise FileExistsError(
+                f"shared path is write-locked by {writer.get('owner')}: {rel_path}"
+            )
+        lease = SharedReadLease(
+            lease_id=f"lease-{uuid.uuid4().hex[:12]}",
+            owner=str(owner),
+            path=str(rel_path).replace("\\", "/").strip("/"),
+            lock_path=readers_dir / f"lease-{uuid.uuid4().hex[:12]}.read.lock",
+            expires_at=now + float(ttl_sec),
+        )
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        fd = os.open(str(lease.lock_path), flags)
+        try:
+            os.write(fd, json.dumps(lease.to_dict(), ensure_ascii=False, indent=2).encode("utf-8"))
+        finally:
+            os.close(fd)
+        writer = self._active_write_lock(write_lock)
+        if writer is not None:
+            try:
+                lease.lock_path.unlink()
+            except OSError:
+                pass
+            raise FileExistsError(
+                f"shared path is write-locked by {writer.get('owner')}: {rel_path}"
+            )
+        self._record_shared_manifest(run, "lock_acquired", lease.to_dict())
+        return lease
+
+    def release_shared_read_lease(self, run: RunWorkspace, lease: SharedReadLease) -> None:
+        data = _read_json(lease.lock_path, {})
+        if data.get("lease_id") == lease.lease_id:
+            try:
+                lease.lock_path.unlink()
+            except OSError:
+                pass
+            self._record_shared_manifest(run, "lock_released", lease.to_dict())
+
+    def write_shared_text(
+        self,
+        run: RunWorkspace,
+        rel_path: str,
+        text: str,
+        *,
+        owner: str,
+        lease: Optional[SharedWriteLease] = None,
+        expected_version: Optional[int] = None,
+    ) -> Path:
+        """Write a text artifact to the shared workspace under a lease."""
+        owned_lease = lease is None
+        if lease is None:
+            lease = self.acquire_shared_lease(run, rel_path, owner=owner)
+        target = self._shared_target(run, rel_path)
+        if lease.path != str(rel_path).replace("\\", "/").strip("/"):
+            raise ValueError("lease path does not match write path")
+        if expected_version is not None:
+            current_version = self.shared_file_version(run, rel_path)
+            if current_version != int(expected_version):
+                if owned_lease:
+                    self.release_shared_lease(run, lease)
+                raise FileExistsError(
+                    f"shared path version conflict: expected {expected_version}, got {current_version}: {rel_path}"
+                )
+        tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(target)
+            self._record_shared_manifest(
+                run,
+                "write",
+                {
+                    "owner": owner,
+                    "path": str(rel_path).replace("\\", "/").strip("/"),
+                    "lease_id": lease.lease_id,
+                    "updated_at": _utc_now(),
+                },
+            )
+            return target
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if owned_lease:
+                self.release_shared_lease(run, lease)
+
+    def write_shared_bytes(
+        self,
+        run: RunWorkspace,
+        rel_path: str,
+        data: bytes,
+        *,
+        owner: str,
+        lease: Optional[SharedWriteLease] = None,
+        expected_version: Optional[int] = None,
+    ) -> Path:
+        """Write binary data to the shared workspace under a lease."""
+        owned_lease = lease is None
+        if lease is None:
+            lease = self.acquire_shared_lease(run, rel_path, owner=owner)
+        target = self._shared_target(run, rel_path)
+        if lease.path != str(rel_path).replace("\\", "/").strip("/"):
+            raise ValueError("lease path does not match write path")
+        if expected_version is not None:
+            current_version = self.shared_file_version(run, rel_path)
+            if current_version != int(expected_version):
+                if owned_lease:
+                    self.release_shared_lease(run, lease)
+                raise FileExistsError(
+                    f"shared path version conflict: expected {expected_version}, got {current_version}: {rel_path}"
+                )
+        tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(data)
+            tmp.replace(target)
+            self._record_shared_manifest(
+                run,
+                "write",
+                {
+                    "owner": owner,
+                    "path": str(rel_path).replace("\\", "/").strip("/"),
+                    "lease_id": lease.lease_id,
+                    "bytes": len(data),
+                    "updated_at": _utc_now(),
+                },
+            )
+            return target
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if owned_lease:
+                self.release_shared_lease(run, lease)
+
+    def read_shared_text(
+        self,
+        run: RunWorkspace,
+        rel_path: str,
+        *,
+        owner: str = "framework",
+        lease: Optional[SharedReadLease] = None,
+    ) -> str:
+        """Read a UTF-8 text file from the shared workspace."""
+        owned_lease = lease is None
+        if lease is None:
+            lease = self.acquire_shared_read_lease(run, rel_path, owner=owner)
+        target = self._shared_target(run, rel_path)
+        try:
+            if not target.is_file():
+                raise FileNotFoundError(f"shared text file not found: {rel_path}")
+            return target.read_text(encoding="utf-8")
+        finally:
+            if owned_lease:
+                self.release_shared_read_lease(run, lease)
+
+    def shared_file_version(self, run: RunWorkspace, rel_path: str) -> int:
+        """Return the manifest write version for a shared workspace path."""
+        shared_dir = run.shared_dir or (run.path / "shared")
+        manifest_path = shared_dir / "manifest.json"
+        normalized = str(rel_path).replace("\\", "/").strip("/")
+        data = _read_json(manifest_path, {})
+        writes = data.get("writes", [])
+        if not isinstance(writes, list):
+            return 0
+        return sum(
+            1
+            for item in writes
+            if isinstance(item, dict)
+            and item.get("event_type") == "write"
+            and item.get("path") == normalized
+        )
+
+    def list_shared_files(self, run: RunWorkspace, rel_dir: str = "") -> List[str]:
+        """List files under a shared workspace subdirectory."""
+        root = self._shared_target(run, rel_dir or ".")
+        if not root.exists():
+            return []
+        if root.is_file():
+            return [str(rel_dir).replace("\\", "/").strip("/")]
+        shared_dir = run.shared_dir or (run.path / "shared")
+        files: List[str] = []
+        for path in sorted(root.rglob("*")):
+            if path.is_file():
+                files.append(path.resolve().relative_to(shared_dir.resolve()).as_posix())
+        return files
+    def _record_shared_manifest(self, run: RunWorkspace, event_type: str, payload: Dict[str, Any]) -> None:
+        shared_dir = run.shared_dir or (run.path / "shared")
+        manifest_path = shared_dir / "manifest.json"
+        data = _read_json(
+            manifest_path,
+            {"run_id": run.run_id, "created_at": _utc_now(), "writes": [], "locks": []},
+        )
+        record = {"event_type": event_type, **payload}
+        if event_type.startswith("lock"):
+            data.setdefault("locks", []).append(record)
+        else:
+            data.setdefault("writes", []).append(record)
+        data["updated_at"] = _utc_now()
+        _write_json(manifest_path, data)
+
+    def discard_private_workspaces(self, run: RunWorkspace) -> None:
+        if run.agents_dir.exists():
+            shutil.rmtree(run.agents_dir)
+        run.agents_dir.mkdir(parents=True, exist_ok=True)
 
     def is_agent_path_writable(self, job: JobWorkspace, path: Path) -> bool:
         """Policy helper for future tool/sandbox integrations."""
@@ -488,6 +939,7 @@ class DulwichWorkspaceManager:
         data["status"] = status
         data["archived_at"] = _utc_now()
         _write_json(manifest_path, data)
+        self.discard_private_workspaces(run)
 
         target_parent = self.workspace_root / "runs" / (
             "archived" if status == "completed" else "failed"
@@ -591,11 +1043,9 @@ class DulwichWorkspaceManager:
 
 def describe_dulwich_backend() -> Dict[str, Any]:
     """Return runtime information for diagnostics and tests."""
-    ensure_dulwich_path()
-    import dulwich  # type: ignore
-
     return {
         "backend": "dulwich",
-        "version": getattr(dulwich, "__version__", None),
+        "version": None if not _DULWICH_AVAILABLE else __import__("dulwich").__version__,  # type: ignore[attr-defined]
         "uses_git_cli": False,
+        "available": _DULWICH_AVAILABLE,
     }

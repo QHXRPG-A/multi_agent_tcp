@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multi Agent TCP"
+  short_description: "Multi-agent TCP project guide"
+  default_prompt: "Use the multi-agent-tcp skill to inspect and work on the multi_agent_tcp project."

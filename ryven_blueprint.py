@@ -2,19 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
-from typing import Any, Iterable, Optional, Type
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterable, Optional, Type
 
 from .graph_runtime import (
     AgentNode as RuntimeAgentNode,
     BlueprintTerminalNode,
     GraphDefinition,
     GraphEdge,
+    GraphEvent,
+    GraphExecutor,
+    GraphRuntime,
 )
+from .workspace_manager import DulwichWorkspaceManager, RunWorkspace
 
 
 BLUEPRINT_START_NODE_ID = "blueprint-start"
 BLUEPRINT_END_NODE_ID = "blueprint-end"
+WORKSPACE_API_CONTEXT_ENV = "MULTI_AGENT_WORKSPACE_CONTEXT"
 
 _START_POS = (180.0, 260.0)
 _END_POS = (760.0, 260.0)
@@ -50,6 +60,328 @@ def editable_nodes(nodes: Iterable[Any]) -> list[Any]:
 
 class RyvenFlowCompileError(ValueError):
     """Raised when a Ryven flow cannot be compiled to GraphDefinition."""
+
+
+@dataclass
+class BlueprintRunResult:
+    ok: bool
+    status: str
+    result: Any = None
+    events: list[dict[str, Any]] = field(default_factory=list)
+    jobs: list[dict[str, Any]] = field(default_factory=list)
+    archive_path: Optional[str] = None
+    error: Optional[str] = None
+
+
+def _node_for_graph_id(flow: Any, graph_id: str) -> Any:
+    for node in getattr(flow, "nodes", []):
+        terminal_kind = blueprint_terminal_kind_for_node(node)
+        if terminal_kind is not None:
+            expected = BLUEPRINT_START_NODE_ID if terminal_kind == "start" else BLUEPRINT_END_NODE_ID
+            if expected == graph_id:
+                return node
+        runtime_node = getattr(node, "runtime_node", None)
+        if callable(runtime_node):
+            try:
+                if runtime_node().node_id == graph_id:
+                    return node
+            except Exception:
+                continue
+    return None
+
+
+def _set_visual_status(flow: Any, node_id: str, status: str, payload: Optional[dict[str, Any]] = None) -> None:
+    node = _node_for_graph_id(flow, node_id)
+    if node is None:
+        return
+    setter = getattr(node, "set_runtime_status", None)
+    if callable(setter):
+        setter(status, payload or {})
+
+
+def _workspace_api_doc() -> str:
+    doc_path = Path(__file__).resolve().parent / "docs" / "workspace_api.md"
+    if not doc_path.is_file():
+        return (
+            "# Workspace API for Blueprint Agents\n\n"
+            "Publish outputs with `python -m multi_agent_tcp.workspace_api publish "
+            "--area <code|artifacts|reports> --path <relative-path> --stdin`."
+        )
+    return doc_path.read_text(encoding="utf-8")
+
+
+def _apply_run_workspace_to_node(
+    node: RuntimeAgentNode,
+    *,
+    manager: DulwichWorkspaceManager,
+    run: RunWorkspace,
+    private_dir: Path,
+) -> RuntimeAgentNode:
+    data = node.to_dict()
+    data["cwd"] = str(private_dir)
+    data["workspace_id"] = run.run_id
+    data["workspace_root"] = str(run.path)
+    data["read_scope"] = list(node.read_scope)
+    data["write_scope"] = list(node.write_scope)
+    data["artifact_scope"] = list(node.artifact_scope)
+
+    api_context_path = private_dir / "workspace_api_context.json"
+    api_context_path.write_text(
+        json.dumps(
+            {
+                "project_root": str(manager.project_root),
+                "workspace_root": str(manager.workspace_root),
+                "run_id": run.run_id,
+                "agent_id": node.runtime_agent_id,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    preamble = (
+        "You are running inside a visual blueprint run. Do not publish task "
+        "outcomes by writing directly to filesystem paths. Use the framework "
+        "Workspace API below for code, artifacts, and reports.\n\n"
+        f"{_workspace_api_doc()}"
+    )
+    adapter_options = dict(data.get("adapter_options", {}))
+    existing = adapter_options.get("prompt_preamble")
+    if isinstance(existing, str) and existing.strip():
+        adapter_options["prompt_preamble"] = f"{existing.strip()}\n\n{preamble}"
+    else:
+        adapter_options["prompt_preamble"] = preamble
+    execution_context = dict(adapter_options.get("execution_context", {}))
+    execution_context["workspace_api"] = {
+        "command": "python -m multi_agent_tcp.workspace_api",
+        "context_env": WORKSPACE_API_CONTEXT_ENV,
+        "areas": ["code", "artifacts", "reports"],
+    }
+    adapter_options["execution_context"] = execution_context
+    adapter_options.setdefault("codex_home", str(private_dir / "codex_home"))
+    data["adapter_options"] = adapter_options
+    extra_env = {str(k): str(v) for k, v in dict(data.get("extra_env", {})).items()}
+    extra_env[WORKSPACE_API_CONTEXT_ENV] = str(api_context_path)
+    package_parent = str(Path(__file__).resolve().parent.parent)
+    existing_pythonpath = extra_env.get("PYTHONPATH") or os.environ.get("PYTHONPATH")
+    extra_env["PYTHONPATH"] = (
+        f"{package_parent}{os.pathsep}{existing_pythonpath}"
+        if existing_pythonpath
+        else package_parent
+    )
+    data["extra_env"] = extra_env
+    return RuntimeAgentNode.from_dict(data)
+
+
+class BlueprintRunController:
+    """Run/stop lifecycle for one Ryven blueprint flow."""
+
+    def __init__(
+        self,
+        flow: Any,
+        *,
+        project_root: Optional[Path] = None,
+        port: int = 9140,
+        verbose: bool = False,
+        event_callback: Optional[Callable[[GraphEvent], None]] = None,
+    ) -> None:
+        self.flow = flow
+        self.project_root = Path(project_root or Path.cwd()).resolve()
+        self.port = int(port)
+        self.verbose = verbose
+        self.event_callback = event_callback
+        self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._task: Optional[asyncio.Future] = None
+        self._done_callbacks: list[Callable[[BlueprintRunResult], None]] = []
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def add_done_callback(self, callback: Callable[[BlueprintRunResult], None]) -> None:
+        self._done_callbacks.append(callback)
+
+    def start(self, *, initial_prompt: str = "") -> None:
+        if self._running:
+            raise RuntimeError("blueprint is already running")
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._thread_main,
+            args=(initial_prompt,),
+            name="BlueprintRunController",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._loop is not None and self._task is not None:
+            self._loop.call_soon_threadsafe(self._task.cancel)
+
+    def _thread_main(self, initial_prompt: str) -> None:
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+        task = asyncio.ensure_future(self._run(initial_prompt))
+        self._task = task
+        try:
+            result = loop.run_until_complete(task)
+        except asyncio.CancelledError:
+            result = BlueprintRunResult(ok=False, status="cancelled")
+        except Exception as exc:
+            result = BlueprintRunResult(ok=False, status="failed", error=str(exc))
+        finally:
+            self._running = False
+            for callback in list(self._done_callbacks):
+                try:
+                    callback(result)
+                except Exception:
+                    pass
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+
+    async def _run(self, initial_prompt: str) -> BlueprintRunResult:
+        from .cluster import CodeMakerCluster
+
+        graph = compile_ryven_flow(self.flow, validate=True)
+        manager = DulwichWorkspaceManager.open_or_init(self.project_root)
+        run = manager.create_run()
+        private_dirs: dict[str, Path] = {}
+        adjusted = GraphDefinition(
+            terminal_nodes=dict(graph.terminal_nodes),
+            route_nodes=dict(graph.route_nodes),
+            edges=list(graph.edges),
+        )
+        for node_id, node in graph.agent_nodes.items():
+            private_dir = manager.agent_workspace_dir(run, node.runtime_agent_id)
+            private_dirs[node_id] = private_dir
+            adjusted.agent_nodes[node_id] = _apply_run_workspace_to_node(
+                node,
+                manager=manager,
+                run=run,
+                private_dir=private_dir,
+            )
+
+        cluster = await CodeMakerCluster.create(
+            [node.to_worker_config() for node in adjusted.agent_nodes.values()],
+            port=self.port,
+            verbose=self.verbose,
+        )
+        events: list[dict[str, Any]] = []
+        private_workspace_rows = [
+            {"node_id": node_id, "private_workspace": str(path)}
+            for node_id, path in private_dirs.items()
+        ]
+
+        def on_event(event: GraphEvent) -> None:
+            events.append(event.to_dict())
+            if event.node_id:
+                _set_visual_status(
+                    self.flow,
+                    event.node_id,
+                    event.status or event.event_type,
+                    event.payload,
+                )
+            if self.event_callback is not None:
+                self.event_callback(event)
+
+        archive_status = "completed"
+        try:
+            runtime = GraphRuntime(cluster)
+            executor = GraphExecutor(runtime)
+            result = await executor.run_blueprint(
+                adjusted,
+                initial_prompt=initial_prompt,
+                event_callback=on_event,
+            )
+            manager.write_shared_text(
+                run,
+                "reports/blueprint_result.json",
+                json.dumps(
+                    {
+                        "run_id": run.run_id,
+                        "status": archive_status,
+                        "ok": archive_status == "completed",
+                        "result": result,
+                        "events": events,
+                        "private_workspaces": private_workspace_rows,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                owner="blueprint-controller",
+            )
+            archive = manager.archive_run(run, status=archive_status)
+            result["shared_workspace"] = str(archive / "shared")
+            result["shared_code_workspace"] = str(archive / "shared" / "code")
+            result["shared_reports_workspace"] = str(archive / "shared" / "reports")
+            result["archive_path"] = str(archive)
+            return BlueprintRunResult(
+                ok=archive_status == "completed",
+                status=archive_status,
+                result=result,
+                events=events,
+                jobs=private_workspace_rows,
+                archive_path=str(archive),
+            )
+        except asyncio.CancelledError:
+            manager.write_shared_text(
+                run,
+                "reports/blueprint_result.json",
+                json.dumps(
+                    {
+                        "run_id": run.run_id,
+                        "status": "cancelled",
+                        "ok": False,
+                        "events": events,
+                        "private_workspaces": private_workspace_rows,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                owner="blueprint-controller",
+            )
+            archive = manager.archive_run(run, status="cancelled")
+            return BlueprintRunResult(
+                ok=False,
+                status="cancelled",
+                events=events,
+                jobs=private_workspace_rows,
+                archive_path=str(archive),
+            )
+        except Exception as exc:
+            manager.write_shared_text(
+                run,
+                "reports/blueprint_result.json",
+                json.dumps(
+                    {
+                        "run_id": run.run_id,
+                        "status": "failed",
+                        "ok": False,
+                        "error": str(exc),
+                        "events": events,
+                        "private_workspaces": private_workspace_rows,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                owner="blueprint-controller",
+            )
+            archive = manager.archive_run(run, status="failed")
+            return BlueprintRunResult(
+                ok=False,
+                status="failed",
+                error=str(exc),
+                events=events,
+                jobs=private_workspace_rows,
+                archive_path=str(archive),
+            )
+        finally:
+            await cluster.stop()
 
 
 def _node_title(node: Any) -> str:
@@ -301,6 +633,8 @@ def install_blueprint_hooks() -> None:
 
 def _install_gui_hooks() -> None:
     try:
+        from qtpy.QtCore import QTimer
+        from qtpy.QtWidgets import QMessageBox
         from ryvencore_qt.src.flows.FlowCommands import RemoveComponents_Command
         from ryvencore_qt.src.flows.FlowView import FlowView
         from ryvencore_qt.src.flows.node_list_widget.NodeListWidget import NodeListWidget
@@ -328,6 +662,61 @@ def _install_gui_hooks() -> None:
         original_get_nodes_data = FlowView._get_nodes_data
         original_get_connections_data = FlowView._get_connections_data
         original_get_output_data = FlowView._get_output_data
+        original_init = FlowView.__init__
+
+        def init_with_blueprint_controls(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self._multi_agent_tcp_blueprint_controller = None
+
+            run_action = self.menu().addAction("Run Blueprint")
+            stop_action = self.menu().addAction("Stop Blueprint")
+            stop_action.setEnabled(False)
+            self._multi_agent_tcp_run_action = run_action
+            self._multi_agent_tcp_stop_action = stop_action
+
+            def show_message(title: str, text: str) -> None:
+                QMessageBox.information(self, title, text)
+
+            def finish(result: BlueprintRunResult) -> None:
+                def update_ui() -> None:
+                    run_action.setEnabled(True)
+                    stop_action.setEnabled(False)
+                    status = result.status
+                    if result.error:
+                        text = f"Blueprint {status}: {result.error}"
+                    else:
+                        text = f"Blueprint {status}."
+                        if result.archive_path:
+                            text += f"\nArchive: {result.archive_path}"
+                    show_message("Blueprint", text)
+
+                QTimer.singleShot(0, update_ui)
+
+            def run_blueprint() -> None:
+                if getattr(self, "_multi_agent_tcp_blueprint_controller", None) is not None:
+                    controller = self._multi_agent_tcp_blueprint_controller
+                    if controller.running:
+                        return
+                controller = BlueprintRunController(self.flow)
+                controller.add_done_callback(finish)
+                self._multi_agent_tcp_blueprint_controller = controller
+                run_action.setEnabled(False)
+                stop_action.setEnabled(True)
+                try:
+                    controller.start()
+                except Exception as exc:
+                    run_action.setEnabled(True)
+                    stop_action.setEnabled(False)
+                    show_message("Blueprint", f"Failed to start blueprint: {exc}")
+
+            def stop_blueprint() -> None:
+                controller = getattr(self, "_multi_agent_tcp_blueprint_controller", None)
+                if controller is not None:
+                    controller.stop()
+                stop_action.setEnabled(False)
+
+            run_action.triggered.connect(run_blueprint)
+            stop_action.triggered.connect(stop_blueprint)
 
         def create_node_without_duplicate_terminals(self, node_class):
             kind = blueprint_terminal_kind_for_class(node_class)
@@ -363,6 +752,7 @@ def _install_gui_hooks() -> None:
         def get_output_data_without_terminals(self, nodes):
             return original_get_output_data(self, editable_nodes(nodes))
 
+        FlowView.__init__ = init_with_blueprint_controls
         FlowView.create_node__cmd = create_node_without_duplicate_terminals
         FlowView.remove_selected_components__cmd = remove_selected_without_terminals
         FlowView._get_nodes_data = get_nodes_data_without_terminals

@@ -8,7 +8,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .client import AgentTCPClient
 from .cluster import WorkerConfig
@@ -355,6 +355,7 @@ class AgentNode:
 
     node_id: str = field(default_factory=generate_agent_node_id)
     agent_id: Optional[str] = None
+    prompt: str = ""
     execution_mode: AgentExecutionMode = "blocking"
     cli_kind: str = "codemaker"
     model: str = "netease-codemaker/kimi-k2.5"
@@ -426,6 +427,7 @@ class AgentNode:
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "node_id": self.node_id,
+            "prompt": self.prompt,
             "execution_mode": self.execution_mode,
             "cli_kind": self.cli_kind,
             "model": self.model,
@@ -475,6 +477,7 @@ class AgentNode:
         return cls(
             node_id=node_id.strip() if isinstance(node_id, str) else generate_agent_node_id(),
             agent_id=str(data["agent_id"]).strip() if data.get("agent_id") else None,
+            prompt=str(data.get("prompt", "")),
             execution_mode=str(data.get("execution_mode", "blocking")),
             cli_kind=str(data.get("cli_kind", "codemaker")),
             model=str(data.get("model", "netease-codemaker/kimi-k2.5")),
@@ -571,6 +574,11 @@ class GraphRuntime:
             node.external,
         )
         return self._instances[node.node_id]
+
+    async def prestart_agents(self, nodes: Sequence[AgentNode]) -> None:
+        """Bind and start every AgentNode before graph execution begins."""
+        for node in nodes:
+            await self.ensure_agent(node)
 
     async def send_agent_message(
         self,
@@ -941,6 +949,192 @@ class GraphExecutor:
 
     def __init__(self, runtime: GraphRuntime) -> None:
         self.runtime = runtime
+
+    @staticmethod
+    def _reply_text(reply: Any) -> str:
+        if isinstance(reply, dict):
+            body = reply.get("body")
+            if isinstance(body, dict):
+                codex = body.get("codex")
+                if isinstance(codex, dict):
+                    text = codex.get("final_text") or codex.get("last_message")
+                    if isinstance(text, str) and text.strip():
+                        return text.strip()
+                cm = body.get("codemaker")
+                if isinstance(cm, dict):
+                    stdout = cm.get("stdout")
+                    if isinstance(stdout, str) and stdout.strip():
+                        try:
+                            from .cluster import extract_final_text
+
+                            text = extract_final_text(stdout)
+                        except Exception:
+                            text = ""
+                        if text.strip():
+                            return text.strip()
+                for key in ("answer", "result", "text", "echo_prompt"):
+                    text = body.get(key)
+                    if isinstance(text, str) and text.strip():
+                        return text.strip()
+            for key in ("answer", "result", "text"):
+                text = reply.get(key)
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+            return json.dumps(reply, ensure_ascii=False)
+        return str(reply)
+
+    @staticmethod
+    def _start_end_ids(graph: GraphDefinition) -> tuple[str, str]:
+        starts = [
+            node.node_id
+            for node in graph.terminal_nodes.values()
+            if node.terminal_kind == "start"
+        ]
+        ends = [
+            node.node_id
+            for node in graph.terminal_nodes.values()
+            if node.terminal_kind == "end"
+        ]
+        if len(starts) != 1 or len(ends) != 1:
+            graph.validate_runnable()
+        return starts[0], ends[0]
+
+    @staticmethod
+    def _exec_successors(graph: GraphDefinition) -> Dict[str, List[str]]:
+        successors: Dict[str, List[str]] = {node_id: [] for node_id in graph._node_ids()}
+        for edge in graph.edges:
+            if edge.is_exec_edge:
+                successors.setdefault(edge.source, []).append(edge.target)
+        return successors
+
+    @staticmethod
+    def _data_inputs(graph: GraphDefinition) -> Dict[str, List[GraphEdge]]:
+        inputs: Dict[str, List[GraphEdge]] = {}
+        for edge in graph.edges:
+            if edge.edge_type == "data":
+                inputs.setdefault(edge.target, []).append(edge)
+        return inputs
+
+    async def run_blueprint(
+        self,
+        graph: GraphDefinition,
+        *,
+        initial_prompt: str = "",
+        event_callback: Optional[Callable[[GraphEvent], None]] = None,
+    ) -> Dict[str, Any]:
+        """Run a minimal visual blueprint along exec edges.
+
+        The current closure intentionally supports a single exec path made of
+        Start, blocking AgentNodes, and End. All AgentNode CLI workers are
+        started before the first node executes.
+        """
+
+        graph.validate_runnable()
+        await self.runtime.prestart_agents(list(graph.agent_nodes.values()))
+
+        def emit(event: GraphEvent) -> None:
+            self.runtime._emit(event)
+            if event_callback is not None:
+                event_callback(event)
+
+        start_id, end_id = self._start_end_ids(graph)
+        successors = self._exec_successors(graph)
+        data_inputs = self._data_inputs(graph)
+        values: Dict[tuple[str, str], Any] = {}
+        executed: List[str] = []
+        last_reply: Any = None
+        current = start_id
+        emit(GraphEvent("BlueprintStarted", status="running"))
+
+        try:
+            while current != end_id:
+                next_nodes = successors.get(current, [])
+                if len(next_nodes) != 1:
+                    raise ValueError(
+                        f"minimal blueprint runner requires exactly one exec successor from {current!r}"
+                    )
+                current = next_nodes[0]
+                if current == end_id:
+                    break
+                node = graph.agent_nodes.get(current)
+                if node is None:
+                    raise ValueError(
+                        f"minimal blueprint runner only supports AgentNode on exec path: {current!r}"
+                    )
+                if node.execution_mode != "blocking":
+                    raise ValueError("minimal blueprint runner only supports blocking AgentNode")
+
+                prompt = node.prompt.strip() or initial_prompt.strip()
+                context: Optional[str] = None
+                for edge in data_inputs.get(node.node_id, []):
+                    port = edge.input_port or ""
+                    value = values.get((edge.source, edge.output_port or "result"))
+                    if value is None:
+                        continue
+                    text = self._reply_text(value)
+                    if port == "prompt":
+                        prompt = text
+                    else:
+                        context = text if context is None else f"{context}\n\n{text}"
+                if not prompt:
+                    prompt = f"Run AgentNode {node.node_id}."
+
+                emit(
+                    GraphEvent(
+                        "NodeQueued",
+                        node_id=node.node_id,
+                        agent_id=node.runtime_agent_id,
+                        status="queued",
+                    )
+                )
+                emit(
+                    GraphEvent(
+                        "NodeRunning",
+                        node_id=node.node_id,
+                        agent_id=node.runtime_agent_id,
+                        status="running",
+                    )
+                )
+                body: Dict[str, Any] = {"prompt": prompt}
+                if context:
+                    body["context"] = context
+                reply = await self.runtime.send_agent_message(node, body)
+                last_reply = reply
+                executed.append(node.node_id)
+                values[(node.node_id, "result")] = reply
+                values[(node.node_id, "out")] = reply
+                emit(
+                    GraphEvent(
+                        "NodeCompleted",
+                        node_id=node.node_id,
+                        agent_id=node.runtime_agent_id,
+                        status="completed",
+                        payload={"result": reply, "text": self._reply_text(reply)},
+                    )
+                )
+        except asyncio.CancelledError:
+            emit(GraphEvent("BlueprintCancelled", status="cancelled"))
+            raise
+        except Exception as exc:
+            emit(
+                GraphEvent(
+                    "BlueprintFailed",
+                    node_id=current if current != start_id else None,
+                    status="failed",
+                    payload={"error": str(exc)},
+                )
+            )
+            raise
+
+        result = {
+            "ok": True,
+            "status": "completed",
+            "executed_nodes": executed,
+            "result": last_reply,
+            "text": self._reply_text(last_reply),
+        }
+        emit(GraphEvent("BlueprintCompleted", status="completed", payload=result))
+        return result
 
     async def run_route(
         self,

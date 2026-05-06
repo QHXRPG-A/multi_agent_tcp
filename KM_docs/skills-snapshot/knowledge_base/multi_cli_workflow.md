@@ -51,12 +51,14 @@ Agent 节点还需要区分两种执行模式：
 
 因此 AgentNode 的配置应包含 `execution_mode: blocking | nonblocking`。阻塞模式的输出走当前执行线，非阻塞模式的直接输出主要是 `job_ref` / `agent_ref` / `workspace_ref`，最终结果通过事件总线与共享工作区回流。
 
-共享工作区应被视为多 Agent 协作的 blackboard，而不是普通临时目录。它至少包含：
+共享工作区应被视为多 Agent 协作的 blackboard，而不是普通临时目录。需要明确区分 **agent 私有空间** 与 **临时共享空间**：
 
-- 物理文件空间：源码、产物、日志、临时文件、manifest。
+- agent 私有空间：每个 agent 在一次蓝图运行中的独立 scratch 目录，用于存放自己的临时文件、缓存、局部上下文、授权 skills view、CLI 会话数据等。蓝图结束后整个销毁，不进入归档，不自动合并到共享空间。
+- 临时共享空间：本次任务的成果空间，存放需要被其它 agent 看到或被最终归档的内容，例如代码修改、生成图片、生成文本、结构化报告、测试结果、任务 manifest 等。
+- 物理文件空间：共享源码/产物区、agent 私有 scratch 区、日志、manifest。
 - 任务账本：每个后台任务完成时写入 job manifest，记录 `job_id`、`node_id`、`agent_id`、状态、改动文件、产物、摘要、风险与测试。
 - 事件流：非阻塞 AgentNode 发出 `TaskStarted`、`TaskProgress`、`TaskCompleted`、`TaskFailed`、`WorkspaceChanged`、`ReviewRequested` 等事件。
-- 写入边界：每个 AgentNode 声明 `read_scope`、`write_scope`、`artifact_scope`、`lock_policy`、`merge_policy`，避免多个后台 agent 覆盖彼此改动。
+- 写入边界：每个 AgentNode 声明 `read_scope`、`write_scope`、`artifact_scope`、`lock_policy`、`merge_policy`，避免多个后台 agent 覆盖彼此改动。私有空间的写入不需要合并；临时共享空间的写入必须受锁、lease、manifest 或 merge policy 约束。
 
 ### 3. MultiModalEnvelope
 
@@ -137,7 +139,7 @@ Agent 节点还需要区分两种执行模式：
 
 ### 共享工作区生命周期
 
-当前实现采用“用户可指定的项目级长期共享工作区 + 蓝图运行级临时共享工作区 + 完整目录归档”：
+目标模型采用“用户可指定的项目级长期共享工作区 + 蓝图运行级临时共享工作区 + agent 私有 scratch 空间 + 完整目录归档”：
 
 ```text
 <long-term-workspace>/
@@ -145,8 +147,12 @@ Agent 节点还需要区分两种执行模式：
   runs/
     active/<run_id>/
       base/
-      integration/
-      jobs/<job_id>/worktree/
+      shared/
+        code/
+        artifacts/
+        reports/
+        manifest.json
+      agents/<agent_id>/private/
       run_manifest.json
     archived/<run_id>/
     failed/<run_id>/
@@ -158,18 +164,23 @@ Agent 节点还需要区分两种执行模式：
 - 推荐用户把长期共享工作区放在对应工程目录下，例如 `<project>/.multi_agent_workspace/` 或 `<project>/.agent_shared/`；也允许放在工程目录外。
 - 长期共享工作区是 runtime 控制面目录，agent 可以读取其中的归档、manifest、事件与历史产物，但不允许直接修改。
 - 当长期共享工作区位于工程目录内部时，创建 `base` 快照和 job worktree 时会排除该目录，避免把长期账本递归复制进每个运行目录。
-- `create_run()` 会在 `runs/active/<run_id>` 创建本次蓝图运行目录，并复制 `base` 与 `integration` 快照。
-- `prepare_job()` 为每个 job 创建隔离 `jobs/<job_id>/worktree`。
-- `prepare_job()` 会拒绝把长期共享工作区路径放入 `write_scope` / `artifact_scope`。
-- `agent_access_context(job)` 会返回 `writable_worktree` 与 `readonly_shared_workspaces`，供后续 agent 启动和沙箱/工具权限层使用。
-- `agent_workspace_dir(run, agent_id)` 会为当前 run 创建/返回对应 agent 的独立目录，供 SkillSpace materialize skill view 和后续 agent cache 使用。
-- `diff_job()` 对比 `base` 与 job worktree，识别 `added` / `modified` / `deleted`。
-- `merge_job()` 先做 `write_scope` / `artifact_scope` 校验，再把 job 变更合并到 `integration`。
-- 文本文件使用保守三方 merge；同一路径双方不同修改会写入 conflict marker 并返回冲突。
-- 二进制冲突、删除/修改冲突、scope 越界都会阻止自动合并。
+- `create_run()` 会在 `runs/active/<run_id>` 创建本次蓝图运行目录，并创建 `base` 与 `shared`。
+- `base` 是运行开始时的项目快照或引用基线，用于之后判断代码修改的来源。
+- `shared/` 是本次蓝图运行的临时共享成果空间，蓝图成功或失败后进入归档。其它 agent 需要读取或复用的代码修改、图片、文本、报告等必须写入这里。
+- `agents/<agent_id>/private/` 是 agent 私有 scratch 空间，用于临时文件、缓存、CLI 会话数据、授权 skill view 等。它不代表任务成果，蓝图结束后应整体销毁，不归档、不合并。
+- 若 agent 需要产出代码修改，目标应是临时共享空间中的代码成果区，而不是私有 scratch 目录。私有 scratch 里的内容除非被 agent 显式发布到共享空间，否则框架不应自动保存。
+- 临时共享空间需要竞态处理：至少要有文件级 lock / lease、写入 manifest、版本号或三方 merge 其中之一，防止多个 agent 同时覆盖同一路径。
+- 文本文件可以使用保守三方 merge；同一路径双方不同修改应写入 conflict marker 或生成冲突记录，并返回冲突。
+- 二进制冲突、删除/修改冲突、scope 越界都不应自动覆盖。
 - `archive_run()` 将整个 `runs/active/<run_id>` 移动到 `runs/archived/<run_id>` 或 `runs/failed/<run_id>`，保留完整目录。后续删除归档接口已预留，但当前不实现。
 
 当前实现不调用 Git CLI / SVN CLI。Dulwich 已 vendored 到 `vendor/dulwich`，通过 `.gitignore` 排除第三方源码进入项目提交。只读访问当前是 runtime policy 与 manifest 约束；真正 OS ACL / 沙箱级强制写入拦截仍属后续任务。
+
+当前代码对照提醒：
+
+- 早期实现把 `jobs/<job_id>/worktree` 同时承担“agent 执行目录”和“待合并成果目录”的职责，这与新的职责划分不完全一致。
+- 后续应拆成 `agents/<agent_id>/private/` 与 `shared/` 两条路径：私有目录只服务 agent 自己，临时共享目录才参与成果归档、冲突检测与跨 agent 协作。
+- 共享空间竞态处理仍是短期重点，不能只靠“最后 merge 一次”替代运行期锁或 manifest 协议。
 
 ## 与现有知识库的关系
 
@@ -181,3 +192,19 @@ Agent 节点还需要区分两种执行模式：
 ## 与短期任务的关系
 
 本文件只记录方向性知识与术语。具体近期推进项、拆解任务、优先级与阶段目标，统一放到上级 `tasks/` 目录中。
+
+## 2026-05-06 workspace implementation note
+
+The current blueprint runtime implementation has started enforcing the split between private scratch space and shared outcome space:
+
+- `base/` is the run-start project snapshot.
+- `agents/<agent_id>/private/` is private scratch for temporary files, cache, skill views, and CLI-local state. It is not treated as a result worktree and is deleted before archive.
+- `shared/code/`, `shared/artifacts/`, and `shared/reports/` are the only per-run outcome areas preserved in the archive.
+- AgentNode `cwd` points at private scratch. The primary contract for outcomes is the injected Workspace API document and command interface, not physical shared paths.
+- Codex and CodeMaker CLI adapters both consume the injected `prompt_preamble` and `execution_context`, so the workspace contract reaches the actual CLI prompt.
+- Shared writes have a first-pass file lease API plus manifest records; this prevents basic same-path races but is not yet a complete merge/conflict protocol.
+- The controller now writes `shared/reports/blueprint_result.json` before archiving so each run has a durable summary.
+
+This means the minimum closed loop should consider `shared/` the blackboard and outcome surface. Private agent directories are disposable runtime implementation details unless an agent explicitly publishes selected files into `shared/`.
+
+Follow-up adjustment: agents should not be taught physical shared workspace paths as the primary contract. The runtime now maintains `docs/workspace_api.md` and injects that API document when an AgentNode starts. Agents publish outputs through `python -m multi_agent_tcp.workspace_api` using logical areas (`code`, `artifacts`, `reports`). The command resolves the run context internally, writes through the workspace manager, and records lease/manifest events. Shared files use a per-path read/write lock: multiple readers can coexist, writers are exclusive, and writes are blocked while readers hold the same path. Joint edits can also use `read --json` plus `publish --expected-version N` to avoid stale overwrites. Current implementation is a local controlled CLI API; stronger enforcement still requires broker-side RPC/tooling plus filesystem sandboxing.

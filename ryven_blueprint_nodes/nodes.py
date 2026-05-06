@@ -76,6 +76,8 @@ class AgentNode(Node):
     def __init__(self, params):
         super().__init__(params)
         self.agent_config = _default_agent_config()
+        self.runtime_status = "idle"
+        self.runtime_payload: Dict[str, Any] = {}
 
     def runtime_node(self) -> RuntimeAgentNode:
         return RuntimeAgentNode.from_dict(self.agent_config)
@@ -88,6 +90,19 @@ class AgentNode(Node):
 
     def set_state(self, data: Dict[str, Any], version):
         self.agent_config = _normalize_agent_config(data)
+
+    def set_runtime_status(self, status: str, payload: Dict[str, Any] | None = None) -> None:
+        self.runtime_status = str(status or "idle")
+        self.runtime_payload = dict(payload or {})
+        gui = getattr(self, "gui", None)
+        main_widget = None
+        if gui is not None:
+            try:
+                main_widget = gui.main_widget()
+            except Exception:
+                main_widget = None
+        if main_widget is not None and hasattr(main_widget, "reload_runtime_state"):
+            main_widget.reload_runtime_state()
 
     def update_event(self, input_called=-1):
         if input_called == 1 and self.input(1) is not None:

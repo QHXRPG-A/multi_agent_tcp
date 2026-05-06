@@ -13,7 +13,11 @@ def ensure_dulwich_path() -> None:
     """Put the vendored Dulwich checkout on sys.path if needed."""
     path = _VENDOR_DULWICH
     if not path.is_dir():
-        raise ImportError(f"vendored Dulwich checkout not found: {path}")
+        return
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
+
+
+def has_dulwich_vendor() -> bool:
+    return _VENDOR_DULWICH.is_dir()
