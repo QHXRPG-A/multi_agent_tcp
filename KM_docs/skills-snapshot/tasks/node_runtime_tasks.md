@@ -184,6 +184,7 @@ Completed and archived into `archive/blueprint_integration_archive.md`:
 - Workspace API writes go through manager-owned lease and manifest recording.
 - Shared files have per-path read/write locks: concurrent reads are allowed, writers are exclusive.
 - Shared files have per-path versions for read-modify-write: `read --json` plus `publish --expected-version N`.
+- Pytest coverage now includes Workspace API binary stale-version conflicts, API-level reader/writer blocking, active-reader publish blocking, path escape rejection, and the private `agents/<agent_id>/private/` SkillSpace integration expectation. Full project pytest is configured to skip vendored/generated dependency trees and currently passes with `59 passed`.
 
 Current short-term follow-up:
 

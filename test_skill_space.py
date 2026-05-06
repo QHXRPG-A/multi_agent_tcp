@@ -85,6 +85,7 @@ def test_agent_workspace_dir_integrates_with_skill_space(tmp_path: Path) -> None
         skill_hashes=[rec.skill_hash],
     )
 
-    assert agent_root.name == "agent_1"
+    assert agent_root.name == "private"
+    assert agent_root.parent.name == "agent_1"
     assert view.root == agent_root
-    assert (agent_root / "agent_workspace.json").is_file()
+    assert (agent_root.parent / "agent_workspace.json").is_file()

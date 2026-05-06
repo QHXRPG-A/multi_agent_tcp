@@ -179,12 +179,17 @@ multi_agent_tcp/
 - `multi_agent_tcp/test_workspace_api.py`
 - `multi_agent_tcp/test_workspace_manager.py`
 - `multi_agent_tcp/test_agent_runtime.py`
+- `multi_agent_tcp/test_skill_space.py`
+- `multi_agent_tcp/pytest.ini`
 
 ## Validation
 
 - `python -m py_compile workspace_manager.py workspace_api.py test_workspace_manager.py test_workspace_api.py ryven_blueprint.py`
 - Direct scripts verified text publishing, binary publishing, concurrent readers, reader-blocks-writer, writer-blocks-reader, and stale version conflict.
-- Full `pytest` was not run in the current Python environment because `pytest` is not installed.
+- Added pytest coverage for Workspace API binary stale-version conflicts, API-level reader/writer blocking, active-reader publish blocking, and path escape rejection.
+- Added `pytest.ini` so project pytest runs do not collect vendored Dulwich, generated `node_modules`, or nested `opencode` tests.
+- `python -m pytest -q test_workspace_api.py test_workspace_manager.py`: `22 passed`
+- `python -m pytest -q`: `59 passed`
 
 ## Current Conclusion
 
