@@ -7,6 +7,7 @@ A **peer-to-peer agent CLI communication bus** with multi-agent lifecycle, sessi
 ## Requirements
 
 - Python 3.10+
+- `merge3` Python package is recommended for Dulwich-powered three-way text merges in the workspace changeset flow (`python -m pip install merge3`).
 - At least one supported agent CLI on `PATH`. Currently:
   - `codemaker` (non-interactive `codemaker run` with `--format json`) — fully supported via `codemaker_bridge.py`.
   - Other CLIs: planned, see `ROADMAP.md`.

@@ -196,3 +196,119 @@ multi_agent_tcp/
 The minimum workspace-control loop is now implemented as a controlled local CLI API plus prompt/API-document injection. This is stronger than plain prompt guidance because shared outcomes go through manager-owned lease, manifest, and version checks. It is still not a full security boundary; a stronger future version should move the Workspace API behind broker/runtime-owned RPC or tool calls and add OS/sandbox-level filesystem restrictions.
 
 ---
+
+# 2026-05-07 Archive Note - Blueprint agent workdir semantics and runtime-owned Workspace RPC
+
+## Summary
+
+1. Reframed `AgentNode.cwd` from private scratch to the assigned user project working directory:
+   - `cwd="."` resolves to the current blueprint project path;
+   - relative `cwd` values resolve under the blueprint project path;
+   - agents are allowed to directly edit files under their assigned project workdir.
+2. Kept private agent directories for framework-owned state only:
+   - Workspace API context file;
+   - CLI-local state such as temporary `CODEX_HOME`;
+   - copied skill views and cache material.
+3. Added runtime-owned Workspace RPC:
+   - new `workspace_rpc.py` exposes a local token-guarded RPC service for run-scoped and long-term shared workspace operations;
+   - `workspace_api.py` remains the CLI entry point, but can now act as a thin RPC client when context contains `transport=rpc`;
+   - blueprint agent context no longer needs shared workspace physical paths.
+4. Added `run` and `long_term` Workspace API scopes:
+   - `run` targets temporary per-blueprint shared outputs;
+   - `long_term` targets project-level shared memory/artifacts retained across runs.
+5. Codex workers now default to project workdir execution with `sandbox=workspace-write` unless explicitly overridden.
+6. Rejected the earlier idea of a plain `cwd` data input on AgentNode:
+   - all agents should be started at blueprint launch;
+   - downstream workdir reassignment is not a data-edge convention.
+7. Added a super-agent-only workdir reassignment primitive:
+   - `SuperAgentProfile.can_assign_downstream_workdir`;
+   - optional `assignable_workdir_roots`;
+   - `GraphRuntime.assign_agent_workdir()`;
+   - `CodeMakerCluster.restart_worker()` kills and relaunches a worker with the same config plus the new `cwd`.
+8. Added basic agent busy tracking:
+   - blocking messages and nonblocking jobs increment `AgentInstance.busy_count`;
+   - workdir reassignment returns `AGENT_BUSY` when the target agent is executing.
+9. Added high-priority short-term tasks for the full blueprint loop:
+   - complete graph scheduling;
+   - collect project workdir changes;
+   - expose super-agent workdir assignment as a framework tool/API;
+   - harden agent state tracking;
+   - define structured task-completion messages;
+   - emit durable workspace/task events;
+   - define archive policy;
+   - implement auto-finish conditions;
+   - surface full run state in UI.
+
+## Affected Code
+
+- `multi_agent_tcp/workspace_rpc.py`
+- `multi_agent_tcp/workspace_api.py`
+- `multi_agent_tcp/ryven_blueprint.py`
+- `multi_agent_tcp/graph_runtime.py`
+- `multi_agent_tcp/cluster.py`
+- `multi_agent_tcp/skill_space.py`
+- `multi_agent_tcp/ryven_blueprint_nodes/gui.py`
+- `multi_agent_tcp/ryven_blueprint_nodes/nodes.py`
+- `multi_agent_tcp/docs/workspace_api.md`
+- `multi_agent_tcp/test_workspace_api.py`
+- `multi_agent_tcp/test_agent_runtime.py`
+- `multi_agent_tcp/KM_docs/skills-snapshot/tasks/current_goals.md`
+
+## Validation
+
+- `python -m pytest -q`: `64 passed`
+
+## Current Conclusion
+
+The project now treats the user project workdir and shared workspaces as separate surfaces. Agents may directly edit their assigned project workdir, while temporary and long-term shared collaboration data goes through the framework Workspace API. Blueprint runs start all agents up front; later workdir reassignment is reserved for super-agent framework calls and must fail when the target agent is busy.
+
+Remaining short-term work is to expose the reassignment primitive to super agents as a real tool/RPC, collect and attribute direct project workdir modifications, define structured completion messages, and implement durable event/auto-finish/archive policies.
+
+---
+
+# 2026-05-07 Archive Note - Runtime tick, agent states, queued messages, and Codex AgentNode output
+
+## Summary
+
+1. Added a framework-owned runtime tick concept:
+   - `GraphRuntime.tick()` is the frame-level maintenance point;
+   - the default background tick interval is `0.5` seconds;
+   - `GraphRuntime.__aenter__()` starts the tick loop, and callers can also invoke `tick()` manually in tests or host runtimes.
+2. Expanded `AgentInstance` from simple `busy_count` tracking into a small runtime state machine:
+   - states include `created`, `starting`, `idle`, `queued`, `dispatching`, `running`, `waiting_for_reply`, `processing_reply`, `failed`, `timed_out`, `cancelled`, `disconnected`, `restarting`, `stopping`, and `stopped`;
+   - each instance records `state_history`, `current_message_id`, `last_error`, timestamps, and whether it can currently accept another message.
+3. Added framework-owned per-agent message queues:
+   - if a target AgentNode is not currently able to accept a message, `send_agent_message()` stores a `PendingAgentMessage`;
+   - the pending record stores message body, source node/agent, target node/agent, timeout, status, result, error, and timing;
+   - each tick dispatches at most one queued message per idle agent, preserving FIFO ordering.
+4. Confirmed the intended display fields for Codex-backed AgentNode output:
+   - `reply.body.codex.final_text` is the framework-preferred final agent reply;
+   - `reply.body.codex.last_message` is the Codex CLI `--output-last-message` result and is used as the primary source for `final_text`;
+   - `reply.body.codex.stdout` is the raw JSONL event stream and is useful for archive/debug;
+   - `reply.body.codex.stderr` is useful for diagnostics but can contain large CLI warnings and remote plugin sync noise.
+5. Fixed a Windows Codex CLI launch compatibility issue:
+   - npm may resolve bare `codex` to `codex.ps1`;
+   - Python `create_subprocess_exec()` cannot directly execute a `.ps1` script through Windows `CreateProcess`;
+   - `codex_bridge.py` now prefers matching `.cmd`/`.exe`/`.bat` shims on Windows, and maps explicit `.ps1` paths to a sibling `.cmd` when available.
+6. Produced real AgentNode/Codex output samples in the working repository:
+   - `agentnode_codex_output_sample.json` for explicit `codex.cmd`;
+   - `agentnode_codex_auto_command_output_sample.json` for bare `command="codex"` after shim resolution.
+
+## Affected Code
+
+- `multi_agent_tcp/graph_runtime.py`
+- `multi_agent_tcp/codex_bridge.py`
+- `multi_agent_tcp/test_agent_runtime.py`
+- `multi_agent_tcp/__init__.py`
+
+## Validation
+
+- `python -m pytest test_agent_runtime.py -q`: `38 passed`
+- `python -m pytest test_workspace_api.py test_workspace_manager.py test_agent_runtime.py -q`: `72 passed`
+- Manual AgentNode -> GraphRuntime -> Codex worker run with `command="codex"` returned `reply.body.codex.final_text == "CODEX_AUTO_COMMAND_OK"`.
+
+## Current Conclusion
+
+The runtime now has a first framework-level scheduling heartbeat and enough agent state vocabulary to reason about when a CLI-backed AgentNode can accept work. Messages that arrive while an agent is busy are no longer dropped or forced through immediately; they are retained by the framework and released one at a time on later ticks.
+
+The next highest-priority work is no longer basic busy tracking. The short-term center of gravity should move to complete graph scheduling: parallel execution, fan-out/fan-in, condition/switch routing, nonblocking joins, and deterministic final state aggregation.

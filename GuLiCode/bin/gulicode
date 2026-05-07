@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+
+import { spawnSync } from "node:child_process"
+import { dirname } from "node:path"
+import { fileURLToPath } from "node:url"
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)))
+const args = ["run", "--cwd", "packages/opencode", "--conditions=browser", "src/index.ts", ...process.argv.slice(2)]
+
+const result = spawnSync("bun", args, {
+  cwd: root,
+  stdio: "inherit",
+  shell: process.platform === "win32",
+})
+
+if (result.error) {
+  console.error(result.error.message)
+  process.exit(1)
+}
+
+process.exit(typeof result.status === "number" ? result.status : 0)

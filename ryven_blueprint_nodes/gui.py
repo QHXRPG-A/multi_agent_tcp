@@ -63,7 +63,7 @@ class AgentNodeMainWidget(NodeMainWidget, QWidget):
         layout.addRow("prompt", self.prompt_edit)
         layout.addRow("cli_kind", self.cli_kind_combo)
         layout.addRow("model", self.model_edit)
-        layout.addRow("cwd", self.cwd_edit)
+        layout.addRow("workdir", self.cwd_edit)
         layout.addRow("timeout", self.timeout_spin)
         layout.addRow("command", self.command_edit)
         layout.addRow("prompt_file", self.prompt_via_file_combo)

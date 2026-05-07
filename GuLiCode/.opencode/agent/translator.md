@@ -35,7 +35,7 @@ Locale guidance does not override code/command preservation rules or the global 
 
 ---
 
-# Do-Not-Translate Terms (OpenCode Docs)
+# Do-Not-Translate Terms (GuLiCode Docs)
 
 Generated from: `packages/web/src/content/docs/*.mdx` (default English docs)
 Generated on: 2026-02-10
@@ -152,15 +152,15 @@ OAuth
 Ollama integration docs
 OpenAI's Data Policies
 OpenChamber
-OpenCode
-OpenCode config
-OpenCode Config
-OpenCode TUI with the opencode theme
-OpenCode Web - Active Session
-OpenCode Web - New Session
-OpenCode Web - See Servers
-OpenCode Zen
-OpenCode-Obsidian
+GuLiCode
+GuLiCode config
+GuLiCode Config
+GuLiCode TUI with the opencode theme
+GuLiCode Web - Active Session
+GuLiCode Web - New Session
+GuLiCode Web - See Servers
+GuLiCode Zen
+GuLiCode-Obsidian
 OpenRouter dashboard
 OpenWork
 OVHcloud panel
@@ -301,7 +301,7 @@ NoeFabris
 OpenAI
 OpenAPI
 OpenChamber
-OpenCode
+GuLiCode
 OpenRouter
 OpenTUI
 OpenWork
@@ -325,7 +325,7 @@ xAI
 ZenMux
 ```
 
-## OpenCode CLI commands (as shown in docs)
+## GuLiCode CLI commands (as shown in docs)
 
 ```text
 opencode

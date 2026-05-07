@@ -151,7 +151,7 @@ npm plugins can declare a version compatibility range in `package.json` using th
 }
 ```
 
-- The value is a semver range checked against the running OpenCode version.
+- The value is a semver range checked against the running GuLiCode version.
 - If the range is not satisfied, the plugin is skipped with a warning and a session error.
 - If `engines.opencode` is absent, no check is performed (backward compatible).
 - File plugins are never checked; only npm package plugins are validated.
@@ -180,7 +180,7 @@ npm plugins can declare a version compatibility range in `package.json` using th
 - There is no uninstall, list, or update CLI command for external plugins.
 - Local file plugins are configured directly in `tui.json`.
 
-When `plugin` entries exist in a writable `.opencode` dir or `OPENCODE_CONFIG_DIR`, OpenCode installs `@opencode-ai/plugin` into that dir and writes:
+When `plugin` entries exist in a writable `.opencode` dir or `OPENCODE_CONFIG_DIR`, GuLiCode installs `@opencode-ai/plugin` into that dir and writes:
 
 - `package.json`
 - `bun.lock`

@@ -102,3 +102,111 @@ bun run --cwd packages/opencode --conditions=browser src/index.ts --help
    - 改入口
    - 改包边界
    - 去掉不需要的 provider / UI / 平台面
+
+---
+
+### 2026-05-07 - GuLiCode 品牌替换、项目级 CLI 入口与启动验证
+
+#### 摘要
+
+1. 在 `multi_agent_tcp/GuLiCode/` 内完成一轮 GuLiCode 品牌化重构：将用户可见的 `OpenCode` 描述替换为 `GuLiCode`。
+2. CLI 展示名从 `opencode` 调整为 `gulicode`，帮助信息、server 描述、TUI 项目位置描述、mDNS 默认说明等已同步。
+3. 新增项目级命令入口，使终端可以直接输入 `GuLiCode` 或 `gulicode` 拉起当前 GuLiCode。
+4. 修正 TUI 首页中心像素 logo：原先仍显示 `opencode`，已替换为 `GULI CODE` 字模。
+5. 完成最小 CLI、version、headless server、全局命令入口 smoke 验证。
+
+#### 涉及文件
+
+- `multi_agent_tcp/GuLiCode/package.json`
+- `multi_agent_tcp/GuLiCode/bin/gulicode`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/index.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/cmd/serve.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/cmd/web.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/cmd/run.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/cmd/pr.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/cmd/uninstall.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/cmd/upgrade.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/cmd/tui/attach.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/cmd/tui/thread.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/network.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/logo.ts`
+- `multi_agent_tcp/GuLiCode/packages/opencode/src/cli/ui.ts`
+- 以及 README、i18n、desktop/web/console、SDK/OpenAPI 等用户可见文案文件。
+
+#### 当前启动方式
+
+项目内部仍以 `packages/opencode/src/index.ts` 为运行入口，当前推荐命令为：
+
+```powershell
+GuLiCode --help
+GuLiCode
+GuLiCode serve --hostname 127.0.0.1 --port 4096
+GuLiCode run "hello"
+```
+
+项目级入口实现：
+
+```text
+GuLiCode/bin/gulicode
+```
+
+该入口会转发到：
+
+```powershell
+bun run --cwd packages/opencode --conditions=browser src/index.ts
+```
+
+本机已在 `GuLiCode/` 下执行：
+
+```powershell
+bun link
+```
+
+因此当前 Windows 环境里：
+
+```powershell
+where.exe gulicode
+```
+
+可解析到：
+
+```text
+C:\Users\qiuhaoxuan\.bun\bin\gulicode.exe
+```
+
+#### 验证结果
+
+已验证：
+
+```powershell
+GuLiCode --help
+GuLiCode --version
+bun run --cwd packages/opencode --conditions=browser src/index.ts --help
+bun run --cwd packages/opencode --conditions=browser src/index.ts --version
+GuLiCode serve --hostname 127.0.0.1 --port 43993 --print-logs
+```
+
+结论：
+
+- `GuLiCode --help` 成功，顶部 wordmark 显示 `GULI CODE`，命令前缀显示 `gulicode`。
+- `GuLiCode --version` 成功，输出 `local`。
+- `GuLiCode serve` 成功拉起 headless server，HTTP 探测返回 `200`。
+- server stdout 显示 `GuLiCode server listening on http://127.0.0.1:<port>`。
+
+#### 仍保留的运行期 OpenCode 标识
+
+以下内容暂时保留，因为仍是当前启动链、依赖解析或配置兼容的一部分：
+
+- `packages/opencode/` 目录名
+- `.opencode/` 配置目录
+- `@opencode-ai/*` workspace/package 依赖名
+- `OPENCODE_*` 环境变量
+- `~/.config/opencode` 与 `~/.local/share/opencode` 等用户配置/数据路径
+- `opencode` 主题名、插件生态引用、旧插件名兼容信息
+
+这些属于下一阶段深度迁移，不应在未做完整兼容层和数据迁移前机械替换。
+
+#### 当前已知非阻塞提示
+
+- 未设置 `OPENCODE_SERVER_PASSWORD` 时，server 会提示无密码保护；这不影响本地 smoke 启动。
+- `.opencode/opencode.jsonc` 中仍可能加载 `oh-my-opencode@latest`，启动时会提示应改为 `oh-my-openagent@latest`；当前不影响 GuLiCode 拉起。

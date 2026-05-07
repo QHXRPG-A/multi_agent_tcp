@@ -1,6 +1,6 @@
 # GuLiCode
 
-GuLiCode is a rebuildable, runnable baseline copied from the upstream OpenCode workspace and intended for gradual integration into `multi_agent_tcp`.
+GuLiCode is a rebuildable, runnable baseline copied from the upstream GuLiCode workspace and intended for gradual integration into `multi_agent_tcp`.
 
 Upstream:
 - Repository: https://github.com/anomalyco/opencode
@@ -14,7 +14,7 @@ Rebuild policy:
 
 Important:
 - This directory is meant to stay bootable first, then be trimmed incrementally with repeated startup verification.
-- If `GuLiCode` is mentioned publicly, clarify that it is an independent project derived from OpenCode and is not affiliated with the OpenCode team.
+- If `GuLiCode` is mentioned publicly, clarify that it is an independent project derived from GuLiCode and is not affiliated with the GuLiCode team.
 
 ## 二开与本 vendor 副本的差异
 

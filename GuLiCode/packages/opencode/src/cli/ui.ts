@@ -4,12 +4,12 @@ import { NamedError } from "@opencode-ai/shared/util/error"
 import { logo as glyphs } from "./logo"
 
 const wordmark = [
-  `⠀                                ▄     `,
-  `█▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█`,
-  `█  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀`,
-  `▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀  ▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀`,
+  `  GGG  U   U L    III    CCC  OOO  DDD  EEEE`,
+  ` G     U   U L     I    C    O   O D  D E   `,
+  ` G  GG U   U L     I    C    O   O D  D EEE `,
+  ` G   G U   U L     I    C    O   O D  D E   `,
+  `  GGG   UUU  LLLL III    CCC  OOO  DDD  EEEE`,
 ]
-
 export const CancelledError = NamedError.create("UICancelledError", z.void())
 
 export const Style = {

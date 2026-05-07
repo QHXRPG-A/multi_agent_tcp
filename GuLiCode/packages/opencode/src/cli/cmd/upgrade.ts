@@ -7,7 +7,7 @@ import { InstallationVersion } from "../../installation/version"
 
 export const UpgradeCommand = {
   command: "upgrade [target]",
-  describe: "upgrade opencode to the latest or a specific version",
+  describe: "upgrade GuLiCode to the latest or a specific version",
   builder: (yargs: Argv) => {
     return yargs
       .positional("target", {

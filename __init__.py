@@ -47,13 +47,17 @@ from .graph_runtime import (
     GraphJob,
     GraphRuntime,
     MultiModalEnvelope,
+    PendingAgentMessage,
     RouteNode,
+    WorkdirAssignmentResult,
     WorkspaceManifest,
     normalize_envelope,
 )
 from .ryven_blueprint import RyvenFlowCompileError, compile_ryven_flow
 from .ryven_blueprint import BlueprintRunController, BlueprintRunResult
 from .workspace_manager import (
+    AgentCheckout,
+    ChangesetSubmitResult,
     DulwichWorkspaceManager,
     FileChange,
     JobWorkspace,
@@ -97,6 +101,8 @@ __all__ = (
     "AgentInstance",
     "GraphRuntime",
     "BrokerAgentRuntime",
+    "WorkdirAssignmentResult",
+    "PendingAgentMessage",
     "MultiModalEnvelope",
     "normalize_envelope",
     "GraphEvent",
@@ -113,6 +119,8 @@ __all__ = (
     "DulwichWorkspaceManager",
     "ProjectWorkspace",
     "RunWorkspace",
+    "AgentCheckout",
+    "ChangesetSubmitResult",
     "JobWorkspace",
     "FileChange",
     "MergeResult",

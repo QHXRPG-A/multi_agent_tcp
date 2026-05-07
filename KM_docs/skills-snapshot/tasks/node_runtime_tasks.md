@@ -35,8 +35,8 @@
    - 下一步把 `upstream` 与图上游超级 agent 的配置流、授权 skill materialize 串起来
 3. 完善 `AgentSkillView` 与 CodexAdapter 的强隔离：
    - prompt/context 注入已可用
-   - 下一步绑定临时 `CODEX_HOME`
-   - 后续接入 sandbox / writable path policy
+   - 临时 `CODEX_HOME` 已绑定到 agent 私有目录
+   - Codex 蓝图启动已使用 `workspace-write` sandbox + private checkout `cwd`，并拒绝 `danger-full-access` 与把真实项目目录加入 `--add-dir`
 4. 为超级 agent 增加下游 agent 配置能力：
    - model
    - skills
@@ -116,7 +116,7 @@
 1. 节点分类目前只落地了 Agent 节点；处理节点、路由节点、I/O 节点仍停留在设计任务。
 2. Agent 节点生命周期已有“首次绑定/后续复用/运行时 close 清理绑定”的基础实现；由 cluster 拥有的 worker 进程 teardown 仍委托给 cluster，尚未形成完整图运行失败/取消收尾协议。
 3. 图编译目前已有路由节点到 `run_chain` / `run_parallel` / `run_parallel_reduce` 的最小映射，并新增 runnable blueprint 起止约束；Ryven flow -> `GraphDefinition` 编译已落地第一版，但还没有图级 blocking 执行入口和事件回流 UI。
-4. 共享工作区已有隔离目录、diff、merge、冲突检测、完整目录归档和 runtime 只读策略；lock / lease、OS ACL / 沙箱级只读强制、持久 runner、Git 对象级 commit/ref merge 仍未做。
+4. 共享工作区已有隔离目录、diff、merge、冲突检测、完整目录归档和 runtime 只读策略；Codex strict launch 依赖 `workspace-write` sandbox 和启动参数校验；lock / lease、持久 runner、Git 对象级 commit/ref merge 仍未做。
 5. 工作区模型已开始向 `base/` + `shared/` + `agents/<agent_id>/private/` 拆分：私有目录只作为 scratch，归档前丢弃；共享目录保留成果，并已有最小文件级 lease API。完整运行期竞态处理、manifest 协议和 Dulwich commit/ref merge 仍未完成。
 6. 事件模型目前是内存列表和 manifest 更新；还不是跨进程事件总线。
 7. SkillSpace 目前提供目录级隔离与 prompt/context 暴露；已可生成 CodexAdapter options，但尚未把临时 `CODEX_HOME` 自动绑定到 CLI 运行时做强隔离。
@@ -165,7 +165,7 @@
 - `publish` and `publish-file` go through `DulwichWorkspaceManager` shared write APIs and lease/manifest recording.
 - Shared files now use a per-path read/write lock: concurrent reads are allowed, but any active writer blocks readers and writers, and active readers block writers.
 - Workspace API also exposes per-path write versions: agents can `read --json`, edit privately, then `publish --expected-version N` to avoid stale overwrites during multi-agent edits.
-- Remaining caveat: this is a controlled CLI API and prompt contract, not a full security boundary. A stronger version should move the context behind a broker-side RPC/token service and add OS/sandbox-level write restrictions.
+- Remaining caveat: this is a controlled CLI API and prompt contract, not a full security boundary for every possible CLI backend. Codex strict launch currently relies on Codex `workspace-write` sandbox semantics; other backends need separate evaluation before being treated as strict.
 
 Still pending:
 - Move Workspace API from local context-file CLI to a broker-side or runtime-owned RPC/tool protocol.
@@ -189,7 +189,81 @@ Completed and archived into `archive/blueprint_integration_archive.md`:
 Current short-term follow-up:
 
 - Promote Workspace API from local context-file CLI to broker/runtime-owned RPC or tool calls.
-- Add stronger filesystem enforcement so agents cannot bypass the API by direct shared-path writes.
 - Add conflict records and optional Dulwich commit/ref merge for `shared/code/`.
 - Emit `WorkspaceChanged` events from Workspace API publish/read flows and surface them in the UI.
 - Define UI-visible policies for binary artifacts, deletes/renames, and scope violations.
+
+## 2026-05-07 VCS-style workspace task update
+
+The file/snapshot VCS-style workspace MVP is now implemented and tested in the codebase.
+
+Completed:
+
+- `checkout/status/diff/submit/sync` exist at manager, RPC, and CLI levels.
+- Agent checkouts are scoped and copied from current `run.integration_dir`.
+- Each checkout keeps its own base snapshot under `agents/<agent_id>/private/state/base`.
+- Submit compares checkout base, latest integration, and agent checkout to decide accept/conflict.
+- Conflict responses are structured and preserved over RPC.
+- The conflict repair loop is tested end to end.
+- Text merge uses Dulwich `merge_blobs()` when available and falls back to conservative conflict behavior otherwise.
+- `merge3` is recorded as the recommended dependency for Dulwich hunk-level text merging.
+
+Next runtime tasks:
+
+1. Inject the VCS code-collaboration contract into AgentNode prompts and execution context.
+2. Prefer `checkout -> edit -> status/diff -> submit` for source edits; keep `publish` for reports/artifacts and non-source outputs.
+3. Launch strict agents with project context read-only and private checkout writable.
+4. Attach changeset ids, conflict ids, test results, and repair attempts to `TaskCompleted` / final blueprint reports.
+5. Surface `CheckoutCreated`, `ChangesetSubmitted`, `ChangesetAccepted`, `ConflictDetected`, `CheckoutSynced`, and `WorkspaceChanged` in the UI/runtime event stream.
+6. Define submit policies for binary files, deletes, renames, formatter-only changes, generated files, and large files.
+7. After the file/snapshot RPC contract stabilizes, evaluate Dulwich commit/ref storage for baseline and integration refs.
+
+## 2026-05-07 runtime tick and graph scheduling priority update
+
+Completed:
+
+- `GraphRuntime` now has a framework tick loop with a default 0.5-second frame interval.
+- `AgentInstance` now tracks a fuller lifecycle state vocabulary and state history, covering startup, idle, queued, dispatching, running, waiting for reply, processing reply, failure, timeout, cancellation, restart, and stop phases.
+- Runtime-managed per-agent queues now retain messages that arrive while a CLI-backed AgentNode cannot accept work.
+- Each tick can dispatch queued messages FIFO, one message per idle agent per frame.
+- Codex-backed AgentNode output was verified through the real `AgentNode -> GraphRuntime -> codex worker` path.
+- Codex final reply display should use `reply.body.codex.final_text`; raw `stdout` remains JSONL debug/archive data, and `stderr` should be treated as diagnostic noise unless an error needs inspection.
+- Windows Codex command resolution now avoids `.ps1` direct execution and prefers npm `.cmd` shims.
+
+New top priority:
+
+1. Complete graph scheduling beyond the minimal single exec path:
+   - `parallel` branches;
+   - fan-out/fan-in;
+   - `condition` / `switch` routing;
+   - nonblocking job joins;
+   - deterministic final state aggregation.
+2. Define scheduler frame semantics:
+   - ready nodes;
+   - blocked nodes;
+   - running nodes/jobs;
+   - completed branches;
+   - failed/cancelled/timed-out branches;
+   - join nodes waiting for upstream requirements;
+   - terminal aggregation.
+3. Define fan-out semantics:
+   - how one upstream output becomes multiple downstream tasks;
+   - how source metadata, task id, branch id, and parent output are carried;
+   - how branch-level errors are reported without losing successful sibling outputs.
+4. Define fan-in semantics:
+   - wait-all, wait-any, quorum, and timeout policies;
+   - how accepted changesets, conflicts, artifacts, reports, and test results are merged into the fan-in input.
+5. Define condition/switch semantics:
+   - routing based on structured output/status, not prompt text alone;
+   - first-match vs multi-match behavior;
+   - default/fallback branch behavior;
+   - error branch behavior.
+6. Define nonblocking join semantics:
+   - join by job id, branch id, node id, or named group;
+   - cancellation and retry policy;
+   - timeout policy;
+   - partial completion policy.
+7. Define deterministic end-state aggregation:
+   - final graph status must be reproducible from scheduler state and event history;
+   - final report should explicitly distinguish success, partial success, failure, cancellation, unresolved conflict, and timeout;
+   - aggregation should include changed files, accepted changesets, conflicts, artifacts, reports, test results, and follow-up risks.

@@ -1,6 +1,6 @@
-# OpenCode Desktop
+# GuLiCode Desktop
 
-Native OpenCode desktop app, built with Tauri v2.
+Native GuLiCode desktop app, built with Tauri v2.
 
 ## Development
 

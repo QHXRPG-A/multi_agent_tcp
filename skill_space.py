@@ -271,7 +271,9 @@ class SuperAgentProfile:
     agent_id: str
     can_view_skill_space: bool = True
     can_assign_downstream_skills: bool = True
+    can_assign_downstream_workdir: bool = False
     assignable_skill_hashes: Optional[List[str]] = None
+    assignable_workdir_roots: Optional[List[Path]] = None
 
     def validate_assignment(self, skill_hashes: Sequence[str], skill_space: SkillSpace) -> None:
         if not self.can_assign_downstream_skills:
@@ -300,3 +302,22 @@ class SuperAgentProfile:
             for h, rec in sorted(records.items())
             if h in allowed
         ]
+
+    def validate_workdir_assignment(self, cwd: Path) -> Path:
+        if not self.can_assign_downstream_workdir:
+            raise PermissionError(f"super agent {self.agent_id!r} cannot assign workdirs")
+        resolved = Path(cwd).expanduser().resolve()
+        if not resolved.is_dir():
+            raise FileNotFoundError(f"assigned workdir is not a directory: {resolved}")
+        if self.assignable_workdir_roots is None:
+            return resolved
+        roots = [Path(root).expanduser().resolve() for root in self.assignable_workdir_roots]
+        for root in roots:
+            try:
+                resolved.relative_to(root)
+                return resolved
+            except ValueError:
+                continue
+        raise PermissionError(
+            f"super agent {self.agent_id!r} cannot assign workdir outside allowed roots: {resolved}"
+        )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,7 @@ AgentExecutionMode = str
 GraphEventType = str
 SkillSelectionMode = str
 BlueprintTerminalKind = str
+AgentRuntimeState = str
 
 _VALID_ENVELOPE_KINDS = {"text", "image", "audio", "file", "blob"}
 _VALID_ENVELOPE_ENCODINGS = {"inline", "fileref", "blobref"}
@@ -29,6 +31,25 @@ _VALID_EXECUTION_MODES = {"blocking", "nonblocking"}
 _VALID_ROUTE_KINDS = {"sequence", "parallel", "parallel_reduce"}
 _VALID_SKILL_SELECTION_MODES = {"none", "all", "selected", "upstream"}
 _VALID_BLUEPRINT_TERMINAL_KINDS = {"start", "end"}
+_AGENT_CAN_ACCEPT_STATES = {"idle", "queued"}
+_VALID_AGENT_RUNTIME_STATES = {
+    "created",
+    "starting",
+    "idle",
+    "queued",
+    "dispatching",
+    "running",
+    "waiting_for_reply",
+    "processing_reply",
+    "completed",
+    "failed",
+    "timed_out",
+    "cancelled",
+    "disconnected",
+    "restarting",
+    "stopping",
+    "stopped",
+}
 
 
 def generate_agent_node_id() -> str:
@@ -512,6 +533,111 @@ class AgentInstance:
     agent_id: str
     external: bool = False
     messages_sent: int = 0
+    busy_count: int = 0
+    state: AgentRuntimeState = "created"
+    current_message_id: Optional[str] = None
+    last_error: Optional[str] = None
+    started_at: float = field(default_factory=time.monotonic)
+    updated_at: float = field(default_factory=time.monotonic)
+    state_history: List[Dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.set_state(self.state)
+
+    @property
+    def can_accept_message(self) -> bool:
+        return self.busy_count == 0 and self.state in _AGENT_CAN_ACCEPT_STATES
+
+    def set_state(
+        self,
+        state: AgentRuntimeState,
+        *,
+        error: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> None:
+        if state not in _VALID_AGENT_RUNTIME_STATES:
+            raise ValueError(f"unsupported agent runtime state: {state!r}")
+        self.state = state
+        self.updated_at = time.monotonic()
+        self.last_error = error
+        if message_id is not None or state == "idle":
+            self.current_message_id = message_id
+        self.state_history.append(
+            {
+                "state": state,
+                "at": self.updated_at,
+                "message_id": self.current_message_id,
+                "error": error,
+            }
+        )
+
+
+@dataclass
+class PendingAgentMessage:
+    """Message held by the framework until a target agent can receive it."""
+
+    message_id: str
+    node_id: str
+    agent_id: str
+    body: Any
+    source_node_id: Optional[str] = None
+    source_agent_id: Optional[str] = None
+    timeout_sec: Optional[float] = None
+    created_at: float = field(default_factory=time.monotonic)
+    dispatched_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    status: str = "queued"
+    result: Any = None
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "message_id": self.message_id,
+            "node_id": self.node_id,
+            "agent_id": self.agent_id,
+            "body": self.body,
+            "status": self.status,
+            "created_at": self.created_at,
+        }
+        if self.source_node_id is not None:
+            data["source_node_id"] = self.source_node_id
+        if self.source_agent_id is not None:
+            data["source_agent_id"] = self.source_agent_id
+        if self.timeout_sec is not None:
+            data["timeout_sec"] = self.timeout_sec
+        if self.dispatched_at is not None:
+            data["dispatched_at"] = self.dispatched_at
+        if self.completed_at is not None:
+            data["completed_at"] = self.completed_at
+        if self.result is not None:
+            data["result"] = self.result
+        if self.error is not None:
+            data["error"] = self.error
+        return data
+
+
+@dataclass
+class WorkdirAssignmentResult:
+    ok: bool
+    agent_id: str
+    node_id: str
+    cwd: Optional[Path] = None
+    error_code: Optional[str] = None
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "ok": self.ok,
+            "agent_id": self.agent_id,
+            "node_id": self.node_id,
+        }
+        if self.cwd is not None:
+            data["cwd"] = str(self.cwd)
+        if self.error_code is not None:
+            data["error_code"] = self.error_code
+        if self.error is not None:
+            data["error"] = self.error
+        return data
 
 
 class GraphRuntime:
@@ -527,12 +653,19 @@ class GraphRuntime:
         cluster: Any,
         *,
         workspace: Optional[WorkspaceManifest] = None,
+        tick_interval_sec: float = 0.5,
     ) -> None:
         self.cluster = cluster
         self.workspace = workspace
+        self.tick_interval_sec = float(tick_interval_sec)
         self._instances: Dict[str, AgentInstance] = {}
+        self._agent_message_queues: Dict[str, List[PendingAgentMessage]] = {}
+        self._pending_messages: Dict[str, PendingAgentMessage] = {}
+        self._dispatch_tasks: Dict[str, asyncio.Task[None]] = {}
         self._jobs: Dict[str, GraphJob] = {}
         self._events: List[GraphEvent] = []
+        self._tick_task: Optional[asyncio.Task[None]] = None
+        self._last_tick_at: Optional[float] = None
         self._closed = False
 
     @property
@@ -544,12 +677,111 @@ class GraphRuntime:
         return dict(self._jobs)
 
     @property
+    def agent_message_queues(self) -> Dict[str, List[PendingAgentMessage]]:
+        return {node_id: list(queue) for node_id, queue in self._agent_message_queues.items()}
+
+    @property
+    def pending_messages(self) -> Dict[str, PendingAgentMessage]:
+        return dict(self._pending_messages)
+
+    @property
     def events(self) -> List[GraphEvent]:
         return list(self._events)
 
     def _emit(self, event: GraphEvent) -> GraphEvent:
         self._events.append(event)
         return event
+
+    def _set_agent_state(
+        self,
+        inst: AgentInstance,
+        state: AgentRuntimeState,
+        *,
+        error: Optional[str] = None,
+        message_id: Optional[str] = None,
+        emit: bool = False,
+    ) -> None:
+        old_state = inst.state
+        inst.set_state(state, error=error, message_id=message_id)
+        if emit and old_state != state:
+            self._emit(
+                GraphEvent(
+                    "AgentStateChanged",
+                    node_id=inst.node.node_id,
+                    agent_id=inst.agent_id,
+                    status=state,
+                    payload={
+                        "from": old_state,
+                        "to": state,
+                        "busy_count": inst.busy_count,
+                        "queue_size": len(self._agent_message_queues.get(inst.node.node_id, [])),
+                        "message_id": inst.current_message_id,
+                        "error": error,
+                    },
+                )
+            )
+
+    def start_tick_loop(self) -> None:
+        """Start the framework tick loop if an event loop is running."""
+        if self._closed or self._tick_task is not None:
+            return
+        self._tick_task = asyncio.create_task(self._tick_loop())
+
+    async def stop_tick_loop(self) -> None:
+        task = self._tick_task
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        self._tick_task = None
+
+    async def _tick_loop(self) -> None:
+        while not self._closed:
+            await self.tick()
+            await asyncio.sleep(self.tick_interval_sec)
+
+    async def tick(self) -> None:
+        """Run one framework frame.
+
+        The frame checks agent/job state and dispatches at most one queued
+        message per idle agent. A queued agent message therefore advances in
+        the same rhythm as the framework rather than bypassing the scheduler.
+        """
+        if self._closed:
+            return
+        self._last_tick_at = time.monotonic()
+
+        finished: List[str] = []
+        for message_id, task in self._dispatch_tasks.items():
+            if task.done():
+                finished.append(message_id)
+        for message_id in finished:
+            self._dispatch_tasks.pop(message_id, None)
+
+        for node_id, inst in list(self._instances.items()):
+            if inst.busy_count < 0:
+                inst.busy_count = 0
+            queue = self._agent_message_queues.get(node_id, [])
+            if not queue or not inst.can_accept_message:
+                continue
+            pending = queue.pop(0)
+            pending.status = "dispatching"
+            pending.dispatched_at = time.monotonic()
+            self._emit(
+                GraphEvent(
+                    "AgentQueuedMessageDispatched",
+                    node_id=node_id,
+                    agent_id=inst.agent_id,
+                    status=pending.status,
+                    payload=pending.to_dict(),
+                )
+            )
+            self._dispatch_tasks[pending.message_id] = asyncio.create_task(
+                self._dispatch_pending_message(inst.node, pending)
+            )
 
     async def ensure_agent(self, node: AgentNode) -> AgentInstance:
         if self._closed:
@@ -558,14 +790,23 @@ class GraphRuntime:
             return self._instances[node.node_id]
 
         agent_id = node.runtime_agent_id
-        ensure_worker = getattr(self.cluster, "ensure_worker", None)
-        if callable(ensure_worker) and not node.external:
-            await ensure_worker(node.to_worker_config())
-        self._instances[node.node_id] = AgentInstance(
+        inst = AgentInstance(
             node=node,
             agent_id=agent_id,
             external=node.external,
+            state="starting",
         )
+        self._instances[node.node_id] = inst
+        self._agent_message_queues.setdefault(node.node_id, [])
+        ensure_worker = getattr(self.cluster, "ensure_worker", None)
+        if callable(ensure_worker) and not node.external:
+            try:
+                await ensure_worker(node.to_worker_config())
+            except Exception as exc:
+                self._set_agent_state(inst, "failed", error=str(exc))
+                self._instances.pop(node.node_id, None)
+                raise
+        self._set_agent_state(inst, "idle")
         log.info(
             "[graph] bound node_id=%s agent_id=%s cli_kind=%s external=%s",
             node.node_id,
@@ -573,7 +814,7 @@ class GraphRuntime:
             node.cli_kind,
             node.external,
         )
-        return self._instances[node.node_id]
+        return inst
 
     async def prestart_agents(self, nodes: Sequence[AgentNode]) -> None:
         """Bind and start every AgentNode before graph execution begins."""
@@ -586,6 +827,8 @@ class GraphRuntime:
         body: Any,
         *,
         timeout_sec: Optional[float] = None,
+        source_node_id: Optional[str] = None,
+        source_agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         if node.execution_mode == "nonblocking":
             job = await self.submit_agent_job(node, body, timeout_sec=timeout_sec)
@@ -597,12 +840,131 @@ class GraphRuntime:
                 "status": job.status,
             }
         inst = await self.ensure_agent(node)
-        reply = await self.cluster.run_single(
-            inst.agent_id,
+        if not inst.can_accept_message:
+            pending = self.queue_agent_message(
+                node,
+                body,
+                timeout_sec=timeout_sec,
+                source_node_id=source_node_id,
+                source_agent_id=source_agent_id,
+            )
+            return {
+                "type": "graph_message_queued",
+                "message_id": pending.message_id,
+                "node_id": pending.node_id,
+                "agent_id": pending.agent_id,
+                "status": pending.status,
+                "queue_size": len(self._agent_message_queues.get(node.node_id, [])),
+            }
+        return await self._dispatch_agent_message(
+            node,
             body,
-            timeout_sec=timeout_sec if timeout_sec is not None else node.timeout_sec,
+            timeout_sec=timeout_sec,
         )
+
+    def queue_agent_message(
+        self,
+        node: AgentNode,
+        body: Any,
+        *,
+        timeout_sec: Optional[float] = None,
+        source_node_id: Optional[str] = None,
+        source_agent_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> PendingAgentMessage:
+        """Store a message until the target agent returns to an idle state."""
+        if self._closed:
+            raise RuntimeError("GraphRuntime is closed")
+        inst = self._instances.get(node.node_id)
+        agent_id = inst.agent_id if inst is not None else node.runtime_agent_id
+        pending = PendingAgentMessage(
+            message_id=message_id or f"msg-{uuid.uuid4().hex[:12]}",
+            node_id=node.node_id,
+            agent_id=agent_id,
+            body=body,
+            source_node_id=source_node_id,
+            source_agent_id=source_agent_id,
+            timeout_sec=timeout_sec,
+        )
+        self._agent_message_queues.setdefault(node.node_id, []).append(pending)
+        self._pending_messages[pending.message_id] = pending
+        if inst is not None and inst.state == "idle":
+            self._set_agent_state(inst, "queued")
+        self._emit(
+            GraphEvent(
+                "AgentMessageQueued",
+                node_id=node.node_id,
+                agent_id=agent_id,
+                status=pending.status,
+                payload=pending.to_dict(),
+            )
+        )
+        return pending
+
+    async def _dispatch_pending_message(
+        self,
+        node: AgentNode,
+        pending: PendingAgentMessage,
+    ) -> None:
+        try:
+            pending.result = await self._dispatch_agent_message(
+                node,
+                pending.body,
+                timeout_sec=pending.timeout_sec,
+                message_id=pending.message_id,
+            )
+            pending.status = "completed"
+        except asyncio.CancelledError:
+            pending.status = "cancelled"
+            raise
+        except Exception as exc:  # pragma: no cover - defensive queued event contract
+            pending.status = "failed"
+            pending.error = str(exc)
+        finally:
+            pending.completed_at = time.monotonic()
+            self._emit(
+                GraphEvent(
+                    "AgentQueuedMessageCompleted",
+                    node_id=pending.node_id,
+                    agent_id=pending.agent_id,
+                    status=pending.status,
+                    payload=pending.to_dict(),
+                )
+            )
+
+    async def _dispatch_agent_message(
+        self,
+        node: AgentNode,
+        body: Any,
+        *,
+        timeout_sec: Optional[float] = None,
+        message_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        inst = await self.ensure_agent(node)
+        inst.busy_count += 1
+        self._set_agent_state(inst, "dispatching", message_id=message_id)
+        try:
+            self._set_agent_state(inst, "running", message_id=message_id)
+            self._set_agent_state(inst, "waiting_for_reply", message_id=message_id)
+            reply = await self.cluster.run_single(
+                inst.agent_id,
+                body,
+                timeout_sec=timeout_sec if timeout_sec is not None else node.timeout_sec,
+            )
+            self._set_agent_state(inst, "processing_reply", message_id=message_id)
+        except asyncio.TimeoutError:
+            self._set_agent_state(inst, "timed_out", error="timeout", message_id=message_id)
+            raise
+        except asyncio.CancelledError:
+            self._set_agent_state(inst, "cancelled", message_id=message_id)
+            raise
+        except Exception as exc:
+            self._set_agent_state(inst, "failed", error=str(exc), message_id=message_id)
+            raise
+        finally:
+            inst.busy_count = max(0, inst.busy_count - 1)
         inst.messages_sent += 1
+        self._set_agent_state(inst, "idle")
         return reply
 
     async def submit_agent_job(
@@ -670,10 +1032,11 @@ class GraphRuntime:
             )
         )
         try:
-            reply = await self.cluster.run_single(
-                job.agent_id,
+            reply = await self._dispatch_agent_message(
+                node,
                 body,
-                timeout_sec=timeout_sec if timeout_sec is not None else node.timeout_sec,
+                timeout_sec=timeout_sec,
+                message_id=job.job_id,
             )
         except Exception as exc:  # pragma: no cover - defensive event contract
             job.status = "failed"
@@ -708,6 +1071,65 @@ class GraphRuntime:
             )
         )
 
+    async def assign_agent_workdir(
+        self,
+        *,
+        super_agent: Any,
+        target_node_id: str,
+        cwd: Path,
+    ) -> WorkdirAssignmentResult:
+        if self._closed:
+            raise RuntimeError("GraphRuntime is closed")
+        if not hasattr(super_agent, "validate_workdir_assignment"):
+            raise PermissionError("workdir assignment requires a SuperAgentProfile")
+        inst = self._instances.get(target_node_id)
+        if inst is None:
+            raise KeyError(f"unknown or unstarted AgentNode: {target_node_id}")
+        if inst.busy_count > 0:
+            return WorkdirAssignmentResult(
+                ok=False,
+                agent_id=inst.agent_id,
+                node_id=target_node_id,
+                error_code="AGENT_BUSY",
+                error="target agent is currently executing a task",
+            )
+        resolved = super_agent.validate_workdir_assignment(cwd)
+        restart_worker = getattr(self.cluster, "restart_worker", None)
+        if not callable(restart_worker):
+            return WorkdirAssignmentResult(
+                ok=False,
+                agent_id=inst.agent_id,
+                node_id=target_node_id,
+                error_code="RESTART_UNSUPPORTED",
+                error="cluster does not support worker restart",
+            )
+        new_node = AgentNode.from_dict(inst.node.to_dict())
+        new_node.cwd = resolved
+        self._set_agent_state(inst, "restarting")
+        try:
+            await restart_worker(new_node.to_worker_config())
+        except Exception as exc:
+            self._set_agent_state(inst, "failed", error=str(exc))
+            raise
+        inst.node = new_node
+        inst.busy_count = 0
+        self._set_agent_state(inst, "idle")
+        self._emit(
+            GraphEvent(
+                "AgentWorkdirAssigned",
+                node_id=target_node_id,
+                agent_id=inst.agent_id,
+                status="completed",
+                payload={"cwd": str(resolved), "assigned_by": getattr(super_agent, "agent_id", None)},
+            )
+        )
+        return WorkdirAssignmentResult(
+            ok=True,
+            agent_id=inst.agent_id,
+            node_id=target_node_id,
+            cwd=resolved,
+        )
+
     async def close(self) -> None:
         """Detach runtime bindings.
 
@@ -717,10 +1139,19 @@ class GraphRuntime:
         if self._closed:
             return
         log.info("[graph] closing runtime instances=%s", list(self._instances))
+        await self.stop_tick_loop()
+        for task in self._dispatch_tasks.values():
+            task.cancel()
+        if self._dispatch_tasks:
+            await asyncio.gather(*self._dispatch_tasks.values(), return_exceptions=True)
+        self._dispatch_tasks.clear()
+        for inst in self._instances.values():
+            self._set_agent_state(inst, "stopped")
         self._instances.clear()
         self._closed = True
 
     async def __aenter__(self) -> "GraphRuntime":
+        self.start_tick_loop()
         return self
 
     async def __aexit__(self, *exc: Any) -> None:

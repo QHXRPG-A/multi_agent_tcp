@@ -19,7 +19,9 @@ from .graph_runtime import (
     GraphExecutor,
     GraphRuntime,
 )
+from .codex_bridge import validate_codex_launch_safety
 from .workspace_manager import DulwichWorkspaceManager, RunWorkspace
+from .workspace_rpc import WorkspaceRPCServer
 
 
 BLUEPRINT_START_NODE_ID = "blueprint-start"
@@ -105,9 +107,21 @@ def _workspace_api_doc() -> str:
         return (
             "# Workspace API for Blueprint Agents\n\n"
             "Publish outputs with `python -m multi_agent_tcp.workspace_api publish "
-            "--area <code|artifacts|reports> --path <relative-path> --stdin`."
+            "--area <artifacts|reports> --path <relative-path> --stdin`."
         )
     return doc_path.read_text(encoding="utf-8")
+
+
+def _resolve_agent_workdir(raw_cwd: Path, project_root: Path) -> Path:
+    cwd = Path(raw_cwd).expanduser()
+    if str(cwd).strip() in {"", "."}:
+        cwd = project_root
+    elif not cwd.is_absolute():
+        cwd = project_root / cwd
+    resolved = cwd.resolve()
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"AgentNode cwd is not a directory: {resolved}")
+    return resolved
 
 
 def _apply_run_workspace_to_node(
@@ -116,36 +130,50 @@ def _apply_run_workspace_to_node(
     manager: DulwichWorkspaceManager,
     run: RunWorkspace,
     private_dir: Path,
+    rpc_server: WorkspaceRPCServer,
 ) -> RuntimeAgentNode:
+    project_context = _resolve_agent_workdir(node.cwd, manager.project_root)
+    checkout = manager.checkout_agent(
+        run,
+        node.runtime_agent_id,
+        write_scope=node.write_scope,
+    )
     data = node.to_dict()
-    data["cwd"] = str(private_dir)
+    data["cwd"] = str(checkout.checkout_dir)
     data["workspace_id"] = run.run_id
-    data["workspace_root"] = str(run.path)
     data["read_scope"] = list(node.read_scope)
     data["write_scope"] = list(node.write_scope)
     data["artifact_scope"] = list(node.artifact_scope)
 
     api_context_path = private_dir / "workspace_api_context.json"
     api_context_path.write_text(
-        json.dumps(
-            {
-                "project_root": str(manager.project_root),
-                "workspace_root": str(manager.workspace_root),
-                "run_id": run.run_id,
-                "agent_id": node.runtime_agent_id,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps(rpc_server.context_for(node.runtime_agent_id), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     preamble = (
-        "You are running inside a visual blueprint run. Do not publish task "
-        "outcomes by writing directly to filesystem paths. Use the framework "
-        "Workspace API below for code, artifacts, and reports.\n\n"
+        "You are running inside a visual blueprint run. The real project "
+        "directory is read-only context; do not write code changes directly "
+        "there. Your writable code workspace is the private checkout at the "
+        "current working directory. Publish reports/artifacts through the "
+        "Workspace API in the run scope, and submit code changes with "
+        "`python -m multi_agent_tcp.workspace_api submit` after editing the "
+        "private checkout. Use list-archives/extract-archive to inspect "
+        "archived run outputs.\n\n"
         f"{_workspace_api_doc()}"
     )
     adapter_options = dict(data.get("adapter_options", {}))
+    if node.cli_kind == "codex" and not adapter_options.get("sandbox"):
+        adapter_options["sandbox"] = "workspace-write"
+    if node.cli_kind == "codex":
+        extra_args = adapter_options.get("extra_args", [])
+        if not isinstance(extra_args, list) or not all(isinstance(x, str) for x in extra_args):
+            raise ValueError("Codex AgentNode adapter_options.extra_args must be a list of strings")
+        validate_codex_launch_safety(
+            cwd=checkout.checkout_dir,
+            sandbox=adapter_options.get("sandbox"),
+            extra_args=[str(x) for x in extra_args],
+            protected_readonly_roots=[project_context],
+        )
     existing = adapter_options.get("prompt_preamble")
     if isinstance(existing, str) and existing.strip():
         adapter_options["prompt_preamble"] = f"{existing.strip()}\n\n{preamble}"
@@ -155,8 +183,21 @@ def _apply_run_workspace_to_node(
     execution_context["workspace_api"] = {
         "command": "python -m multi_agent_tcp.workspace_api",
         "context_env": WORKSPACE_API_CONTEXT_ENV,
-        "areas": ["code", "artifacts", "reports"],
+        "areas": ["artifacts", "reports"],
+        "transport": "rpc",
+        "rpc_url": rpc_server.url,
     }
+    execution_context["code_workspace"] = {
+        "mode": "vcs_checkout",
+        "project_context": str(project_context),
+        "integration_dir": str(run.integration_dir),
+        "checkout_path": str(checkout.checkout_dir),
+        "checkout_id": checkout.checkout_id,
+        "base_ref": checkout.base_ref,
+        "write_scope": list(checkout.write_scope),
+        "submit_command": "python -m multi_agent_tcp.workspace_api submit",
+    }
+    execution_context["workspace_scopes"] = ["run"]
     adapter_options["execution_context"] = execution_context
     adapter_options.setdefault("codex_home", str(private_dir / "codex_home"))
     data["adapter_options"] = adapter_options
@@ -247,6 +288,8 @@ class BlueprintRunController:
         graph = compile_ryven_flow(self.flow, validate=True)
         manager = DulwichWorkspaceManager.open_or_init(self.project_root)
         run = manager.create_run()
+        workspace_rpc = WorkspaceRPCServer(manager, run)
+        workspace_rpc.start()
         private_dirs: dict[str, Path] = {}
         adjusted = GraphDefinition(
             terminal_nodes=dict(graph.terminal_nodes),
@@ -261,6 +304,7 @@ class BlueprintRunController:
                 manager=manager,
                 run=run,
                 private_dir=private_dir,
+                rpc_server=workspace_rpc,
             )
 
         cluster = await CodeMakerCluster.create(
@@ -382,6 +426,7 @@ class BlueprintRunController:
             )
         finally:
             await cluster.stop()
+            workspace_rpc.close()
 
 
 def _node_title(node: Any) -> str:

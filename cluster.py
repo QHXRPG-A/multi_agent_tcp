@@ -519,6 +519,7 @@ class CodeMakerCluster:
         self._workers: List[WorkerConfig] = []
         self._broker_proc: Optional[subprocess.Popen] = None
         self._agent_procs: List[subprocess.Popen] = []
+        self._agent_proc_by_id: Dict[str, subprocess.Popen] = {}
         self._tmp_files: List[Path] = []
         self._work_dir: Optional[Path] = None
         self._owns_processes: bool = False
@@ -750,10 +751,22 @@ class CodeMakerCluster:
         self._agent_procs.append(
             _spawn(acmd, f"AGENT {worker.agent_id}", verbose=self._verbose, env=env)
         )
+        self._agent_proc_by_id[worker.agent_id] = self._agent_procs[-1]
         self._workers.append(worker)
         settle = 4.0 if _IS_WIN else 1.5
         await asyncio.sleep(settle)
         log.info("worker ready agent_id=%s cli_kind=%s", worker.agent_id, worker.cli_kind)
+
+    async def restart_worker(self, worker: WorkerConfig) -> None:
+        """Kill and relaunch one owned worker with the supplied config."""
+        if not self._owns_processes:
+            raise RuntimeError("cannot restart worker: cluster does not own processes")
+        proc = self._agent_proc_by_id.pop(worker.agent_id, None)
+        if proc is not None:
+            terminate_and_wait(proc, timeout=10)
+            self._agent_procs = [p for p in self._agent_procs if p is not proc]
+        self._workers = [w for w in self._workers if w.agent_id != worker.agent_id]
+        await self.ensure_worker(worker)
 
     async def _ensure_client(self) -> AgentTCPClient:
         """Return a connected orchestrator client, creating one if needed."""
@@ -1021,6 +1034,7 @@ class CodeMakerCluster:
         for proc in self._agent_procs:
             terminate_and_wait(proc, timeout=10)
         self._agent_procs.clear()
+        self._agent_proc_by_id.clear()
         if self._broker_proc is not None:
             terminate_and_wait(self._broker_proc, timeout=10)
             self._broker_proc = None

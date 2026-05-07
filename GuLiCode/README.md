@@ -3,7 +3,7 @@
     <picture>
       <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
       <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="GuLiCode logo">
     </picture>
   </a>
 </p>
@@ -39,7 +39,7 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+[![GuLiCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
 
@@ -66,7 +66,7 @@ nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev
 
 ### Desktop App (BETA)
 
-OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
+GuLiCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
 
 | Platform              | Download                              |
 | --------------------- | ------------------------------------- |
@@ -99,7 +99,7 @@ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 
 ### Agents
 
-OpenCode includes two built-in agents you can switch between with the `Tab` key.
+GuLiCode includes two built-in agents you can switch between with the `Tab` key.
 
 - **build** - Default, full-access agent for development work
 - **plan** - Read-only agent for analysis and code exploration
@@ -114,15 +114,15 @@ Learn more about [agents](https://opencode.ai/docs/agents).
 
 ### Documentation
 
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
+For more info on how to configure GuLiCode, [**head over to our docs**](https://opencode.ai/docs).
 
 ### Contributing
 
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
+If you're interested in contributing to GuLiCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
 
-### Building on OpenCode
+### Building on GuLiCode
 
-If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
+If you are working on a project that's related to GuLiCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the GuLiCode team and is not affiliated with us in any way.
 
 ### FAQ
 
@@ -131,10 +131,10 @@ If you are working on a project that's related to OpenCode and is using "opencod
 It's very similar to Claude Code in terms of capability. Here are the key differences:
 
 - 100% open source
-- Not coupled to any provider. Although we recommend the models we provide through [OpenCode Zen](https://opencode.ai/zen), OpenCode can be used with Claude, OpenAI, Google, or even local models. As models evolve, the gaps between them will close and pricing will drop, so being provider-agnostic is important.
+- Not coupled to any provider. Although we recommend the models we provide through [GuLiCode Zen](https://opencode.ai/zen), GuLiCode can be used with Claude, OpenAI, Google, or even local models. As models evolve, the gaps between them will close and pricing will drop, so being provider-agnostic is important.
 - Out-of-the-box LSP support
-- A focus on TUI. OpenCode is built by neovim users and the creators of [terminal.shop](https://terminal.shop); we are going to push the limits of what's possible in the terminal.
-- A client/server architecture. This, for example, can allow OpenCode to run on your computer while you drive it remotely from a mobile app, meaning that the TUI frontend is just one of the possible clients.
+- A focus on TUI. GuLiCode is built by neovim users and the creators of [terminal.shop](https://terminal.shop); we are going to push the limits of what's possible in the terminal.
+- A client/server architecture. This, for example, can allow GuLiCode to run on your computer while you drive it remotely from a mobile app, meaning that the TUI frontend is just one of the possible clients.
 
 ---
 

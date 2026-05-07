@@ -17,6 +17,7 @@ def test_dulwich_backend_is_vendored() -> None:
     assert info["backend"] == "dulwich"
     assert info["uses_git_cli"] is False
     assert "available" in info
+    assert "merge3_available" in info
 
 
 def test_workspace_lifecycle_archives_full_run_directory(tmp_path: Path) -> None:
@@ -34,6 +35,9 @@ def test_workspace_lifecycle_archives_full_run_directory(tmp_path: Path) -> None
     assert (archive / "base" / "src" / "a.txt").read_text(encoding="utf-8") == "base\n"
     assert (archive / "shared" / "code" / "src" / "a.txt").read_text(encoding="utf-8") == "job\n"
     assert (archive / "jobs" / "job-1" / "worktree" / "src" / "a.txt").read_text(encoding="utf-8") == "job\n"
+    assert (manager.workspace_root / "shared" / "archives" / "run-1-completed.zip").is_file()
+    archives = manager.list_long_term_archives()
+    assert archives[0]["archive_id"] == "run-1-completed"
     assert not (tmp_path / ".multi_agent_workspace" / "runs" / "active" / "run-1").exists()
 
 
@@ -76,6 +80,27 @@ def test_run_has_private_scratch_and_shared_outcome_space(tmp_path: Path) -> Non
     assert (archive / "shared" / "code" / "src" / "a.txt").is_file()
     assert (archive / "shared" / "reports" / "result.md").read_text(encoding="utf-8") == "shared result\n"
     assert not (archive / "agents" / "agent-a" / "private" / "scratch.txt").exists()
+
+
+def test_long_term_archive_extracts_into_agent_private_workspace(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    old_run = manager.create_run(run_id="run-old")
+    manager.write_shared_text(old_run, "reports/result.md", "shared result\n", owner="framework")
+    manager.archive_run(old_run)
+
+    run = manager.create_run(run_id="run-new")
+    extracted = manager.extract_long_term_archive(
+        run,
+        "agent-a",
+        "run-old-completed",
+        path="reports",
+    )
+
+    private = manager.agent_workspace_dir(run, "agent-a")
+    assert extracted == private / "extracted_archives" / "run-old-completed" / "reports"
+    assert (extracted / "result.md").read_text(encoding="utf-8") == "shared result\n"
+    assert not (manager.workspace_root / "shared" / "archives" / "reports").exists()
 
 
 def test_custom_long_term_workspace_outside_project_is_allowed(tmp_path: Path) -> None:
@@ -158,8 +183,151 @@ def test_same_file_conflict_is_detected(tmp_path: Path) -> None:
     assert result_b.ok is False
     assert result_b.conflicts == ["src/a.txt"]
     content = (run.integration_dir / "src" / "a.txt").read_text(encoding="utf-8")
-    assert "<<<<<<< CURRENT" in content
-    assert ">>>>>>> JOB" in content
+    assert "<<<<<<<" in content
+    assert ">>>>>>>" in content
+
+
+def test_agent_checkout_submit_accepts_and_archives_changeset(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-vcs")
+    checkout = manager.checkout_agent(run, "agent-a", write_scope=["src/**"])
+
+    _write(checkout.checkout_dir / "src" / "a.txt", "changed\n")
+    status = manager.status_checkout(run, checkout)
+    result = manager.submit_checkout(run, checkout, task_id="task-1", summary="change a")
+
+    assert [(change.path, change.status) for change in status] == [("src/a.txt", "modified")]
+    assert result.ok is True
+    assert result.status == "accepted"
+    assert result.merged_files == ["src/a.txt"]
+    assert (run.integration_dir / "src" / "a.txt").read_text(encoding="utf-8") == "changed\n"
+    assert result.archive_path is not None
+    assert (result.archive_path / "changeset.json").is_file()
+    submit_result = json.loads((result.archive_path / "submit_result.json").read_text(encoding="utf-8"))
+    assert submit_result["status"] == "accepted"
+
+
+def test_agent_checkout_pulls_scoped_files_from_integration_workspace(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    _write(tmp_path / "docs" / "note.md", "base docs\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-vcs-pull")
+    _write(run.integration_dir / "src" / "a.txt", "current integration\n")
+
+    checkout = manager.checkout_agent(run, "agent-a", write_scope=["src/**"])
+
+    assert (checkout.checkout_dir / "src" / "a.txt").read_text(encoding="utf-8") == "current integration\n"
+    assert not (checkout.checkout_dir / "docs" / "note.md").exists()
+    assert (checkout.base_dir / "src" / "a.txt").read_text(encoding="utf-8") == "current integration\n"
+    assert not (checkout.base_dir / "docs" / "note.md").exists()
+
+
+def test_agent_checkout_submit_rejects_scope_violation(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    _write(tmp_path / "secret.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-vcs-scope")
+    checkout = manager.checkout_agent(run, "agent-a", write_scope=["src/**"])
+
+    _write(checkout.checkout_dir / "secret.txt", "changed\n")
+    result = manager.submit_checkout(run, checkout)
+
+    assert result.ok is False
+    assert result.status == "rejected"
+    assert result.scope_violations == ["secret.txt"]
+    assert (run.integration_dir / "secret.txt").read_text(encoding="utf-8") == "base\n"
+
+
+def test_agent_checkout_submit_reports_structured_conflict(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-vcs-conflict")
+    checkout_a = manager.checkout_agent(run, "agent-a", write_scope=["src/**"])
+    checkout_b = manager.checkout_agent(run, "agent-b", write_scope=["src/**"])
+
+    _write(checkout_a.checkout_dir / "src" / "a.txt", "from a\n")
+    _write(checkout_b.checkout_dir / "src" / "a.txt", "from b\n")
+
+    assert manager.submit_checkout(run, checkout_a).ok is True
+    result_b = manager.submit_checkout(run, checkout_b)
+
+    assert result_b.ok is False
+    assert result_b.status == "conflict"
+    assert result_b.conflicts[0]["path"] == "src/a.txt"
+    assert result_b.conflicts[0]["reason"] == "stale_base"
+    assert "<<<<<<<" in result_b.conflicts[0]["merge_preview"]
+    assert (run.integration_dir / "src" / "a.txt").read_text(encoding="utf-8") == "from a\n"
+
+
+def test_agent_checkout_dulwich_merge_accepts_non_overlapping_same_file_changes(tmp_path: Path) -> None:
+    info = describe_dulwich_backend()
+    if not info.get("merge3_available"):
+        return
+    _write(tmp_path / "src" / "shared.txt", "one\ntwo\nthree\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-vcs-dulwich-merge")
+    checkout_a = manager.checkout_agent(run, "agent-a", write_scope=["src/**"])
+    checkout_b = manager.checkout_agent(run, "agent-b", write_scope=["src/**"])
+
+    _write(checkout_a.checkout_dir / "src" / "shared.txt", "ONE\ntwo\nthree\n")
+    _write(checkout_b.checkout_dir / "src" / "shared.txt", "one\ntwo\nTHREE\n")
+
+    assert manager.submit_checkout(run, checkout_a).ok is True
+    result_b = manager.submit_checkout(run, checkout_b)
+
+    assert result_b.ok is True
+    assert result_b.status == "accepted"
+    assert (run.integration_dir / "src" / "shared.txt").read_text(encoding="utf-8") == "ONE\ntwo\nTHREE\n"
+
+
+def test_agent_checkout_sync_uses_latest_integration_as_base(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    _write(tmp_path / "src" / "b.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-vcs-sync")
+    checkout_a = manager.checkout_agent(run, "agent-a", write_scope=["src/**"])
+    checkout_b = manager.checkout_agent(run, "agent-b", write_scope=["src/**"])
+
+    _write(checkout_a.checkout_dir / "src" / "a.txt", "from a\n")
+    assert manager.submit_checkout(run, checkout_a).ok is True
+
+    manager.sync_checkout(run, checkout_b)
+    _write(checkout_b.checkout_dir / "src" / "b.txt", "from b\n")
+    status = manager.status_checkout(run, checkout_b)
+
+    assert [(change.path, change.status) for change in status] == [("src/b.txt", "modified")]
+    assert manager.submit_checkout(run, checkout_b).ok is True
+    assert (run.integration_dir / "src" / "a.txt").read_text(encoding="utf-8") == "from a\n"
+    assert (run.integration_dir / "src" / "b.txt").read_text(encoding="utf-8") == "from b\n"
+
+
+def test_agent_checkout_conflict_repair_loop_blocks_then_accepts_resubmit(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "shared.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-vcs-loop")
+    checkout_a = manager.checkout_agent(run, "agent-a", write_scope=["src/**"])
+    checkout_b = manager.checkout_agent(run, "agent-b", write_scope=["src/**"])
+
+    _write(checkout_a.checkout_dir / "src" / "shared.txt", "from a\n")
+    _write(checkout_b.checkout_dir / "src" / "shared.txt", "from b\n")
+
+    accepted_a = manager.submit_checkout(run, checkout_a)
+    blocked_b = manager.submit_checkout(run, checkout_b)
+
+    assert accepted_a.ok is True
+    assert blocked_b.ok is False
+    assert blocked_b.status == "conflict"
+    assert (run.integration_dir / "src" / "shared.txt").read_text(encoding="utf-8") == "from a\n"
+
+    manager.sync_checkout(run, checkout_b)
+    assert (checkout_b.checkout_dir / "src" / "shared.txt").read_text(encoding="utf-8") == "from a\n"
+    _write(checkout_b.checkout_dir / "src" / "shared.txt", "from a\nfrom b after sync\n")
+    repaired_b = manager.submit_checkout(run, checkout_b)
+
+    assert repaired_b.ok is True
+    assert repaired_b.status == "accepted"
+    assert (run.integration_dir / "src" / "shared.txt").read_text(encoding="utf-8") == "from a\nfrom b after sync\n"
 
 
 def test_shared_workspace_lease_blocks_competing_writer(tmp_path: Path) -> None:

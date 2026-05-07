@@ -455,3 +455,194 @@
 1. 将 agent 主架构与蓝图/GuLiCode 归档并列维护。
 2. 保持 `SKILL.md` 只写当前有效工作方法与核心架构，不堆大量过程性叙事。
 3. 对新增运行基线（Ryven / GuLiCode）的后续裁剪，也应记录对 `multi_agent_tcp` agent 架构的影响。
+---
+
+### 2026-05-07 - VCS-style workspace changeset loop and Dulwich text merge MVP
+
+#### Summary
+
+This round advanced the shared workspace model from report/artifact publishing and legacy job worktree merging toward a framework-owned VCS-style changeset loop for multi-agent code collaboration.
+
+The implemented flow is:
+
+```text
+run integration workspace
+  -> scoped agent checkout
+  -> private agent edits
+  -> status/diff
+  -> submit changeset
+  -> framework merge or structured conflict
+  -> sync and resubmit repair loop
+```
+
+#### Landed
+
+1. Added VCS-style workspace concepts in `workspace_manager.py`:
+   - `AgentCheckout`
+   - `ChangesetSubmitResult`
+   - `checkout_agent()`
+   - `status_checkout()`
+   - `diff_checkout()`
+   - `submit_checkout()`
+   - `sync_checkout()`
+2. `checkout_agent()` now copies scoped files from the current run integration workspace, not the original run base. The checkout stores its own base snapshot in `agents/<agent_id>/private/state/base`.
+3. `submit_checkout()` validates write scope, computes changes relative to the checkout base snapshot, compares with latest `run.integration_dir`, and either applies accepted changes or returns structured conflict data.
+4. Conflict detection now uses a three-way view:
+   - checkout base snapshot
+   - latest integration file
+   - agent private checkout file
+5. The Workspace API and RPC server now expose:
+   - `checkout`
+   - `status`
+   - `diff`
+   - `submit`
+   - `sync`
+6. RPC responses now preserve legitimate `ok: false, status: "conflict"` results instead of converting them into transport errors.
+7. Text merge now prefers `dulwich.merge.merge_blobs()` and falls back to the previous conservative merge logic when Dulwich or its merge backend is unavailable. Dulwich hunk-level merge requires the `merge3` Python package.
+8. Added changeset and conflict archive records under run directories:
+   - `changesets/<changeset_id>/changeset.json`
+   - `changesets/<changeset_id>/patch.diff`
+   - `changesets/<changeset_id>/submit_result.json`
+   - `conflicts/<conflict_id>/conflict.json`
+9. `docs/workspace_api.md` now documents the VCS-style code flow for agents.
+10. `README.md` now records `merge3` as the recommended runtime dependency for Dulwich-powered text merges.
+
+#### Verified behavior
+
+Tests now cover:
+
+- scoped checkout from current integration workspace into private agent checkout;
+- private file edits submitted back into the temporary integration workspace;
+- scope violations blocked before merge;
+- same-file same-region conflicts returned to the agent and not applied;
+- conflict repair loop: conflict -> sync -> edit -> resubmit -> accepted;
+- RPC/CLI end-to-end conflict loop with two agents;
+- Dulwich hunk-level merge accepting non-overlapping edits in the same text file.
+
+Full validation after this round:
+
+```text
+python -m pytest -q
+74 passed
+```
+
+#### Remaining boundaries
+
+1. This is still a file/snapshot changeset backend, not Dulwich commit/ref storage.
+2. The authoritative writer is the framework runtime, but OS/sandbox-level enforcement still needs to prevent direct writes outside private checkouts.
+3. Rename detection, binary merge policy, delete/rename interaction, and large-file handling still need explicit rules.
+4. Workspace events exist as manifest records, but a durable cross-process event bus and UI surfacing are still pending.
+5. Blueprint AgentNode launch policy still needs to wire strict read-only project context plus writable checkout into Codex/OpenCode execution modes.
+
+---
+
+### 2026-05-07 - Strict Workspace API cleanup and long-term archive read model
+
+#### Summary
+
+This round completed the agent-facing workspace contract cleanup around code changes, temporary shared outputs, and long-term shared memory.
+
+The current contract is:
+
+```text
+agent code edits:
+  checkout -> edit private checkout -> status/diff -> submit
+
+agent run outputs:
+  publish / publish-file only for run-scope reports and artifacts
+
+long-term shared workspace:
+  framework writes named run archive zips
+  agents list/extract archives into private workspace for reading
+```
+
+#### Landed
+
+1. Removed agent-facing `code` from Workspace API publish areas:
+   - `VALID_AREAS` is now only `artifacts` and `reports`.
+   - `publish --area code` and `publish-file --area code` are no longer exposed by parser help or RPC context.
+   - Blueprint execution context now advertises only `["artifacts", "reports"]` as publish areas.
+2. Removed agent-facing publish/read/list `--scope` handling:
+   - `publish`, `publish-file`, `read`, and `list` now operate on the current run workspace only.
+   - `long_term` is no longer exposed as a publish scope.
+   - RPC publish/read/list no longer resolve long-term workspace runs.
+3. Added framework-owned long-term archive flow:
+   - `archive_run()` compresses the temporary run `shared/` workspace into `.multi_agent_workspace/shared/archives/<run_id>-<status>.zip`.
+   - Archive metadata is recorded in `.multi_agent_workspace/shared/archives/manifest.json`.
+4. Added read-only archive APIs for agents:
+   - `list-archives`
+   - `extract-archive`
+   - extraction targets the requesting agent's private workspace under `extracted_archives/`.
+5. Updated agent-injected Workspace API documentation and removed stale design-document references to old `code` publish areas and long-term publish scopes.
+6. Blueprint AgentNode launch now creates a private checkout before worker start, launches with checkout as `cwd`, injects RPC Workspace API context, and presents archive read commands for long-term results.
+
+#### Verified behavior
+
+Validation after this round:
+
+```text
+python -m pytest test_workspace_api.py test_workspace_manager.py test_agent_runtime.py
+66 passed
+```
+
+#### Current boundaries
+
+1. Long-term archive deletion, pruning, indexing/search, and retention policies are still pending.
+2. The archive reader extracts zip contents into private workspace; a streaming read API may be useful later for large archives.
+3. OS/sandbox-level enforcement should still be tightened so non-cooperative tools cannot write outside the private checkout.
+4. Rename, binary, large-file, generated-file, and formatter policies for changeset submit still need explicit rules.
+
+---
+
+### 2026-05-07 - Codex strict launch sandbox guard
+
+#### Summary
+
+This round closed the short-term strict-launch concern for Codex-backed Blueprint AgentNodes by relying on Codex CLI sandbox semantics instead of adding a broader runtime dirty-scan policy.
+
+The current Codex launch contract is:
+
+```text
+real project path
+  -> exposed to the agent as read-only project_context
+
+private agent checkout
+  -> passed to Codex as cwd / --cd
+  -> writable under Codex workspace-write sandbox
+```
+
+#### Landed
+
+1. Confirmed local Codex CLI behavior (`codex-cli 0.125.0`):
+   - `--sandbox workspace-write --cd <checkout>` allows writes in the working root;
+   - directories outside `--cd` can be read but are not writable unless explicitly added.
+2. Blueprint Codex AgentNodes continue to default to `sandbox=workspace-write` and private checkout `cwd`.
+3. Added Codex launch safety validation at the bridge/config layer:
+   - reject `sandbox=danger-full-access`;
+   - reject `extra_args` that request `--sandbox danger-full-access` or `-s danger-full-access`;
+   - reject `--dangerously-bypass-approvals-and-sandbox`;
+   - reject `extra_args --add-dir <path>` when the added directory overlaps the read-only project context.
+4. Reused the same validation from blueprint workspace application, so dangerous Codex options are rejected before the worker launch configuration is accepted.
+5. Preserved user-facing semantics: users may still configure a real project directory as AgentNode `cwd`; blueprint runtime treats it as read-only `project_context` and launches Codex from the private checkout.
+
+#### Affected Code
+
+- `multi_agent_tcp/codex_bridge.py`
+- `multi_agent_tcp/ryven_blueprint.py`
+- `multi_agent_tcp/test_agent_runtime.py`
+
+#### Validation
+
+```text
+python -m pytest test_agent_runtime.py -q
+35 passed
+
+python -m pytest test_workspace_api.py test_workspace_manager.py test_agent_runtime.py -q
+70 passed
+```
+
+#### Current conclusion
+
+For Codex-backed blueprint agents, the earlier short-term task "add runtime/tool-layer checks for direct writes outside checkout paths" is no longer tracked as an active task. The current boundary is Codex `workspace-write` sandbox plus launch-time rejection of writable `project_context` escape hatches.
+
+This conclusion is Codex-specific. Other CLI adapters without equivalent sandbox semantics should be evaluated separately if they are brought into strict launch mode.

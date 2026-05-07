@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import filecmp
 import fnmatch
+import difflib
+import hashlib
+import importlib.util
 import json
 import os
 import shutil
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,13 +29,19 @@ _DULWICH_AVAILABLE = False
 if has_dulwich_vendor():
     ensure_dulwich_path()
     try:
+        from dulwich.merge import merge_blobs  # type: ignore  # noqa: E402
+        from dulwich.objects import Blob  # type: ignore  # noqa: E402
         from dulwich.repo import NotGitRepository, Repo  # type: ignore  # noqa: E402
 
         _DULWICH_AVAILABLE = True
     except Exception:  # pragma: no cover - fallback when vendored checkout is absent
+        Blob = None  # type: ignore[assignment]
+        merge_blobs = None  # type: ignore[assignment]
         NotGitRepository = Exception  # type: ignore[assignment]
         Repo = None  # type: ignore[assignment]
 else:
+    Blob = None  # type: ignore[assignment]
+    merge_blobs = None  # type: ignore[assignment]
     NotGitRepository = Exception  # type: ignore[assignment]
     Repo = None  # type: ignore[assignment]
 
@@ -53,6 +63,19 @@ def _read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
 def _write_json(path: Path, data: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _safe_archive_id(raw: str) -> str:
+    archive_id = str(raw).strip()
+    if archive_id.endswith(".zip"):
+        archive_id = archive_id[:-4]
+    if not archive_id:
+        raise ValueError("archive_id must be non-empty")
+    if any(ch in archive_id for ch in ("/", "\\", ":", "\0")):
+        raise ValueError("archive_id must be a file name, not a path")
+    if archive_id in {".", ".."}:
+        raise ValueError("archive_id must be a file name, not a path")
+    return archive_id
 
 
 def _path_within(path: Path, root: Path) -> bool:
@@ -93,9 +116,11 @@ def _copy_project_tree(
     dst: Path,
     *,
     excluded_roots: Optional[Sequence[Path]] = None,
+    include_scopes: Optional[Sequence[str]] = None,
 ) -> None:
     src = Path(src).resolve()
     excluded = [Path(p).resolve() for p in (excluded_roots or [])]
+    scopes = [str(scope) for scope in (include_scopes or []) if str(scope).strip()]
 
     def ignore(dir_path: str, names: List[str]) -> set[str]:
         ignored: set[str] = set()
@@ -116,6 +141,15 @@ def _copy_project_tree(
 
     if dst.exists():
         shutil.rmtree(dst)
+    if scopes:
+        dst.mkdir(parents=True, exist_ok=True)
+        for rel, path in _relative_files(src, excluded_roots=excluded).items():
+            if not _scope_allows(rel, scopes):
+                continue
+            target = dst / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+        return
     shutil.copytree(src, dst, ignore=ignore)
 
 
@@ -153,19 +187,71 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _merge_text(base: str, current: str, job: str) -> tuple[bool, str]:
-    """Small deterministic three-way merge for text files.
+def _safe_id(value: str, *, field_name: str = "id") -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
+    if not safe:
+        raise ValueError(f"{field_name} must not be empty")
+    return safe
 
-    This handles the reliable common cases first. When both current and job
-    diverge differently from base, it returns conflict markers instead of
-    trying to be clever.
-    """
+
+def _sha256_file(path: Path) -> Optional[str]:
+    if not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _count_patch_lines(patch: str) -> tuple[int, int]:
+    additions = 0
+    deletions = 0
+    for line in patch.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+    return additions, deletions
+
+
+def _unified_diff(base_file: Path, new_file: Path, rel_path: str) -> str:
+    if (base_file.exists() and _is_binary(base_file)) or (new_file.exists() and _is_binary(new_file)):
+        return ""
+    base_lines = base_file.read_text(encoding="utf-8").splitlines() if base_file.exists() else []
+    new_lines = new_file.read_text(encoding="utf-8").splitlines() if new_file.exists() else []
+    lines = list(
+        difflib.unified_diff(
+            base_lines,
+            new_lines,
+            fromfile=f"a/{rel_path}",
+            tofile=f"b/{rel_path}",
+            lineterm="",
+        )
+    )
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _merge_text(base: str, current: str, job: str) -> tuple[bool, str]:
+    """Three-way text merge, using Dulwich when its merge backend is available."""
     if current == job:
         return True, current
     if current == base:
         return True, job
     if job == base:
         return True, current
+    if _DULWICH_AVAILABLE and Blob is not None and merge_blobs is not None:
+        try:
+            merged, had_conflicts = merge_blobs(
+                Blob.from_string(base.encode("utf-8")),
+                Blob.from_string(current.encode("utf-8")),
+                Blob.from_string(job.encode("utf-8")),
+            )
+            return not had_conflicts, merged.decode("utf-8")
+        except Exception:
+            pass
     conflict = (
         "<<<<<<< CURRENT\n"
         f"{current}"
@@ -180,9 +266,24 @@ def _merge_text(base: str, current: str, job: str) -> tuple[bool, str]:
 class FileChange:
     path: str
     status: str
+    additions: int = 0
+    deletions: int = 0
+    base_hash: Optional[str] = None
+    new_hash: Optional[str] = None
+    patch: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, str]:
-        return {"path": self.path, "status": self.status}
+    def to_dict(self, *, include_patch: bool = True) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "path": self.path,
+            "status": self.status,
+            "additions": self.additions,
+            "deletions": self.deletions,
+            "base_hash": self.base_hash,
+            "new_hash": self.new_hash,
+        }
+        if include_patch:
+            data["patch"] = self.patch or ""
+        return data
 
 
 @dataclass
@@ -249,6 +350,64 @@ class JobWorkspace:
             "artifact_scope": list(self.artifact_scope),
             "readonly_shared_paths": list(self.readonly_shared_paths),
         }
+
+
+@dataclass
+class AgentCheckout:
+    checkout_id: str
+    run_id: str
+    agent_id: str
+    path: Path
+    checkout_dir: Path
+    state_dir: Path
+    base_dir: Path
+    base_ref: str
+    write_scope: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "checkout_id": self.checkout_id,
+            "run_id": self.run_id,
+            "agent_id": self.agent_id,
+            "path": str(self.path),
+            "checkout_path": str(self.checkout_dir),
+            "state_dir": str(self.state_dir),
+            "base_dir": str(self.base_dir),
+            "base_ref": self.base_ref,
+            "write_scope": list(self.write_scope),
+            "writable": True,
+        }
+
+
+@dataclass
+class ChangesetSubmitResult:
+    ok: bool
+    status: str
+    changeset_id: str
+    merged_files: List[str] = field(default_factory=list)
+    files: List[Dict[str, Any]] = field(default_factory=list)
+    conflicts: List[Dict[str, Any]] = field(default_factory=list)
+    scope_violations: List[str] = field(default_factory=list)
+    integration_ref: Optional[str] = None
+    events: List[str] = field(default_factory=list)
+    archive_path: Optional[Path] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "ok": self.ok,
+            "status": self.status,
+            "changeset_id": self.changeset_id,
+            "merged_files": list(self.merged_files),
+            "files": list(self.files),
+            "conflicts": list(self.conflicts),
+            "scope_violations": list(self.scope_violations),
+            "events": list(self.events),
+        }
+        if self.integration_ref is not None:
+            data["integration_ref"] = self.integration_ref
+        if self.archive_path is not None:
+            data["archive_path"] = str(self.archive_path)
+        return data
 
 
 @dataclass
@@ -471,9 +630,7 @@ class DulwichWorkspaceManager:
         cache, temporary files, authorized skill views, and CLI-local state.
         It is discarded before the run is archived.
         """
-        safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in agent_id)
-        if not safe:
-            raise ValueError("agent_id must not be empty")
+        safe = _safe_id(agent_id, field_name="agent_id")
         path = run.agents_dir / safe / "private"
         path.mkdir(parents=True, exist_ok=True)
         _write_json(
@@ -487,6 +644,220 @@ class DulwichWorkspaceManager:
             },
         )
         return path
+
+    def checkout_agent(
+        self,
+        run: RunWorkspace,
+        agent_id: str,
+        *,
+        write_scope: Optional[Sequence[str]] = None,
+        mode: str = "full",
+    ) -> AgentCheckout:
+        """Create or refresh a VCS-style private checkout for an agent."""
+        if mode != "full":
+            raise ValueError("only full checkout mode is currently supported")
+        self._validate_readonly_workspace_not_writable(write_scope or [])
+        safe_agent = _safe_id(agent_id, field_name="agent_id")
+        private = self.agent_workspace_dir(run, agent_id)
+        checkout_dir = private / "checkout"
+        state_dir = private / "state"
+        checkout_base_dir = state_dir / "base"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        scopes = [str(s) for s in (write_scope or [])]
+        _copy_project_tree(run.integration_dir, checkout_dir, include_scopes=scopes)
+        _copy_project_tree(run.integration_dir, checkout_base_dir, include_scopes=scopes)
+        checkout_id = f"co-{uuid.uuid4().hex[:12]}"
+        base_ref = f"int-{run.run_id}-checkout"
+        checkout = AgentCheckout(
+            checkout_id=checkout_id,
+            run_id=run.run_id,
+            agent_id=agent_id,
+            path=run.agents_dir / safe_agent / "private",
+            checkout_dir=checkout_dir,
+            state_dir=state_dir,
+            base_dir=checkout_base_dir,
+            base_ref=base_ref,
+            write_scope=scopes,
+        )
+        data = checkout.to_dict()
+        data["created_at"] = _utc_now()
+        _write_json(private / "checkout.json", data)
+        self._record_workspace_event(
+            run,
+            "CheckoutCreated",
+            {
+                "agent_id": agent_id,
+                "checkout_id": checkout_id,
+                "base_ref": base_ref,
+                "write_scope": list(checkout.write_scope),
+            },
+        )
+        return checkout
+
+    def open_agent_checkout(self, run: RunWorkspace, agent_id: str) -> AgentCheckout:
+        private = self.agent_workspace_dir(run, agent_id)
+        data = _read_json(private / "checkout.json", {})
+        if not data:
+            raise FileNotFoundError(f"agent checkout not found: {agent_id}")
+        return AgentCheckout(
+            checkout_id=str(data["checkout_id"]),
+            run_id=str(data.get("run_id", run.run_id)),
+            agent_id=str(data.get("agent_id", agent_id)),
+            path=private,
+            checkout_dir=Path(str(data["checkout_path"])),
+            state_dir=Path(str(data["state_dir"])),
+            base_dir=Path(str(data.get("base_dir") or Path(str(data["state_dir"])) / "base")),
+            base_ref=str(data.get("base_ref", f"base-{run.run_id}")),
+            write_scope=[str(s) for s in data.get("write_scope", [])],
+        )
+
+    def status_checkout(self, run: RunWorkspace, checkout: AgentCheckout) -> List[FileChange]:
+        return self._diff_dirs(checkout.base_dir, checkout.checkout_dir, include_patch=False)
+
+    def diff_checkout(self, run: RunWorkspace, checkout: AgentCheckout) -> List[FileChange]:
+        return self._diff_dirs(checkout.base_dir, checkout.checkout_dir, include_patch=True)
+
+    def submit_checkout(
+        self,
+        run: RunWorkspace,
+        checkout: AgentCheckout,
+        *,
+        task_id: Optional[str] = None,
+        summary: str = "",
+        test_results: Optional[Sequence[Dict[str, Any]]] = None,
+        risks: Optional[Sequence[str]] = None,
+    ) -> ChangesetSubmitResult:
+        changes = self.diff_checkout(run, checkout)
+        changeset_id = f"cs-{uuid.uuid4().hex[:12]}"
+        allowed_scopes = list(checkout.write_scope)
+        scope_violations = [
+            change.path for change in changes if not _scope_allows(change.path, allowed_scopes)
+        ]
+        file_dicts = [change.to_dict() for change in changes]
+        self._record_workspace_event(
+            run,
+            "ChangesetSubmitted",
+            {
+                "changeset_id": changeset_id,
+                "agent_id": checkout.agent_id,
+                "task_id": task_id,
+                "base_ref": checkout.base_ref,
+                "files": [change.path for change in changes],
+            },
+        )
+
+        conflicts: List[Dict[str, Any]] = []
+        planned: List[tuple[FileChange, Optional[bytes], Optional[str]]] = []
+        if not scope_violations:
+            for change in changes:
+                ok, merged_bytes, conflict = self._plan_checkout_change(run, checkout, change)
+                if ok:
+                    planned.append((change, merged_bytes, None))
+                else:
+                    conflicts.append(conflict or {"path": change.path, "reason": "conflict"})
+
+        status = "accepted"
+        ok = True
+        events = ["ChangesetSubmitted"]
+        merged_files: List[str] = []
+        integration_ref: Optional[str] = None
+        if scope_violations:
+            ok = False
+            status = "rejected"
+        elif conflicts:
+            ok = False
+            status = "conflict"
+            events.append("ConflictDetected")
+            self._record_conflict(run, changeset_id, checkout, conflicts)
+            self._record_workspace_event(
+                run,
+                "ConflictDetected",
+                {
+                    "changeset_id": changeset_id,
+                    "agent_id": checkout.agent_id,
+                    "files": [item.get("path") for item in conflicts],
+                },
+            )
+        else:
+            for change, merged_bytes, _ in planned:
+                self._apply_checkout_change(run, change, merged_bytes)
+                merged_files.append(change.path)
+            integration_ref = f"int-{uuid.uuid4().hex[:12]}"
+            if checkout.base_dir.exists():
+                shutil.rmtree(checkout.base_dir)
+            _copy_project_tree(run.integration_dir, checkout.base_dir, include_scopes=checkout.write_scope)
+            checkout.base_ref = integration_ref
+            data = checkout.to_dict()
+            data["submitted_at"] = _utc_now()
+            _write_json(checkout.path / "checkout.json", data)
+            events.extend(["ChangesetAccepted", "WorkspaceChanged"])
+            self._record_workspace_event(
+                run,
+                "ChangesetAccepted",
+                {
+                    "changeset_id": changeset_id,
+                    "agent_id": checkout.agent_id,
+                    "merged_files": list(merged_files),
+                    "integration_ref": integration_ref,
+                },
+            )
+            self._record_workspace_event(
+                run,
+                "WorkspaceChanged",
+                {
+                    "changeset_id": changeset_id,
+                    "agent_id": checkout.agent_id,
+                    "paths": list(merged_files),
+                },
+            )
+
+        result = ChangesetSubmitResult(
+            ok=ok,
+            status=status,
+            changeset_id=changeset_id,
+            merged_files=merged_files,
+            files=file_dicts,
+            conflicts=conflicts,
+            scope_violations=scope_violations,
+            integration_ref=integration_ref,
+            events=events,
+        )
+        archive_path = self._archive_changeset(
+            run,
+            changeset_id,
+            checkout,
+            file_dicts,
+            result,
+            task_id=task_id,
+            summary=summary,
+            test_results=list(test_results or []),
+            risks=list(risks or []),
+        )
+        result.archive_path = archive_path
+        return result
+
+    def sync_checkout(self, run: RunWorkspace, checkout: AgentCheckout) -> AgentCheckout:
+        """Refresh a checkout from the latest integration state."""
+        if checkout.checkout_dir.exists():
+            shutil.rmtree(checkout.checkout_dir)
+        if checkout.base_dir.exists():
+            shutil.rmtree(checkout.base_dir)
+        _copy_project_tree(run.integration_dir, checkout.checkout_dir, include_scopes=checkout.write_scope)
+        _copy_project_tree(run.integration_dir, checkout.base_dir, include_scopes=checkout.write_scope)
+        checkout.base_ref = f"int-{uuid.uuid4().hex[:12]}"
+        data = checkout.to_dict()
+        data["synced_at"] = _utc_now()
+        _write_json(checkout.path / "checkout.json", data)
+        self._record_workspace_event(
+            run,
+            "CheckoutSynced",
+            {
+                "agent_id": checkout.agent_id,
+                "checkout_id": checkout.checkout_id,
+                "base_ref": checkout.base_ref,
+            },
+        )
+        return checkout
 
     def shared_access_context(self, run: RunWorkspace, *, agent_private_dir: Optional[Path] = None) -> Dict[str, Any]:
         """Return the paths that define this run's collaboration workspace."""
@@ -940,6 +1311,7 @@ class DulwichWorkspaceManager:
         data["archived_at"] = _utc_now()
         _write_json(manifest_path, data)
         self.discard_private_workspaces(run)
+        self.archive_run_shared_workspace(run, status=status)
 
         target_parent = self.workspace_root / "runs" / (
             "archived" if status == "completed" else "failed"
@@ -951,18 +1323,278 @@ class DulwichWorkspaceManager:
         shutil.move(str(run.path), str(target))
         return target
 
-    def _diff_dirs(self, left: Path, right: Path) -> List[FileChange]:
+    def archive_run_shared_workspace(self, run: RunWorkspace, *, status: str = "completed") -> Path:
+        """Compress the temporary shared workspace into the long-term archive area."""
+        shared_dir = run.shared_dir or (run.path / "shared")
+        if not shared_dir.is_dir():
+            raise FileNotFoundError(f"run shared workspace not found: {shared_dir}")
+        archives_dir = self.workspace_root / "shared" / "archives"
+        archives_dir.mkdir(parents=True, exist_ok=True)
+        archive_id = f"{run.run_id}-{status}"
+        zip_path = archives_dir / f"{archive_id}.zip"
+        if zip_path.exists():
+            archive_id = f"{archive_id}-{uuid.uuid4().hex[:8]}"
+            zip_path = archives_dir / f"{archive_id}.zip"
+
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(shared_dir.rglob("*")):
+                if path.is_file():
+                    zf.write(path, path.resolve().relative_to(shared_dir.resolve()).as_posix())
+
+        manifest_path = archives_dir / "manifest.json"
+        manifest = _read_json(manifest_path, {"archives": []})
+        archives = manifest.setdefault("archives", [])
+        if not isinstance(archives, list):
+            archives = []
+            manifest["archives"] = archives
+        archives.append(
+            {
+                "archive_id": archive_id,
+                "run_id": run.run_id,
+                "status": status,
+                "path": str(zip_path),
+                "bytes": zip_path.stat().st_size,
+                "created_at": _utc_now(),
+                "format": "zip",
+                "root": "shared",
+            }
+        )
+        manifest["updated_at"] = _utc_now()
+        _write_json(manifest_path, manifest)
+        return zip_path
+
+    def list_long_term_archives(self) -> List[Dict[str, Any]]:
+        archives_dir = self.workspace_root / "shared" / "archives"
+        manifest = _read_json(archives_dir / "manifest.json", {"archives": []})
+        items = manifest.get("archives", [])
+        if not isinstance(items, list):
+            return []
+        return [dict(item) for item in items if isinstance(item, dict)]
+
+    def extract_long_term_archive(
+        self,
+        run: RunWorkspace,
+        agent_id: str,
+        archive_id: str,
+        *,
+        path: str = "",
+    ) -> Path:
+        """Extract a long-term run archive into an agent private read workspace."""
+        safe_id = _safe_archive_id(archive_id)
+        archive_path = self.workspace_root / "shared" / "archives" / f"{safe_id}.zip"
+        if not archive_path.is_file():
+            raise FileNotFoundError(f"long-term archive not found: {safe_id}")
+
+        normalized = str(path or "").replace("\\", "/").strip("/")
+        if normalized:
+            parts = normalized.split("/")
+            if any(part in {"", ".", ".."} for part in parts) or ":" in normalized:
+                raise ValueError("archive path must be relative")
+
+        private = self.agent_workspace_dir(run, agent_id)
+        extract_root = private / "extracted_archives" / safe_id
+        if extract_root.exists():
+            shutil.rmtree(extract_root)
+        extract_root.mkdir(parents=True)
+
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            for info in zf.infolist():
+                name = info.filename.replace("\\", "/").strip("/")
+                if not name or name.endswith("/"):
+                    continue
+                parts = name.split("/")
+                if any(part in {"", ".", ".."} for part in parts) or ":" in name:
+                    raise ValueError(f"unsafe archive member path: {info.filename}")
+                if normalized and name != normalized and not name.startswith(f"{normalized}/"):
+                    continue
+                target = extract_root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+        return extract_root / normalized if normalized else extract_root
+
+    def _diff_dirs(self, left: Path, right: Path, *, include_patch: bool = False) -> List[FileChange]:
         left_files = _relative_files(left)
         right_files = _relative_files(right)
         changes: List[FileChange] = []
         for rel in sorted(set(left_files) | set(right_files)):
             if rel not in left_files:
-                changes.append(FileChange(rel, "added"))
+                status = "added"
             elif rel not in right_files:
-                changes.append(FileChange(rel, "deleted"))
+                status = "deleted"
             elif not filecmp.cmp(left_files[rel], right_files[rel], shallow=False):
-                changes.append(FileChange(rel, "modified"))
+                status = "modified"
+            else:
+                continue
+            base_file = left / rel
+            new_file = right / rel
+            patch = _unified_diff(base_file, new_file, rel) if include_patch else ""
+            additions, deletions = _count_patch_lines(patch)
+            changes.append(
+                FileChange(
+                    rel,
+                    status,
+                    additions=additions,
+                    deletions=deletions,
+                    base_hash=_sha256_file(base_file),
+                    new_hash=_sha256_file(new_file),
+                    patch=patch,
+                )
+            )
         return changes
+
+    def _plan_checkout_change(
+        self,
+        run: RunWorkspace,
+        checkout: AgentCheckout,
+        change: FileChange,
+    ) -> tuple[bool, Optional[bytes], Optional[Dict[str, Any]]]:
+        rel = Path(change.path)
+        base_file = checkout.base_dir / rel
+        current_file = run.integration_dir / rel
+        checkout_file = checkout.checkout_dir / rel
+
+        def conflict(reason: str, *, merge_preview: str = "", hint: str = "") -> Dict[str, Any]:
+            data: Dict[str, Any] = {
+                "path": change.path,
+                "reason": reason,
+                "base_hash": _sha256_file(base_file),
+                "current_hash": _sha256_file(current_file),
+                "agent_hash": _sha256_file(checkout_file),
+            }
+            if merge_preview:
+                data["merge_preview"] = merge_preview
+            if hint:
+                data["hint"] = hint
+            return data
+
+        if change.status == "deleted":
+            if not current_file.exists():
+                return True, None, None
+            if base_file.exists() and filecmp.cmp(base_file, current_file, shallow=False):
+                return True, None, None
+            return False, None, conflict("delete_modify", hint="Current integration changed this file after the checkout base.")
+
+        if change.status == "added":
+            if not checkout_file.exists():
+                return True, None, None
+            if current_file.exists():
+                if filecmp.cmp(current_file, checkout_file, shallow=False):
+                    return True, checkout_file.read_bytes(), None
+                return False, None, conflict("add_add", hint="Another changeset already added this path differently.")
+            return True, checkout_file.read_bytes(), None
+
+        if not base_file.exists():
+            return self._plan_checkout_change(run, checkout, FileChange(change.path, "added"))
+        if not current_file.exists():
+            return False, None, conflict("modify_deleted", hint="Current integration deleted this file.")
+        if not checkout_file.exists():
+            return self._plan_checkout_change(run, checkout, FileChange(change.path, "deleted"))
+        if filecmp.cmp(current_file, checkout_file, shallow=False):
+            return True, checkout_file.read_bytes(), None
+        if filecmp.cmp(base_file, current_file, shallow=False):
+            return True, checkout_file.read_bytes(), None
+        if filecmp.cmp(base_file, checkout_file, shallow=False):
+            return True, current_file.read_bytes(), None
+        if _is_binary(base_file) or _is_binary(current_file) or _is_binary(checkout_file):
+            return False, None, conflict("binary_conflict", hint="Binary files changed on both sides.")
+
+        ok, merged = _merge_text(
+            _read_text(base_file),
+            _read_text(current_file),
+            _read_text(checkout_file),
+        )
+        if ok:
+            return True, merged.encode("utf-8"), None
+        return False, None, conflict(
+            "stale_base",
+            merge_preview=merged,
+            hint="Both changes modify the same text region.",
+        )
+
+    def _apply_checkout_change(
+        self,
+        run: RunWorkspace,
+        change: FileChange,
+        merged_bytes: Optional[bytes],
+    ) -> None:
+        rel = Path(change.path)
+        target = run.integration_dir / rel
+        if merged_bytes is None:
+            if target.exists():
+                target.unlink()
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(merged_bytes)
+
+    def _record_workspace_event(self, run: RunWorkspace, event_type: str, payload: Dict[str, Any]) -> None:
+        self._record_shared_manifest(
+            run,
+            "workspace_event",
+            {
+                "workspace_event": event_type,
+                **payload,
+                "updated_at": _utc_now(),
+            },
+        )
+
+    def _record_conflict(
+        self,
+        run: RunWorkspace,
+        changeset_id: str,
+        checkout: AgentCheckout,
+        conflicts: List[Dict[str, Any]],
+    ) -> Path:
+        conflict_id = f"cf-{uuid.uuid4().hex[:12]}"
+        path = run.path / "conflicts" / conflict_id / "conflict.json"
+        _write_json(
+            path,
+            {
+                "conflict_id": conflict_id,
+                "changeset_id": changeset_id,
+                "run_id": run.run_id,
+                "agent_id": checkout.agent_id,
+                "files": conflicts,
+                "created_at": _utc_now(),
+            },
+        )
+        return path
+
+    def _archive_changeset(
+        self,
+        run: RunWorkspace,
+        changeset_id: str,
+        checkout: AgentCheckout,
+        files: List[Dict[str, Any]],
+        result: ChangesetSubmitResult,
+        *,
+        task_id: Optional[str],
+        summary: str,
+        test_results: List[Dict[str, Any]],
+        risks: List[str],
+    ) -> Path:
+        root = run.path / "changesets" / changeset_id
+        root.mkdir(parents=True, exist_ok=True)
+        patch_text = "\n".join(str(item.get("patch") or "") for item in files if item.get("patch"))
+        (root / "patch.diff").write_text(patch_text, encoding="utf-8")
+        _write_json(
+            root / "changeset.json",
+            {
+                "changeset_id": changeset_id,
+                "run_id": run.run_id,
+                "agent_id": checkout.agent_id,
+                "task_id": task_id,
+                "base_ref": checkout.base_ref,
+                "files": files,
+                "summary": summary,
+                "test_results": test_results,
+                "risks": risks,
+                "created_at": _utc_now(),
+            },
+        )
+        _write_json(root / "submit_result.json", result.to_dict())
+        return root
 
     def _merge_add(self, base_file: Path, current_file: Path, job_file: Path) -> bool:
         if current_file.exists():
@@ -1048,4 +1680,5 @@ def describe_dulwich_backend() -> Dict[str, Any]:
         "version": None if not _DULWICH_AVAILABLE else __import__("dulwich").__version__,  # type: ignore[attr-defined]
         "uses_git_cli": False,
         "available": _DULWICH_AVAILABLE,
+        "merge3_available": importlib.util.find_spec("merge3") is not None,
     }

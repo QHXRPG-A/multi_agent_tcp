@@ -1,8 +1,23 @@
 # Workspace API for Blueprint Agents
 
-Agents should publish run outputs through the framework Workspace API instead of writing directly to shared workspace paths.
+Agents should publish run-scope reports and artifacts through the framework Workspace API instead of writing directly to shared workspace paths.
 
-The framework prepares the API context before the agent starts. Agents do not need to know the physical workspace directories.
+The framework prepares the API context before the agent starts. Agents do not need to know the physical workspace directories. In blueprint runs the context normally points at a runtime-owned local RPC endpoint with an opaque token; the CLI below is only the thin client.
+
+Blueprint agents edit code through a VCS-style private checkout. The runtime creates the checkout before the agent starts, launches the CLI with that checkout as `cwd`, and expects final code changes to be submitted back to the framework as a changeset. Run-scope reports and artifacts still use `publish`/`publish-file`; run-scope code never does.
+
+The long-term shared workspace is read-only for agents. The framework archives each run's temporary shared workspace into a named zip under the long-term workspace. Agents can list those archives and extract interesting results into their own private workspace for reading.
+
+## Agent Project Working Directory
+
+Blueprint AgentNodes receive two code views:
+
+- `project_context`: the node's requested project path, resolved against the blueprint project root and treated as read-only context.
+- `checkout_path`: the writable private checkout. The worker process starts with this path as `cwd`.
+
+For Codex workers, the blueprint runtime defaults to `codex exec --sandbox workspace-write --cd <checkout_path>` unless the node explicitly overrides the Codex sandbox option.
+
+All AgentNodes are started when the blueprint run starts. A downstream working directory can only be reassigned later through the framework runtime API, and only by a `SuperAgentProfile` with `can_assign_downstream_workdir=True`. The framework rejects reassignment with `AGENT_BUSY` if the target agent is currently executing a task; otherwise it kills and relaunches that worker with the same config plus the new working directory.
 
 ## Command
 
@@ -12,9 +27,42 @@ python -m multi_agent_tcp.workspace_api <command> [options]
 
 ## Areas
 
-- `code`: source files or code changes produced by the task.
 - `artifacts`: generated images, documents, binary-adjacent text metadata, or other reusable assets.
 - `reports`: summaries, manifests, test results, review notes, and structured run outputs.
+
+## VCS-Style Code Flow
+
+Use these commands when the runtime asks agents to work in private code checkouts instead of writing directly to the project directory.
+
+Create or refresh the agent checkout:
+
+```powershell
+python -m multi_agent_tcp.workspace_api checkout --scope-path "src/**" --scope-path "tests/**"
+```
+
+The command returns JSON with `checkout_path`, `checkout_id`, `base_ref`, and `writable`. Edit files under `checkout_path`.
+
+Inspect checkout changes:
+
+```powershell
+python -m multi_agent_tcp.workspace_api status
+python -m multi_agent_tcp.workspace_api diff
+python -m multi_agent_tcp.workspace_api diff --summary
+```
+
+Submit the checkout as a changeset:
+
+```powershell
+python -m multi_agent_tcp.workspace_api submit --task-id task-123 --summary "Implement parser fix"
+```
+
+Accepted submissions are merged into the run integration tree and archived under `changesets/<changeset_id>/`. Conflicts return `ok: false`, `status: "conflict"`, and structured file entries with `reason`, hashes, and a merge preview when available. After a conflict, refresh from the latest integration state:
+
+```powershell
+python -m multi_agent_tcp.workspace_api sync
+```
+
+Then reapply the fix in the private checkout and submit again.
 
 ## Publish Text
 
@@ -22,10 +70,6 @@ Write UTF-8 text to a specific outcome area. The framework acquires a file lease
 
 ```powershell
 "summary" | python -m multi_agent_tcp.workspace_api publish --area reports --path result.md --stdin
-```
-
-```powershell
-python -m multi_agent_tcp.workspace_api publish --area code --path src/example.py --file local_result.py
 ```
 
 ```powershell
@@ -50,13 +94,25 @@ Publish any local file, including images and other binary artifacts. The file is
 python -m multi_agent_tcp.workspace_api publish-file --area artifacts --path images/result.png --file local_result.png
 ```
 
-```powershell
-python -m multi_agent_tcp.workspace_api publish-file --area code --path src/generated.py --file generated.py
-```
-
 The command prints JSON with `ok`, `area`, `path`, and `bytes`. It does not print the physical workspace location.
 
 `publish-file` also supports `--expected-version <N>` for read-modify-write workflows.
+
+## Long-Term Archives
+
+List run archives stored by the framework in the read-only long-term workspace:
+
+```powershell
+python -m multi_agent_tcp.workspace_api list-archives
+```
+
+Extract a whole archive, or a single relative path inside it, into your private workspace:
+
+```powershell
+python -m multi_agent_tcp.workspace_api extract-archive --archive-id run-123-completed --path reports
+```
+
+The extract command returns the private path to read. It does not write into the long-term workspace.
 
 ## Read Text
 
@@ -85,7 +141,8 @@ The command prints JSON containing relative paths.
 ## Rules
 
 - Do not write task outcomes directly to filesystem paths.
-- Use `publish --area code` for code output.
+- Direct code edits are allowed only under the private checkout.
+- Code collaboration must use `checkout -> edit -> status/diff -> submit`.
 - Use `publish-file --area artifacts` for generated assets such as images or binary files.
 - Use `publish --area reports` for summaries, manifests, and test output.
 - Keep private scratch files private. Only data published through the API is treated as a run outcome.

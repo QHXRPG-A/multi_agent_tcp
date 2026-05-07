@@ -32,6 +32,10 @@ from multi_agent_tcp import (
 from multi_agent_tcp.skill_space import SkillSpace, SuperAgentProfile
 from multi_agent_tcp.codemaker_bridge import _merge_prompt as _merge_codemaker_prompt
 from multi_agent_tcp.codemaker_bridge import load_codemaker_runtime
+from multi_agent_tcp.codex_bridge import load_codex_runtime
+from multi_agent_tcp.ryven_blueprint import _apply_run_workspace_to_node
+from multi_agent_tcp.workspace_manager import DulwichWorkspaceManager
+from multi_agent_tcp.workspace_rpc import WorkspaceRPCServer
 
 
 def test_body_to_agent_message_preserves_prompt_context_and_attachments() -> None:
@@ -264,6 +268,63 @@ def test_adapter_from_agent_config_accepts_codex_worker_mode_without_cli_kind() 
     assert isinstance(adapter, CodexAdapter)
 
 
+def test_codex_runtime_rejects_danger_full_access() -> None:
+    with pytest.raises(ValueError, match="danger-full-access"):
+        load_codex_runtime(
+            {
+                "agent_id": "agent-cx",
+                "codex": {
+                    "cwd": ".",
+                    "sandbox": "danger-full-access",
+                },
+            }
+        )
+
+
+def test_codex_runtime_prefers_windows_cmd_shim_for_ps1(tmp_path: Path) -> None:
+    ps1 = tmp_path / "codex.ps1"
+    cmd = tmp_path / "codex.cmd"
+    ps1.write_text("Write-Output codex", encoding="utf-8")
+    cmd.write_text("@echo off\r\n", encoding="utf-8")
+
+    runtime = load_codex_runtime(
+        {
+            "agent_id": "agent-cx",
+            "codex": {
+                "cwd": str(tmp_path),
+                "command": str(ps1),
+            },
+        }
+    )
+
+    if ps1.suffix.lower() == ".ps1":
+        assert runtime["command"] == str(cmd)
+
+
+def test_codex_runtime_rejects_extra_args_add_dir_for_project_context(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    checkout = tmp_path / "run" / "agents" / "agent-cx" / "private" / "checkout"
+    project.mkdir()
+    checkout.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="--add-dir"):
+        load_codex_runtime(
+            {
+                "agent_id": "agent-cx",
+                "codex": {
+                    "cwd": str(checkout),
+                    "sandbox": "workspace-write",
+                    "extra_args": ["--add-dir", str(project)],
+                    "execution_context": {
+                        "code_workspace": {
+                            "project_context": str(project),
+                        },
+                    },
+                },
+            }
+        )
+
+
 def test_multimodal_envelope_serializes_and_normalizes() -> None:
     env = MultiModalEnvelope.text("hello", meta={"port": "out"})
 
@@ -335,6 +396,66 @@ class _RouteCluster(_FakeCluster):
         return {"route": "parallel_reduce", "reduce_worker": reduce_worker}
 
 
+class _RestartableCluster(_FakeCluster):
+    def __init__(self) -> None:
+        super().__init__()
+        self.worker_cwds: dict[str, Path] = {}
+        self.restarted: list[str] = []
+
+    async def ensure_worker(self, worker: WorkerConfig) -> None:
+        if worker.agent_id not in self.started:
+            await super().ensure_worker(worker)
+        self.worker_cwds[worker.agent_id] = worker.cwd
+
+    async def restart_worker(self, worker: WorkerConfig) -> None:
+        self.restarted.append(worker.agent_id)
+        self.worker_cwds[worker.agent_id] = worker.cwd
+
+    async def run_single(
+        self,
+        worker_id: str,
+        body: Any,
+        *,
+        timeout_sec: float = 600.0,
+        _skip_skill_inject: bool = False,
+    ) -> dict[str, Any]:
+        self.sent.append((worker_id, body, timeout_sec))
+        return {"type": "message", "from": worker_id, "body": {"ok": True}}
+
+
+class _SequencedCluster(_FakeCluster):
+    def __init__(self) -> None:
+        super().__init__()
+        self._started_events: list[asyncio.Event] = []
+        self._release_events: list[asyncio.Event] = []
+
+    async def run_single(
+        self,
+        worker_id: str,
+        body: Any,
+        *,
+        timeout_sec: float = 600.0,
+        _skip_skill_inject: bool = False,
+    ) -> dict[str, Any]:
+        idx = len(self.sent)
+        started = asyncio.Event()
+        release = asyncio.Event()
+        self._started_events.append(started)
+        self._release_events.append(release)
+        self.sent.append((worker_id, body, timeout_sec))
+        started.set()
+        await release.wait()
+        return {"type": "message", "from": worker_id, "body": {"ok": True, "idx": idx}}
+
+    async def wait_started(self, idx: int) -> None:
+        while len(self._started_events) <= idx:
+            await asyncio.sleep(0)
+        await self._started_events[idx].wait()
+
+    def release(self, idx: int) -> None:
+        self._release_events[idx].set()
+
+
 @pytest.mark.asyncio
 async def test_graph_runtime_lazy_starts_and_reuses_agent_node() -> None:
     cluster = _FakeCluster()
@@ -350,6 +471,90 @@ async def test_graph_runtime_lazy_starts_and_reuses_agent_node() -> None:
     assert cluster.sent == [("node-a", {"prompt": "next"}, 42.0)]
     assert first.messages_sent == 1
     assert reply["body"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_queues_messages_until_agent_is_idle() -> None:
+    cluster = _SequencedCluster()
+    node = AgentNode(node_id="node-a", cwd=Path("."), timeout_sec=42.0)
+    runtime = GraphRuntime(cluster)
+
+    first_task = asyncio.create_task(runtime.send_agent_message(node, {"prompt": "first"}))
+    await cluster.wait_started(0)
+
+    queued = await runtime.send_agent_message(
+        node,
+        {"prompt": "second"},
+        source_node_id="node-b",
+        source_agent_id="agent-b",
+    )
+
+    assert queued["type"] == "graph_message_queued"
+    assert queued["queue_size"] == 1
+    assert runtime.agent_message_queues["node-a"][0].body == {"prompt": "second"}
+    assert runtime.instances["node-a"].state == "waiting_for_reply"
+
+    cluster.release(0)
+    first_reply = await first_task
+    assert first_reply["body"]["idx"] == 0
+    assert runtime.instances["node-a"].state == "idle"
+
+    await runtime.tick()
+    await cluster.wait_started(1)
+    assert cluster.sent[1] == ("node-a", {"prompt": "second"}, 42.0)
+    assert runtime.agent_message_queues["node-a"] == []
+
+    cluster.release(1)
+    for _ in range(20):
+        await asyncio.sleep(0)
+        pending = runtime.pending_messages[queued["message_id"]]
+        if pending.status == "completed":
+            break
+
+    pending = runtime.pending_messages[queued["message_id"]]
+    assert pending.status == "completed"
+    assert pending.source_node_id == "node-b"
+    assert pending.result["body"]["idx"] == 1
+    assert runtime.instances["node-a"].messages_sent == 2
+    states = [entry["state"] for entry in runtime.instances["node-a"].state_history]
+    assert "starting" in states
+    assert "idle" in states
+    assert "dispatching" in states
+    assert "running" in states
+    assert "waiting_for_reply" in states
+    assert "processing_reply" in states
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_tick_dispatches_only_one_queued_message_per_frame() -> None:
+    cluster = _SequencedCluster()
+    node = AgentNode(node_id="node-a", cwd=Path("."))
+    runtime = GraphRuntime(cluster)
+    await runtime.ensure_agent(node)
+
+    first = runtime.queue_agent_message(node, {"prompt": "first"})
+    second = runtime.queue_agent_message(node, {"prompt": "second"})
+
+    await runtime.tick()
+    await cluster.wait_started(0)
+
+    assert cluster.sent == [("node-a", {"prompt": "first"}, 1800.0)]
+    assert runtime.agent_message_queues["node-a"][0].message_id == second.message_id
+
+    await runtime.tick()
+    assert len(cluster.sent) == 1
+
+    cluster.release(0)
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if runtime.pending_messages[first.message_id].status == "completed":
+            break
+
+    await runtime.tick()
+    await cluster.wait_started(1)
+
+    assert cluster.sent[1] == ("node-a", {"prompt": "second"}, 1800.0)
+    cluster.release(1)
 
 
 @pytest.mark.asyncio
@@ -386,6 +591,105 @@ def test_workspace_manifest_rejects_scope_escape(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         manifest.validate_scopes(write_scope=[".."])
+
+
+def test_blueprint_workspace_application_uses_private_checkout_and_rpc_context(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-blueprint")
+    private = manager.agent_workspace_dir(run, "agent-cx")
+    server = WorkspaceRPCServer(manager, run)
+    server.start()
+    try:
+        node = AgentNode(
+            node_id="agent-node",
+            agent_id="agent-cx",
+            cli_kind="codex",
+            cwd=Path("."),
+        )
+        adjusted = _apply_run_workspace_to_node(
+            node,
+            manager=manager,
+            run=run,
+            private_dir=private,
+            rpc_server=server,
+        )
+
+        checkout_path = private / "checkout"
+        assert adjusted.cwd == checkout_path
+        assert (checkout_path / "src").is_dir()
+        assert adjusted.adapter_options["sandbox"] == "workspace-write"
+        code_workspace = adjusted.adapter_options["execution_context"]["code_workspace"]
+        assert code_workspace["mode"] == "vcs_checkout"
+        assert code_workspace["checkout_path"] == str(checkout_path)
+        assert code_workspace["integration_dir"] == str(run.integration_dir)
+        context_path = private / "workspace_api_context.json"
+        context = context_path.read_text(encoding="utf-8")
+        assert '"transport": "rpc"' in context
+        assert str(manager.workspace_root) not in context
+        assert str(run.path) not in context
+    finally:
+        server.close()
+
+
+def test_blueprint_workspace_application_rejects_codex_danger_full_access(
+    tmp_path: Path,
+) -> None:
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-blueprint")
+    private = manager.agent_workspace_dir(run, "agent-cx")
+    server = WorkspaceRPCServer(manager, run)
+    server.start()
+    try:
+        node = AgentNode(
+            node_id="agent-node",
+            agent_id="agent-cx",
+            cli_kind="codex",
+            cwd=Path("."),
+            adapter_options={"sandbox": "danger-full-access"},
+        )
+
+        with pytest.raises(ValueError, match="danger-full-access"):
+            _apply_run_workspace_to_node(
+                node,
+                manager=manager,
+                run=run,
+                private_dir=private,
+                rpc_server=server,
+            )
+    finally:
+        server.close()
+
+
+def test_blueprint_workspace_application_rejects_codex_project_add_dir(
+    tmp_path: Path,
+) -> None:
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-blueprint")
+    private = manager.agent_workspace_dir(run, "agent-cx")
+    server = WorkspaceRPCServer(manager, run)
+    server.start()
+    try:
+        node = AgentNode(
+            node_id="agent-node",
+            agent_id="agent-cx",
+            cli_kind="codex",
+            cwd=Path("."),
+            adapter_options={"extra_args": ["--add-dir", str(tmp_path)]},
+        )
+
+        with pytest.raises(ValueError, match="--add-dir"):
+            _apply_run_workspace_to_node(
+                node,
+                manager=manager,
+                run=run,
+                private_dir=private,
+                rpc_server=server,
+            )
+    finally:
+        server.close()
 
 
 def test_graph_definition_detects_cycles() -> None:
@@ -526,7 +830,7 @@ async def test_graph_executor_routes_to_cluster_primitives() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_executor_runs_minimal_blueprint_and_prestarts_all_agents() -> None:
+async def test_graph_executor_runs_minimal_blueprint_and_starts_agents() -> None:
     cluster = _FakeCluster()
     runtime = GraphRuntime(cluster)
     executor = GraphExecutor(runtime)
@@ -566,6 +870,57 @@ async def test_graph_executor_runs_minimal_blueprint_and_prestarts_all_agents() 
         "NodeCompleted",
         "BlueprintCompleted",
     ]
+
+
+@pytest.mark.asyncio
+async def test_super_agent_assigns_downstream_workdir_by_runtime_api(tmp_path: Path) -> None:
+    assigned = tmp_path / "assigned-project"
+    assigned.mkdir()
+    cluster = _RestartableCluster()
+    runtime = GraphRuntime(cluster)
+    target = AgentNode(node_id="target", agent_id="worker-target", cwd=tmp_path)
+    super_agent = SuperAgentProfile(
+        agent_id="super",
+        can_assign_downstream_workdir=True,
+        assignable_workdir_roots=[tmp_path],
+    )
+
+    await runtime.prestart_agents([target])
+    result = await runtime.assign_agent_workdir(
+        super_agent=super_agent,
+        target_node_id="target",
+        cwd=assigned,
+    )
+
+    assert result.ok is True
+    assert result.cwd == assigned.resolve()
+    assert cluster.started == ["worker-target"]
+    assert cluster.restarted == ["worker-target"]
+    assert cluster.worker_cwds["worker-target"] == assigned.resolve()
+
+
+@pytest.mark.asyncio
+async def test_workdir_assignment_rejects_busy_agent(tmp_path: Path) -> None:
+    cluster = _RestartableCluster()
+    runtime = GraphRuntime(cluster)
+    target = AgentNode(node_id="target", agent_id="worker-target", cwd=tmp_path)
+    super_agent = SuperAgentProfile(
+        agent_id="super",
+        can_assign_downstream_workdir=True,
+        assignable_workdir_roots=[tmp_path],
+    )
+
+    inst = await runtime.ensure_agent(target)
+    inst.busy_count = 1
+    result = await runtime.assign_agent_workdir(
+        super_agent=super_agent,
+        target_node_id="target",
+        cwd=tmp_path,
+    )
+
+    assert result.ok is False
+    assert result.error_code == "AGENT_BUSY"
+    assert cluster.restarted == []
 
 
 @pytest.mark.asyncio

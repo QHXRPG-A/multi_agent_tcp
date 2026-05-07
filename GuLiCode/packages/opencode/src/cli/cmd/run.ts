@@ -212,7 +212,7 @@ function normalizePath(input?: string) {
 
 export const RunCommand = cmd({
   command: "run [message..]",
-  describe: "run opencode with a message",
+  describe: "run GuLiCode with a message",
   builder: (yargs: Argv) => {
     return yargs
       .positional("message", {
