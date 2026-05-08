@@ -1,14 +1,16 @@
 # 节点运行时与图编译方向任务
 
+> 当前定位：本文件只记录 GraphRuntime / graph scheduling / AgentNode runtime 的任务。旧 Ryven `Start -> AgentNode -> End` 最小闭环是历史阶段，不是当前 GuLiCode 产品主线。当前优先级以 `current_goals.md` 和 `multi_agent_communication_tasks.md` 为准。
+
 ## 目标
 
-把当前 cluster / broker 编排能力，逐步抬升为面向节点图的执行运行时与编译目标。
+把 GraphRuntime 运行时、节点队列、消息批次、fan-out/fan-in、workspace/events 和最终状态聚合打磨成 GuLiCode desktop 可依赖的执行底座。
 
 ## 近期任务
 
 ### 当前最高优先级：多 Agent 通信设计
 
-`F:\src\ryven_demo\多agents通信设计.md` 已成为当前节点运行时方向的首要开发手册；详细短期任务拆解见 [`multi_agent_communication_tasks.md`](multi_agent_communication_tasks.md)。
+当前节点运行时方向的首要任务拆解见 [`multi_agent_communication_tasks.md`](multi_agent_communication_tasks.md)。历史设计稿可参考 skill 根目录的 `多agents通信设计.md`，不要再使用旧 `F:\src\ryven_demo` 作为默认路径。
 
 已完成第一阶段：
 
@@ -27,9 +29,9 @@
 4. 多对一 fan-in / join；
 5. 状态查询与结束/最终聚合接口。
 
-### 最小闭环优先路径
+### 历史最小闭环路径（已降级）
 
-短期内优先只做一条可落地的主线：
+以下路径曾用于 Ryven / runtime 融合早期验证，现在只作为历史背景：
 
 1. `Start -> blocking AgentNode -> End`
 2. 由 Ryven Flow 编译成 `GraphDefinition`
@@ -37,46 +39,48 @@
 4. 节点运行状态可见，最终结果可见
 5. 运行结果先回写到 UI / 日志，后续再进入事件总线
 
-这条路径的原则：
+这条路径当时的原则：
 - 不先做完整路由系统
 - 不先做 nonblocking job 持久化
 - 不先做复杂 Inspector / 类型系统
 - 不先做分布式 workspace 协作
 - 先确保单节点图闭环稳定
 
-1. 完善 AgentNode prompt contract，使下游 agent 只知晓：
+这批旧阶段任务中，仍然有效的运行时部分已经迁移到当前 GraphRuntime / GuLiCode 主线；Ryven/editor 专属部分延后。保留以下条目仅用于理解历史来源：
+
+1. AgentNode prompt contract，使下游 agent 只知晓：
    - 传入上下文
    - 用户设置的 agent prompt / model / skills
    - 框架允许暴露的接口文档
    - 可读/可写路径
    - 输出格式
-2. 继续打通 `AgentSkillSelection` 到图执行期的授权 skill 注入：
+2. `AgentSkillSelection` 到图执行期的授权 skill 注入：
    - `none` / `all` / `selected` / `upstream` 模型已落地
    - registry / registry-ui 已同步
-   - 下一步把 `upstream` 与图上游超级 agent 的配置流、授权 skill materialize 串起来
-3. 完善 `AgentSkillView` 与 CodexAdapter 的强隔离：
+   - 当前仍需把 `upstream` 与图上游超级 agent 的配置流、授权 skill materialize 串起来
+3. `AgentSkillView` 与 CodexAdapter 的强隔离：
    - prompt/context 注入已可用
    - 临时 `CODEX_HOME` 已绑定到 agent 私有目录
    - Codex 蓝图启动已使用 `workspace-write` sandbox + private checkout `cwd`，并拒绝 `danger-full-access` 与把真实项目目录加入 `--add-dir`
-4. 为超级 agent 增加下游 agent 配置能力：
+4. 超级 agent 下游 agent 配置能力：
    - model
    - skills
    - prompt contract
    - write/artifact scope
-5. 补处理节点、I/O 节点和条件 `switch` 路由。
-6. 把内存事件模型扩展为可订阅/可持久化事件流，并补 `WorkspaceChanged`、`ReviewRequested` 的实际触发点。
-7. 为非阻塞 job 增加取消、恢复、超时、失败重试和持久 runner。
-8. 为共享工作区增加 lock / lease、Dulwich commit/ref merge、归档删除 API、归档索引和空间清理策略。
-9. 按 Ryven + GraphRuntime 融合顺序推进图执行链路：
+5. 处理节点、I/O 节点和条件 `switch` 路由。
+6. 可订阅/可持久化事件流，以及 `WorkspaceChanged`、`ReviewRequested` 的实际触发点。
+7. 非阻塞 job 的取消、恢复、超时、失败重试和持久 runner。
+8. 共享工作区 lock / lease、Dulwich commit/ref merge、归档删除 API、归档索引和空间清理策略。
+9. Ryven + GraphRuntime 融合顺序：
    - 第一步：Ryven Flow -> `GraphDefinition` 编译 + `validate_runnable`（已完成）
    - 第二步：只跑 blocking `AgentNode` 的最小链路
    - 第三步：显示每个节点的运行状态和最终结果
    - 第四步：接 nonblocking job / manifest / workspace event
    - 第五步：做更强的类型系统、Inspector、上下文推荐
 
-### 最小闭环方案备忘
+### Ryven 最小闭环方案备忘（延后）
 
-短期最实用的实现策略是：
+如果未来重新启动 Ryven/editor 方向，可参考以下策略：
 
 1. 先把图执行器限制为单一执行路径，只支持 `Start -> AgentNode -> End`
 2. 只允许一个 blocking AgentNode 先跑通完整回路
@@ -145,20 +149,14 @@
 
 未完成 / 下一步：
 
-1. 先落地最小闭环：`Start -> blocking AgentNode -> End` 的图级执行入口、状态回写和结果展示。
-2. 给 UI 补一个明确的 Run 入口，把运行触发从手工调用收敛到统一动作。
-3. 让 `AgentNode.result` 的 data 输出能进入下游节点 prompt，先支持一跳传递。
-4. 先定义最少的运行态事件：`queued` / `running` / `completed` / `failed`。
-5. 拆分 agent 私有 scratch 空间与临时共享成果空间，停止把私有 worktree 自动 merge 当作成果发布机制。
-6. 给临时共享空间增加基础竞态处理：文件级 lock / lease、写入 manifest、冲突记录。
-7. 完成后再补处理节点、I/O 节点和条件 `switch` 路由。
-8. 再把内存事件模型扩展为可订阅/可持久化事件流，并补 `WorkspaceChanged`、`ReviewRequested` 的实际触发点。
-9. 再为非阻塞 job 增加取消、恢复、超时、失败重试和持久 runner。
-10. 再为共享工作区增加 Dulwich commit/ref merge、归档删除 API、归档索引和空间清理策略。
-11. 把 `AgentSkillView` 的 Codex options 自动并入 AgentNode / WorkerConfig 创建路径。
-12. 将 `upstream` skill selection 与图上游超级 agent 配置流打通，并在需要时由运行时 materialize 授权 skills。
-13. 实现超级 agent 除 skill 分配外的下游 agent 配置能力。
-14. 建立更强的端口类型系统、Inspector 数据预览和上下文推荐能力。
+1. 完成 graph scheduling beyond minimal single exec path：parallel branches、fan-out/fan-in、condition/switch routing、nonblocking job joins、deterministic final state aggregation。
+2. 把 ordinary-Agent dispatch 绑定到当前 task envelope、outgoing batch 和 `required_outgoing_targets`。
+3. 把 workspace/VCS API、artifact/report publish API 统一绑定到当前任务信封和 Agent scope。
+4. Surface runtime events to GuLiCode desktop：queued、dispatching、running、waiting_for_reply、join waiting、completed、failed、cancelled、workspace changed。
+5. 将 `AgentSkillView` / Codex adapter options 自动并入 AgentNode / WorkerConfig 创建路径。
+6. 将 `upstream` skill selection 与图上游超级 agent 配置流打通，并在需要时由运行时 materialize 授权 skills。
+7. 实现超级 agent 除 skill 分配外的下游 agent 配置能力。
+8. Ryven/editor 相关的 Run Blueprint、Start/End 最小链路、Inspector 和节点视觉改造延后到明确需要 visual editor 时。
 
 ## 依赖知识
 

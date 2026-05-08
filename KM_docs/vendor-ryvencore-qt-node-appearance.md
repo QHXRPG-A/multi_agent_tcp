@@ -2,6 +2,8 @@
 
 本文说明 `multi_agent_tcp/vendor` 下 **Ryven / ryvencore_qt** 流图编辑器中，**节点（Node）、端口（Port）、标题**等视觉如何组织与实现，便于维护或二次换肤。
 
+> 当前清理定位（2026-05-09）：本文是 Ryven / ryvencore_qt visual-editor 备用资料。当前产品主线是 GuLiCode desktop + GraphRuntimeControlPlane + GraphRuntime；除非明确重启 Ryven/editor 方向，不应把本文中的视觉改造建议当作近期主线任务。
+
 ## 适用范围
 
 - 主要代码包：`vendor/ryvencore_qt/ryvencore_qt/`

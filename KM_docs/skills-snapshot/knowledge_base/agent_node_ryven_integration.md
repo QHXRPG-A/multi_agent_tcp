@@ -2,6 +2,8 @@
 
 本文件沉淀 `AgentNode` 接入 vendored Ryven / `ryvencore_qt` 节点 UI 时确认的框架知识、当前实现边界和后续维护注意事项。它补充 [`vendor_ryven_ui.md`](vendor_ryven_ui.md) 的启动与视觉层知识，也补充 [`blueprint_gap_notes.md`](blueprint_gap_notes.md) 中的蓝图语义设计。
 
+> 当前定位：这是 Ryven/editor 适配知识，不是当前 GuLiCode 桌面 app 主线。当前启动和调度决策属于 GuLiCode top Agent -> GraphRuntimeControlPlane -> GraphRuntime；Ryven wrapper 只在需要 visual editor 时作为 GraphDefinition 前端。
+
 ## 当前结论
 
 `multi_agent_tcp.graph_runtime.AgentNode` 是后端 dataclass 配置对象，不是 Ryven 的 `ryvencore.Node` 子类，不能直接注册进 Ryven 左侧节点库。正确做法是创建一个本地 Ryven nodes package，用 Ryven `Node` 子类包装后端 `AgentNode` 配置，并在节点 state 中保存后端配置 dict。
@@ -202,7 +204,7 @@ Ryven Flow
 
 当前第一步已经完成：live Ryven flow 可编译为 `GraphDefinition`，并能通过 `validate_runnable()` 做运行前结构校验。它仍只是运行前编译和校验，不等价于完整执行链路。
 
-下一阶段应优先实现只跑 blocking `AgentNode` 的最小链路：Run 入口编译当前 flow，创建/连接 `CodeMakerCluster`，创建 `GraphRuntime`，按 exec 拓扑调度 blocking AgentNode，并把最终结果回填到 UI 或日志。
+如果未来重新启动 Ryven/editor 轨道，可先实现只跑 blocking `AgentNode` 的最小链路：Run 入口编译当前 flow，连接后端 CLI worker adapter，创建 `GraphRuntime`，按 exec 拓扑调度 blocking AgentNode，并把最终结果回填到 UI 或日志。当前 GuLiCode 主线不应依赖这条路径作为产品入口。
 
 ## GUI 导入验证注意事项
 

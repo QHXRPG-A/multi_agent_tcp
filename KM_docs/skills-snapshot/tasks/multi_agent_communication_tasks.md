@@ -2,7 +2,9 @@
 
 ## 当前定位
 
-`F:\src\ryven_demo\多agents通信设计.md` 是当前多 Agent 蓝图通信与顶层 Agent 治理的首要开发手册。
+多 Agent 蓝图通信与顶层 Agent 治理是当前主线。优先参考本 skill 的 `knowledge_base/core_architecture.md`、`knowledge_base/gulicode_desktop.md`、`knowledge_base/dispatch_workflows.md`，以及同目录保留的 `多agents通信设计.md` 历史设计稿。
+
+旧路径如 `F:\src\ryven_demo\多agents通信设计.md` 只代表早期材料来源，不应作为当前默认项目路径。
 
 短期推进范围只聚焦框架掌握 Agent 间通信和调度权：
 

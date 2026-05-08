@@ -2,22 +2,24 @@
 
 本文件整理 `multi_agent_tcp` 在多 CLI agent、节点化编排与多模态消息方面的近期方向性知识。它记录的是当前已明确的设计方向与术语，不等价于“功能已实现”。
 
+> 当前定位：本文件是 backend adapter / worker execution 知识，不是产品主架构入口。当前主线是 GuLiCode desktop / top Agent -> `GraphRuntimeControlPlane` -> `GraphRuntime` -> AgentNode queues / workspace/events -> `CLIWorkerBackend` adapters。阅读本文件时应把 CodeMaker、Codex、Claude 等 CLI 都理解为可替换后端。
+
 ## 定位
 
-根据 [D:\agents\multi_agent_tcp\KM_docs\multi-cli-node-workflow-brainstorm.md](D:\agents\multi_agent_tcp\KM_docs\multi-cli-node-workflow-brainstorm.md)，项目正在从“围绕 CodeMaker CLI 的薄编排框架”扩展为：
+早期材料 [D:\agents\multi_agent_tcp\KM_docs\multi-cli-node-workflow-brainstorm.md](D:\agents\multi_agent_tcp\KM_docs\multi-cli-node-workflow-brainstorm.md) 提出过从“围绕 CodeMaker CLI 的薄编排框架”扩展到以下 adapter 能力：
 
 - 多 CLI agent 接入
 - 节点化工作流编排
 - 多模态消息总线
 - headless 优先的运行时设计
 
-这条线与当前主架构并不冲突，而是其上层扩展方向。
+这条线与当前主架构并不冲突，但现在应放在 `CLIWorkerBackend` 适配层内理解。它服务 GraphRuntime，不主导 GraphRuntime。
 
 ## 关键方向
 
 ### 1. CLIAdapter 抽象
 
-当前 `codemaker_bridge.py` 是唯一已落地的 CLI adapter 形态。后续方向是抽出一层薄的 `CLIAdapter`：
+早期 `codemaker_bridge.py` 是最先落地的 CLI adapter 形态。当前写法应优先使用 `CLIWorkerBackend` / `CLIAdapter` 边界：
 
 - 只负责进程 IO、prompt 传递、输出解析、附件落地
 - 不负责 LLM 推理、tool routing、对话历史管理

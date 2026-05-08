@@ -1,14 +1,18 @@
 # vendored Ryven / UI 方向任务
 
+> 当前定位：Ryven 是延后的 visual-editor / 历史原型轨道，不是当前 GuLiCode 桌面 app 主线。除非用户明确要求 Ryven/editor 工作，否则不要把本文件中的 `Start -> AgentNode -> End` 最小闭环当作当前优先级。
+
 ## 目标
 
-为未来节点编辑器、蓝图体验和 vendor GUI 定制建立明确的近期推进项，并把 vendored Ryven 的正式启动入口沉淀为稳定方法。
+为未来节点编辑器、蓝图体验和 vendor GUI 定制保留知识与任务草案，并把 vendored Ryven 的正式启动入口沉淀为稳定方法。
 
-## 近期任务
+当前主线应从 GuLiCode desktop / top Agent 发起 start plan，经 `GraphRuntimeControlPlane` 校验并交给 `GraphRuntime` 执行。Ryven 只是在未来需要可视化编辑器时复用 GraphDefinition / AgentNode schema 的一个候选前端。
 
-### 最小闭环优先路径
+## 延后任务
 
-Ryven / UI 这边短期不要一口气做重度蓝图编辑器，先只完成这条链路：
+### Ryven 最小闭环备忘
+
+如果后续重新启动 Ryven/editor 方向，不要一口气做重度蓝图编辑器，先只完成这条链路：
 
 1. 节点库里能拖出 `Start` / `AgentNode` / `End`
 2. `AgentNode` 的配置能稳定保存和恢复
@@ -20,6 +24,8 @@ Ryven / UI 这边短期不要一口气做重度蓝图编辑器，先只完成这
 - 先做执行闭环，不先做完整美术改造
 - 先做状态反馈，不先做大型 Inspector
 - 先做单图单路径，不先做复杂多分支编辑体验
+
+但在当前项目主线下，这些工作排在 GuLiCode/top-Agent、GraphRuntime 调度、workspace/events 和 desktop UI 集成之后。
 
 1. 基于 `vendor-ryvencore-qt-node-appearance.md`，梳理视觉层改造入口：
    - `Design.py`
@@ -80,7 +86,7 @@ Ryven / UI 这边短期不要一口气做重度蓝图编辑器，先只完成这
 5. 把最终结果显示在节点 widget 或下方最简结果区
 6. 先不要做复杂主题和交互打磨，先保证“点一下能跑通”
 
-未完成 / 下一步：
+未完成 / 下一步（仅在 Ryven/editor 方向被重新激活时执行）：
 
 1. 先实现 `Run Blueprint` 和 blocking 最小执行链路。
 2. 先把节点运行状态和最终结果显示出来。

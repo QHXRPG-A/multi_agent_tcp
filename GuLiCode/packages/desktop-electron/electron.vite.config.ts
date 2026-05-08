@@ -1,6 +1,7 @@
 import { defineConfig } from "electron-vite"
 import appPlugin from "@opencode-ai/app/vite"
 import * as fs from "node:fs/promises"
+import { fileURLToPath } from "node:url"
 
 const channel = (() => {
   const raw = process.env.OPENCODE_CHANNEL
@@ -64,6 +65,11 @@ export default defineConfig({
     plugins: [appPlugin],
     publicDir: "../../../app/public",
     root: "src/renderer",
+    resolve: {
+      alias: {
+        "ghostty-web": fileURLToPath(new URL("../app/node_modules/ghostty-web/dist/ghostty-web.js", import.meta.url)),
+      },
+    },
     define: {
       "import.meta.env.VITE_OPENCODE_CHANNEL": JSON.stringify(channel),
     },

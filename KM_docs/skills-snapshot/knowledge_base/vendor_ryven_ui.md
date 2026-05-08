@@ -2,6 +2,8 @@
 
 本文件整理 `multi_agent_tcp/vendor` 下 `Ryven` 与 `ryvencore_qt` 的节点外观、主题、视觉结构与正式启动入口知识，便于后续 UI 定制、换肤、节点编辑器二开，以及稳定启动 vendored Ryven。
 
+> 当前定位：Ryven 是二级/延后 visual-editor 轨道。当前产品主线是 GuLiCode desktop + GraphRuntimeControlPlane + GraphRuntime。除非用户明确要求 Ryven/editor，本文件只作为历史和备用知识。
+
 ## 适用范围
 
 主要参考：

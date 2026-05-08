@@ -1,24 +1,29 @@
-# 多 CLI 接入 + 节点化工作流 + 多模态消息（短期目标脑暴）
+# 多 CLI 接入 + 节点化工作流 + 多模态消息（历史脑暴 / adapter 参考）
 
-> 文档定位：**短期目标的工程脑暴**，不是 ADR、不是规范、不是 API 草案。
-> 目的是把"多 CLI + 节点工作流 + 多模态"这条线在架构、协议、CLI Adapter、节点契约、迁移路径上的所有岔路写清楚，便于后续拆 ROADMAP 与排期。
+> 当前清理定位（2026-05-09）：本文是早期工程脑暴和 adapter 参考，不是当前项目主线、ADR、规范或 API 草案。
+> 当前主线是 **GuLiCode desktop / top Agent -> GraphRuntimeControlPlane -> GraphRuntime -> AgentNode queues / outgoing batches / joins / workspace events -> CLIWorkerBackend adapters**。
+> 文中的 CodeMaker、TCP broker、`CodeMakerCluster`、`show-registry` / `dispatch`、Ryven 可视化编辑器内容，应按 backend adapter / legacy broker / 延后 visual-editor 资料理解。
+>
+> 原始目的：把"多 CLI + 节点工作流 + 多模态"这条线在架构、协议、CLI Adapter、节点契约、迁移路径上的岔路写清楚，便于后续拆 ROADMAP 与排期。
 >
 > 不在本次范围：完整 schema、UI 设计、代码改动、ROADMAP / SKILL 修订（仅在文末以"待办"形式标出）。
 
-## 1. 短期目标与定位
+## 1. 历史目标与当前定位
 
-把现有 `multi_agent_tcp`（围绕 CodeMaker CLI 的薄编排框架）扩成一个**多 CLI agent 的节点化工作流编排器**：
+历史目标曾是把当时的 `multi_agent_tcp`（围绕 CodeMaker CLI 的薄编排框架）扩成一个**多 CLI agent 的节点化工作流编排器**：
 
 - **接入多种 agent CLI**：CodeMaker CLI（已支持）、Claude Code CLI、Codex CLI 等同类非交互式编码代理，未来还应能挂自研 CLI。
 - **以节点系统组织 agent 间协作**：不再只暴露 `run_parallel` / `run_chain` / `run_single` 三种 Python API 调用模式，而是把"agent 调用 + 消息处理"建模成一张**有向图**；图里既有"调一个 CLI"的节点，也有"做消息格式化、字段抽取、模板填充"的处理节点，用户能通过往图里加节点来定义任意中间处理。
 - **支持多模态信息传递**：节点之间的边能传图像、文本、（次要：音频）以及通用二进制；agent 节点在调具体 CLI 之前，由 adapter 把多模态信封落地成 CLI 能消费的形式（文件路径 / inline base64 / @file 引用）。
 - **headless 优先**：本轮先把"图执行运行时 + 节点契约 + CLI Adapter + 多模态数据面"做对；可视化编辑器（vendored Ryven）在最后一步复用，不重写。
 
-一句话：把当前框架从**"调 CodeMaker 的薄编排"** 演化为**"多 CLI agent 节点编排 + 多模态消息总线"**。
+按当前口径，这条线应收敛为 **CLIWorkerBackend / CLIAdapter 后端适配层**，服务 GuLiCode + GraphRuntime 主线，而不是重新定义产品架构中心。
 
-## 2. 与现有基线的张力（先把不一致挑明）
+历史一句话：把当时框架从**"调 CodeMaker 的薄编排"** 演化为**"多 CLI agent 节点编排 + 多模态消息总线"**。现在阅读时应把它理解为 adapter / worker execution 脑暴。
 
-新目标会同时撞到 4 个位置，列出来便于后续逐项处理：
+## 2. 与当时基线的张力（历史记录）
+
+当时的新目标会同时撞到 4 个位置，列出来便于后续逐项处理。当前实现和主线已经变化，以下内容只作为迁移背景：
 
 | # | 位置 | 现状 | 与新目标的冲突 | 处理方向 |
 |---|------|------|----------------|----------|
@@ -29,12 +34,12 @@
 
 > 注：`ROADMAP.md` 第 31 行 ASCII 架构图里也写了同一条"✗ 模型抽象层"，撤销时两处一起改。
 
-## 3. CLI Adapter 抽象（核心）
+## 3. CLI Adapter 抽象（仍有参考价值）
 
 ### 3.1 设计目标
 
 - **一层薄壳**：只适配进程 IO（怎么 spawn、怎么递 prompt、怎么解输出、怎么塞文件、怎么上下文续命），**不做** LLM 推理、tool routing、对话历史管理（这些 CLI 自己已实现，与 ROADMAP 的"薄框架"原则一致）。
-- **统一输出**：所有 adapter 把 CLI 的差异化输出归一化为 [`cluster.py`](../cluster.py) 现有的 `WorkerResult{worker, status, answer, raw_stdout, stderr, elapsed_sec}`，再加一个 `attachments: List[MultiModalEnvelope]` 用于回传图像/文件/音频。
+- **统一输出**：所有 adapter 把 CLI 的差异化输出归一化为 runtime/backend 可消费的结果结构。文中沿用当时的 [`cluster.py`](../cluster.py) / `WorkerResult` 表述；当前新文档应优先写 `CLIWorkerBackend` 边界。
 - **可发现的能力声明**：每个 adapter 暴露一份 capabilities（是否支持非交互模式、是否支持文件附件、是否支持 NDJSON、是否支持 streaming），让节点图编译器（GraphCompiler：节点图 → 编排原语）能选择正确的调用路径。
 
 > 术语澄清：本节出现的"编排器 / 编译器"专指**框架内部**把节点图拍平成 broker 调用的那一层组件，**不是**指"Cursor / CodeMaker 之类的上游决策者"。本框架自 2026-04-30 起已不再使用"上游/下游"这种角色对称破坏的描述（详见新增的§10"对等通信原语 vs 编排原语"）。
@@ -348,13 +353,15 @@ workspace_root/
 
 > 关键约束：blob 帧必须能被现有 `batch_gather` 协议透明转发；建议 broker 给 blob store 一个独立的请求 id 命名空间，避免与 `gather_id` / `reply_to` / `gather_reply`（见 [`broker.py`](../broker.py)）混淆。
 
-## 6. 节点 → broker 调度的映射
+## 6. 历史节点 → broker 调度映射（已降级）
+
+> 当前说明：本节描述的是早期 GraphCompiler / broker / cluster 映射想法。当前调度语义应以 `GraphRuntimeControlPlane` / `GraphRuntime` 为中心；broker、TCP、cluster 只作为 CLI worker backend 路径。
 
 ### 6.1 编译思路
 
-节点图（DAG）由 GraphCompiler 拍平成"图运行期 agent 实例表 + 消息调度步骤"。表中所有"Agent 节点"均指 [§4.1.1 定义](#411-agent-节点的可视化配置面重点) 的"装载一个对等 agent CLI 的节点类型"——即用户在可视化编辑器里**拖出来一个 Agent 节点 = 声明一个图运行期 agent 实例**。
+历史设想中，节点图（DAG）由 GraphCompiler 拍平成"图运行期 agent 实例表 + 消息调度步骤"。表中所有"Agent 节点"均指 [§4.1.1 定义](#411-agent-节点的可视化配置面重点) 的"装载一个对等 agent CLI 的节点类型"。
 
-GraphRuntime 必须维护本次蓝图运行的 `node_id -> agent_instance/session` 映射。第一次经过节点时启动或绑定实例；之后再次经过同一节点只发送消息；整图结束时再统一 teardown 本次运行创建的实例。
+当前仍然成立的部分是：`GraphRuntime` 维护本次蓝图运行的 `node_id -> agent_instance/session` 映射。第一次经过节点时启动或绑定实例；之后再次经过同一节点只发送消息；整图结束时再统一 teardown 本次运行创建的实例。
 
 | DAG 模式 | 编译目标 |
 |----------|----------|
@@ -371,8 +378,8 @@ GraphRuntime 必须维护本次蓝图运行的 `node_id -> agent_instance/sessio
 flowchart TD
     NodeGraph[NodeGraph DAG] --> GraphCompiler[GraphCompiler]
     GraphCompiler --> ProcessingNodes[Processing IO Routing Nodes]
-    GraphCompiler --> ClusterAPI[CodeMakerCluster API]
-    ClusterAPI --> Broker["Broker batch_gather and unicast"]
+    GraphCompiler --> Runtime["GraphRuntime / CLIWorkerBackend boundary"]
+    Runtime --> Broker["Legacy Broker batch_gather and unicast"]
     Broker --> AgentLoop[Agent Loop]
     AgentLoop --> CLIAdapter[CLIAdapter]
     CLIAdapter --> CodeMakerCLI[codemaker run]
@@ -416,7 +423,9 @@ flowchart LR
 - 短期方案：**catalog 注入只在 `cli_kind == "codemaker"` 时生效**；其它 CLI 走各自的 adapter 内置 skill 注入逻辑。
 - registry 的 `skills: [...]` 字段语义不变（仍是项目级 skill 列表），但具体如何注入由 adapter 决定。
 
-## 8. MVP 路线（5 步）
+## 8. 历史 MVP 路线（不再作为当前优先级）
+
+> 当前说明：以下是 2026-04 期间的脑暴路线。当前优先级已经转为 GuLiCode top-Agent、GraphRuntimeControlPlane、GraphRuntime 队列/批次/join/workspace/events，以及 desktop UI 集成。Ryven 可视化阶段延后。
 
 | 阶段 | 目标 | 关键产出 |
 |------|------|----------|
@@ -424,7 +433,7 @@ flowchart LR
 | **② CLI Adapter 抽象** | 把现有 [`codemaker_bridge.py`](../codemaker_bridge.py) 重构为 `CodeMakerAdapter`，`WorkerConfig` / `agent_loop` 走 adapter 接口 | `multi_agent_tcp/adapters/codemaker.py`；行为零变化（金丝雀） |
 | **③ ClaudeCodeAdapter / CodexAdapter** | 各跑一次最小 spike，确认 §3.3 表里 TODO 的真值，再写 adapter | `multi_agent_tcp/adapters/claude_code.py` / `codex.py`；`agents_registry.json` 增加 `cli_kind` |
 | **④ MultiModalEnvelope + Blob Store** | 信封落地、`blob_put` / `blob_get` 帧、adapter `materialize_attachments` 实装 | [`protocol.py`](../protocol.py) 增加新帧类型；[`broker.py`](../broker.py) 增加 blob store 子模块 |
-| **⑤ 可视化（最后做）** | 把 vendored Ryven UI 复用为节点图编辑器，节点定义复用 ① 的 schema | UI 不重写；只做 NodeGUI 适配，把 Ryven 的 Port/NodeItem 映射到 §4 的端口契约 |
+| **⑤ 可视化（最后做）** | 把 vendored Ryven UI 复用为节点图编辑器，节点定义复用 ① 的 schema | UI 不重写；只做 NodeGUI 适配，把 Ryven 的 Port/NodeItem 映射到 §4 的端口契约；当前已延后 |
 
 > **每一步都能独立交付**：① 完成后即可用 YAML 跑节点图；② 完成后多 CLI 能并存于一个集群；④ 完成后才解锁多模态；⑤ 是体验加分项，不阻塞功能。
 
@@ -440,9 +449,9 @@ flowchart LR
 - **R8（开放）**：是否允许"远端 worker"（broker 与 agent 不同机器）？若要，blob store 必须升级成可远程拉，且涉及网络带宽/安全；本轮脑暴不展开。
 - **R9（开放）**：节点图是否需要持久化为可重入的"工作流模板"（带版本号、迁移）？若需要，`MultiModalEnvelope.meta` 还要补 schema 版本；与 [`ryvencore-vs-ue5-blueprint-gaps-2-4-8.md`](ryvencore-vs-ue5-blueprint-gaps-2-4-8.md) §2.3 第 4 层"序列化 / 存档类型"对齐。
 
-## 10. 对等通信原语 vs 编排原语（2026-04-30 新增）
+## 10. 对等通信原语 vs 编排原语（历史术语澄清）
 
-随着项目定位转向"agent CLI 之间对等通信、管理、协作"，在阅读本脑暴和后续 ROADMAP 时，需要明确区分**两类原语**——它们处于不同抽象层，承担不同职责，且对"对称性"的要求不同：
+本节保留当时对旧叙事的纠偏价值。当前项目定位已进一步转向 GuLiCode + GraphRuntime 主线；阅读本节时，应把 peer/broker/dispatch 视为 backend adapter 和 legacy broker 层的术语澄清，而不是新的产品中心。
 
 ### 10.1 对等通信原语（peer primitives）
 

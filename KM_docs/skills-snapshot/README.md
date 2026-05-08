@@ -1,19 +1,26 @@
-# Cursor skill 镜像快照
+# multi-agent-tcp Codex skill
 
-本目录是 `C:\Users\a\.cursor\skills\multi-agent-tcp\` 的仓库内镜像快照。
+本目录是当前本机生效的 Codex skill：`C:\Users\a\.codex\skills\multi-agent-tcp\`。
 
 ## 目的
 
-- 让仓库读者无需访问本地 `.cursor/` 目录，也能看到当前 Cursor skill 的完整结构。
-- 让 skill 的知识库、任务目录和归档目录都能被提交到仓库历史中，便于回顾与分享。
-- 作为同步副本，方便在 `KM_docs` 语境中直接引用具体 skill 文档。
+- 为 GuLiCode desktop、GraphRuntimeControlPlane、GraphRuntime、AgentNode 队列、workspace/events 和 CLIWorkerBackend adapter 提供本地工作记忆。
+- 保留旧 CodeMakerCluster / TCP / Ryven 资料，但只作为兼容和历史背景。
+- 让后续更新 skill 时有稳定的知识库、任务目录和归档目录。
 
-## 同步规则
+## 当前主线
 
-- **权威源目录**：`C:\Users\a\.cursor\skills\multi-agent-tcp\`
-- 本目录只是镜像，不是生效中的 Cursor skill 目录。
-- 修改 skill 时，应先修改源目录，再整体同步到本目录。
-- 旧的 `cursor-SKILL.md` / `cursor-ARCHIVE.md` / `codemaker-SKILL.md` 单文件快照模式已废弃；现在按完整目录镜像同步。
+- GuLiCode desktop / top Agent 发起 start plan。
+- `GraphRuntimeControlPlane` 负责组织读取、开始校验、运行控制、消息批次、join、结束归档等非 UI 控制面。
+- `GraphRuntime` 负责 AgentNode queue、tick dispatch、outgoing batch、fan-in/join、workspace/event/final status。
+- `CLIWorkerBackend` 负责 Codex / CodeMaker / 其它 CLI 的后端适配。
+
+## 维护规则
+
+- 新内容优先写入 `knowledge_base/` 或 `tasks/`，长期变更再归档到 `archive/`。
+- 写新文档时不要恢复旧的“Cursor/CodeMaker TCP 编排是中心”的表述。
+- `CodeMakerCluster` 只作为旧 API 兼容名使用；新文档优先写 `CLIWorkerBackend`。
+- Ryven 是可视化编辑器候选和历史原型；除非用户明确要求 Ryven/editor，不作为当前产品优先级。
 
 ## 当前包含内容
 
@@ -21,5 +28,3 @@
 - `knowledge_base/`
 - `tasks/`
 - `archive/`
-
-若本目录内容与源目录不一致，应以源目录为准重新覆盖。

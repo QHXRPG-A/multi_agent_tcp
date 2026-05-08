@@ -1,140 +1,125 @@
 ---
 name: multi-agent-tcp
 description: >-
- Orchestrates multiple CodeMaker CLI workers over TCP via CodeMakerCluster,
- AgentsRegistry, broker batch_gather, show-registry/dispatch flows, and
- skill catalog injection. Use when working with multi_agent_tcp, CodeMaker
- multi-agent clusters, agents_registry.json, registry-ui, or TCP orchestration
- between Cursor and CodeMaker CLI workers.
+ Work on the current multi_agent_tcp direction: GuLiCode desktop app,
+ blueprint runtime control, GraphRuntimeControlPlane, GraphRuntime scheduling,
+ top-agent orchestration, AgentNode queues, fan-out/fan-in joins, workspace
+ state, events, and CLIWorkerBackend adapters. Use for GuLiCode desktop,
+ multi-agent blueprint communication, runtime start/status/end, agent dispatch,
+ workspace/archive flow, and legacy TCP/CodeMaker backend compatibility.
 ---
-# multi_agent_tcp —让 Cursor/CodeMaker 与多个 CodeMaker CLI交互的编排框架
+# multi_agent_tcp - GuLiCode blueprint runtime skill
 
-> **框架核心目的**：让 Cursor（或 CodeMaker 等 AI 编码助手）能**同时与多个 CodeMaker CLI 实例交互**——并行分发任务、串行链式协作、聚合多路结果。Cursor/CodeMaker 与多 CodeMaker CLI 的交互是本框架的**重中之重**，所有底层组件（Broker、TCP 协议、进程管理）都服务于这一目标。
+## Current Position
 
-## 当前定位
+The current project center is **GuLiCode desktop app + blueprint runtime**.
 
-- **定位**：Cursor（或任何 Python 调用者）通过一个 `CodeMakerCluster` 对象管理一组 CodeMaker CLI worker 进程，以并行或串行方式提交任务并拿聚合结果。
-- **代码根路径**：当前工作区通常为 `d:\agents\multi_agent_tcp\`；历史环境也可能位于 `f:\src\Package\Script\Python\multi_agent_tcp\`。编写命令时以当前本机实际路径为准。
-- **维护范围**：用户若说「只更新 Cursor skill」，仅修改本目录下的文档；`.codemaker/skills/multi-agent-tcp/SKILL.md` 为另一份拷贝，需另行同步。
+The main architecture line is:
 
-## 文档结构
+```text
+GuLiCode desktop / UI / top Agent
+  -> GraphRuntimeControlPlane
+  -> GraphRuntime
+  -> AgentNode queues, outgoing batches, joins, workspace state, events
+  -> CLIWorkerBackend
+  -> AgentTCPClient / Broker / CLIAdapter / worker process
+```
+
+Rules of interpretation:
+
+- Treat `GraphRuntimeControlPlane` and `GraphRuntime` as the current semantic center.
+- Treat GuLiCode as the intended top-agent and desktop integration surface.
+- Treat low-level TCP workers as a backend adapter path, not the product architecture center.
+- Treat `CodeMakerCluster` as a backward-compatible alias for the old cluster facade. New writing should prefer `CLIWorkerBackend` unless explaining legacy APIs.
+- Treat Ryven as a legacy/optional visual editor track. Current start decisions belong to GuLiCode/top Agent plans validated by the framework, not to Start/End nodes as decision makers.
+
+Common repository root:
+
+```text
+D:\agents\multi_agent_tcp
+```
+
+Historical paths such as `F:\src\Package\Script\Python\multi_agent_tcp` or `F:\src\ryven_demo` may appear in archives. Do not use them as current defaults unless the user's machine actually has that path.
+
+## Document Layout
 
 ### 1. `SKILL.md`
 
-只保留：
-- 当前有效的高层方法
-- 关键规则
-- 入口索引
-- 模块文档、任务文档与归档文档引用
+This file is only the high-level navigation and maintenance policy. Do not put long module details here.
 
 ### 2. `多agents通信设计.md`
 
-顶层多 Agent 通信与 GuLiCode 协调模型设计文档。用于记录当前关于以下主题的有效设计：
+Primary design document for top-agent governance and multi-agent communication.
 
-- 多 Agent 蓝图中的控制流 / 数据流拆分
-- 顶层 Agent：GuLiCode 的定位、生命周期、权限边界和输出分层
-- 框架对顶层 Agent 的 rule / skill、profile、启动计划校验和纠错回路
-- 框架需要提供的开始、组织架构、状态查询、结束、消息分发、计划校验、事件订阅、工作区与归档接口
-- 普通 Agent 的通信约束、共享工作区规则、事件状态模型、UI 交互建议和当前开发进度
+Read first when the user asks about:
 
-当用户询问“顶层 Agent”“GuLiCode 作为全局协调者”“多 agents 如何通信”“Agent 间消息分发”“Start / End 是否应保留”“框架接口如何约束顶层 Agent”等问题时，优先阅读本文件。
+- GuLiCode as global coordinator / top Agent
+- multi-agent communication
+- ordinary Agent message dispatch
+- start/status/end runtime interfaces
+- required outgoing targets
+- fan-out and fan-in
+- join aggregation
+- top-agent rule / skill / profile
+- whether Start/End should remain as decision makers
 
 ### 3. `knowledge_base/`
 
-模块知识库目录。不同模块分别记录在独立知识文档中，只保存当前有效知识，不承担历史变更流水。
+Stable current knowledge. Prefer these files for implementation decisions:
 
-- [`knowledge_base/README.md`](knowledge_base/README.md)：知识库索引
-- [`knowledge_base/core_architecture.md`](knowledge_base/core_architecture.md)：主架构、组件与协议入口
-- [`knowledge_base/cluster_api.md`](knowledge_base/cluster_api.md)：`CodeMakerCluster` API 与生命周期
-- [`knowledge_base/registry_and_skills.md`](knowledge_base/registry_and_skills.md)：registry、skill 合并、catalog 注入
-- [`knowledge_base/dispatch_workflows.md`](knowledge_base/dispatch_workflows.md)：`show-registry` / `dispatch` / async / legacy workflow
-- [`knowledge_base/cli_reference.md`](knowledge_base/cli_reference.md)：CLI 速查
-- [`knowledge_base/runtime_notes.md`](knowledge_base/runtime_notes.md)：重试、编码、心跳、日志、`codemaker run` 易错点
-- [`knowledge_base/multi_cli_workflow.md`](knowledge_base/multi_cli_workflow.md)：多 CLI 接入、节点工作流、`CLIAdapter`、`MultiModalEnvelope` 等近期方向性知识
-- [`knowledge_base/vendor_ryven_ui.md`](knowledge_base/vendor_ryven_ui.md)：vendored `Ryven` / `ryvencore_qt` 的节点外观、视觉层与启动入口知识
-- [`knowledge_base/agent_node_ryven_integration.md`](knowledge_base/agent_node_ryven_integration.md)：`AgentNode` 接入 Ryven 节点 UI、Start/End 机制、删除保护与 runnable graph 校验
-- [`knowledge_base/blueprint_gap_notes.md`](knowledge_base/blueprint_gap_notes.md)：对标 UE5 蓝图时的类型系统、编辑效率与信息密度改进方向
-- [`knowledge_base/gulicode_desktop.md`](knowledge_base/gulicode_desktop.md)：GuLiCode 桌面端源码结构、Electron/Tauri 启动链路、main/preload/renderer/app 分层，以及蓝图系统嵌入桌面端的建议路径
-
-知识文档之间允许直接交叉引用；新增模块时优先在 `knowledge_base/` 中新建对应文档，再从本文件挂入口。
+- [`knowledge_base/core_architecture.md`](knowledge_base/core_architecture.md): current architecture centered on GuLiCode, `GraphRuntimeControlPlane`, `GraphRuntime`, workspace/events, and CLI backend adapters.
+- [`knowledge_base/gulicode_desktop.md`](knowledge_base/gulicode_desktop.md): GuLiCode desktop source structure, Electron/Tauri launch paths, main/preload/renderer/app layering, and desktop integration guidance.
+- [`knowledge_base/dispatch_workflows.md`](knowledge_base/dispatch_workflows.md): runtime control-plane CLI/RPC workflows, legacy dispatch notes, and thin-client boundaries.
+- [`knowledge_base/cluster_api.md`](knowledge_base/cluster_api.md): legacy `CodeMakerCluster` compatibility and preferred `CLIWorkerBackend` terminology.
+- [`knowledge_base/registry_and_skills.md`](knowledge_base/registry_and_skills.md): registry, skill selection, and catalog injection.
+- [`knowledge_base/runtime_notes.md`](knowledge_base/runtime_notes.md): encoding, logs, process cleanup, retry, and CLI runtime pitfalls.
+- [`knowledge_base/multi_cli_workflow.md`](knowledge_base/multi_cli_workflow.md): CLI adapter/backend history and still-relevant adapter constraints.
+- [`knowledge_base/vendor_ryven_ui.md`](knowledge_base/vendor_ryven_ui.md): vendored Ryven / ryvencore_qt visual-editor knowledge, now secondary.
+- [`knowledge_base/agent_node_ryven_integration.md`](knowledge_base/agent_node_ryven_integration.md): Ryven AgentNode wrapper and historical Start/End integration details.
+- [`knowledge_base/blueprint_gap_notes.md`](knowledge_base/blueprint_gap_notes.md): UE5 Blueprint comparison notes, useful for UI/editor design only.
 
 ### 4. `tasks/`
 
-短期任务目录。用于沉淀最近要推进的工程目标、任务拆解和阶段性执行清单，不承担长期知识沉淀。
+Short-term work. Prefer current files in this order:
 
-- [`tasks/README.md`](tasks/README.md)：任务目录说明
-- [`tasks/current_goals.md`](tasks/current_goals.md)：当前短期目标总览
-- [`tasks/multi_cli_adapter_tasks.md`](tasks/multi_cli_adapter_tasks.md)：多 CLI adapter 方向任务
-- [`tasks/node_runtime_tasks.md`](tasks/node_runtime_tasks.md)：节点运行时与图编译方向任务
-- [`tasks/vendor_ryven_tasks.md`](tasks/vendor_ryven_tasks.md)：vendored Ryven / UI 改造方向任务
+- [`tasks/current_goals.md`](tasks/current_goals.md): current active priorities.
+- [`tasks/multi_agent_communication_tasks.md`](tasks/multi_agent_communication_tasks.md): GuLiCode top Agent, runtime control, message staging, joins, and framework-owned communication.
+- [`tasks/node_runtime_tasks.md`](tasks/node_runtime_tasks.md): GraphRuntime / graph scheduling implementation tasks.
+- [`tasks/multi_cli_adapter_tasks.md`](tasks/multi_cli_adapter_tasks.md): CLI backend adapter work, secondary to runtime/control-plane work.
+- [`tasks/vendor_ryven_tasks.md`](tasks/vendor_ryven_tasks.md): Ryven/editor tasks, deferred unless user specifically asks for Ryven.
 
 ### 5. `archive/`
 
-历史变更归档目录。每个 `*_archive.md` 只负责记录某一方向的变更，便于回顾；不再使用总归档文件。
+Historical change records only. Do not use archive content as current behavior unless a current knowledge document points to it.
 
-- [`archive/agents_architecture_archive.md`](archive/agents_architecture_archive.md)：多 agent 主架构、dispatch、registry、cluster、CLI 演进历史
-- [`archive/blueprint_integration_archive.md`](archive/blueprint_integration_archive.md)：Ryven / 蓝图 / vendor GUI 方向变更历史
-- [`archive/gulicode_runtime_baseline_archive.md`](archive/gulicode_runtime_baseline_archive.md)：GuLiCode / OpenCode 运行基线方向变更历史
+- [`archive/agents_architecture_archive.md`](archive/agents_architecture_archive.md)
+- [`archive/blueprint_integration_archive.md`](archive/blueprint_integration_archive.md)
+- [`archive/gulicode_runtime_baseline_archive.md`](archive/gulicode_runtime_baseline_archive.md)
 
-## 推荐使用方式
+## Query Map
 
-### 先看高层入口，再按需深入
+- GuLiCode desktop startup, Electron/Tauri, desktop source layering: read `knowledge_base/gulicode_desktop.md`.
+- GuLiCode top Agent, organization view, top-agent profile, start plan, status explanation: read `多agents通信设计.md`, then `tasks/multi_agent_communication_tasks.md`.
+- Runtime start/status/end, organization, message batch, agent dispatch, join-create/join-contribute: read `knowledge_base/dispatch_workflows.md`.
+- Current architecture or component ownership: read `knowledge_base/core_architecture.md`.
+- Legacy `CodeMakerCluster`, `run_parallel`, `run_chain`, broker/TCP worker path: read `knowledge_base/cluster_api.md`.
+- Registry, skills, per-agent skill selection: read `knowledge_base/registry_and_skills.md`.
+- Workspace API, changesets, archive, private checkout, conflict flow: read `knowledge_base/core_architecture.md` and `tasks/multi_agent_communication_tasks.md`; use archive only for history.
+- Ryven GUI, node visuals, old Start/End wrapper behavior: read `knowledge_base/vendor_ryven_ui.md` and `knowledge_base/agent_node_ryven_integration.md`, but treat them as secondary/deferred.
+- Multi CLI adapters, Codex/CodeMaker process adapters, `CLIAdapter`: read `knowledge_base/multi_cli_workflow.md`, but keep the `CLIWorkerBackend` adapter boundary in mind.
 
-1. 先读本文件确认问题属于：多 Agent 通信 / 顶层 Agent 设计、主架构、cluster API、registry/skills、dispatch、CLI、运行时注意事项、节点工作流、vendor UI，还是短期任务推进。
-2. 再进入 `knowledge_base/` 或 `tasks/` 对应文档。
-3. 若需要回顾历史决策、迁移过程或某方向演进，再读取 `archive/` 中对应的 `*_archive.md`。
+## Maintenance Rules
 
-### 常见查询映射
+- Current effective knowledge belongs in `knowledge_base/`.
+- Short-term priorities and checklists belong in `tasks/`.
+- Historical migration notes belong in `archive/`.
+- Do not restore old "Cursor/CodeMaker TCP orchestration" framing as the skill center.
+- Do not present Ryven Start/End minimum loop as the current product priority unless the user explicitly asks for Ryven/editor work.
+- When documenting backend execution, prefer `CLIWorkerBackend`; mention `CodeMakerCluster` only as a compatibility alias.
+- When documenting user-facing orchestration, prefer GuLiCode top Agent and framework-owned runtime APIs.
+- When copying from `KM_docs/skills-snapshot`, re-check whether imported content reintroduces old center framing before considering the skill clean.
 
-- 问主架构：看 `knowledge_base/core_architecture.md`
-- 问 `CodeMakerCluster`：看 `knowledge_base/cluster_api.md`
-- 问 `agents_registry.json` / skill 注入：看 `knowledge_base/registry_and_skills.md`
-- 问 `show-registry` / `dispatch` / async：看 `knowledge_base/dispatch_workflows.md`
-- 问命令怎么写：看 `knowledge_base/cli_reference.md`
-- 问运行时陷阱：看 `knowledge_base/runtime_notes.md`
-- 问顶层 Agent、GuLiCode 全局协调者、多 Agent 通信、消息分发、Start/End 去留、框架核心接口或普通 Agent 通信约束：看 `多agents通信设计.md`
-- 问多 CLI / 节点工作流方向：看 `knowledge_base/multi_cli_workflow.md`
-- 问 Ryven / `ryvencore_qt` 视觉层或启动方式：看 `knowledge_base/vendor_ryven_ui.md`
-- 问 `AgentNode` 如何接入 Ryven 节点 UI、Start/End 如何自动创建或如何保护不可删除：看 `knowledge_base/agent_node_ryven_integration.md`
-- 问蓝图差距与改进点：看 `knowledge_base/blueprint_gap_notes.md`
-- 问 GuLiCode 桌面端、Electron/Tauri 启动、桌面源码结构、或蓝图系统如何嵌入 GuLiCode 桌面端：看 `knowledge_base/gulicode_desktop.md`
-- 问最近要做什么：看 `tasks/*.md`
-- 问历史变更：看 `archive/*.md`
+## Repository Link
 
-## 归档与维护规则
-
-### 知识库更新
-
-- 当前有效知识优先更新到 `knowledge_base/` 对应模块文档。
-- `SKILL.md` 只做导航，不重复承载大量细节。
-- 若一个知识点跨多个模块，可在模块文档之间直接交叉引用。
-- 来自 `KM_docs` 的方向性内容，只有在适合作为长期参考时才进入知识库；仍属近期推进清单的内容优先进入 `tasks/`。
-
-### 任务目录更新
-
-- 短期目标、阶段性推进项、待做清单统一更新到 `tasks/`。
-- `tasks/` 记录的是“最近要推进什么”，不是长期知识库，也不是历史归档。
-- 当某项方向沉淀为稳定方法后，应转写到 `knowledge_base/`；当某轮工作需要回顾演进过程时，再追加到 `archive/`。
-
-### 历史归档更新
-
-当用户明确要求「归档」或要沉淀长期历史时：
-- 不再新建或恢复总 `ARCHIVE.md`
-- 只把历史变更追加到 `archive/` 下对应主题的 `*_archive.md`
-- 若是新方向，新增一个新的 `*_archive.md`
-- 归档文档只记录变更与阶段性结论，当前有效方法仍应同步回 `knowledge_base/`
-
-### multi_agent_tcp 方向特别说明
-
-- 若用户要求启动或汉化 Ryven GUI，优先查看 `knowledge_base/vendor_ryven_ui.md`、`knowledge_base/agent_node_ryven_integration.md` 与 `archive/blueprint_integration_archive.md`。
-- 若用户要求处理 GuLiCode / OpenCode 运行基线，优先查看 `archive/gulicode_runtime_baseline_archive.md`。
-- 若用户要求处理顶层 Agent：GuLiCode、多 Agent 通信设计、Agent 间消息分发、顶层 Agent rule/skill、开始/状态/结束接口，优先查看 `多agents通信设计.md`。
-- 若用户要求处理 GuLiCode 桌面端源码、桌面启动、Electron/Tauri、或把蓝图系统嵌入 GuLiCode 桌面端，优先查看 `knowledge_base/gulicode_desktop.md`。
-- 若用户要求多 agent 编排、dispatch、registry、cluster、registry-ui 等主能力，优先查看 `knowledge_base/` 与 `archive/agents_architecture_archive.md`。
-- 若用户要求梳理多 CLI、节点化工作流、多模态消息等近期方向，优先查看 `knowledge_base/multi_cli_workflow.md` 与 `tasks/`。
-
-## 外部与仓库关联
-
-- GitHub 仓库：<https://github.com/QHXRPG-A/multi_agent_tcp>
-- `multi_agent_tcp/` 是常见代码仓根目录；本 skill 文档目录与代码仓可能不是同一 git 范围。
-- 用户若说「只更新 Cursor」，默认仅维护本 skill 目录，不改代码仓或 `.codemaker` 副本。
+- GitHub: <https://github.com/QHXRPG-A/multi_agent_tcp>
+- Current common local root: `D:\agents\multi_agent_tcp`

@@ -1,12 +1,32 @@
 # 多 CLI Adapter 方向任务
 
+> 当前定位：本文件是后端 CLI 适配层任务，不是 GuLiCode / GraphRuntime 的产品主线。新设计应使用 `CLIWorkerBackend` / `CLIAdapter` 术语；`CodeMaker` 只是一个兼容 adapter，不能重新成为架构中心。
+
 ## 目标
 
-围绕 `KM_docs/multi-cli-node-workflow-brainstorm.md` 中提出的方向，建立多 CLI agent 接入基线。
+围绕 GuLiCode 桌面 app 和 GraphRuntime 需要的 worker backend，建立多 CLI agent 接入基线。
+
+适配层职责：
+
+- 把 Codex、CodeMaker、未来 Claude 等 CLI 包装成 runtime 可调用的 backend。
+- 承接 `AgentNode` 的 prompt、context、workspace contract、attachments、timeout、cancel 和结果解析。
+- 对上保持稳定的 `CLIWorkerBackend` / `CLIAdapter` 边界，不让具体 CLI 细节渗透到 GraphRuntime 调度语义中。
+
+非目标：
+
+- 不把 `CodeMakerCluster` 重新定义为当前主架构。
+- 不用 adapter 任务替代 GuLiCode top-Agent、control plane、message batch、join、workspace/events 主线。
+- 不把 registry-ui 的旧 CodeMaker 字段作为新 UI 的默认信息架构。
 
 ## 近期任务
 
-1. 继续硬化已落地的 `CodexAdapter`：
+1. 将已落地的 Codex / CodeMaker adapter 收敛到 `CLIWorkerBackend` 边界：
+   - prompt contract
+   - execution context
+   - workspace API / VCS checkout contract
+   - structured result extraction
+   - timeout / cancel / cleanup
+2. 继续硬化已落地的 `CodexAdapter`：
    - `codex exec`
    - stdin prompt
    - `--model`
@@ -14,22 +34,22 @@
    - `--json` 或 `--output-last-message`
    - 图片附件 `--image`
    - 超时与取消
-2. 完善 `cli_kind=codex` / `mode=codex-worker` 的生产配置路径：
+3. 完善 `cli_kind=codex` / `mode=codex-worker` 的生产配置路径：
    - registry 示例
    - cluster JSON 示例
    - registry-ui 字段差异化
-3. 继续完善 SkillSpace / AgentSkillView 与 CodexAdapter 的隔离：
+4. 继续完善 SkillSpace / AgentSkillView 与 CodexAdapter 的隔离：
    - 只暴露授权 skills
    - agent 不接触真实 skill 空间路径
    - 将临时 `CODEX_HOME` 自动绑定到 agent 独立目录或 run workspace
-4. 设计 AgentNode prompt contract：
+5. 设计 AgentNode prompt contract：
    - 用户设置的 agent prompt
    - 上游传入上下文
    - 框架接口文档
    - 授权 skills catalog
    - 输出格式要求
-5. 继续确认 Claude CLI 的非交互入口、输出格式、cwd/env、附件与取消语义。
-6. 评估 `registry_ui.py` 后续如何按 `cli_kind` 渲染不同字段与 model 候选。
+6. 继续确认 Claude CLI 的非交互入口、输出格式、cwd/env、附件与取消语义。
+7. 评估 `registry_ui.py` 后续如何按 `cli_kind` 渲染不同字段与 model 候选，但不要把旧 registry-ui 作为 GuLiCode UI 主线。
 
 ## 当前代码对照状态（2026-05-03）
 

@@ -2,6 +2,8 @@
 
 本文档记录与 UE5 蓝图系统对比时，**当前流图栈**（Ryven / ryvencore + ryvencore_qt 及上层业务）在以下三方面的**差距与可改进点**，便于排期与架构讨论。
 
+> 当前清理定位（2026-05-09）：本文是 Ryven/editor 体验脑暴和备用参考，不是当前 GuLiCode / GraphRuntime 主线任务清单。文中的“当前流图栈”“优先补”等表述只在重启 visual-editor 方向时成立；当前产品优先级仍是 GuLiCode desktop、GraphRuntimeControlPlane、GraphRuntime 调度、workspace/events 和 UI 集成。
+
 定位说明：UE5 蓝图为引擎内一等公民的可视化脚本；本栈为通用 **Qt 节点编辑器 + Python 执行模型**。对比目的为取长补短，而非要求功能对等。
 
 结合当前 vendored `ryvencore_qt` 的能力边界，这里重点围绕以下既有基础设施展开脑暴：
