@@ -1,3 +1,64 @@
+# 2026-05-08 Current Short-Term Status
+
+`F:\src\ryven_demo\多agents通信设计.md` has been promoted into a dedicated short-term task track. See `tasks/multi_agent_communication_tasks.md`.
+
+Completed in the latest communication-design round:
+
+- Added framework-owned one-to-many message staging and complete-batch dispatch in `GraphRuntime`.
+- Added `OutgoingMessageBatch` and `StagedOutgoingMessage`.
+- Added `create_outgoing_batch()`, `stage_outgoing_message()`, and `dispatch_outgoing_batch()`.
+- Added `AgentOutgoingTargetsReminder` so a source Agent that returns to `idle` can be reminded about missing `remaining_targets`.
+- Complete outgoing batches now enter downstream Agent message queues instead of directly calling worker processes.
+- Added `GraphDefinition.agent_connections()` to derive Agent-to-Agent communication links from ordinary `exec` edges.
+- Added `GraphDefinition.agent_organization_view()` with `start_policy`; start nodes are explicitly selected by the top Agent, and the framework only validates them.
+- Added `GraphRuntime.create_outgoing_batch_from_graph()` to validate required targets against graph-derived connections.
+- Added `GuLiCodeTopAgentProfile`, `TopAgentStartPlan`, `TopAgentTask`, and `TopAgentPlanValidation` as the first code contract for sections 4 and 5 of the design document.
+- Added `JoinBarrier` / `JoinContribution` and `GraphRuntime.create_join_barrier()` / `submit_join_contribution()` for fan-in policies: `wait-all`, `wait-any`, `quorum`, and `timeout`.
+- Added join aggregation for accepted changesets, conflicts, artifacts, reports, test results, source metadata, source statuses, and missing sources.
+- Added `GraphRuntime.status_snapshot()` for run, Agent, queue, outgoing batch, join, job, recent event, workspace, and optional organization-view status.
+- Added `RunEndResult`, `GraphRuntime.end_run()`, and `compute_final_status()` for `complete`, `cancel`, `fail`, `pause`, and `archive_only`, with final statuses `success`, `partial_success`, `failed`, `cancelled`, `conflicted`, and `timed_out`.
+- Added non-UI runtime control-plane basics in `graph_control.py`: graph JSON loading, top/full and ordinary-agent scoped organization views, `GraphRuntimeControlPlane`, and `GraphRuntimeRPCServer`.
+- Added CLI thin clients for organization and runtime control: `organization`, `runtime validate-start`, `runtime start/status/end`, `runtime message-batch/message-stage`, and `runtime join-create/join-contribute`.
+- Added persistent GuLiCode top-agent profile JSON loading/saving plus `runtime top-agent-context` for rendering profile + organization context.
+- Added `agent.dispatch` / `runtime agent-dispatch` as a runtime-owned ordinary-Agent downstream message dispatch wrapper.
+- Added run start manifest recording: accepted start plans, organization snapshots, top-agent profile, user goal, and queued initial messages are retained in runtime status and optional workspace JSON.
+- Added automatic join aggregate queueing: a ready `JoinBarrier` with a target AgentNode now queues a `join_aggregate` envelope into the target Agent queue and emits `JoinBarrierAggregateQueued`.
+- Added `cancel` / `fail` cleanup for pending runtime work: queued/dispatching messages, unfinished jobs, and waiting joins are cancelled with structured events.
+- Upgraded `GraphExecutor.run_blueprint()` into a deterministic sequential DAG runner: nodes wait for all exec predecessors, multi-Agent fan-in automatically creates a `JoinBarrier`, and the generated `join_aggregate` envelope is dispatched to the merge Agent.
+- Added final report and archive indexing on run completion: `complete` writes `shared/reports/final_report.json`; `complete` / `archive_only` call the existing workspace manager archive flow when `archive_manager` / `archive_run` are available.
+- Current validation snapshot: `python -m pytest test_agent_runtime.py test_graph_control.py -q` -> `58 passed`; `python -m pytest test_graph_control.py test_agent_runtime.py test_workspace_api.py test_workspace_manager.py -q` -> `93 passed`.
+
+Updated next short-term focus:
+
+- Most important: continue `F:\src\ryven_demo\多agents通信设计.md` via `tasks/multi_agent_communication_tasks.md`.
+- Next implementation target: bind ordinary-Agent message staging to the current task envelope's `required_outgoing_targets`.
+- Then inject ordinary-Agent rule / skill / tool context into AgentNode startup context.
+- Then connect fan-in / status / end runtime interfaces to graph scheduling and archive indexing. UI is deferred for now.
+
+High-priority short-term tasks for the communication/control loop:
+
+- [DONE] Implement one-to-many outgoing message batch staging, overwrite-before-dispatch, `remaining_targets` reminders, and complete-batch queueing.
+- [DONE] Generate `agent_connections` from `GraphDefinition` and use them to validate outgoing batch targets.
+- [DONE] Remove Start/End as launch decision makers; start nodes are explicitly selected by GuLiCode/top Agent and only validated by the framework.
+- [DONE] Add GuLiCode top-Agent rule/skill/profile and start-plan validation skeleton.
+- [DONE] Expose organization view as a stable runtime/RPC/CLI interface.
+- [DONE] Implement the start interface: validate `TopAgentStartPlan`, create run, queue initial tasks, and record start plan / organization snapshot in run manifest.
+- [DONE] Persist top-Agent profile/rule/skill files and load them through the control plane.
+- [PARTIAL] Expose message staging to ordinary agents through a runtime-owned RPC/CLI wrapper; task-envelope target binding remains.
+- [DONE] Implement fan-in / join policies: wait-all, wait-any, quorum, timeout, aggregation metadata, and deterministic ready/timed-out events.
+- [DONE] Implement runtime state query and end/final aggregation interfaces for top-Agent status explanations.
+- [DONE] Expose organization, fan-in, status, and end through runtime-owned control-plane, RPC, and CLI thin clients.
+- [DONE] Connect fan-in barrier readiness to aggregate envelope queueing for the target Agent.
+- [DONE] Connect end/cancel/fail to queued message, dispatch task, job, and waiting barrier cancellation.
+- [DONE] Add graph-scheduler automatic fan-in barrier creation from multi-input exec edges.
+- [DONE] Connect complete/archive_only to final report generation and archive indexing.
+- [HIGH] Wire the non-UI control plane into a real long-lived GuLiCode/top-Agent session.
+- [HIGH] Bind ordinary-Agent message dispatch to current task envelopes and `required_outgoing_targets`.
+- [HIGH] Inject ordinary-Agent rule / skill / tool context into AgentNode startup context.
+- [DEFERRED] UI surfacing for organization, runtime status, join, and workspace state.
+
+---
+
 # 2026-05-07 Current Short-Term Status
 
 The strict VCS-style workspace contract has landed and is archived in `archive/agents_architecture_archive.md`.
@@ -26,7 +87,8 @@ Completed in the latest round:
 
 Updated next short-term focus:
 
-- Most important: complete graph scheduling beyond the minimal single exec path: `parallel`, fan-out/fan-in, `condition`/`switch`, nonblocking join, and deterministic final state aggregation.
+- Most important: treat `F:\src\ryven_demo\多agents通信设计.md` as the current highest-priority short-term design task. Keep refining and then implement its framework-driven multi-agent message dispatch contract, especially `required_outgoing_targets`, staged one-to-many messages, same-target overwrite before dispatch, `remaining_targets` reminders after the source agent returns to `idle`, and complete-batch dispatch.
+- Next focus: complete graph scheduling beyond the minimal single exec path: `parallel`, fan-out/fan-in, `condition`/`switch`, nonblocking join, and deterministic final state aggregation.
 - Define the scheduler data model for runnable graph frames: ready nodes, running jobs, blocked joins, completed branches, failed branches, and terminal aggregation.
 - Define how fan-in nodes collect upstream outputs, errors, conflicts, artifacts, and accepted changesets before continuing.
 - Define how condition/switch routes inspect node output, task status, conflict records, and test results without relying on prompt conventions.
@@ -39,6 +101,7 @@ Updated next short-term focus:
 
 High-priority short-term tasks for the full blueprint execution loop:
 
+- [MOST IMPORTANT] Refine and implement `F:\src\ryven_demo\多agents通信设计.md` as the active blueprint communication design: framework-pushed `required_outgoing_targets`, agent-called message staging, overwrite-before-dispatch semantics, `remaining_targets` reminders, and complete one-to-many batch dispatch before downstream queueing.
 - [DONE] Integrate VCS-style `checkout/status/diff/submit/sync` into AgentNode prompt contracts and execution context.
 - [DONE] Add strict launch mode shape for agents: project root as read-only context, private checkout as writable `cwd`, framework runtime as the only integration writer.
 - [DONE] Remove agent-facing `code` publish area and long-term publish scope from Workspace API/RPC and injected docs.

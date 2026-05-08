@@ -6,6 +6,27 @@
 
 ## 近期任务
 
+### 当前最高优先级：多 Agent 通信设计
+
+`F:\src\ryven_demo\多agents通信设计.md` 已成为当前节点运行时方向的首要开发手册；详细短期任务拆解见 [`multi_agent_communication_tasks.md`](multi_agent_communication_tasks.md)。
+
+已完成第一阶段：
+
+- 一对多 outgoing batch 暂存与完整批次入队；
+- `remaining_targets` 补齐提醒；
+- 从 `GraphDefinition` 自动生成 `agent_connections`；
+- `agent_organization_view()` 初版组织视图；
+- 启动点由 GuLiCode / 顶层 Agent 显式指定，框架只校验；
+- GuLiCode 顶层 Agent rule / skill / start plan validation 骨架。
+
+下一步优先：
+
+1. 组织架构接口；
+2. 开始接口；
+3. 普通 Agent 消息分发 RPC/tool；
+4. 多对一 fan-in / join；
+5. 状态查询与结束/最终聚合接口。
+
 ### 最小闭环优先路径
 
 短期内优先只做一条可落地的主线：

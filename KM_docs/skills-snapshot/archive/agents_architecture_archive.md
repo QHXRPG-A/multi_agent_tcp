@@ -4,6 +4,153 @@
 
 ## 变更记录
 
+### 2026-05-08 — 多 Agent 通信控制面、顶层 Agent profile 与 run start manifest
+
+#### 摘要
+1. 围绕 `多agents通信设计.md`，将顶层 Agent / 普通 Agent 通信治理推进为可测试的非 UI 控制面。
+2. 框架继续保留调度、校验、暂存、转发、归档和终止的最终控制权；GuLiCode 顶层 Agent 只提交结构化意图和解释状态。
+3. UI 暂未开发，本轮只完成运行时、control plane、RPC/CLI thin client 与文档状态同步。
+
+#### 已落地
+1. 顶层 Agent profile：
+   - `GuLiCodeTopAgentProfile` 支持 JSON `from_dict()` / `load()` / `save()`。
+   - profile 字段包括 `agent_id`、`display_name`、`allowed_run_permissions`、`rule`、`skill`。
+   - `runtime validate-start --top-agent-profile ...` 使用 profile 做权限与 start plan 校验。
+   - `runtime top-agent-context --top-agent-profile ...` 输出 profile + organization context。
+2. 顶层 Agent start plan：
+   - `TopAgentTask`、`TopAgentStartPlan`、`TopAgentPlanValidation` 已作为启动计划结构化契约。
+   - 校验覆盖 agent 描述完整性、start node 存在性、任务字典对齐、必填字段和顶层 Agent start 权限。
+3. 组织架构与普通 Agent scoped view：
+   - `GraphDefinition.agent_connections()` 从普通 AgentNode 之间的 `exec` 边生成可通信关系。
+   - `GraphDefinition.agent_organization_view()` 返回 graph、agents、agent_connections、start_policy。
+   - `scoped_organization_view()` 为普通 Agent 返回自身相关上游、下游与 scope。
+4. 消息分发：
+   - `OutgoingMessageBatch` / `StagedOutgoingMessage` 支持完整 batch/stage 分发。
+   - `message.create_batch` / `message.stage` 通过 control plane / RPC / CLI 暴露。
+   - `agent.dispatch` / `runtime agent-dispatch` 提供普通 Agent 单步分发 MVP：按图可达性校验 source/target，创建单 target batch，暂存后进入下游队列。
+5. Fan-in / join：
+   - `JoinBarrier` / `JoinContribution` 支持 `wait-all`、`wait-any`、`quorum`、`timeout`。
+   - ready 后可自动生成 `join_aggregate` 信封并投递给汇聚 Agent。
+   - `GraphExecutor.run_blueprint()` 已可从多输入 `exec` 边自动创建 join barrier。
+6. 运行状态与结束：
+   - `GraphRuntime.status_snapshot()` 聚合 run、Agent、queue、outgoing batch、join、job、recent events、workspace 和 organization。
+   - `GraphRuntime.end_run()` 支持 `complete`、`cancel`、`fail`、`pause`、`archive_only`。
+   - `cancel` / `fail` 会取消 queued / dispatching messages、未完成 jobs 和 waiting joins。
+   - `complete` 生成 `shared/reports/final_report.json`；`complete` / `archive_only` 可接入既有 workspace archive index。
+7. Run start manifest：
+   - `GraphRuntime.record_start_manifest()` 记录 top-agent profile、start plan、organization snapshot、user goal 和 queued initial messages。
+   - `status_snapshot()["run"]["manifest"]` 可查询。
+   - 有 `WorkspaceManifest` 和 `manifest_path` 时可写出 workspace JSON。
+
+#### 涉及
+- `graph_runtime.py`
+- `graph_control.py`
+- `__main__.py`
+- `__init__.py`
+- `test_agent_runtime.py`
+- `test_graph_control.py`
+- `tasks/current_goals.md`
+- `tasks/multi_agent_communication_tasks.md`
+- `多agents通信设计.md`
+
+#### 验证
+```text
+python -m pytest test_graph_control.py test_agent_runtime.py -q
+58 passed
+
+python -m pytest test_graph_control.py test_agent_runtime.py test_workspace_api.py test_workspace_manager.py -q
+93 passed
+```
+
+#### 当前边界
+1. `agent.dispatch` 目前按图可达性校验，还没有绑定当前任务信封中的 `required_outgoing_targets`。
+2. 普通 Agent 的 rule / skill / tool context 还没有稳定注入到 AgentNode 启动上下文。
+3. 非 UI control plane 已具备长生命周期接入基础，但真实 GuLiCode 顶层 Agent 会话尚未接入。
+4. 普通 Agent 状态读取权限仍需进一步收敛。
+5. UI 状态展示、顶层 Agent 对话入口、changeset/conflict/artifact 可视化均后续再开发。
+
+---
+
+### 2026-05-08 — 顶层 GuLiCode 会话、任务信封约束与状态解释收口
+
+#### 摘要
+
+本轮继续推进 `多agents通信设计.md` 中标记的“仍未完成”项，但继续不开发 UI。重点是把上一轮留下的非 UI control plane 能力收口成可被真实 GuLiCode / 普通 Agent 消费的运行时协议：
+
+1. 顶层 GuLiCode profile 不再只是 rule / skill 文本，而是可以映射为长期运行 worker 的 profile。
+2. 普通 Agent 的 `agent.dispatch` 从“按全图可达性临时创建一跳分发”收敛为“必须绑定当前 outgoing batch / 任务信封”。
+3. 普通 Agent 每轮消息携带 `framework_context`，明确当前 `outgoing_batch_id`、`required_outgoing_targets`、`remaining_targets`、可达下游和工具约束。
+4. 顶层 Agent 状态解释接入 `status_snapshot()`、workspace、队列、join、job 和 recent events，不再依赖自由文本猜测。
+
+#### 已落地
+
+1. 顶层 GuLiCode 可运行 profile：
+   - `GuLiCodeTopAgentProfile` 扩展 `cli_kind`、`model`、`cwd`、`timeout_sec`、`prompt_via_file`、`command`、`adapter_options`、`extra_env`、`external`。
+   - 新增 `GuLiCodeTopAgentProfile.to_agent_node()`，将顶层 profile 映射为框架拥有的 `AgentNode`，供同一 `GraphRuntime` 绑定长期 worker。
+   - profile JSON `load()` / `save()` 保留 rule / skill 文本能力，同时保存运行配置。
+2. 顶层 Agent 会话控制面：
+   - `GraphRuntimeControlPlane` 新增 `top_agent.start_session`，用于提前绑定 GuLiCode worker。
+   - `GraphRuntimeControlPlane` 新增 `top_agent.ask`，将用户自然语言消息、top-agent organization context 和可选状态解释投递给 GuLiCode worker。
+   - CLI thin client 新增 `runtime top-agent-start-session` 与 `runtime top-agent-ask`。
+3. 状态解释：
+   - `GraphRuntime.explain_status()` 基于 `status_snapshot()` 生成顶层 Agent 可读摘要。
+   - 解释结果包含 run 状态、Agent state 分组、queued / dispatching message 数量、waiting outgoing batch、waiting join、running / failed job、workspace conflicts、reports、artifacts、recent events key 摘要和 recommended actions。
+   - control plane 新增 `top_agent.explain_status`，CLI thin client 新增 `runtime explain-status`。
+4. 普通 Agent 消息上下文：
+   - 新增 `ordinary_agent_framework_context()`，为普通 Agent 构造 scoped organization、message envelope、`agent.dispatch` 工具说明和通信规则。
+   - 新增 `inject_framework_context()`，把 `framework_context` 注入每轮消息的 `context` 字段，并保留已有 user context。
+   - `run.start` 会为带下游的 start node 创建本轮 outgoing batch，并把 `required_outgoing_targets` / `remaining_targets` 注入初始 `top_agent_task`。
+   - 新增 `agent.context` / `runtime agent-context`，用于读取普通 Agent 当前 batch 的工具上下文。
+5. `agent.dispatch` 信封约束：
+   - `agent.dispatch` 现在必须携带当前 `batch_id`。
+   - source 必须匹配 batch owner。
+   - target 必须属于该 batch 的 `required_target_node_ids`。
+   - 分发不再仅按全图可达性临时创建单 target batch；当前 outgoing batch 是普通 Agent 本轮通信的权威信封。
+   - 投递给下游的消息会注入下游自己的下一轮 `framework_context`；若下游还有下游节点，控制面会为其创建下一轮 outgoing batch。
+6. 文档同步：
+   - `多agents通信设计.md` 的落地优先级、当前开发进度和“仍未完成”已同步。
+   - UI 状态展示仍明确暂不开发，后续 UI 只消费已有 headless 状态 / 解释接口。
+
+#### 涉及
+
+- `graph_runtime.py`
+- `graph_control.py`
+- `__main__.py`
+- `__init__.py`
+- `test_graph_control.py`
+- `多agents通信设计.md`
+
+#### 验证
+
+```text
+python -m pytest test_graph_control.py -q
+5 passed
+
+python -m pytest test_agent_runtime.py test_graph_control.py -q
+59 passed
+
+python -m pytest test_graph_control.py test_agent_runtime.py test_workspace_api.py test_workspace_manager.py -q
+94 passed
+
+python -m py_compile graph_runtime.py graph_control.py __main__.py __init__.py
+```
+
+#### 关闭的上一轮边界
+
+1. `agent.dispatch` 已绑定当前任务信封中的 `required_outgoing_targets`。
+2. 普通 Agent 的 tool context 已作为 `framework_context` 注入到消息上下文。
+3. 非 UI control plane 已接入 GuLiCode 顶层 Agent 长生命周期 worker 边界。
+4. 顶层 Agent 状态解释已接入事件和快照，而不是自由文本猜测。
+
+#### 当前边界
+
+1. UI 状态展示仍不开发；后续 UI 应消费 `status_snapshot()` / `explain_status()` / RPC thin client，不复制状态聚合逻辑。
+2. GuLiCode / Codex CLI 的底层 adapter 仍是“长生命周期 worker 边界 + 每条消息调用 CLI”的兼容形态；若 CLI 后续支持真正交互式 session，可在 adapter 内替换实现，不改变 control plane 协议。
+3. `framework_context` 已进入消息信封，但仍需和真实 AgentNode 启动 prompt / skill 注入链路做端到端联调，确认各 CLI adapter 都稳定消费 `context` 字段。
+4. 权限收敛仍可继续加强：workspace/VCS API、artifact/report publish API 后续也应绑定当前任务信封和 Agent scope。
+
+---
+
 ### 2026-05-03 — AgentNode skill selection 模型同步到 registry 与 registry-ui
 
 #### 摘要

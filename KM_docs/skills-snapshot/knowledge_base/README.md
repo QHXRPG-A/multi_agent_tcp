@@ -20,3 +20,4 @@
 - `vendor_ryven_ui.md`：vendored `ryvencore_qt` / `Ryven` 的节点外观、主题与视觉层知识
 - `agent_node_ryven_integration.md`：`AgentNode` 接入 Ryven 节点 UI、Start/End 自动注入、删除保护、Ryven Flow -> `GraphDefinition` 编译与 runnable graph 校验
 - `blueprint_gap_notes.md`：对标 UE5 蓝图时的类型系统、编辑效率与信息密度改进方向
+- `gulicode_desktop.md`：GuLiCode 桌面端源码结构、Electron/Tauri 启动链路、main/preload/renderer/app 分层，以及蓝图系统嵌入桌面端的建议路径

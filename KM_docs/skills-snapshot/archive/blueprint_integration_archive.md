@@ -4,6 +4,69 @@
 
 ## 变更记录
 
+### 2026-05-08 — 多 Agent 通信设计进入短期任务主线并完成第一阶段落地
+
+#### 摘要
+
+1. 将 `F:\src\ryven_demo\多agents通信设计.md` 明确设为当前多 Agent 蓝图通信与顶层 Agent 治理的首要开发手册。
+2. 新增短期任务文档：
+   - `tasks/multi_agent_communication_tasks.md`
+   - 用于跟踪框架掌握 Agent 间通信与调度权的近期任务。
+3. 完成一对多消息分发运行时 MVP：
+   - `OutgoingMessageBatch`
+   - `StagedOutgoingMessage`
+   - `GraphRuntime.create_outgoing_batch()`
+   - `GraphRuntime.stage_outgoing_message()`
+   - `GraphRuntime.dispatch_outgoing_batch()`
+   - `AgentOutgoingTargetsReminder`
+4. 明确批量投递语义：
+   - Agent 只提交发往 required targets 的消息意图；
+   - 框架暂存、校验、提醒、覆盖、补齐；
+   - 全部补齐后，完整批次分别进入下游 Agent 消息队列；
+   - 后续仍由 tick 按 idle 状态逐帧 dispatch，不直接调用下游进程。
+5. 完成图结构通信关系第一版：
+   - `GraphDefinition.agent_connections()` 从普通 AgentNode 到普通 AgentNode 的 `exec` 边生成可通信关系；
+   - `data` 边和 Start/End terminal 边不进入普通 Agent 通信关系；
+   - `GraphRuntime.create_outgoing_batch_from_graph()` 基于图结构校验 required targets。
+6. 修正启动点语义：
+   - 当前不再把 Start/End 视为启动决策来源；
+   - `agent_organization_view()` 不再输出 `recommended_start_nodes`；
+   - 新增 `start_policy`，明确启动点由 GuLiCode / 顶层 Agent 显式指定，框架只负责校验。
+7. 完成 GuLiCode 顶层 Agent 契约骨架：
+   - `GuLiCodeTopAgentProfile`
+   - `TopAgentTask`
+   - `TopAgentStartPlan`
+   - `TopAgentPlanValidation`
+   - 覆盖 rule / skill 文本骨架、organization context、启动计划校验。
+
+#### 涉及
+
+- `multi_agent_tcp/graph_runtime.py`
+- `multi_agent_tcp/test_agent_runtime.py`
+- `multi_agent_tcp/__init__.py`
+- `F:\src\ryven_demo\多agents通信设计.md`
+- `tasks/current_goals.md`
+- `tasks/node_runtime_tasks.md`
+- `tasks/multi_agent_communication_tasks.md`
+
+#### 验证
+
+```text
+python -m pytest test_agent_runtime.py -q
+46 passed
+
+python -m pytest test_workspace_api.py test_workspace_manager.py test_agent_runtime.py -q
+81 passed
+```
+
+#### 当前结论
+
+多 Agent 蓝图的短期重心已经从“单 Agent 最小执行链路”转到“框架拥有通信与调度权”。顶层 Agent 负责理解、拆解、解释和提交启动计划；普通 Agent 只处理局部任务并提交消息意图；框架负责校验、暂存、补齐提醒、队列投递、事件记录和后续最终聚合。
+
+下一步应继续暴露稳定组织架构接口、开始接口、普通 Agent 消息分发 RPC/tool、多对一 fan-in / join、状态查询接口和结束/最终聚合接口。
+
+---
+
 ### 2026-05-04 — Ryven Flow 编译为 GraphDefinition 第一版
 
 #### 摘要
@@ -312,3 +375,124 @@ Remaining short-term work is to expose the reassignment primitive to super agent
 The runtime now has a first framework-level scheduling heartbeat and enough agent state vocabulary to reason about when a CLI-backed AgentNode can accept work. Messages that arrive while an agent is busy are no longer dropped or forced through immediately; they are retained by the framework and released one at a time on later ticks.
 
 The next highest-priority work is no longer basic busy tracking. The short-term center of gravity should move to complete graph scheduling: parallel execution, fan-out/fan-in, condition/switch routing, nonblocking joins, and deterministic final state aggregation.
+
+---
+
+# 2026-05-08 Archive Note - Multi-Agent communication control plane, fan-in scheduling, and final archive indexing
+
+## Summary
+
+This round moved the multi-Agent blueprint communication design from document-only semantics into runtime-owned primitives, non-UI control-plane APIs, deterministic fan-in scheduling, and run-finalization archive indexing.
+
+The current contract is:
+
+```text
+top Agent / GuLiCode
+  -> reads organization view
+  -> validates and submits start plan
+  -> queries runtime status
+  -> requests end / pause / cancel / archive
+
+ordinary AgentNode
+  -> receives queued framework messages
+  -> stages outgoing messages only for required targets
+  -> contributes structured join results
+
+framework runtime
+  -> owns queues, joins, dispatch, status, final aggregation, report, archive
+```
+
+## Landed
+
+1. Added framework-owned one-to-many message staging:
+   - `OutgoingMessageBatch`
+   - `StagedOutgoingMessage`
+   - `create_outgoing_batch()`
+   - `stage_outgoing_message()`
+   - `dispatch_outgoing_batch()`
+   - `AgentOutgoingTargetsReminder`
+   - complete batches are queued into downstream Agent message queues instead of direct process calls.
+2. Added graph-derived Agent communication topology:
+   - `GraphDefinition.agent_connections()` derives ordinary Agent-to-Agent exec links;
+   - `GraphDefinition.agent_organization_view()` exposes graph, agents, connections, and top-Agent start policy;
+   - `GraphRuntime.create_outgoing_batch_from_graph()` validates required targets against graph-derived reachability.
+3. Added GuLiCode/top-Agent contract skeleton:
+   - `GuLiCodeTopAgentProfile`
+   - `TopAgentStartPlan`
+   - `TopAgentTask`
+   - `TopAgentPlanValidation`
+   - start plans require complete Agent descriptions, explicit start nodes, aligned tasks, and required task fields.
+4. Added multi-source fan-in runtime primitives:
+   - `JoinBarrier`
+   - `JoinContribution`
+   - `create_join_barrier()`
+   - `submit_join_contribution()`
+   - policies: `wait-all`, `wait-any`, `quorum`, and timeout;
+   - contributions aggregate source metadata, accepted changesets, conflicts, artifacts, reports, and test results.
+5. Added automatic fan-in aggregate delivery:
+   - when a ready join has a target AgentNode, the runtime queues a `join_aggregate` envelope for the merge Agent;
+   - `dispatch_queued_message_now()` lets the graph executor synchronously dispatch that generated aggregate when needed;
+   - events include `JoinBarrierAggregateQueued`.
+6. Added runtime status and finalization APIs:
+   - `GraphRuntime.status_snapshot()`;
+   - `RunEndResult`;
+   - `GraphRuntime.end_run()`;
+   - `compute_final_status()`;
+   - final states: `success`, `partial_success`, `failed`, `cancelled`, `conflicted`, `timed_out`.
+7. Added cancellation / failure cleanup:
+   - `cancel` / `fail` now cancel queued or dispatching messages, unfinished jobs, and waiting joins;
+   - events include `TaskCancelled`, `JoinBarrierCancelled`, and `RunPendingWorkCancelled`.
+8. Added non-UI runtime control plane:
+   - new `graph_control.py`;
+   - `graph_definition_from_dict()`;
+   - `scoped_organization_view()`;
+   - `GraphRuntimeControlPlane`;
+   - `GraphRuntimeRPCServer`;
+   - CLI thin clients: `organization`, `runtime validate-start`, `runtime start/status/end`, `runtime message-batch/message-stage`, and `runtime join-create/join-contribute`.
+9. Upgraded `GraphExecutor.run_blueprint()`:
+   - from minimal single-path execution to deterministic sequential DAG execution;
+   - AgentNodes wait for all exec predecessors;
+   - multi-Agent upstreams automatically create a join barrier;
+   - upstream results are submitted as join contributions;
+   - the generated `join_aggregate` is dispatched to the merge Agent.
+10. Added final report and archive indexing:
+   - `complete` writes `shared/reports/final_report.json`;
+   - when `archive_manager` and `archive_run` are available, `complete` and `archive_only` call the existing workspace manager `archive_run()` flow;
+   - long-term archive manifest indexing reuses the established shared archive mechanism;
+   - `RunEndResult.summary.final_report_path` points at the archived final report path when the run is moved.
+
+## Affected Code
+
+- `multi_agent_tcp/graph_runtime.py`
+- `multi_agent_tcp/graph_control.py`
+- `multi_agent_tcp/__main__.py`
+- `multi_agent_tcp/__init__.py`
+- `multi_agent_tcp/test_agent_runtime.py`
+- `multi_agent_tcp/test_graph_control.py`
+
+## Validation
+
+```text
+python -m pytest test_agent_runtime.py test_graph_control.py -q
+56 passed
+
+python -m pytest test_graph_control.py test_agent_runtime.py test_workspace_api.py test_workspace_manager.py -q
+91 passed
+```
+
+## Current Conclusion
+
+The non-UI runtime core now owns the essential multi-Agent communication loop:
+
+- outgoing one-to-many handoff is framework staged and complete-batch dispatched;
+- multi-source fan-in is represented by join barriers and structured contributions;
+- multi-input exec joins are automatically created by the graph executor;
+- status and end controls are available through a runtime control plane, RPC server, and CLI thin clients;
+- completion can publish a final report and index the run through the long-term archive flow.
+
+Remaining short-term work should focus on surfaces rather than core semantics:
+
+1. Persist top-Agent profile/rule/skill files instead of keeping the current skeleton only in code.
+2. Wire the non-UI control plane into a real long-lived GuLiCode/top-Agent session.
+3. Expose ordinary-Agent message staging through Workspace RPC or a runtime-owned tool context.
+4. Keep UI surfacing deferred until the non-UI control plane stabilizes further.

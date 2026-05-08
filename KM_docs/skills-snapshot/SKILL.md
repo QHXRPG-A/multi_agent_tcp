@@ -27,7 +27,19 @@ description: >-
 - 入口索引
 - 模块文档、任务文档与归档文档引用
 
-### 2. `knowledge_base/`
+### 2. `多agents通信设计.md`
+
+顶层多 Agent 通信与 GuLiCode 协调模型设计文档。用于记录当前关于以下主题的有效设计：
+
+- 多 Agent 蓝图中的控制流 / 数据流拆分
+- 顶层 Agent：GuLiCode 的定位、生命周期、权限边界和输出分层
+- 框架对顶层 Agent 的 rule / skill、profile、启动计划校验和纠错回路
+- 框架需要提供的开始、组织架构、状态查询、结束、消息分发、计划校验、事件订阅、工作区与归档接口
+- 普通 Agent 的通信约束、共享工作区规则、事件状态模型、UI 交互建议和当前开发进度
+
+当用户询问“顶层 Agent”“GuLiCode 作为全局协调者”“多 agents 如何通信”“Agent 间消息分发”“Start / End 是否应保留”“框架接口如何约束顶层 Agent”等问题时，优先阅读本文件。
+
+### 3. `knowledge_base/`
 
 模块知识库目录。不同模块分别记录在独立知识文档中，只保存当前有效知识，不承担历史变更流水。
 
@@ -42,10 +54,11 @@ description: >-
 - [`knowledge_base/vendor_ryven_ui.md`](knowledge_base/vendor_ryven_ui.md)：vendored `Ryven` / `ryvencore_qt` 的节点外观、视觉层与启动入口知识
 - [`knowledge_base/agent_node_ryven_integration.md`](knowledge_base/agent_node_ryven_integration.md)：`AgentNode` 接入 Ryven 节点 UI、Start/End 机制、删除保护与 runnable graph 校验
 - [`knowledge_base/blueprint_gap_notes.md`](knowledge_base/blueprint_gap_notes.md)：对标 UE5 蓝图时的类型系统、编辑效率与信息密度改进方向
+- [`knowledge_base/gulicode_desktop.md`](knowledge_base/gulicode_desktop.md)：GuLiCode 桌面端源码结构、Electron/Tauri 启动链路、main/preload/renderer/app 分层，以及蓝图系统嵌入桌面端的建议路径
 
 知识文档之间允许直接交叉引用；新增模块时优先在 `knowledge_base/` 中新建对应文档，再从本文件挂入口。
 
-### 3. `tasks/`
+### 4. `tasks/`
 
 短期任务目录。用于沉淀最近要推进的工程目标、任务拆解和阶段性执行清单，不承担长期知识沉淀。
 
@@ -55,7 +68,7 @@ description: >-
 - [`tasks/node_runtime_tasks.md`](tasks/node_runtime_tasks.md)：节点运行时与图编译方向任务
 - [`tasks/vendor_ryven_tasks.md`](tasks/vendor_ryven_tasks.md)：vendored Ryven / UI 改造方向任务
 
-### 4. `archive/`
+### 5. `archive/`
 
 历史变更归档目录。每个 `*_archive.md` 只负责记录某一方向的变更，便于回顾；不再使用总归档文件。
 
@@ -67,7 +80,7 @@ description: >-
 
 ### 先看高层入口，再按需深入
 
-1. 先读本文件确认问题属于：主架构、cluster API、registry/skills、dispatch、CLI、运行时注意事项、节点工作流、vendor UI，还是短期任务推进。
+1. 先读本文件确认问题属于：多 Agent 通信 / 顶层 Agent 设计、主架构、cluster API、registry/skills、dispatch、CLI、运行时注意事项、节点工作流、vendor UI，还是短期任务推进。
 2. 再进入 `knowledge_base/` 或 `tasks/` 对应文档。
 3. 若需要回顾历史决策、迁移过程或某方向演进，再读取 `archive/` 中对应的 `*_archive.md`。
 
@@ -79,10 +92,12 @@ description: >-
 - 问 `show-registry` / `dispatch` / async：看 `knowledge_base/dispatch_workflows.md`
 - 问命令怎么写：看 `knowledge_base/cli_reference.md`
 - 问运行时陷阱：看 `knowledge_base/runtime_notes.md`
+- 问顶层 Agent、GuLiCode 全局协调者、多 Agent 通信、消息分发、Start/End 去留、框架核心接口或普通 Agent 通信约束：看 `多agents通信设计.md`
 - 问多 CLI / 节点工作流方向：看 `knowledge_base/multi_cli_workflow.md`
 - 问 Ryven / `ryvencore_qt` 视觉层或启动方式：看 `knowledge_base/vendor_ryven_ui.md`
 - 问 `AgentNode` 如何接入 Ryven 节点 UI、Start/End 如何自动创建或如何保护不可删除：看 `knowledge_base/agent_node_ryven_integration.md`
 - 问蓝图差距与改进点：看 `knowledge_base/blueprint_gap_notes.md`
+- 问 GuLiCode 桌面端、Electron/Tauri 启动、桌面源码结构、或蓝图系统如何嵌入 GuLiCode 桌面端：看 `knowledge_base/gulicode_desktop.md`
 - 问最近要做什么：看 `tasks/*.md`
 - 问历史变更：看 `archive/*.md`
 
@@ -113,6 +128,8 @@ description: >-
 
 - 若用户要求启动或汉化 Ryven GUI，优先查看 `knowledge_base/vendor_ryven_ui.md`、`knowledge_base/agent_node_ryven_integration.md` 与 `archive/blueprint_integration_archive.md`。
 - 若用户要求处理 GuLiCode / OpenCode 运行基线，优先查看 `archive/gulicode_runtime_baseline_archive.md`。
+- 若用户要求处理顶层 Agent：GuLiCode、多 Agent 通信设计、Agent 间消息分发、顶层 Agent rule/skill、开始/状态/结束接口，优先查看 `多agents通信设计.md`。
+- 若用户要求处理 GuLiCode 桌面端源码、桌面启动、Electron/Tauri、或把蓝图系统嵌入 GuLiCode 桌面端，优先查看 `knowledge_base/gulicode_desktop.md`。
 - 若用户要求多 agent 编排、dispatch、registry、cluster、registry-ui 等主能力，优先查看 `knowledge_base/` 与 `archive/agents_architecture_archive.md`。
 - 若用户要求梳理多 CLI、节点化工作流、多模态消息等近期方向，优先查看 `knowledge_base/multi_cli_workflow.md` 与 `tasks/`。
 
