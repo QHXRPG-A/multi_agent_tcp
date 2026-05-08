@@ -15,6 +15,18 @@ GraphRuntime
 
 `CLIWorkerBackend` is the new semantic name for the old `CodeMakerCluster` concept. `CodeMakerCluster` remains as a backward-compatible alias, but new code and documentation should prefer `CLIWorkerBackend`.
 
+## Architecture Diagrams
+
+The current communication model is summarized in the main overview diagram:
+
+![Multi-agent communication overview](docs/diagrams/multi_agents_communication/01_overview.svg)
+
+More focused diagrams live in [`docs/diagrams/multi_agents_communication/`](docs/diagrams/multi_agents_communication/):
+
+- [One-to-many outgoing batch dispatch](docs/diagrams/multi_agents_communication/02_fanout_dispatch.svg)
+- [Fan-in join aggregation](docs/diagrams/multi_agents_communication/03_fanin_join.svg)
+- [Appendix: CLIWorkerBackend TCP delivery path](docs/diagrams/multi_agents_communication/04_tcp_delivery.svg)
+
 ## Current Architecture Notes
 
 - `GraphRuntimeControlPlane` is the non-UI control surface for organization reads, top-agent context, run start/status/end, outgoing message batches, ordinary `agent.dispatch`, and join contribution commands.
