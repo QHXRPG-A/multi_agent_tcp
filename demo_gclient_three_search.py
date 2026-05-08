@@ -1,6 +1,6 @@
 """
 Three ``codemaker-worker`` agents searching gclient code **in parallel** via
-:class:`CodeMakerCluster`.
+:class:`CLIWorkerBackend`.
 
 Usage (from ``f:\\src\\Package\\Script\\Python``)::
 
@@ -19,7 +19,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from multi_agent_tcp.cluster import CodeMakerCluster, WorkerConfig
+from multi_agent_tcp.cli_worker_backend import CLIWorkerBackend, WorkerConfig
 from multi_agent_tcp.log_setup import setup_logging
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -66,7 +66,7 @@ async def _run(
     work = Path(tempfile.gettempdir()) / "multi_agent_tcp_gclient_search"
     work.mkdir(parents=True, exist_ok=True)
 
-    async with await CodeMakerCluster.create(
+    async with await CLIWorkerBackend.create(
         workers, host=host, port=port, verbose=verbose,
     ) as cluster:
         par = await cluster.run_parallel(
@@ -101,7 +101,7 @@ async def _run(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="3 codemaker workers parallel search (CodeMakerCluster)")
+    p = argparse.ArgumentParser(description="3 codemaker workers parallel search (CLIWorkerBackend)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=9140)
     p.add_argument("--cwd", type=Path, default=REPO_ROOT)

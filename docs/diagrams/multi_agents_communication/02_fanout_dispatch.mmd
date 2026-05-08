@@ -1,0 +1,19 @@
+sequenceDiagram
+  participant A as 源 AgentNode
+  participant CP as 控制面 agent.dispatch
+  participant RT as GraphRuntime 运行时
+  participant B as OutgoingMessageBatch 出站批次
+  participant D1 as 目标 Agent 1
+  participant D2 as 目标 Agent 2
+
+  A->>CP: agent.dispatch(source, target1, batch_id, body)
+  CP->>RT: 校验 batch_id / source / target
+  RT->>B: 暂存 target1 消息
+  RT-->>A: remaining_targets=[target2]，还不能投递
+
+  A->>CP: agent.dispatch(source, target2, batch_id, body)
+  CP->>RT: 校验 target2 属于 required targets
+  RT->>B: 暂存 target2 消息
+  RT->>RT: remaining_targets=[]
+  RT->>D1: queue_agent_message 入队
+  RT->>D2: queue_agent_message 入队

@@ -6,7 +6,7 @@ Low-level (broker / agent plumbing):
   python -m multi_agent_tcp agent --config path/to/agent.json [--mode echo|listen|codemaker-worker|codex-worker]
   python -m multi_agent_tcp spawn --config path/to/spawn.json
 
-High-level (CodeMakerCluster):
+High-level (CLIWorkerBackend):
   python -m multi_agent_tcp cluster start --config cluster.json
   python -m multi_agent_tcp run-parallel --config cluster.json --tasks tasks.json [-o result.json]
   python -m multi_agent_tcp run-chain   --config cluster.json --tasks tasks.json [-o result.json]
@@ -31,6 +31,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib import request as urlrequest
 
 from .broker import Broker
 from .client import AgentTCPClient
@@ -327,20 +328,20 @@ def _cmd_spawn(cfg_path: Path, verbose: bool) -> None:
 # ---------------------------------------------------------------------------
 
 async def _cmd_cluster_start(cfg_path: Path, verbose: bool) -> None:
-    from .cluster import CodeMakerCluster, WorkerConfig
+    from .cli_worker_backend import CLIWorkerBackend, WorkerConfig
 
     data = _load_json(cfg_path)
-    host, port = CodeMakerCluster.host_port_from_json(data)
-    workers = CodeMakerCluster.workers_from_json(data)
-    cluster = await CodeMakerCluster.create(workers, host=host, port=port, verbose=verbose)
-    log.info("cluster running — press Ctrl+C to stop")
+    host, port = CLIWorkerBackend.host_port_from_json(data)
+    workers = CLIWorkerBackend.workers_from_json(data)
+    backend = await CLIWorkerBackend.create(workers, host=host, port=port, verbose=verbose)
+    log.info("CLI worker backend running — press Ctrl+C to stop")
     try:
         while True:
             await asyncio.sleep(1.0)
     except asyncio.CancelledError:
         pass
     finally:
-        await cluster.stop()
+        await backend.stop()
 
 
 def _load_tasks(path: Path) -> List[tuple]:
@@ -363,12 +364,12 @@ def _load_tasks(path: Path) -> List[tuple]:
 
 
 async def _create_cluster_from_args(args: argparse.Namespace):
-    """Build a CodeMakerCluster from --config, --registry, or --port args.
+    """Build a CLIWorkerBackend from --config, --registry, or --port args.
 
-    Returns ``(cluster, owns)`` where *owns* is True when the cluster manages
+    Returns ``(backend, owns)`` where *owns* is True when the backend manages
     its own subprocesses (caller should use ``stop()`` / async-with).
     """
-    from .cluster import CodeMakerCluster
+    from .cli_worker_backend import CLIWorkerBackend
 
     if getattr(args, "registry", False):
         from .registry import AgentsRegistry
@@ -378,7 +379,7 @@ async def _create_cluster_from_args(args: argparse.Namespace):
         if getattr(args, "agent_ids", None):
             agent_ids = [a.strip() for a in args.agent_ids.split(",") if a.strip()]
         skill_mode = getattr(args, "skill_mode", "catalog")
-        cluster = await CodeMakerCluster.create_from_registry(
+        backend = await CLIWorkerBackend.create_from_registry(
             reg,
             agent_ids=agent_ids,
             host=getattr(args, "host", "127.0.0.1"),
@@ -386,21 +387,21 @@ async def _create_cluster_from_args(args: argparse.Namespace):
             verbose=args.verbose,
             skill_mode=skill_mode,
         )
-        return cluster, True
+        return backend, True
 
     if args.config:
         data = _load_json(args.config)
-        host, port = CodeMakerCluster.host_port_from_json(data)
-        workers = CodeMakerCluster.workers_from_json(data)
-        cluster = await CodeMakerCluster.create(
+        host, port = CLIWorkerBackend.host_port_from_json(data)
+        workers = CLIWorkerBackend.workers_from_json(data)
+        backend = await CLIWorkerBackend.create(
             workers, host=host, port=port, verbose=args.verbose,
         )
-        return cluster, True
+        return backend, True
 
-    cluster = await CodeMakerCluster.connect(
+    backend = await CLIWorkerBackend.connect(
         host=args.host, port=args.port,
     )
-    return cluster, False
+    return backend, False
 
 
 async def _cmd_run_parallel(args: argparse.Namespace) -> None:
@@ -498,6 +499,173 @@ def _cmd_show_registry(args: argparse.Namespace) -> None:
     _write_result(resp, args.output)
 
 
+def _runtime_rpc_request(
+    rpc_url: str,
+    token: str,
+    command: str,
+    args: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload = json.dumps(
+        {"token": token, "command": command, "args": args},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    req = urlrequest.Request(
+        rpc_url,
+        data=payload,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    with urlrequest.urlopen(req, timeout=30) as resp:  # noqa: S310 - user-provided local RPC URL
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _read_json_arg(*, path: Optional[Path] = None, inline: Optional[str] = None) -> Any:
+    if path is not None:
+        return json.loads(path.read_text(encoding="utf-8"))
+    if inline is not None:
+        return json.loads(inline)
+    return None
+
+
+def _cmd_organization(args: argparse.Namespace) -> None:
+    from .graph_control import load_graph_definition, scoped_organization_view
+
+    if args.rpc_url:
+        result = _runtime_rpc_request(
+            args.rpc_url,
+            args.token,
+            "organization.read",
+            {"agent_id": args.agent_id},
+        )
+    else:
+        graph = load_graph_definition(args.graph)
+        result = {
+            "ok": True,
+            "organization": scoped_organization_view(graph, agent_id=args.agent_id),
+        }
+    _write_result(result, args.output)
+
+
+def _cmd_runtime(args: argparse.Namespace) -> None:
+    command = str(args.runtime_cmd)
+    if command == "validate-start":
+        from .graph_control import load_graph_definition, load_top_agent_profile
+        from .graph_runtime import GuLiCodeTopAgentProfile, TopAgentStartPlan
+
+        graph = load_graph_definition(args.graph)
+        plan = TopAgentStartPlan.from_dict(_read_json_arg(path=args.plan))
+        profile = (
+            load_top_agent_profile(args.top_agent_profile)
+            if args.top_agent_profile
+            else GuLiCodeTopAgentProfile()
+        )
+        result = profile.validate_start_plan(graph, plan).to_dict()
+        _write_result(result, args.output)
+        return
+
+    if command == "top-agent-context":
+        from .graph_control import load_graph_definition, load_top_agent_profile
+        from .graph_runtime import GuLiCodeTopAgentProfile
+
+        graph = load_graph_definition(args.graph)
+        profile = (
+            load_top_agent_profile(args.top_agent_profile)
+            if args.top_agent_profile
+            else GuLiCodeTopAgentProfile()
+        )
+        result = {"ok": True, "context": profile.organization_context(graph)}
+        _write_result(result, args.output)
+        return
+
+    rpc_url = str(args.rpc_url)
+    token = str(args.token)
+    rpc_args: Dict[str, Any]
+    rpc_command: str
+
+    if command == "start":
+        rpc_command = "run.start"
+        rpc_args = {
+            "plan": _read_json_arg(path=args.plan),
+            "manifest_path": str(args.manifest_path) if args.manifest_path else None,
+        }
+    elif command == "status":
+        rpc_command = "run.status"
+        rpc_args = {"recent_events_limit": args.recent_events_limit}
+    elif command == "explain-status":
+        rpc_command = "top_agent.explain_status"
+        rpc_args = {"recent_events_limit": args.recent_events_limit}
+    elif command == "top-agent-start-session":
+        rpc_command = "top_agent.start_session"
+        rpc_args = {}
+    elif command == "top-agent-ask":
+        rpc_command = "top_agent.ask"
+        rpc_args = {
+            "prompt": args.prompt,
+            "include_status": not args.no_status,
+            "recent_events_limit": args.recent_events_limit,
+        }
+    elif command == "end":
+        rpc_command = "run.end"
+        rpc_args = {"action": args.action, "reason": args.reason, "archive": args.archive}
+    elif command == "message-batch":
+        rpc_command = "message.create_batch"
+        rpc_args = {
+            "source_node_id": args.source_node_id,
+            "required_target_node_ids": [
+                item.strip()
+                for item in (args.required_targets or "").split(",")
+                if item.strip()
+            ],
+            "batch_id": args.batch_id,
+        }
+    elif command == "message-stage":
+        rpc_command = "message.stage"
+        rpc_args = {
+            "batch_id": args.batch_id,
+            "target_node_id": args.target_node_id,
+            "body": _read_json_arg(path=args.body, inline=args.body_json),
+        }
+    elif command == "agent-context":
+        rpc_command = "agent.context"
+        rpc_args = {
+            "source_node_id": args.source_node_id,
+            "batch_id": args.batch_id,
+        }
+    elif command == "agent-dispatch":
+        rpc_command = "agent.dispatch"
+        rpc_args = {
+            "source_node_id": args.source_node_id,
+            "target_node_id": args.target_node_id,
+            "body": _read_json_arg(path=args.body, inline=args.body_json),
+            "batch_id": args.batch_id,
+        }
+    elif command == "join-create":
+        rpc_command = "join.create"
+        rpc_args = {
+            "join_id": args.join_id,
+            "target_node_id": args.target_node_id,
+            "required_source_node_ids": [
+                item.strip()
+                for item in args.required_sources.split(",")
+                if item.strip()
+            ],
+            "policy": args.policy,
+            "quorum": args.quorum,
+            "timeout_sec": args.timeout_sec,
+        }
+    elif command == "join-contribute":
+        rpc_command = "join.contribute"
+        contribution = _read_json_arg(path=args.contribution, inline=args.contribution_json)
+        if not isinstance(contribution, dict):
+            raise ValueError("join contribution must be a JSON object")
+        rpc_args = contribution
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(f"unsupported runtime command: {command}")
+
+    result = _runtime_rpc_request(rpc_url, token, rpc_command, rpc_args)
+    _write_result(result, args.output)
+
+
 def _load_dispatch_tasks(raw: Any) -> List[Dict[str, str]]:
     """Validate dispatch task list: ``[{"agent_id": "...", "prompt": "..."}, ...]``."""
     if not isinstance(raw, list) or not raw:
@@ -518,7 +686,7 @@ def _load_dispatch_tasks(raw: Any) -> List[Dict[str, str]]:
 
 async def _cmd_dispatch(args: argparse.Namespace) -> None:
     from .registry import AgentsRegistry
-    from .cluster import CodeMakerCluster
+    from .cli_worker_backend import CLIWorkerBackend
 
     reg = AgentsRegistry.load()
 
@@ -548,7 +716,7 @@ async def _cmd_dispatch(args: argparse.Namespace) -> None:
     ]
 
     skill_mode = getattr(args, "skill_mode", "catalog")
-    async with await CodeMakerCluster.create_from_registry(
+    async with await CLIWorkerBackend.create_from_registry(
         reg,
         agent_ids=needed_ids,
         port=args.port,
@@ -729,7 +897,7 @@ def _cmd_list_agents(args: argparse.Namespace) -> None:
 
 async def _cmd_run_agent(args: argparse.Namespace) -> None:
     from .registry import AgentsRegistry
-    from .cluster import CodeMakerCluster, WorkerConfig, extract_final_text
+    from .cli_worker_backend import CLIWorkerBackend, WorkerConfig, extract_final_text
 
     session_id: str = args.session_id
     agent_id: str = args.agent_id
@@ -759,7 +927,7 @@ async def _cmd_run_agent(args: argparse.Namespace) -> None:
         timeout_sec=agent.timeout_sec,
     )
 
-    async with await CodeMakerCluster.create(
+    async with await CLIWorkerBackend.create(
         workers=[wc], port=args.port, verbose=args.verbose,
     ) as cluster:
         log.info("cluster up — sending prompt (%d chars)", len(final_prompt))
@@ -866,6 +1034,132 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="read-only: list available agents from registry (no session)",
     )
     p_sr.add_argument("-o", "--output", type=Path, help="write JSON to file")
+
+    p_org = sub.add_parser(
+        "organization",
+        help="read graph organization view from a graph JSON or runtime RPC",
+    )
+    org_src = p_org.add_mutually_exclusive_group(required=True)
+    org_src.add_argument("--graph", type=Path, help="graph definition JSON")
+    org_src.add_argument("--rpc-url", help="live GraphRuntime RPC URL")
+    p_org.add_argument("--token", default="", help="GraphRuntime RPC token")
+    p_org.add_argument("--agent-id", help="return ordinary-agent scoped view")
+    p_org.add_argument("-o", "--output", type=Path, help="write JSON to file")
+
+    p_runtime = sub.add_parser(
+        "runtime",
+        help="call graph runtime control-plane commands",
+    )
+    runtime_sub = p_runtime.add_subparsers(dest="runtime_cmd", required=True)
+
+    p_validate = runtime_sub.add_parser("validate-start", help="dry-run validate a top-agent start plan")
+    p_validate.add_argument("--graph", type=Path, required=True)
+    p_validate.add_argument("--plan", type=Path, required=True)
+    p_validate.add_argument("--top-agent-profile", type=Path, help="JSON GuLiCode top-agent profile")
+    p_validate.add_argument("-o", "--output", type=Path, help="write JSON to file")
+
+    p_top_context = runtime_sub.add_parser(
+        "top-agent-context",
+        help="render top-agent rule/skill plus graph organization context",
+    )
+    p_top_context.add_argument("--graph", type=Path, required=True)
+    p_top_context.add_argument("--top-agent-profile", type=Path, help="JSON GuLiCode top-agent profile")
+    p_top_context.add_argument("-o", "--output", type=Path, help="write JSON to file")
+
+    def _add_runtime_rpc_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--rpc-url", required=True, help="live GraphRuntime RPC URL")
+        p.add_argument("--token", required=True, help="GraphRuntime RPC token")
+        p.add_argument("-o", "--output", type=Path, help="write JSON to file")
+
+    p_rt_start = runtime_sub.add_parser("start", help="submit a top-agent start plan to runtime RPC")
+    _add_runtime_rpc_args(p_rt_start)
+    p_rt_start.add_argument("--plan", type=Path, required=True)
+    p_rt_start.add_argument("--manifest-path", type=Path, help="optional WorkspaceManifest JSON output path")
+
+    p_rt_status = runtime_sub.add_parser("status", help="read runtime status snapshot")
+    _add_runtime_rpc_args(p_rt_status)
+    p_rt_status.add_argument("--recent-events-limit", type=int, default=20)
+
+    p_rt_explain = runtime_sub.add_parser(
+        "explain-status",
+        help="summarize runtime status for the top-level agent",
+    )
+    _add_runtime_rpc_args(p_rt_explain)
+    p_rt_explain.add_argument("--recent-events-limit", type=int, default=20)
+
+    p_top_start = runtime_sub.add_parser(
+        "top-agent-start-session",
+        help="bind the long-lived GuLiCode top-agent worker",
+    )
+    _add_runtime_rpc_args(p_top_start)
+
+    p_top_ask = runtime_sub.add_parser(
+        "top-agent-ask",
+        help="send a user message to the long-lived GuLiCode top-agent worker",
+    )
+    _add_runtime_rpc_args(p_top_ask)
+    p_top_ask.add_argument("--prompt", required=True)
+    p_top_ask.add_argument("--no-status", action="store_true", help="omit status explanation context")
+    p_top_ask.add_argument("--recent-events-limit", type=int, default=20)
+
+    p_rt_end = runtime_sub.add_parser("end", help="end, pause, cancel, fail, or archive a run")
+    _add_runtime_rpc_args(p_rt_end)
+    p_rt_end.add_argument(
+        "--action",
+        required=True,
+        choices=["complete", "cancel", "fail", "pause", "archive_only"],
+    )
+    p_rt_end.add_argument("--reason", default="")
+    p_rt_end.add_argument("--archive", action="store_true")
+
+    p_msg_batch = runtime_sub.add_parser("message-batch", help="create an outgoing message batch")
+    _add_runtime_rpc_args(p_msg_batch)
+    p_msg_batch.add_argument("--source-node-id", required=True)
+    p_msg_batch.add_argument("--required-targets", default="", help="comma-separated target node ids")
+    p_msg_batch.add_argument("--batch-id")
+
+    p_msg_stage = runtime_sub.add_parser("message-stage", help="stage one outgoing target message")
+    _add_runtime_rpc_args(p_msg_stage)
+    p_msg_stage.add_argument("--batch-id", required=True)
+    p_msg_stage.add_argument("--target-node-id", required=True)
+    body_g = p_msg_stage.add_mutually_exclusive_group(required=True)
+    body_g.add_argument("--body", type=Path, help="JSON body file")
+    body_g.add_argument("--body-json", help="inline JSON body")
+
+    p_agent_context = runtime_sub.add_parser(
+        "agent-context",
+        help="read the ordinary AgentNode framework_context for a current batch",
+    )
+    _add_runtime_rpc_args(p_agent_context)
+    p_agent_context.add_argument("--source-node-id", required=True)
+    p_agent_context.add_argument("--batch-id")
+
+    p_agent_dispatch = runtime_sub.add_parser(
+        "agent-dispatch",
+        help="ordinary AgentNode API: validate and dispatch one downstream message",
+    )
+    _add_runtime_rpc_args(p_agent_dispatch)
+    p_agent_dispatch.add_argument("--source-node-id", required=True)
+    p_agent_dispatch.add_argument("--target-node-id", required=True)
+    p_agent_dispatch.add_argument("--batch-id")
+    dispatch_body_g = p_agent_dispatch.add_mutually_exclusive_group(required=True)
+    dispatch_body_g.add_argument("--body", type=Path, help="JSON body file")
+    dispatch_body_g.add_argument("--body-json", help="inline JSON body")
+
+    p_join_create = runtime_sub.add_parser("join-create", help="create a fan-in join barrier")
+    _add_runtime_rpc_args(p_join_create)
+    p_join_create.add_argument("--join-id")
+    p_join_create.add_argument("--target-node-id")
+    p_join_create.add_argument("--required-sources", required=True, help="comma-separated source node ids")
+    p_join_create.add_argument("--policy", choices=["wait-all", "wait-any", "quorum"], default="wait-all")
+    p_join_create.add_argument("--quorum", type=int)
+    p_join_create.add_argument("--timeout-sec", type=float)
+
+    p_join_contribute = runtime_sub.add_parser("join-contribute", help="submit one join contribution")
+    _add_runtime_rpc_args(p_join_contribute)
+    contrib_g = p_join_contribute.add_mutually_exclusive_group(required=True)
+    contrib_g.add_argument("--contribution", type=Path, help="JSON contribution file")
+    contrib_g.add_argument("--contribution-json", help="inline JSON contribution")
 
     p_disp = sub.add_parser(
         "dispatch",
@@ -1022,6 +1316,22 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.cmd == "show-registry":
         _cmd_show_registry(args)
+        return
+
+    if args.cmd == "organization":
+        try:
+            _cmd_organization(args)
+        except (ValueError, KeyError, OSError) as e:
+            print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False, indent=2))
+            sys.exit(1)
+        return
+
+    if args.cmd == "runtime":
+        try:
+            _cmd_runtime(args)
+        except (ValueError, KeyError, OSError) as e:
+            print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False, indent=2))
+            sys.exit(1)
         return
 
     if args.cmd == "dispatch-status":

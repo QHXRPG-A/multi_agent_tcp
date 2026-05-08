@@ -1,0 +1,9 @@
+flowchart TD
+  A["Agent A 结果"] --> J["JoinBarrier 汇聚屏障"]
+  B["Agent B 结果"] --> J
+  C["Agent C 结果"] --> J
+
+  J -->|wait-all / wait-any / quorum| READY["JoinBarrierReady：汇聚条件满足"]
+  READY --> AGG["join_aggregate 消息"]
+  AGG --> TARGET["目标 AgentNode 队列"]
+  TARGET --> TICK["tick / dispatch_queued_message_now：调度投递"]

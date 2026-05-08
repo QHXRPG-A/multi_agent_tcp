@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="1120" viewBox="0 0 1700 1120" role="img" aria-labelledby="title desc">
+  <title id="title">附录：CLIWorkerBackend 底层 TCP 消息投递链路</title>
+  <desc id="desc">GraphRuntime 进入 CLIWorkerBackend 底层执行后端，通过 AgentTCPClient、Broker、Worker Agent 进程和 CLIAdapter 调用真实 CLI 并取回结构化回复。该图是底层后端说明，不是 GuLiCode 桌面应用加蓝图系统的主线架构图。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#34515f"/>
+    </marker>
+    <style>
+      .bg{fill:#f7f9fb}
+      .head{fill:#f4edff;stroke:#8250df;stroke-width:2;rx:8}
+      .life{stroke:#8c959f;stroke-width:2;stroke-dasharray:7 7}
+      .msg{stroke:#34515f;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+      .ret{stroke:#69737d;stroke-width:2;stroke-dasharray:8 6;fill:none;marker-end:url(#arrow)}
+      .note{fill:#fff7e6;stroke:#b7791f;stroke-width:2;rx:8}
+      .explain{fill:#ffffff;stroke:#8c959f;stroke-width:1.8;rx:8}
+      .label{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:17px;fill:#1f2328}
+      .small{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:14px;fill:#3b434b}
+      .title{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:30px;font-weight:700;fill:#1f2328}
+      .subtitle{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:20px;font-weight:700;fill:#1f2328}
+    </style>
+  </defs>
+  <rect class="bg" width="1700" height="1120"/>
+  <text class="title" x="60" y="55">附录：CLIWorkerBackend 底层 TCP 投递链路</text>
+  <text class="small" x="60" y="84">用途：说明运行时如何进入 CLI worker 执行后端；它不是 GuLiCode 桌面应用 + 蓝图系统的主架构图。</text>
+
+  <rect class="head" x="55" y="120" width="205" height="66"/>
+  <text class="label" x="100" y="149">GraphRuntime</text>
+  <text class="small" x="82" y="174">蓝图运行时发起投递</text>
+  <line class="life" x1="157" y1="186" x2="157" y2="865"/>
+
+  <rect class="head" x="325" y="120" width="255" height="66"/>
+  <text class="label" x="370" y="149">CLIWorkerBackend</text>
+  <text class="small" x="358" y="174">CLI worker 执行后端</text>
+  <line class="life" x1="452" y1="186" x2="452" y2="865"/>
+
+  <rect class="head" x="650" y="120" width="230" height="66"/>
+  <text class="label" x="703" y="149">AgentTCPClient</text>
+  <text class="small" x="682" y="174">长度前缀 JSON frame</text>
+  <line class="life" x1="765" y1="186" x2="765" y2="865"/>
+
+  <rect class="head" x="955" y="120" width="175" height="66"/>
+  <text class="label" x="1015" y="149">Broker</text>
+  <text class="small" x="990" y="174">TCP 路由中心</text>
+  <line class="life" x1="1042" y1="186" x2="1042" y2="865"/>
+
+  <rect class="head" x="1210" y="120" width="220" height="66"/>
+  <text class="label" x="1245" y="149">Worker Agent 进程</text>
+  <text class="small" x="1268" y="174">agent loop</text>
+  <line class="life" x1="1320" y1="186" x2="1320" y2="865"/>
+
+  <rect class="head" x="1490" y="120" width="170" height="66"/>
+  <text class="label" x="1525" y="149">CLIAdapter</text>
+  <text class="small" x="1510" y="174">codex / codemaker</text>
+  <line class="life" x1="1575" y1="186" x2="1575" y2="865"/>
+
+  <rect class="note" x="310" y="215" width="610" height="72"/>
+  <text class="label" x="335" y="247">进入底层执行后端</text>
+  <text class="small" x="335" y="272">GraphRuntime 的主职责仍是调度 AgentNode；CLIWorkerBackend 只是当前 CLI worker backend 实现。</text>
+
+  <path class="msg" d="M157 330 H452"/>
+  <text class="label" x="180" y="317">run_single(worker_id, body)</text>
+  <path class="msg" d="M452 390 H765"/>
+  <text class="label" x="490" y="377">send_to(worker_id, body)</text>
+  <path class="msg" d="M765 455 H1042"/>
+  <text class="label" x="795" y="442">JSON frame：{type: send, to, body}</text>
+  <path class="msg" d="M1042 520 H1320"/>
+  <text class="label" x="1070" y="507">JSON frame：{type: message, from, body}</text>
+  <path class="msg" d="M1320 585 H1575"/>
+  <text class="label" x="1340" y="572">body_to_agent_message + adapter.send_message</text>
+  <path class="msg" d="M1575 645 H1320"/>
+  <text class="label" x="1360" y="632">structured result：结构化结果</text>
+  <path class="ret" d="M1320 710 H1042"/>
+  <text class="label" x="1090" y="697">send_to(sender, reply)</text>
+  <path class="ret" d="M1042 775 H765"/>
+  <text class="label" x="838" y="762">message reply</text>
+  <path class="ret" d="M765 835 H452"/>
+  <text class="label" x="535" y="822">wait_for_message(expect_from=worker_id)</text>
+  <path class="ret" d="M452 895 H157"/>
+  <text class="label" x="250" y="882">reply：结构化回复返回运行时</text>
+
+  <rect class="explain" x="60" y="950" width="1580" height="130"/>
+  <text class="subtitle" x="90" y="985">函数 / 变量中文解释</text>
+  <text class="small" x="90" y="1014">CLIWorkerBackend.run_single(worker_id, body)：运行时向指定 CLI worker 发送一条任务，并等待该 worker 回复。</text>
+  <text class="small" x="90" y="1039">AgentTCPClient.send_to：向 Broker 写入 {type: "send", to, body}；Broker 再转成 {type: "message", from, body} 给目标 worker。</text>
+  <text class="small" x="90" y="1064">CLIAdapter：把框架消息转换为 Codex / CodeMaker 等 CLI 调用，并把 stdout、stderr、final_text 等整理成结构化结果。</text>
+</svg>

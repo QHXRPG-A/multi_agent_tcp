@@ -283,7 +283,7 @@ class BlueprintRunController:
             loop.close()
 
     async def _run(self, initial_prompt: str) -> BlueprintRunResult:
-        from .cluster import CodeMakerCluster
+        from .cli_worker_backend import CLIWorkerBackend
 
         graph = compile_ryven_flow(self.flow, validate=True)
         manager = DulwichWorkspaceManager.open_or_init(self.project_root)
@@ -307,7 +307,7 @@ class BlueprintRunController:
                 rpc_server=workspace_rpc,
             )
 
-        cluster = await CodeMakerCluster.create(
+        cluster = await CLIWorkerBackend.create(
             [node.to_worker_config() for node in adjusted.agent_nodes.values()],
             port=self.port,
             verbose=self.verbose,

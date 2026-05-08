@@ -1,21 +1,22 @@
-"""Orchestrate multiple CodeMaker CLI instances via TCP.
+"""Orchestrate multiple CLI-backed Agent workers via TCP.
 
 Quick start::
 
-    from multi_agent_tcp import CodeMakerCluster, WorkerConfig
+    from multi_agent_tcp import CLIWorkerBackend, WorkerConfig
 
-    cluster = await CodeMakerCluster.create(
+    backend = await CLIWorkerBackend.create(
         workers=[WorkerConfig("cm1", cwd=Path(".")), WorkerConfig("cm2", cwd=Path("."))],
     )
-    result = await cluster.run_parallel([("cm1", {"prompt": "A"}), ("cm2", {"prompt": "B"})])
+    result = await backend.run_parallel([("cm1", {"prompt": "A"}), ("cm2", {"prompt": "B"})])
     for wr in result.succeeded:
         print(wr.worker, wr.answer[:200])
-    await cluster.stop()
+    await backend.stop()
 """
 
 from .broker import Broker
 from .client import AgentTCPClient
-from .cluster import (
+from .cli_worker_backend import (
+    CLIWorkerBackend,
     CodeMakerCluster,
     ParallelResult,
     ReduceResult,
@@ -40,21 +41,41 @@ from .graph_runtime import (
     AgentSkillSelection,
     BlueprintTerminalNode,
     BrokerAgentRuntime,
+    GuLiCodeTopAgentProfile,
     GraphDefinition,
     GraphEdge,
     GraphEvent,
     GraphExecutor,
     GraphJob,
     GraphRuntime,
+    JoinBarrier,
+    JoinContribution,
     MultiModalEnvelope,
+    OutgoingMessageBatch,
     PendingAgentMessage,
     RouteNode,
+    RunEndResult,
+    StagedOutgoingMessage,
+    TopAgentPlanValidation,
+    TopAgentStartPlan,
+    TopAgentTask,
     WorkdirAssignmentResult,
     WorkspaceManifest,
     normalize_envelope,
 )
 from .ryven_blueprint import RyvenFlowCompileError, compile_ryven_flow
 from .ryven_blueprint import BlueprintRunController, BlueprintRunResult
+from .graph_control import (
+    GraphControlResponse,
+    GraphRuntimeControlPlane,
+    GraphRuntimeRPCServer,
+    graph_definition_from_dict,
+    inject_framework_context,
+    load_graph_definition,
+    load_top_agent_profile,
+    ordinary_agent_framework_context,
+    scoped_organization_view,
+)
 from .workspace_manager import (
     AgentCheckout,
     ChangesetSubmitResult,
@@ -75,6 +96,7 @@ from .skill_space import (
 from .registry import AgentsRegistry, AgentProfile, AgentSession, SkillInfo, show_registry_response
 
 __all__ = (
+    "CLIWorkerBackend",
     "CodeMakerCluster",
     "WorkerConfig",
     "WorkerResult",
@@ -97,12 +119,21 @@ __all__ = (
     "body_to_agent_message",
     "AgentNode",
     "AgentSkillSelection",
+    "GuLiCodeTopAgentProfile",
+    "TopAgentTask",
+    "TopAgentStartPlan",
+    "TopAgentPlanValidation",
     "BlueprintTerminalNode",
     "AgentInstance",
     "GraphRuntime",
     "BrokerAgentRuntime",
+    "JoinBarrier",
+    "JoinContribution",
+    "RunEndResult",
     "WorkdirAssignmentResult",
     "PendingAgentMessage",
+    "OutgoingMessageBatch",
+    "StagedOutgoingMessage",
     "MultiModalEnvelope",
     "normalize_envelope",
     "GraphEvent",
@@ -116,6 +147,15 @@ __all__ = (
     "compile_ryven_flow",
     "BlueprintRunController",
     "BlueprintRunResult",
+    "GraphControlResponse",
+    "GraphRuntimeControlPlane",
+    "GraphRuntimeRPCServer",
+    "graph_definition_from_dict",
+    "inject_framework_context",
+    "load_graph_definition",
+    "load_top_agent_profile",
+    "ordinary_agent_framework_context",
+    "scoped_organization_view",
     "DulwichWorkspaceManager",
     "ProjectWorkspace",
     "RunWorkspace",

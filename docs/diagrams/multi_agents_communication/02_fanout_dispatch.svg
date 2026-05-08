@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+  <title id="title">一对多出站批次分发</title>
+  <desc id="desc">展示普通 Agent 通过 agent.dispatch 提交下游消息，控制面校验 batch_id、source、target，运行时暂存消息，全部目标补齐后才入队投递。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#34515f"/>
+    </marker>
+    <style>
+      .bg{fill:#f7f9fb}
+      .head{fill:#e9f3ff;stroke:#1f6feb;stroke-width:2;rx:8}
+      .life{stroke:#8c959f;stroke-width:2;stroke-dasharray:7 7}
+      .msg{stroke:#34515f;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+      .ret{stroke:#69737d;stroke-width:2;stroke-dasharray:8 6;fill:none;marker-end:url(#arrow)}
+      .note{fill:#fff7e6;stroke:#b7791f;stroke-width:2;rx:8}
+      .explain{fill:#ffffff;stroke:#8c959f;stroke-width:1.8;rx:8}
+      .label{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:17px;fill:#1f2328}
+      .small{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:14px;fill:#3b434b}
+      .title{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:30px;font-weight:700;fill:#1f2328}
+      .subtitle{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:20px;font-weight:700;fill:#1f2328}
+    </style>
+  </defs>
+  <rect class="bg" width="1600" height="1040"/>
+  <text class="title" x="60" y="55">一对多分发：先暂存，全部补齐后统一入队</text>
+
+  <rect class="head" x="65" y="95" width="210" height="66"/>
+  <text class="label" x="105" y="124">源 AgentNode</text>
+  <text class="small" x="95" y="149">普通 Agent，不能私信下游</text>
+  <line class="life" x1="170" y1="161" x2="170" y2="820"/>
+
+  <rect class="head" x="340" y="95" width="250" height="66"/>
+  <text class="label" x="380" y="124">控制面 agent.dispatch</text>
+  <text class="small" x="380" y="149">校验接口参数</text>
+  <line class="life" x1="465" y1="161" x2="465" y2="820"/>
+
+  <rect class="head" x="670" y="95" width="225" height="66"/>
+  <text class="label" x="718" y="124">GraphRuntime</text>
+  <text class="small" x="710" y="149">运行时状态与事件</text>
+  <line class="life" x1="782" y1="161" x2="782" y2="820"/>
+
+  <rect class="head" x="970" y="95" width="270" height="66"/>
+  <text class="label" x="1016" y="124">OutgoingMessageBatch</text>
+  <text class="small" x="1016" y="149">保存 required_targets</text>
+  <line class="life" x1="1105" y1="161" x2="1105" y2="820"/>
+
+  <rect class="head" x="1290" y="95" width="125" height="66"/>
+  <text class="label" x="1316" y="124">目标 1</text>
+  <text class="small" x="1318" y="149">消息队列</text>
+  <line class="life" x1="1352" y1="161" x2="1352" y2="820"/>
+
+  <rect class="head" x="1450" y="95" width="125" height="66"/>
+  <text class="label" x="1476" y="124">目标 2</text>
+  <text class="small" x="1478" y="149">消息队列</text>
+  <line class="life" x1="1512" y1="161" x2="1512" y2="820"/>
+
+  <path class="msg" d="M170 235 H465"/>
+  <text class="label" x="190" y="222">agent.dispatch(source, target1, batch_id, body)</text>
+  <path class="msg" d="M465 292 H782"/>
+  <text class="label" x="495" y="279">校验 batch_id / source / target 是否合法</text>
+  <path class="msg" d="M782 350 H1105"/>
+  <text class="label" x="810" y="337">暂存 target1 的消息，可被后续覆盖</text>
+  <path class="ret" d="M782 415 H170"/>
+  <text class="label" x="320" y="402">返回 remaining_targets = [target2]，还不能投递</text>
+
+  <rect class="note" x="640" y="445" width="565" height="75"/>
+  <text class="label" x="665" y="477">批次仍处于 staging 状态</text>
+  <text class="small" x="665" y="502">只要有 required target 未补齐，框架不会把任何下游消息放入目标 Agent 队列。</text>
+
+  <path class="msg" d="M170 575 H465"/>
+  <text class="label" x="190" y="562">agent.dispatch(source, target2, batch_id, body)</text>
+  <path class="msg" d="M465 635 H782"/>
+  <text class="label" x="495" y="622">校验 target2 属于当前 required_target_node_ids</text>
+  <path class="msg" d="M782 690 H1105"/>
+  <text class="label" x="810" y="677">暂存 target2 的消息</text>
+  <path class="msg" d="M1105 740 H782"/>
+  <text class="label" x="830" y="727">remaining_targets = []，触发统一分发</text>
+  <path class="msg" d="M782 785 H1352"/>
+  <text class="label" x="905" y="772">queue_agent_message(target1)</text>
+  <path class="msg" d="M782 828 H1512"/>
+  <text class="label" x="905" y="815">queue_agent_message(target2)</text>
+
+  <rect class="explain" x="60" y="880" width="1480" height="125"/>
+  <text class="subtitle" x="90" y="915">函数 / 变量中文解释</text>
+  <text class="small" x="90" y="943">agent.dispatch：普通 Agent 唯一推荐的下游分发接口；必须带 source_node_id、target_node_id、batch_id、body。</text>
+  <text class="small" x="90" y="967">batch_id：当前控制流步骤的出站批次编号，防止 Agent 借旧上下文或全图关系随意发消息。</text>
+  <text class="small" x="90" y="991">required_target_node_ids / remaining_targets：本轮必须通知的目标集合，以及尚未补齐的目标集合。</text>
+</svg>

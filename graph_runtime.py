@@ -24,6 +24,10 @@ GraphEventType = str
 SkillSelectionMode = str
 BlueprintTerminalKind = str
 AgentRuntimeState = str
+TopAgentRunPermission = str
+JoinPolicy = str
+RunLifecycleStatus = str
+RunFinalStatus = str
 
 _VALID_ENVELOPE_KINDS = {"text", "image", "audio", "file", "blob"}
 _VALID_ENVELOPE_ENCODINGS = {"inline", "fileref", "blobref"}
@@ -31,6 +35,9 @@ _VALID_EXECUTION_MODES = {"blocking", "nonblocking"}
 _VALID_ROUTE_KINDS = {"sequence", "parallel", "parallel_reduce"}
 _VALID_SKILL_SELECTION_MODES = {"none", "all", "selected", "upstream"}
 _VALID_BLUEPRINT_TERMINAL_KINDS = {"start", "end"}
+_VALID_TOP_AGENT_RUN_PERMISSIONS = {"ask", "start", "status", "end"}
+_VALID_JOIN_POLICIES = {"wait-all", "wait-any", "quorum"}
+_VALID_RUN_END_ACTIONS = {"complete", "cancel", "fail", "pause", "archive_only"}
 _AGENT_CAN_ACCEPT_STATES = {"idle", "queued"}
 _VALID_AGENT_RUNTIME_STATES = {
     "created",
@@ -167,6 +174,7 @@ class WorkspaceManifest:
     workspace_id: str
     workspace_root: Path
     jobs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    run: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser()
@@ -230,10 +238,27 @@ class WorkspaceManifest:
         if artifacts is not None:
             entry["artifacts"] = [str(p) for p in artifacts]
 
+    def record_run_start(
+        self,
+        *,
+        top_agent: Dict[str, Any],
+        start_plan: Dict[str, Any],
+        organization: Dict[str, Any],
+        queued_messages: Sequence[Dict[str, Any]],
+    ) -> None:
+        self.run["start"] = {
+            "top_agent": dict(top_agent),
+            "start_plan": dict(start_plan),
+            "organization": dict(organization),
+            "queued_messages": [dict(message) for message in queued_messages],
+            "started_at": time.monotonic(),
+        }
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "workspace_id": self.workspace_id,
             "workspace_root": str(self.workspace_root),
+            "run": dict(self.run),
             "jobs": dict(self.jobs),
         }
 
@@ -526,6 +551,397 @@ class AgentNode:
 
 
 @dataclass
+class TopAgentTask:
+    """Structured task assigned by the top-level agent to one AgentNode."""
+
+    goal: str
+    context_refs: List[str] = field(default_factory=list)
+    expected_output: str = ""
+    acceptance: str = ""
+    downstream_collaboration: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.goal = str(self.goal).strip()
+        self.context_refs = [str(ref).strip() for ref in self.context_refs if str(ref).strip()]
+        self.expected_output = str(self.expected_output).strip()
+        self.acceptance = str(self.acceptance).strip()
+        self.downstream_collaboration = str(self.downstream_collaboration).strip()
+        if not isinstance(self.metadata, dict):
+            raise ValueError("TopAgentTask.metadata must be an object")
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TopAgentTask":
+        if not isinstance(data, dict):
+            raise ValueError("TopAgentTask data must be an object")
+        refs = data.get("context_refs", [])
+        if refs is None:
+            refs = []
+        if not isinstance(refs, list):
+            raise ValueError("TopAgentTask.context_refs must be a list")
+        return cls(
+            goal=str(data.get("goal", "")),
+            context_refs=[str(ref) for ref in refs],
+            expected_output=str(data.get("expected_output", "")),
+            acceptance=str(data.get("acceptance", "")),
+            downstream_collaboration=str(data.get("downstream_collaboration", "")),
+            metadata=dict(data.get("metadata", {})),
+        )
+
+    def missing_required_fields(self) -> List[str]:
+        missing: List[str] = []
+        if not self.goal:
+            missing.append("goal")
+        if not self.expected_output:
+            missing.append("expected_output")
+        if not self.acceptance:
+            missing.append("acceptance")
+        return missing
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "goal": self.goal,
+            "context_refs": list(self.context_refs),
+            "expected_output": self.expected_output,
+            "acceptance": self.acceptance,
+        }
+        if self.downstream_collaboration:
+            data["downstream_collaboration"] = self.downstream_collaboration
+        if self.metadata:
+            data["metadata"] = dict(self.metadata)
+        return data
+
+
+@dataclass
+class TopAgentStartPlan:
+    """Start plan proposed by GuLiCode/top-level agent."""
+
+    user_goal: str
+    agent_descriptions: Dict[str, str]
+    start_nodes: List[str]
+    tasks: Dict[str, TopAgentTask]
+    run_policy: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.user_goal = str(self.user_goal).strip()
+        self.agent_descriptions = {
+            str(node_id).strip(): str(description).strip()
+            for node_id, description in self.agent_descriptions.items()
+            if str(node_id).strip()
+        }
+        self.start_nodes = [str(node_id).strip() for node_id in self.start_nodes if str(node_id).strip()]
+        self.tasks = {
+            str(node_id).strip(): (
+                task if isinstance(task, TopAgentTask) else TopAgentTask.from_dict(task)
+            )
+            for node_id, task in self.tasks.items()
+            if str(node_id).strip()
+        }
+        if not isinstance(self.run_policy, dict):
+            raise ValueError("TopAgentStartPlan.run_policy must be an object")
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TopAgentStartPlan":
+        if not isinstance(data, dict):
+            raise ValueError("TopAgentStartPlan data must be an object")
+        descriptions = data.get("agent_descriptions", {})
+        if not isinstance(descriptions, dict):
+            raise ValueError("TopAgentStartPlan.agent_descriptions must be an object")
+        start_nodes = data.get("start_nodes", [])
+        if not isinstance(start_nodes, list):
+            raise ValueError("TopAgentStartPlan.start_nodes must be a list")
+        tasks = data.get("tasks", {})
+        if not isinstance(tasks, dict):
+            raise ValueError("TopAgentStartPlan.tasks must be an object")
+        return cls(
+            user_goal=str(data.get("user_goal", "")),
+            agent_descriptions={str(k): str(v) for k, v in descriptions.items()},
+            start_nodes=[str(node_id) for node_id in start_nodes],
+            tasks={
+                str(node_id): TopAgentTask.from_dict(task)
+                for node_id, task in tasks.items()
+            },
+            run_policy=dict(data.get("run_policy", {})),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "user_goal": self.user_goal,
+            "agent_descriptions": dict(self.agent_descriptions),
+            "start_nodes": list(self.start_nodes),
+            "tasks": {
+                node_id: task.to_dict()
+                for node_id, task in self.tasks.items()
+            },
+            "run_policy": dict(self.run_policy),
+        }
+
+
+@dataclass
+class TopAgentPlanValidation:
+    ok: bool
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    normalized_plan: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "ok": self.ok,
+            "errors": list(self.errors),
+            "warnings": list(self.warnings),
+        }
+        if self.normalized_plan is not None:
+            data["normalized_plan"] = dict(self.normalized_plan)
+        return data
+
+
+@dataclass
+class GuLiCodeTopAgentProfile:
+    """Rule/skill contract for the global GuLiCode coordinator."""
+
+    agent_id: str = "gulicode"
+    display_name: str = "GuLiCode"
+    cli_kind: str = "codex"
+    model: str = "gpt-5.4"
+    cwd: Path = Path(".")
+    timeout_sec: float = 1800.0
+    prompt_via_file: str = "auto"
+    command: str = "codex"
+    adapter_options: Dict[str, Any] = field(default_factory=dict)
+    extra_env: Dict[str, str] = field(default_factory=dict)
+    external: bool = False
+    allowed_run_permissions: List[TopAgentRunPermission] = field(
+        default_factory=lambda: ["ask", "start", "status", "end"]
+    )
+    rule: Optional[str] = None
+    skill: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.agent_id = str(self.agent_id).strip() or "gulicode"
+        self.display_name = str(self.display_name).strip() or "GuLiCode"
+        self.cli_kind = str(self.cli_kind).strip() or "codex"
+        self.model = str(self.model).strip() or "gpt-5.4"
+        self.cwd = Path(self.cwd).expanduser()
+        self.timeout_sec = float(self.timeout_sec)
+        self.prompt_via_file = str(self.prompt_via_file).strip() or "auto"
+        self.command = str(self.command).strip() or self.cli_kind
+        if not isinstance(self.adapter_options, dict):
+            raise ValueError("GuLiCodeTopAgentProfile.adapter_options must be an object")
+        if not isinstance(self.extra_env, dict):
+            raise ValueError("GuLiCodeTopAgentProfile.extra_env must be an object")
+        self.extra_env = {str(k): str(v) for k, v in self.extra_env.items()}
+        permissions: List[str] = []
+        for permission in self.allowed_run_permissions:
+            value = str(permission).strip().lower()
+            if value not in _VALID_TOP_AGENT_RUN_PERMISSIONS:
+                raise ValueError(f"unsupported top-agent permission: {permission!r}")
+            if value not in permissions:
+                permissions.append(value)
+        self.allowed_run_permissions = permissions
+        if self.rule is not None:
+            self.rule = str(self.rule).strip() or None
+        if self.skill is not None:
+            self.skill = str(self.skill).strip() or None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GuLiCodeTopAgentProfile":
+        if not isinstance(data, dict):
+            raise ValueError("GuLiCodeTopAgentProfile data must be an object")
+        raw_permissions = data.get("allowed_run_permissions", data.get("permissions"))
+        if raw_permissions is not None and not isinstance(raw_permissions, list):
+            raise ValueError("GuLiCodeTopAgentProfile.allowed_run_permissions must be a list")
+        permissions = (
+            [str(item) for item in raw_permissions]
+            if raw_permissions is not None
+            else ["ask", "start", "status", "end"]
+        )
+        return cls(
+            agent_id=str(data.get("agent_id", "gulicode")),
+            display_name=str(data.get("display_name", "GuLiCode")),
+            cli_kind=str(data.get("cli_kind", "codex")),
+            model=str(data.get("model", "gpt-5.4")),
+            cwd=Path(str(data.get("cwd", "."))).expanduser(),
+            timeout_sec=float(data.get("timeout_sec", 1800.0)),
+            prompt_via_file=str(data.get("prompt_via_file", "auto")),
+            command=str(data.get("command", data.get("cli_kind", "codex"))),
+            adapter_options=dict(data.get("adapter_options", {})),
+            extra_env=dict(data.get("extra_env", {})),
+            external=bool(data.get("external", False)),
+            allowed_run_permissions=permissions,
+            rule=(
+                str(data["rule"])
+                if data.get("rule") is not None
+                else None
+            ),
+            skill=(
+                str(data["skill"])
+                if data.get("skill") is not None
+                else None
+            ),
+        )
+
+    @classmethod
+    def load(cls, path: Path) -> "GuLiCodeTopAgentProfile":
+        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+    def to_dict(self, *, include_text: bool = True) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "agent_id": self.agent_id,
+            "display_name": self.display_name,
+            "cli_kind": self.cli_kind,
+            "model": self.model,
+            "cwd": str(self.cwd),
+            "timeout_sec": self.timeout_sec,
+            "prompt_via_file": self.prompt_via_file,
+            "command": self.command,
+            "adapter_options": dict(self.adapter_options),
+            "extra_env": dict(self.extra_env),
+            "external": self.external,
+            "allowed_run_permissions": list(self.allowed_run_permissions),
+        }
+        if include_text:
+            data["rule"] = self.rule_text()
+            data["skill"] = self.skill_text()
+        else:
+            if self.rule is not None:
+                data["rule"] = self.rule
+            if self.skill is not None:
+                data["skill"] = self.skill
+        return data
+
+    def save(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def rule_text(self) -> str:
+        if self.rule is not None:
+            return self.rule
+        return "\n".join(
+            [
+                "# GuLiCode Top Agent Rules",
+                "",
+                "- Read the latest organization view before proposing a start plan.",
+                "- Produce one concise responsibility description for every AgentNode.",
+                "- Choose start_nodes explicitly from existing AgentNode ids; the framework does not choose them for you.",
+                "- Provide one task for every selected start node.",
+                "- Each task must include goal, expected_output, and acceptance.",
+                "- Do not ask ordinary agents to bypass framework workspace, VCS, or message APIs.",
+                "- Do not expose private scratch paths, real skill-space paths, tokens, or RPC internals to ordinary agents.",
+                "- Explain failures, conflicts, timeouts, or missing permissions instead of pretending success.",
+                "- Request end/cancel/pause through the framework; final state aggregation belongs to the framework.",
+            ]
+        )
+
+    def skill_text(self) -> str:
+        if self.skill is not None:
+            return self.skill
+        return "\n".join(
+            [
+                "# GuLiCode Top Agent Framework Console",
+                "",
+                "- Organization view: inspect graph, agents, edges, scopes, and agent_connections.",
+                "- Start plan: submit user_goal, agent_descriptions, start_nodes, tasks, and run_policy.",
+                "- Status: read runtime events, agent states, queues, jobs, changesets, conflicts, artifacts, and reports.",
+                "- Status explanation: use framework status summaries and recent events; do not infer hidden progress.",
+                "- Messaging: ordinary AgentNode communication is staged, validated, and queued by the framework.",
+                "- Ordinary agents receive a per-message framework_context containing outgoing_batch_id, required_outgoing_targets, remaining_targets, scoped organization, and agent.dispatch usage.",
+                "- Workspace: source edits use checkout/status/diff/submit/sync; reports and artifacts use publish APIs.",
+                "- End control: request complete, cancel, fail, pause, or archive_only; unresolved work remains visible.",
+            ]
+        )
+
+    def to_agent_node(self) -> AgentNode:
+        """Return the framework-owned long-lived GuLiCode worker binding."""
+
+        safe_id = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in self.agent_id)
+        return AgentNode(
+            node_id=f"top-agent-{safe_id}",
+            agent_id=self.agent_id,
+            prompt="",
+            execution_mode="blocking",
+            cli_kind=self.cli_kind,
+            model=self.model,
+            cwd=self.cwd,
+            timeout_sec=self.timeout_sec,
+            prompt_via_file=self.prompt_via_file,
+            command=self.command,
+            adapter_options=dict(self.adapter_options),
+            extra_env=dict(self.extra_env),
+            external=self.external,
+        )
+
+    def organization_context(self, graph: "GraphDefinition") -> Dict[str, Any]:
+        return {
+            "top_agent": self.to_dict(),
+            "organization": graph.agent_organization_view(),
+        }
+
+    def validate_start_plan(
+        self,
+        graph: "GraphDefinition",
+        plan: TopAgentStartPlan,
+    ) -> TopAgentPlanValidation:
+        errors: List[str] = []
+        warnings: List[str] = []
+        node_ids = set(graph.agent_nodes)
+
+        if "start" not in self.allowed_run_permissions:
+            errors.append(f"top agent {self.agent_id!r} is not allowed to start runs")
+        if not plan.user_goal:
+            errors.append("user_goal is required")
+
+        description_ids = set(plan.agent_descriptions)
+        missing_descriptions = sorted(node_ids - description_ids)
+        unknown_descriptions = sorted(description_ids - node_ids)
+        if missing_descriptions:
+            errors.append(
+                "agent_descriptions must cover every AgentNode; missing: "
+                + ", ".join(missing_descriptions)
+            )
+        if unknown_descriptions:
+            errors.append(
+                "agent_descriptions contains unknown AgentNode ids: "
+                + ", ".join(unknown_descriptions)
+            )
+
+        start_ids = set(plan.start_nodes)
+        if not plan.start_nodes:
+            errors.append("start_nodes must not be empty")
+        unknown_starts = sorted(start_ids - node_ids)
+        if unknown_starts:
+            errors.append("start_nodes contains unknown AgentNode ids: " + ", ".join(unknown_starts))
+        if len(start_ids) != len(plan.start_nodes):
+            errors.append("start_nodes must not contain duplicates")
+
+        task_ids = set(plan.tasks)
+        missing_tasks = sorted(start_ids - task_ids)
+        extra_tasks = sorted(task_ids - start_ids)
+        if missing_tasks:
+            errors.append("tasks must include every start node; missing: " + ", ".join(missing_tasks))
+        if extra_tasks:
+            errors.append("tasks contains entries for non-start nodes: " + ", ".join(extra_tasks))
+        for node_id, task in plan.tasks.items():
+            missing_fields = task.missing_required_fields()
+            if missing_fields:
+                errors.append(
+                    f"task {node_id!r} missing required fields: " + ", ".join(missing_fields)
+                )
+
+        if plan.run_policy.get("allow_parallel") is False and len(plan.start_nodes) > 1:
+            warnings.append("run_policy.allow_parallel is false but multiple start_nodes were provided")
+
+        return TopAgentPlanValidation(
+            ok=not errors,
+            errors=errors,
+            warnings=warnings,
+            normalized_plan=plan.to_dict() if not errors else None,
+        )
+
+
+@dataclass
 class AgentInstance:
     """Runtime binding between an AgentNode and a broker-registered agent."""
 
@@ -617,6 +1033,281 @@ class PendingAgentMessage:
 
 
 @dataclass
+class StagedOutgoingMessage:
+    """Message staged by one agent for a downstream target."""
+
+    target_node_id: str
+    target_agent_id: str
+    body: Any
+    staged_at: float = field(default_factory=time.monotonic)
+    overwrite_count: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "target_node_id": self.target_node_id,
+            "target_agent_id": self.target_agent_id,
+            "body": self.body,
+            "staged_at": self.staged_at,
+            "overwrite_count": self.overwrite_count,
+        }
+
+
+@dataclass
+class OutgoingMessageBatch:
+    """Framework-owned one-to-many handoff for a single source agent step."""
+
+    batch_id: str
+    source_node_id: str
+    source_agent_id: str
+    required_target_node_ids: List[str]
+    required_target_agent_ids: List[str]
+    created_at: float = field(default_factory=time.monotonic)
+    status: str = "staging"
+    staged_messages: Dict[str, StagedOutgoingMessage] = field(default_factory=dict)
+    dispatched_message_ids: List[str] = field(default_factory=list)
+    reminder_count: int = 0
+    last_reminder_targets: List[str] = field(default_factory=list)
+
+    @property
+    def remaining_targets(self) -> List[str]:
+        return [
+            target
+            for target in self.required_target_node_ids
+            if target not in self.staged_messages
+        ]
+
+    @property
+    def ready_to_dispatch(self) -> bool:
+        return not self.remaining_targets
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "batch_id": self.batch_id,
+            "source_node_id": self.source_node_id,
+            "source_agent_id": self.source_agent_id,
+            "required_target_node_ids": list(self.required_target_node_ids),
+            "required_target_agent_ids": list(self.required_target_agent_ids),
+            "remaining_targets": self.remaining_targets,
+            "status": self.status,
+            "created_at": self.created_at,
+            "staged_messages": {
+                target: message.to_dict()
+                for target, message in self.staged_messages.items()
+            },
+            "dispatched_message_ids": list(self.dispatched_message_ids),
+            "reminder_count": self.reminder_count,
+        }
+
+
+@dataclass
+class JoinContribution:
+    """One upstream source contribution captured by a fan-in barrier."""
+
+    source_node_id: str
+    source_agent_id: Optional[str] = None
+    status: str = "completed"
+    result: Any = None
+    accepted_changesets: List[Dict[str, Any]] = field(default_factory=list)
+    conflicts: List[Dict[str, Any]] = field(default_factory=list)
+    artifacts: List[Dict[str, Any]] = field(default_factory=list)
+    reports: List[Dict[str, Any]] = field(default_factory=list)
+    test_results: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    submitted_at: float = field(default_factory=time.monotonic)
+    overwrite_count: int = 0
+
+    def __post_init__(self) -> None:
+        self.source_node_id = str(self.source_node_id).strip()
+        if not self.source_node_id:
+            raise ValueError("JoinContribution.source_node_id must be non-empty")
+        if self.source_agent_id is not None:
+            self.source_agent_id = str(self.source_agent_id).strip() or None
+        self.status = str(self.status or "completed").strip() or "completed"
+        if not isinstance(self.metadata, dict):
+            raise ValueError("JoinContribution.metadata must be an object")
+        self.accepted_changesets = [dict(item) for item in self.accepted_changesets]
+        self.conflicts = [dict(item) for item in self.conflicts]
+        self.artifacts = [dict(item) for item in self.artifacts]
+        self.reports = [dict(item) for item in self.reports]
+        self.test_results = [dict(item) for item in self.test_results]
+
+    @property
+    def is_successful(self) -> bool:
+        return self.status in {"completed", "success", "accepted", "passed"}
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "source_node_id": self.source_node_id,
+            "status": self.status,
+            "result": self.result,
+            "accepted_changesets": list(self.accepted_changesets),
+            "conflicts": list(self.conflicts),
+            "artifacts": list(self.artifacts),
+            "reports": list(self.reports),
+            "test_results": list(self.test_results),
+            "metadata": dict(self.metadata),
+            "submitted_at": self.submitted_at,
+            "overwrite_count": self.overwrite_count,
+        }
+        if self.source_agent_id is not None:
+            data["source_agent_id"] = self.source_agent_id
+        return data
+
+
+@dataclass
+class JoinBarrier:
+    """Framework-owned multi-source fan-in barrier."""
+
+    join_id: str
+    target_node_id: Optional[str]
+    required_source_node_ids: List[str]
+    policy: JoinPolicy = "wait-all"
+    quorum: Optional[int] = None
+    timeout_sec: Optional[float] = None
+    created_at: float = field(default_factory=time.monotonic)
+    status: str = "waiting"
+    contributions: Dict[str, JoinContribution] = field(default_factory=dict)
+    completed_at: Optional[float] = None
+    final_reason: Optional[str] = None
+    aggregate_message_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.join_id = str(self.join_id).strip()
+        if not self.join_id:
+            raise ValueError("JoinBarrier.join_id must be non-empty")
+        if self.target_node_id is not None:
+            self.target_node_id = str(self.target_node_id).strip() or None
+        self.required_source_node_ids = [
+            str(node_id).strip()
+            for node_id in self.required_source_node_ids
+            if str(node_id).strip()
+        ]
+        if not self.required_source_node_ids:
+            raise ValueError("JoinBarrier.required_source_node_ids must not be empty")
+        if len(set(self.required_source_node_ids)) != len(self.required_source_node_ids):
+            raise ValueError("JoinBarrier.required_source_node_ids must not contain duplicates")
+        if self.policy not in _VALID_JOIN_POLICIES:
+            raise ValueError(f"unsupported join policy: {self.policy!r}")
+        if self.policy == "quorum":
+            if self.quorum is None:
+                raise ValueError("quorum join policy requires quorum")
+            if self.quorum < 1 or self.quorum > len(self.required_source_node_ids):
+                raise ValueError("quorum must be between 1 and the number of required sources")
+        elif self.quorum is not None and self.quorum < 1:
+            raise ValueError("quorum must be positive when provided")
+
+    @property
+    def missing_sources(self) -> List[str]:
+        return [
+            source
+            for source in self.required_source_node_ids
+            if source not in self.contributions
+        ]
+
+    @property
+    def contribution_count(self) -> int:
+        return len(self.contributions)
+
+    @property
+    def successful_count(self) -> int:
+        return sum(1 for item in self.contributions.values() if item.is_successful)
+
+    def timed_out(self, *, now: Optional[float] = None) -> bool:
+        if self.timeout_sec is None:
+            return False
+        return (now if now is not None else time.monotonic()) >= self.created_at + self.timeout_sec
+
+    def aggregate(self) -> Dict[str, Any]:
+        contributions = {
+            source: contribution.to_dict()
+            for source, contribution in self.contributions.items()
+        }
+        return {
+            "join_id": self.join_id,
+            "target_node_id": self.target_node_id,
+            "required_source_node_ids": list(self.required_source_node_ids),
+            "policy": self.policy,
+            "quorum": self.quorum,
+            "status": self.status,
+            "final_reason": self.final_reason,
+            "missing_sources": self.missing_sources,
+            "contribution_count": self.contribution_count,
+            "successful_count": self.successful_count,
+            "source_statuses": {
+                source: contribution.status
+                for source, contribution in self.contributions.items()
+            },
+            "source_metadata": {
+                source: dict(contribution.metadata)
+                for source, contribution in self.contributions.items()
+                if contribution.metadata
+            },
+            "accepted_changesets": [
+                item
+                for contribution in self.contributions.values()
+                for item in contribution.accepted_changesets
+            ],
+            "conflicts": [
+                item
+                for contribution in self.contributions.values()
+                for item in contribution.conflicts
+            ],
+            "artifacts": [
+                item
+                for contribution in self.contributions.values()
+                for item in contribution.artifacts
+            ],
+            "reports": [
+                item
+                for contribution in self.contributions.values()
+                for item in contribution.reports
+            ],
+            "test_results": [
+                item
+                for contribution in self.contributions.values()
+                for item in contribution.test_results
+            ],
+            "contributions": contributions,
+            "created_at": self.created_at,
+            "completed_at": self.completed_at,
+            "aggregate_message_id": self.aggregate_message_id,
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = self.aggregate()
+        data["timeout_sec"] = self.timeout_sec
+        return data
+
+
+@dataclass
+class RunEndResult:
+    """Structured result returned by GraphRuntime.end_run()."""
+
+    ok: bool
+    action: str
+    run_status: RunLifecycleStatus
+    final_status: Optional[RunFinalStatus]
+    reason: str = ""
+    summary: Dict[str, Any] = field(default_factory=dict)
+    archived: bool = False
+    ended_at: float = field(default_factory=time.monotonic)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "ok": self.ok,
+            "action": self.action,
+            "run_status": self.run_status,
+            "reason": self.reason,
+            "summary": dict(self.summary),
+            "archived": self.archived,
+            "ended_at": self.ended_at,
+        }
+        if self.final_status is not None:
+            data["final_status"] = self.final_status
+        return data
+
+
+@dataclass
 class WorkdirAssignmentResult:
     ok: bool
     agent_id: str
@@ -653,19 +1344,32 @@ class GraphRuntime:
         cluster: Any,
         *,
         workspace: Optional[WorkspaceManifest] = None,
+        archive_manager: Any = None,
+        archive_run: Any = None,
         tick_interval_sec: float = 0.5,
     ) -> None:
         self.cluster = cluster
         self.workspace = workspace
+        self.archive_manager = archive_manager
+        self.archive_run = archive_run
         self.tick_interval_sec = float(tick_interval_sec)
         self._instances: Dict[str, AgentInstance] = {}
         self._agent_message_queues: Dict[str, List[PendingAgentMessage]] = {}
         self._pending_messages: Dict[str, PendingAgentMessage] = {}
+        self._outgoing_batches: Dict[str, OutgoingMessageBatch] = {}
+        self._join_barriers: Dict[str, JoinBarrier] = {}
+        self._join_target_nodes: Dict[str, AgentNode] = {}
         self._dispatch_tasks: Dict[str, asyncio.Task[None]] = {}
+        self._job_tasks: Dict[str, asyncio.Task[None]] = {}
         self._jobs: Dict[str, GraphJob] = {}
         self._events: List[GraphEvent] = []
         self._tick_task: Optional[asyncio.Task[None]] = None
         self._last_tick_at: Optional[float] = None
+        self._run_status: RunLifecycleStatus = "created"
+        self._final_status: Optional[RunFinalStatus] = None
+        self._ended_at: Optional[float] = None
+        self._end_reason: Optional[str] = None
+        self._run_manifest: Dict[str, Any] = {}
         self._closed = False
 
     @property
@@ -685,12 +1389,73 @@ class GraphRuntime:
         return dict(self._pending_messages)
 
     @property
+    def outgoing_batches(self) -> Dict[str, OutgoingMessageBatch]:
+        return dict(self._outgoing_batches)
+
+    @property
+    def join_barriers(self) -> Dict[str, JoinBarrier]:
+        return dict(self._join_barriers)
+
+    @property
     def events(self) -> List[GraphEvent]:
         return list(self._events)
+
+    @property
+    def run_manifest(self) -> Dict[str, Any]:
+        return dict(self._run_manifest)
 
     def _emit(self, event: GraphEvent) -> GraphEvent:
         self._events.append(event)
         return event
+
+    def _mark_run_running(self) -> None:
+        if self._run_status in {"created", "paused"}:
+            self._run_status = "running"
+
+    def record_start_manifest(
+        self,
+        *,
+        top_agent: Dict[str, Any],
+        start_plan: Dict[str, Any],
+        organization: Dict[str, Any],
+        queued_messages: Sequence[Dict[str, Any]],
+        manifest_path: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        self._mark_run_running()
+        entry = {
+            "top_agent": dict(top_agent),
+            "start_plan": dict(start_plan),
+            "organization": dict(organization),
+            "queued_messages": [dict(message) for message in queued_messages],
+            "started_at": time.monotonic(),
+        }
+        self._run_manifest["start"] = entry
+        if self.workspace is not None:
+            self.workspace.record_run_start(
+                top_agent=top_agent,
+                start_plan=start_plan,
+                organization=organization,
+                queued_messages=queued_messages,
+            )
+            if manifest_path is not None:
+                self.workspace.write_json(manifest_path)
+        self._emit(
+            GraphEvent(
+                "RunStarted",
+                status=self._run_status,
+                payload={
+                    "top_agent": dict(top_agent),
+                    "start_nodes": list(start_plan.get("start_nodes", [])),
+                    "queued_message_ids": [
+                        str(message.get("message_id"))
+                        for message in queued_messages
+                        if message.get("message_id") is not None
+                    ],
+                    "manifest_path": str(manifest_path) if manifest_path is not None else None,
+                },
+            )
+        )
+        return dict(entry)
 
     def _set_agent_state(
         self,
@@ -753,6 +1518,7 @@ class GraphRuntime:
         if self._closed:
             return
         self._last_tick_at = time.monotonic()
+        self._check_join_timeouts(now=self._last_tick_at)
 
         finished: List[str] = []
         for message_id, task in self._dispatch_tasks.items():
@@ -764,6 +1530,7 @@ class GraphRuntime:
         for node_id, inst in list(self._instances.items()):
             if inst.busy_count < 0:
                 inst.busy_count = 0
+            self._maybe_remind_outgoing_targets(inst)
             queue = self._agent_message_queues.get(node_id, [])
             if not queue or not inst.can_accept_message:
                 continue
@@ -782,6 +1549,871 @@ class GraphRuntime:
             self._dispatch_tasks[pending.message_id] = asyncio.create_task(
                 self._dispatch_pending_message(inst.node, pending)
             )
+
+    def _maybe_remind_outgoing_targets(self, inst: AgentInstance) -> None:
+        if not inst.can_accept_message:
+            return
+        for batch in self._outgoing_batches.values():
+            if batch.status != "staging":
+                continue
+            if batch.source_node_id != inst.node.node_id:
+                continue
+            remaining = batch.remaining_targets
+            if not remaining:
+                continue
+            if batch.last_reminder_targets == remaining:
+                continue
+            batch.reminder_count += 1
+            batch.last_reminder_targets = list(remaining)
+            self._emit(
+                GraphEvent(
+                    "AgentOutgoingTargetsReminder",
+                    node_id=inst.node.node_id,
+                    agent_id=inst.agent_id,
+                    status="waiting_for_outgoing_targets",
+                    payload={
+                        "batch_id": batch.batch_id,
+                        "required_outgoing_targets": list(batch.required_target_node_ids),
+                        "remaining_targets": list(remaining),
+                    },
+                )
+            )
+
+    def create_join_barrier(
+        self,
+        *,
+        required_sources: Sequence[AgentNode | str],
+        target_node: Optional[AgentNode | str] = None,
+        policy: JoinPolicy = "wait-all",
+        quorum: Optional[int] = None,
+        timeout_sec: Optional[float] = None,
+        join_id: Optional[str] = None,
+    ) -> JoinBarrier:
+        """Create a framework-owned fan-in barrier for upstream results."""
+
+        if self._closed:
+            raise RuntimeError("GraphRuntime is closed")
+        self._mark_run_running()
+        source_ids = [
+            source.node_id if isinstance(source, AgentNode) else str(source)
+            for source in required_sources
+        ]
+        target_id = (
+            target_node.node_id if isinstance(target_node, AgentNode)
+            else str(target_node) if target_node is not None
+            else None
+        )
+        barrier = JoinBarrier(
+            join_id=join_id or f"join-{uuid.uuid4().hex[:12]}",
+            target_node_id=target_id,
+            required_source_node_ids=source_ids,
+            policy=policy,
+            quorum=quorum,
+            timeout_sec=timeout_sec,
+        )
+        self._join_barriers[barrier.join_id] = barrier
+        if isinstance(target_node, AgentNode):
+            self._join_target_nodes[barrier.join_id] = target_node
+        elif target_id is not None and target_id in self._instances:
+            self._join_target_nodes[barrier.join_id] = self._instances[target_id].node
+        self._emit(
+            GraphEvent(
+                "JoinBarrierCreated",
+                node_id=barrier.target_node_id,
+                status=barrier.status,
+                payload=barrier.to_dict(),
+            )
+        )
+        return barrier
+
+    def submit_join_contribution(
+        self,
+        join_id: str,
+        source_node: AgentNode | str,
+        *,
+        status: str = "completed",
+        result: Any = None,
+        source_agent_id: Optional[str] = None,
+        accepted_changesets: Optional[Sequence[Dict[str, Any]]] = None,
+        conflicts: Optional[Sequence[Dict[str, Any]]] = None,
+        artifacts: Optional[Sequence[Dict[str, Any]]] = None,
+        reports: Optional[Sequence[Dict[str, Any]]] = None,
+        test_results: Optional[Sequence[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Record or overwrite one upstream contribution and evaluate the join."""
+
+        barrier = self._join_barriers.get(join_id)
+        if barrier is None:
+            raise KeyError(f"unknown join barrier: {join_id}")
+        if barrier.status in {"ready", "timed_out", "cancelled"}:
+            raise RuntimeError(f"join barrier {join_id} is already {barrier.status}")
+        source_id = source_node.node_id if isinstance(source_node, AgentNode) else str(source_node)
+        if source_id not in barrier.required_source_node_ids:
+            raise ValueError(f"source {source_id!r} is not required for join {join_id}")
+
+        inst = self._instances.get(source_id)
+        resolved_agent_id = source_agent_id or (inst.agent_id if inst is not None else None)
+        previous = barrier.contributions.get(source_id)
+        contribution = JoinContribution(
+            source_node_id=source_id,
+            source_agent_id=resolved_agent_id,
+            status=status,
+            result=result,
+            accepted_changesets=list(accepted_changesets or []),
+            conflicts=list(conflicts or []),
+            artifacts=list(artifacts or []),
+            reports=list(reports or []),
+            test_results=list(test_results or []),
+            metadata=dict(metadata or {}),
+            overwrite_count=(previous.overwrite_count + 1) if previous is not None else 0,
+        )
+        barrier.contributions[source_id] = contribution
+        self._emit(
+            GraphEvent(
+                "JoinContributionSubmitted",
+                node_id=barrier.target_node_id,
+                agent_id=resolved_agent_id,
+                status=contribution.status,
+                payload={
+                    "join_id": barrier.join_id,
+                    "source_node_id": source_id,
+                    "overwritten": previous is not None,
+                    "join_status": barrier.status,
+                    "missing_sources": barrier.missing_sources,
+                },
+            )
+        )
+        self._evaluate_join_barrier(barrier)
+        return {
+            "join_id": barrier.join_id,
+            "status": barrier.status,
+            "ready": barrier.status == "ready",
+            "missing_sources": barrier.missing_sources,
+            "aggregate": barrier.aggregate(),
+        }
+
+    def _evaluate_join_barrier(self, barrier: JoinBarrier) -> None:
+        if barrier.status != "waiting":
+            return
+        reason: Optional[str] = None
+        if barrier.policy == "wait-all" and not barrier.missing_sources:
+            reason = "all_sources_submitted"
+        elif barrier.policy == "wait-any" and barrier.contribution_count >= 1:
+            reason = "any_source_submitted"
+        elif barrier.policy == "quorum" and barrier.successful_count >= int(barrier.quorum or 0):
+            reason = "quorum_reached"
+        elif barrier.timed_out():
+            barrier.status = "timed_out"
+            barrier.completed_at = time.monotonic()
+            barrier.final_reason = "timeout"
+            self._emit(
+                GraphEvent(
+                    "JoinBarrierTimedOut",
+                    node_id=barrier.target_node_id,
+                    status=barrier.status,
+                    payload=barrier.aggregate(),
+                )
+            )
+            return
+
+        if reason is None:
+            return
+        barrier.status = "ready"
+        barrier.completed_at = time.monotonic()
+        barrier.final_reason = reason
+        self._queue_join_aggregate_if_possible(barrier)
+        self._emit(
+            GraphEvent(
+                "JoinBarrierReady",
+                node_id=barrier.target_node_id,
+                status=barrier.status,
+                payload=barrier.aggregate(),
+            )
+        )
+
+    def _check_join_timeouts(self, *, now: Optional[float] = None) -> None:
+        for barrier in self._join_barriers.values():
+            if barrier.status != "waiting" or not barrier.timed_out(now=now):
+                continue
+            barrier.status = "timed_out"
+            barrier.completed_at = now if now is not None else time.monotonic()
+            barrier.final_reason = "timeout"
+            self._emit(
+                GraphEvent(
+                    "JoinBarrierTimedOut",
+                    node_id=barrier.target_node_id,
+                    status=barrier.status,
+                    payload=barrier.aggregate(),
+                )
+            )
+
+    def _queue_join_aggregate_if_possible(self, barrier: JoinBarrier) -> None:
+        if barrier.aggregate_message_id is not None:
+            return
+        target = self._join_target_nodes.get(barrier.join_id)
+        if target is None:
+            return
+        aggregate = barrier.aggregate()
+        pending = self.queue_agent_message(
+            target,
+            {
+                "type": "join_aggregate",
+                "join_id": barrier.join_id,
+                "prompt": f"Process fan-in join aggregate {barrier.join_id}.",
+                "aggregate": aggregate,
+            },
+            source_node_id=None,
+            source_agent_id="graph-runtime",
+            message_id=f"join-msg-{barrier.join_id}",
+        )
+        barrier.aggregate_message_id = pending.message_id
+        self._emit(
+            GraphEvent(
+                "JoinBarrierAggregateQueued",
+                node_id=barrier.target_node_id,
+                agent_id=pending.agent_id,
+                status=pending.status,
+                payload={
+                    "join_id": barrier.join_id,
+                    "message_id": pending.message_id,
+                    "target_node_id": pending.node_id,
+                    "target_agent_id": pending.agent_id,
+                },
+            )
+        )
+
+    async def dispatch_queued_message_now(self, message_id: str) -> PendingAgentMessage:
+        """Synchronously dispatch one queued message and keep its result."""
+
+        pending = self._pending_messages.get(message_id)
+        if pending is None:
+            raise KeyError(f"unknown queued message: {message_id}")
+        if pending.status != "queued":
+            raise RuntimeError(f"message {message_id} is {pending.status}, not queued")
+        queue = self._agent_message_queues.get(pending.node_id, [])
+        self._agent_message_queues[pending.node_id] = [
+            item for item in queue if item.message_id != message_id
+        ]
+        pending.status = "dispatching"
+        pending.dispatched_at = time.monotonic()
+        self._emit(
+            GraphEvent(
+                "AgentQueuedMessageDispatched",
+                node_id=pending.node_id,
+                agent_id=pending.agent_id,
+                status=pending.status,
+                payload=pending.to_dict(),
+            )
+        )
+        node = self._instances[pending.node_id].node
+        try:
+            pending.result = await self._dispatch_agent_message(
+                node,
+                pending.body,
+                timeout_sec=pending.timeout_sec,
+                message_id=pending.message_id,
+            )
+            pending.status = "completed"
+        except Exception as exc:
+            pending.status = "failed"
+            pending.error = str(exc)
+            raise
+        finally:
+            pending.completed_at = time.monotonic()
+            self._emit(
+                GraphEvent(
+                    "AgentQueuedMessageCompleted",
+                    node_id=pending.node_id,
+                    agent_id=pending.agent_id,
+                    status=pending.status,
+                    payload=pending.to_dict(),
+                )
+            )
+        return pending
+
+    def _workspace_state_snapshot(self) -> Dict[str, Any]:
+        if self.workspace is None:
+            return {
+                "workspace_id": None,
+                "changesets": [],
+                "conflicts": [],
+                "artifacts": [],
+                "reports": [],
+                "jobs": {},
+            }
+        root = self.workspace.workspace_root
+        changesets: List[Dict[str, Any]] = []
+        conflicts: List[Dict[str, Any]] = []
+        artifacts: List[Dict[str, Any]] = []
+        reports: List[Dict[str, Any]] = []
+
+        for event in self._events:
+            payload = event.payload
+            event_type = event.event_type
+            if event_type in {"ChangesetSubmitted", "ChangesetAccepted"}:
+                changesets.append(dict(payload))
+            elif event_type == "ConflictDetected":
+                conflicts.append(dict(payload))
+            elif event_type == "ArtifactPublished":
+                artifacts.append(dict(payload))
+            elif event_type == "AgentReportSubmitted":
+                reports.append(dict(payload))
+
+        return {
+            "workspace_id": self.workspace.workspace_id,
+            "workspace_root": str(root),
+            "jobs": {
+                job_id: dict(entry)
+                for job_id, entry in self.workspace.jobs.items()
+            },
+            "changesets": changesets,
+            "conflicts": conflicts,
+            "artifacts": artifacts,
+            "reports": reports,
+        }
+
+    def status_snapshot(
+        self,
+        *,
+        graph: Optional["GraphDefinition"] = None,
+        recent_events_limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Return a top-agent/UI-friendly runtime status snapshot."""
+
+        self._check_join_timeouts()
+        agents: Dict[str, Dict[str, Any]] = {}
+        for node_id, inst in self._instances.items():
+            agents[node_id] = {
+                "node_id": node_id,
+                "agent_id": inst.agent_id,
+                "external": inst.external,
+                "state": inst.state,
+                "busy_count": inst.busy_count,
+                "messages_sent": inst.messages_sent,
+                "current_message_id": inst.current_message_id,
+                "last_error": inst.last_error,
+                "queue_size": len(self._agent_message_queues.get(node_id, [])),
+                "started_at": inst.started_at,
+                "updated_at": inst.updated_at,
+            }
+
+        queue_state = {
+            node_id: [message.to_dict() for message in queue]
+            for node_id, queue in self._agent_message_queues.items()
+        }
+        pending_state = {
+            message_id: message.to_dict()
+            for message_id, message in self._pending_messages.items()
+        }
+        outgoing_state = {
+            batch_id: batch.to_dict()
+            for batch_id, batch in self._outgoing_batches.items()
+        }
+        join_state = {
+            join_id: barrier.to_dict()
+            for join_id, barrier in self._join_barriers.items()
+        }
+        jobs_state = {
+            job_id: job.to_dict()
+            for job_id, job in self._jobs.items()
+        }
+        events = self._events[-recent_events_limit:] if recent_events_limit >= 0 else self._events
+
+        snapshot: Dict[str, Any] = {
+            "run": {
+                "status": self._run_status,
+                "final_status": self._final_status,
+                "ended_at": self._ended_at,
+                "end_reason": self._end_reason,
+                "closed": self._closed,
+                "last_tick_at": self._last_tick_at,
+                "manifest": dict(self._run_manifest),
+            },
+            "agents": agents,
+            "queues": {
+                "by_agent": queue_state,
+                "pending_messages": pending_state,
+                "dispatching_message_ids": list(self._dispatch_tasks),
+            },
+            "outgoing_batches": outgoing_state,
+            "joins": join_state,
+            "jobs": jobs_state,
+            "recent_events": [event.to_dict() for event in events],
+            "workspace": self._workspace_state_snapshot(),
+        }
+        if graph is not None:
+            snapshot["organization"] = graph.agent_organization_view()
+        return snapshot
+
+    def explain_status(
+        self,
+        *,
+        graph: Optional["GraphDefinition"] = None,
+        recent_events_limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Return a compact top-agent status explanation grounded in events."""
+
+        snapshot = self.status_snapshot(
+            graph=graph,
+            recent_events_limit=recent_events_limit,
+        )
+        agents = snapshot["agents"]
+        queues = snapshot["queues"]
+        outgoing = snapshot["outgoing_batches"]
+        joins = snapshot["joins"]
+        jobs = snapshot["jobs"]
+        workspace = snapshot.get("workspace") or {}
+
+        agent_states: Dict[str, List[str]] = {}
+        for node_id, info in agents.items():
+            agent_states.setdefault(str(info.get("state", "unknown")), []).append(node_id)
+
+        pending_message_count = sum(len(items) for items in queues["by_agent"].values())
+        dispatching_message_count = len(queues.get("dispatching_message_ids", []))
+        waiting_batches = {
+            batch_id: batch
+            for batch_id, batch in outgoing.items()
+            if batch.get("status") == "staging"
+        }
+        waiting_joins = {
+            join_id: join
+            for join_id, join in joins.items()
+            if join.get("status") == "waiting"
+        }
+        failed_jobs = {
+            job_id: job
+            for job_id, job in jobs.items()
+            if job.get("status") == "failed"
+        }
+        running_jobs = {
+            job_id: job
+            for job_id, job in jobs.items()
+            if job.get("status") in {"queued", "running"}
+        }
+        conflicts = list(workspace.get("conflicts", []))
+        reports = list(workspace.get("reports", []))
+        artifacts = list(workspace.get("artifacts", []))
+
+        observations: List[str] = []
+        run = snapshot["run"]
+        observations.append(f"run is {run['status']}")
+        if run.get("final_status"):
+            observations.append(f"final status is {run['final_status']}")
+        if pending_message_count:
+            observations.append(f"{pending_message_count} queued agent message(s)")
+        if dispatching_message_count:
+            observations.append(f"{dispatching_message_count} dispatch task(s) in flight")
+        if waiting_batches:
+            observations.append(f"{len(waiting_batches)} outgoing batch(es) waiting for targets")
+        if waiting_joins:
+            observations.append(f"{len(waiting_joins)} join barrier(s) waiting for sources")
+        if running_jobs:
+            observations.append(f"{len(running_jobs)} background job(s) still running")
+        if failed_jobs:
+            observations.append(f"{len(failed_jobs)} failed job(s)")
+        if conflicts:
+            observations.append(f"{len(conflicts)} conflict item(s) reported")
+        if not any(
+            [
+                pending_message_count,
+                dispatching_message_count,
+                waiting_batches,
+                waiting_joins,
+                running_jobs,
+                failed_jobs,
+                conflicts,
+            ]
+        ):
+            observations.append("no pending runtime work is visible")
+
+        recommendations: List[str] = []
+        if conflicts:
+            recommendations.append("review conflicts before completing the run")
+        if waiting_batches:
+            recommendations.append("ask source agents to fill remaining outgoing targets")
+        if waiting_joins:
+            recommendations.append("wait for missing join sources or end with a partial result")
+        if failed_jobs:
+            recommendations.append("inspect failed jobs and retry or fail the run")
+        if not recommendations and run["status"] == "running":
+            recommendations.append("continue monitoring or complete the run after acceptance checks")
+        if run["status"] in {"ended", "cancelled", "failed", "completed", "archived"}:
+            recommendations.append("read final report and archive index before reporting to the user")
+
+        event_summaries = []
+        for event in snapshot["recent_events"]:
+            event_summaries.append(
+                {
+                    "event_type": event.get("event_type"),
+                    "node_id": event.get("node_id"),
+                    "agent_id": event.get("agent_id"),
+                    "status": event.get("status"),
+                    "job_id": event.get("job_id"),
+                    "payload_keys": sorted((event.get("payload") or {}).keys()),
+                }
+            )
+
+        return {
+            "summary": "; ".join(observations),
+            "run": dict(run),
+            "agent_states": {
+                state: sorted(node_ids)
+                for state, node_ids in agent_states.items()
+            },
+            "pending": {
+                "queued_messages": pending_message_count,
+                "dispatching_messages": dispatching_message_count,
+                "waiting_outgoing_batches": {
+                    batch_id: {
+                        "source_node_id": batch.get("source_node_id"),
+                        "remaining_targets": list(batch.get("remaining_targets", [])),
+                    }
+                    for batch_id, batch in waiting_batches.items()
+                },
+                "waiting_joins": {
+                    join_id: {
+                        "target_node_id": join.get("target_node_id"),
+                        "missing_sources": list(join.get("missing_sources", [])),
+                    }
+                    for join_id, join in waiting_joins.items()
+                },
+                "running_jobs": sorted(running_jobs),
+            },
+            "risks": {
+                "failed_jobs": sorted(failed_jobs),
+                "conflicts": conflicts,
+            },
+            "outputs": {
+                "reports": reports,
+                "artifacts": artifacts,
+            },
+            "recent_events": event_summaries,
+            "recommended_actions": recommendations,
+        }
+
+    def _summarize_for_final_state(self) -> Dict[str, Any]:
+        self._check_join_timeouts()
+        agent_states = {
+            node_id: inst.state
+            for node_id, inst in self._instances.items()
+        }
+        pending_messages = [
+            message.to_dict()
+            for message in self._pending_messages.values()
+            if message.status in {"queued", "dispatching"}
+        ]
+        failed_messages = [
+            message.to_dict()
+            for message in self._pending_messages.values()
+            if message.status == "failed"
+        ]
+        timed_out_joins = [
+            barrier.to_dict()
+            for barrier in self._join_barriers.values()
+            if barrier.status == "timed_out"
+        ]
+        waiting_joins = [
+            barrier.to_dict()
+            for barrier in self._join_barriers.values()
+            if barrier.status == "waiting"
+        ]
+        conflict_items = [
+            item
+            for barrier in self._join_barriers.values()
+            for item in barrier.aggregate()["conflicts"]
+        ]
+        for event in self._events:
+            if event.event_type == "ConflictDetected":
+                conflict_items.append(dict(event.payload))
+        failed_jobs = [
+            job.to_dict()
+            for job in self._jobs.values()
+            if job.status == "failed"
+        ]
+        running_jobs = [
+            job.to_dict()
+            for job in self._jobs.values()
+            if job.status in {"queued", "running"}
+        ]
+        accepted_changesets = [
+            item
+            for barrier in self._join_barriers.values()
+            for item in barrier.aggregate()["accepted_changesets"]
+        ]
+        completed_jobs = [
+            job.to_dict()
+            for job in self._jobs.values()
+            if job.status == "completed"
+        ]
+        return {
+            "agent_states": agent_states,
+            "pending_messages": pending_messages,
+            "failed_messages": failed_messages,
+            "failed_jobs": failed_jobs,
+            "running_jobs": running_jobs,
+            "waiting_joins": waiting_joins,
+            "timed_out_joins": timed_out_joins,
+            "conflicts": conflict_items,
+            "accepted_changesets": accepted_changesets,
+            "completed_jobs": completed_jobs,
+            "event_count": len(self._events),
+        }
+
+    def compute_final_status(self) -> RunFinalStatus:
+        """Derive a deterministic final status from runtime state."""
+
+        summary = self._summarize_for_final_state()
+        if self._run_status == "cancelled":
+            return "cancelled"
+        if summary["timed_out_joins"] or any(
+            state == "timed_out" for state in summary["agent_states"].values()
+        ):
+            return "timed_out"
+        if summary["conflicts"]:
+            return "conflicted"
+        if summary["failed_messages"] or summary["failed_jobs"] or any(
+            state in {"failed", "disconnected"} for state in summary["agent_states"].values()
+        ):
+            return "failed"
+        if summary["pending_messages"] or summary["running_jobs"] or summary["waiting_joins"]:
+            if summary["completed_jobs"] or summary["accepted_changesets"]:
+                return "partial_success"
+            return "failed"
+        return "success"
+
+    def _cancel_pending_runtime_work(self, *, reason: str) -> Dict[str, Any]:
+        cancelled_messages: List[str] = []
+        for task in self._dispatch_tasks.values():
+            task.cancel()
+        for queue in self._agent_message_queues.values():
+            queue.clear()
+        for message in self._pending_messages.values():
+            if message.status not in {"queued", "dispatching"}:
+                continue
+            message.status = "cancelled"
+            message.error = reason or "run ended"
+            message.completed_at = time.monotonic()
+            cancelled_messages.append(message.message_id)
+            self._emit(
+                GraphEvent(
+                    "AgentQueuedMessageCompleted",
+                    node_id=message.node_id,
+                    agent_id=message.agent_id,
+                    status=message.status,
+                    payload=message.to_dict(),
+                )
+            )
+
+        cancelled_jobs: List[str] = []
+        for task in self._job_tasks.values():
+            task.cancel()
+        for job in self._jobs.values():
+            if job.status not in {"queued", "running"}:
+                continue
+            job.status = "cancelled"
+            cancelled_jobs.append(job.job_id)
+            if self.workspace is not None:
+                self.workspace.update_job(job.job_id, status=job.status, error=reason or "run ended")
+            self._emit(
+                GraphEvent(
+                    "TaskCancelled",
+                    job_id=job.job_id,
+                    node_id=job.node_id,
+                    agent_id=job.agent_id,
+                    status=job.status,
+                    payload={"reason": reason},
+                )
+            )
+
+        cancelled_joins: List[str] = []
+        for barrier in self._join_barriers.values():
+            if barrier.status != "waiting":
+                continue
+            barrier.status = "cancelled"
+            barrier.completed_at = time.monotonic()
+            barrier.final_reason = reason or "run ended"
+            cancelled_joins.append(barrier.join_id)
+            self._emit(
+                GraphEvent(
+                    "JoinBarrierCancelled",
+                    node_id=barrier.target_node_id,
+                    status=barrier.status,
+                    payload=barrier.aggregate(),
+                )
+            )
+
+        summary = {
+            "messages": cancelled_messages,
+            "jobs": cancelled_jobs,
+            "joins": cancelled_joins,
+            "dispatch_tasks": list(self._dispatch_tasks),
+            "job_tasks": list(self._job_tasks),
+        }
+        if any(summary[key] for key in ("messages", "jobs", "joins", "dispatch_tasks", "job_tasks")):
+            self._emit(
+                GraphEvent(
+                    "RunPendingWorkCancelled",
+                    status="cancelled",
+                    payload={"reason": reason, **summary},
+                )
+            )
+        self._dispatch_tasks.clear()
+        self._job_tasks.clear()
+        return summary
+
+    def _archive_status_for_final(self) -> str:
+        if self._final_status == "cancelled" or self._run_status == "cancelled":
+            return "cancelled"
+        if self._final_status in {"failed", "conflicted", "timed_out"} or self._run_status == "failed":
+            return "failed"
+        return "completed"
+
+    def _write_final_report(self, result: RunEndResult) -> Optional[Path]:
+        report = {
+            "run_status": result.run_status,
+            "final_status": result.final_status,
+            "action": result.action,
+            "reason": result.reason,
+            "ended_at": result.ended_at,
+            "summary": result.summary,
+            "status_snapshot": self.status_snapshot(recent_events_limit=50),
+        }
+        target: Optional[Path] = None
+        if self.archive_run is not None:
+            reports_dir = getattr(self.archive_run, "shared_reports_dir", None)
+            if reports_dir is not None:
+                target = Path(reports_dir) / "final_report.json"
+        if target is None and self.workspace is not None:
+            target = self.workspace.workspace_root / "reports" / "final_report.json"
+        if target is None:
+            return None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._emit(
+            GraphEvent(
+                "FinalReportPublished",
+                status=result.final_status or result.run_status,
+                payload={"path": str(target), "final_status": result.final_status},
+            )
+        )
+        return target
+
+    def _archive_run_if_available(self) -> Optional[Path]:
+        if self.archive_manager is None or self.archive_run is None:
+            return None
+        archive_run = getattr(self.archive_manager, "archive_run", None)
+        if not callable(archive_run):
+            return None
+        archive_path = archive_run(self.archive_run, status=self._archive_status_for_final())
+        self._emit(
+            GraphEvent(
+                "RunArchiveIndexed",
+                status=self._archive_status_for_final(),
+                payload={"path": str(archive_path)},
+            )
+        )
+        return Path(archive_path)
+
+    def _archived_report_path(
+        self,
+        report_path: Optional[Path],
+        archive_path: Optional[Path],
+    ) -> Optional[Path]:
+        if report_path is None:
+            return None
+        if archive_path is None or self.archive_run is None:
+            return report_path
+        run_path = Path(getattr(self.archive_run, "path", ""))
+        try:
+            return archive_path / report_path.resolve().relative_to(run_path.resolve())
+        except ValueError:
+            return report_path
+
+    def end_run(
+        self,
+        action: str,
+        *,
+        reason: str = "",
+        archive: bool = False,
+    ) -> RunEndResult:
+        """End, pause, or archive the run through the framework-owned gate."""
+
+        action = str(action).strip().lower()
+        if action not in _VALID_RUN_END_ACTIONS:
+            raise ValueError(f"unsupported run end action: {action!r}")
+        if action == "pause":
+            self._run_status = "paused"
+            self._end_reason = reason
+            result = RunEndResult(
+                ok=True,
+                action=action,
+                run_status=self._run_status,
+                final_status=None,
+                reason=reason,
+                summary=self._summarize_for_final_state(),
+                archived=archive,
+            )
+            self._emit(GraphEvent("RunPaused", status="paused", payload=result.to_dict()))
+            return result
+
+        if action == "archive_only":
+            result = RunEndResult(
+                ok=True,
+                action=action,
+                run_status=self._run_status,
+                final_status=self._final_status,
+                reason=reason,
+                summary=self._summarize_for_final_state(),
+                archived=True,
+            )
+            report_path = self._write_final_report(result)
+            archive_path = self._archive_run_if_available()
+            final_report_path = self._archived_report_path(report_path, archive_path)
+            if final_report_path is not None:
+                result.summary["final_report_path"] = str(final_report_path)
+            if archive_path is not None:
+                result.summary["archive_path"] = str(archive_path)
+            self._emit(GraphEvent("RunArchived", status=self._run_status, payload=result.to_dict()))
+            return result
+
+        if action == "cancel":
+            cleanup = self._cancel_pending_runtime_work(reason=reason)
+            self._run_status = "cancelled"
+            self._final_status = "cancelled"
+        elif action == "fail":
+            cleanup = self._cancel_pending_runtime_work(reason=reason)
+            self._run_status = "failed"
+            self._final_status = "failed"
+        else:
+            cleanup = {}
+            self._run_status = "completed"
+            self._final_status = self.compute_final_status()
+        self._ended_at = time.monotonic()
+        self._end_reason = reason
+        result = RunEndResult(
+            ok=True,
+            action=action,
+            run_status=self._run_status,
+            final_status=self._final_status,
+            reason=reason,
+            summary=self._summarize_for_final_state(),
+            archived=archive,
+            ended_at=self._ended_at,
+        )
+        if cleanup:
+            result.summary["cancelled"] = cleanup
+        if action == "complete":
+            report_path = self._write_final_report(result)
+            archive_path = self._archive_run_if_available()
+            final_report_path = self._archived_report_path(report_path, archive_path)
+            if final_report_path is not None:
+                result.summary["final_report_path"] = str(final_report_path)
+            if archive_path is not None:
+                result.summary["archive_path"] = str(archive_path)
+                result.archived = True
+        self._emit(GraphEvent("RunEnded", status=self._final_status, payload=result.to_dict()))
+        return result
 
     async def ensure_agent(self, node: AgentNode) -> AgentInstance:
         if self._closed:
@@ -821,6 +2453,198 @@ class GraphRuntime:
         for node in nodes:
             await self.ensure_agent(node)
 
+    async def create_outgoing_batch(
+        self,
+        source_node: AgentNode,
+        required_targets: Sequence[AgentNode],
+        *,
+        batch_id: Optional[str] = None,
+        allowed_targets: Optional[Sequence[AgentNode]] = None,
+    ) -> OutgoingMessageBatch:
+        """Start a framework-owned one-to-many handoff.
+
+        ``required_targets`` is the exact set the source agent must cover in
+        this control-flow step. Messages are staged until every target has an
+        entry, including intentionally empty messages.
+        """
+        if self._closed:
+            raise RuntimeError("GraphRuntime is closed")
+        self._mark_run_running()
+        if not required_targets:
+            raise ValueError("required_targets must not be empty")
+        source_inst = await self.ensure_agent(source_node)
+        allowed_node_ids = (
+            {node.node_id for node in allowed_targets}
+            if allowed_targets is not None
+            else {node.node_id for node in required_targets}
+        )
+        seen_targets: set[str] = set()
+        target_node_ids: List[str] = []
+        target_agent_ids: List[str] = []
+        for target in required_targets:
+            if target.node_id not in allowed_node_ids:
+                raise ValueError(
+                    f"required target {target.node_id!r} is not reachable from {source_node.node_id!r}"
+                )
+            if target.node_id in seen_targets:
+                raise ValueError(f"duplicate required target: {target.node_id}")
+            seen_targets.add(target.node_id)
+            target_inst = await self.ensure_agent(target)
+            target_node_ids.append(target.node_id)
+            target_agent_ids.append(target_inst.agent_id)
+
+        batch = OutgoingMessageBatch(
+            batch_id=batch_id or f"out-{uuid.uuid4().hex[:12]}",
+            source_node_id=source_node.node_id,
+            source_agent_id=source_inst.agent_id,
+            required_target_node_ids=target_node_ids,
+            required_target_agent_ids=target_agent_ids,
+        )
+        self._outgoing_batches[batch.batch_id] = batch
+        self._emit(
+            GraphEvent(
+                "AgentOutgoingBatchCreated",
+                node_id=source_node.node_id,
+                agent_id=source_inst.agent_id,
+                status=batch.status,
+                payload=batch.to_dict(),
+            )
+        )
+        return batch
+
+    async def create_outgoing_batch_from_graph(
+        self,
+        graph: "GraphDefinition",
+        source_node_id: str,
+        *,
+        required_target_node_ids: Optional[Sequence[str]] = None,
+        batch_id: Optional[str] = None,
+    ) -> OutgoingMessageBatch:
+        """Create an outgoing batch using graph-derived agent connections."""
+        if source_node_id not in graph.agent_nodes:
+            raise KeyError(f"unknown source AgentNode: {source_node_id}")
+        connections = graph.agent_connections()
+        allowed_target_ids = connections.get(source_node_id, [])
+        if required_target_node_ids is None:
+            required_ids = list(allowed_target_ids)
+        else:
+            required_ids = [str(node_id) for node_id in required_target_node_ids]
+        missing = [node_id for node_id in required_ids if node_id not in graph.agent_nodes]
+        if missing:
+            raise KeyError(f"unknown target AgentNode(s): {', '.join(missing)}")
+        required_targets = [graph.agent_nodes[node_id] for node_id in required_ids]
+        allowed_targets = [graph.agent_nodes[node_id] for node_id in allowed_target_ids]
+        return await self.create_outgoing_batch(
+            graph.agent_nodes[source_node_id],
+            required_targets,
+            batch_id=batch_id,
+            allowed_targets=allowed_targets,
+        )
+
+    def stage_outgoing_message(
+        self,
+        batch_id: str,
+        target_node: AgentNode,
+        body: Any,
+    ) -> Dict[str, Any]:
+        """Stage or overwrite a source agent's message for one required target."""
+        batch = self._outgoing_batches.get(batch_id)
+        if batch is None:
+            raise KeyError(f"unknown outgoing batch: {batch_id}")
+        if batch.status != "staging":
+            raise RuntimeError(f"outgoing batch {batch_id} is already {batch.status}")
+        if target_node.node_id not in batch.required_target_node_ids:
+            raise ValueError(
+                f"target {target_node.node_id!r} is not required for batch {batch_id}"
+            )
+
+        inst = self._instances.get(target_node.node_id)
+        target_agent_id = inst.agent_id if inst is not None else target_node.runtime_agent_id
+        previous = batch.staged_messages.get(target_node.node_id)
+        overwritten = previous is not None
+        overwrite_count = (previous.overwrite_count + 1) if previous is not None else 0
+        batch.staged_messages[target_node.node_id] = StagedOutgoingMessage(
+            target_node_id=target_node.node_id,
+            target_agent_id=target_agent_id,
+            body=body,
+            overwrite_count=overwrite_count,
+        )
+        batch.last_reminder_targets = []
+        remaining = batch.remaining_targets
+        ready = not remaining
+        self._emit(
+            GraphEvent(
+                "AgentMessageStaged",
+                node_id=batch.source_node_id,
+                agent_id=batch.source_agent_id,
+                status="staged",
+                payload={
+                    "batch_id": batch.batch_id,
+                    "target_node_id": target_node.node_id,
+                    "target_agent_id": target_agent_id,
+                    "overwritten": overwritten,
+                    "ready_to_dispatch": ready,
+                    "remaining_targets": list(remaining),
+                },
+            )
+        )
+        if ready:
+            dispatched = self.dispatch_outgoing_batch(batch.batch_id)
+            remaining = dispatched["remaining_targets"]
+        return {
+            "staged": True,
+            "overwritten": overwritten,
+            "ready_to_dispatch": ready,
+            "remaining_targets": list(remaining),
+            "batch_id": batch.batch_id,
+        }
+
+    def dispatch_outgoing_batch(self, batch_id: str) -> Dict[str, Any]:
+        """Queue a complete staged batch into downstream agent queues."""
+        batch = self._outgoing_batches.get(batch_id)
+        if batch is None:
+            raise KeyError(f"unknown outgoing batch: {batch_id}")
+        if batch.status != "staging":
+            raise RuntimeError(f"outgoing batch {batch_id} is already {batch.status}")
+        remaining = batch.remaining_targets
+        if remaining:
+            raise RuntimeError(
+                f"outgoing batch {batch_id} is missing target messages: {', '.join(remaining)}"
+            )
+
+        message_ids: List[str] = []
+        for target_node_id in batch.required_target_node_ids:
+            staged = batch.staged_messages[target_node_id]
+            target_inst = self._instances.get(target_node_id)
+            if target_inst is None:
+                raise KeyError(f"target agent is not started: {target_node_id}")
+            pending = self.queue_agent_message(
+                target_inst.node,
+                staged.body,
+                source_node_id=batch.source_node_id,
+                source_agent_id=batch.source_agent_id,
+            )
+            message_ids.append(pending.message_id)
+
+        batch.status = "dispatched"
+        batch.dispatched_message_ids = message_ids
+        self._emit(
+            GraphEvent(
+                "AgentOutgoingBatchDispatched",
+                node_id=batch.source_node_id,
+                agent_id=batch.source_agent_id,
+                status=batch.status,
+                payload=batch.to_dict(),
+            )
+        )
+        return {
+            "batch_id": batch.batch_id,
+            "status": batch.status,
+            "ready_to_dispatch": True,
+            "remaining_targets": [],
+            "message_ids": list(message_ids),
+        }
+
     async def send_agent_message(
         self,
         node: AgentNode,
@@ -830,6 +2654,7 @@ class GraphRuntime:
         source_node_id: Optional[str] = None,
         source_agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        self._mark_run_running()
         if node.execution_mode == "nonblocking":
             job = await self.submit_agent_job(node, body, timeout_sec=timeout_sec)
             return {
@@ -875,6 +2700,7 @@ class GraphRuntime:
         """Store a message until the target agent returns to an idle state."""
         if self._closed:
             raise RuntimeError("GraphRuntime is closed")
+        self._mark_run_running()
         inst = self._instances.get(node.node_id)
         agent_id = inst.agent_id if inst is not None else node.runtime_agent_id
         pending = PendingAgentMessage(
@@ -982,6 +2808,7 @@ class GraphRuntime:
         asyncio task in the current process. It provides the event/job contract
         without introducing distributed leases or worktree merging yet.
         """
+        self._mark_run_running()
         inst = await self.ensure_agent(node)
         job = GraphJob(
             job_id=job_id or f"job-{uuid.uuid4().hex[:12]}",
@@ -1008,7 +2835,9 @@ class GraphRuntime:
             )
         )
         if start:
-            asyncio.create_task(self._run_agent_job(job, node, body, timeout_sec=timeout_sec))
+            self._job_tasks[job.job_id] = asyncio.create_task(
+                self._run_agent_job(job, node, body, timeout_sec=timeout_sec)
+            )
         return job
 
     async def _run_agent_job(
@@ -1038,6 +2867,21 @@ class GraphRuntime:
                 timeout_sec=timeout_sec,
                 message_id=job.job_id,
             )
+        except asyncio.CancelledError:
+            job.status = "cancelled"
+            if self.workspace is not None:
+                self.workspace.update_job(job.job_id, status=job.status, error="cancelled")
+            self._emit(
+                GraphEvent(
+                    "TaskCancelled",
+                    job_id=job.job_id,
+                    node_id=job.node_id,
+                    agent_id=job.agent_id,
+                    status=job.status,
+                )
+            )
+            self._job_tasks.pop(job.job_id, None)
+            return
         except Exception as exc:  # pragma: no cover - defensive event contract
             job.status = "failed"
             if self.workspace is not None:
@@ -1052,6 +2896,7 @@ class GraphRuntime:
                     payload={"error": str(exc)},
                 )
             )
+            self._job_tasks.pop(job.job_id, None)
             return
 
         job.status = "completed"
@@ -1070,6 +2915,7 @@ class GraphRuntime:
                 payload={"result": reply},
             )
         )
+        self._job_tasks.pop(job.job_id, None)
 
     async def assign_agent_workdir(
         self,
@@ -1308,6 +3154,75 @@ class GraphDefinition:
             adjacency[edge.source].append(edge.target)
         return adjacency
 
+    def agent_connections(self) -> Dict[str, List[str]]:
+        """Return directly reachable downstream AgentNodes over exec edges."""
+        connections: Dict[str, List[str]] = {
+            node_id: [] for node_id in self.agent_nodes
+        }
+        for edge in self.edges:
+            if not edge.is_exec_edge:
+                continue
+            if edge.source not in self.agent_nodes:
+                continue
+            if edge.target not in self.agent_nodes:
+                continue
+            if edge.target not in connections[edge.source]:
+                connections[edge.source].append(edge.target)
+        return connections
+
+    def agent_organization_view(self) -> Dict[str, Any]:
+        """Return a framework-readable organization view for agents and UI."""
+        connections = self.agent_connections()
+        upstreams: Dict[str, List[str]] = {node_id: [] for node_id in self.agent_nodes}
+        for source, targets in connections.items():
+            for target in targets:
+                upstreams.setdefault(target, []).append(source)
+
+        agents: Dict[str, Dict[str, Any]] = {}
+        for node_id, node in self.agent_nodes.items():
+            agents[node_id] = {
+                "node_id": node_id,
+                "agent_id": node.runtime_agent_id,
+                "cli_kind": node.cli_kind,
+                "execution_mode": node.execution_mode,
+                "skill_selection": node.skill_selection.to_dict(),
+                "skills": list(node.skills),
+                "read_scope": list(node.read_scope),
+                "write_scope": list(node.write_scope),
+                "artifact_scope": list(node.artifact_scope),
+                "upstream_agents": list(upstreams.get(node_id, [])),
+                "downstream_agents": list(connections.get(node_id, [])),
+            }
+
+        return {
+            "graph": {
+                "nodes": sorted(self._node_ids()),
+                "agent_nodes": list(self.agent_nodes),
+                "route_nodes": list(self.route_nodes),
+                "terminal_nodes": {
+                    node_id: node.terminal_kind
+                    for node_id, node in self.terminal_nodes.items()
+                },
+                "edges": [
+                    {
+                        "from": edge.source,
+                        "to": edge.target,
+                        "edge_type": edge.edge_type or "exec",
+                        "output_port": edge.output_port,
+                        "input_port": edge.input_port,
+                    }
+                    for edge in self.edges
+                ],
+            },
+            "agent_connections": connections,
+            "agents": agents,
+            "start_policy": {
+                "selected_by": "top_agent",
+                "framework_role": "validate_only",
+                "valid_start_nodes": list(self.agent_nodes),
+            },
+        }
+
     def validate_dag(self) -> None:
         node_ids = self._node_ids()
         for edge in self.edges:
@@ -1439,6 +3354,14 @@ class GraphExecutor:
         return successors
 
     @staticmethod
+    def _exec_predecessors(graph: GraphDefinition) -> Dict[str, List[str]]:
+        predecessors: Dict[str, List[str]] = {node_id: [] for node_id in graph._node_ids()}
+        for edge in graph.edges:
+            if edge.is_exec_edge:
+                predecessors.setdefault(edge.target, []).append(edge.source)
+        return predecessors
+
+    @staticmethod
     def _data_inputs(graph: GraphDefinition) -> Dict[str, List[GraphEdge]]:
         inputs: Dict[str, List[GraphEdge]] = {}
         for edge in graph.edges:
@@ -1453,11 +3376,13 @@ class GraphExecutor:
         initial_prompt: str = "",
         event_callback: Optional[Callable[[GraphEvent], None]] = None,
     ) -> Dict[str, Any]:
-        """Run a minimal visual blueprint along exec edges.
+        """Run a runnable blueprint along exec edges.
 
-        The current closure intentionally supports a single exec path made of
-        Start, blocking AgentNodes, and End. All AgentNode CLI workers are
-        started before the first node executes.
+        The runner is intentionally deterministic and sequential for now. A
+        node becomes ready when all exec predecessors have completed. If an
+        AgentNode has multiple upstream AgentNode predecessors, the executor
+        creates a runtime join barrier, submits upstream contributions, and
+        dispatches the generated ``join_aggregate`` envelope to the node.
         """
 
         graph.validate_runnable()
@@ -1470,30 +3395,33 @@ class GraphExecutor:
 
         start_id, end_id = self._start_end_ids(graph)
         successors = self._exec_successors(graph)
+        predecessors = self._exec_predecessors(graph)
         data_inputs = self._data_inputs(graph)
         values: Dict[tuple[str, str], Any] = {}
         executed: List[str] = []
+        completed: set[str] = {start_id}
+        queued: List[str] = list(successors.get(start_id, []))
+        seen_ready: set[str] = set(queued)
         last_reply: Any = None
-        current = start_id
         emit(GraphEvent("BlueprintStarted", status="running"))
 
         try:
-            while current != end_id:
-                next_nodes = successors.get(current, [])
-                if len(next_nodes) != 1:
-                    raise ValueError(
-                        f"minimal blueprint runner requires exactly one exec successor from {current!r}"
-                    )
-                current = next_nodes[0]
+            while queued:
+                current = queued.pop(0)
+                if current in completed:
+                    continue
+                if any(pred not in completed for pred in predecessors.get(current, [])):
+                    continue
                 if current == end_id:
+                    completed.add(current)
                     break
                 node = graph.agent_nodes.get(current)
                 if node is None:
                     raise ValueError(
-                        f"minimal blueprint runner only supports AgentNode on exec path: {current!r}"
+                        f"blueprint runner only supports AgentNode on exec path: {current!r}"
                     )
                 if node.execution_mode != "blocking":
-                    raise ValueError("minimal blueprint runner only supports blocking AgentNode")
+                    raise ValueError("blueprint runner only supports blocking AgentNode")
 
                 prompt = node.prompt.strip() or initial_prompt.strip()
                 context: Optional[str] = None
@@ -1529,11 +3457,37 @@ class GraphExecutor:
                 body: Dict[str, Any] = {"prompt": prompt}
                 if context:
                     body["context"] = context
-                reply = await self.runtime.send_agent_message(node, body)
+
+                upstream_agents = [
+                    pred for pred in predecessors.get(node.node_id, [])
+                    if pred in graph.agent_nodes
+                ]
+                if len(upstream_agents) > 1:
+                    barrier = self.runtime.create_join_barrier(
+                        required_sources=upstream_agents,
+                        target_node=node,
+                        join_id=f"join-{node.node_id}-{len(executed) + 1}",
+                    )
+                    for pred in upstream_agents:
+                        pred_node = graph.agent_nodes[pred]
+                        self.runtime.submit_join_contribution(
+                            barrier.join_id,
+                            pred,
+                            source_agent_id=pred_node.runtime_agent_id,
+                            result=values.get((pred, "result")),
+                        )
+                    assert barrier.aggregate_message_id is not None
+                    pending = await self.runtime.dispatch_queued_message_now(
+                        barrier.aggregate_message_id
+                    )
+                    reply = pending.result
+                else:
+                    reply = await self.runtime.send_agent_message(node, body)
                 last_reply = reply
                 executed.append(node.node_id)
                 values[(node.node_id, "result")] = reply
                 values[(node.node_id, "out")] = reply
+                completed.add(node.node_id)
                 emit(
                     GraphEvent(
                         "NodeCompleted",
@@ -1543,6 +3497,14 @@ class GraphExecutor:
                         payload={"result": reply, "text": self._reply_text(reply)},
                     )
                 )
+                for target in successors.get(node.node_id, []):
+                    if target not in seen_ready and all(
+                        pred in completed for pred in predecessors.get(target, [])
+                    ):
+                        queued.append(target)
+                        seen_ready.add(target)
+            if end_id not in completed:
+                raise ValueError("blueprint runner did not reach end node")
         except asyncio.CancelledError:
             emit(GraphEvent("BlueprintCancelled", status="cancelled"))
             raise

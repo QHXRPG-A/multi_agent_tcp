@@ -636,7 +636,7 @@ netease-codemaker/gpt-5.2-codex-2026-01-14
 multi_agent_tcp/
 ├── __init__.py             # 包导出（v0.5.0）
 ├── __main__.py             # CLI 入口（show-registry / dispatch / ...）
-├── cluster.py              # CodeMakerCluster（create_from_registry 等）
+├── cluster.py              # CLIWorkerBackend（create_from_registry 等；CodeMakerCluster 为兼容别名）
 ├── registry.py             # AgentsRegistry + show_registry_response
 ├── agents_registry.json    # ★ 所有对等 agent 的配置源
 ├── broker.py               # TCP 通信总线核心

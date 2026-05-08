@@ -1,0 +1,20 @@
+sequenceDiagram
+  title 附录：CLIWorkerBackend 底层 TCP 投递链路
+  participant RT as GraphRuntime
+  participant C as CLIWorkerBackend / TCPGraphClusterAdapter
+  participant CLI as AgentTCPClient
+  participant B as Broker
+  participant W as Worker Agent 进程
+  participant AD as CLIAdapter
+
+  Note over RT,C: GraphRuntime 的主线语义是调度 AgentNode；这里进入底层 CLI worker 执行后端
+  RT->>C: run_single(worker_id, body)：请求单个 CLI worker 执行
+  C->>CLI: send_to(worker_id, body)：客户端发送
+  CLI->>B: JSON frame {type: send}
+  B->>W: JSON frame {type: message, from, body}
+  W->>AD: body_to_agent_message + adapter.send_message
+  AD-->>W: structured result：结构化结果
+  W->>B: send_to(sender, reply)：回发回复
+  B->>CLI: message reply
+  CLI-->>C: wait_for_message：等待指定 worker 回复
+  C-->>RT: reply：结构化回复返回运行时

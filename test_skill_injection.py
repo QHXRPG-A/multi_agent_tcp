@@ -7,7 +7,7 @@ Usage:
 This script:
 1. Loads the agents registry
 2. Builds a lightweight skill catalog (or full preamble in --mode full)
-3. Launches a single CodeMaker CLI worker via CodeMakerCluster
+3. Launches a single CLI-backed worker via CLIWorkerBackend
 4. Sends a prompt that asks the agent to read the skill file and summarize it
 5. Prints whether the agent successfully loaded the skill on-demand
 """
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from .registry import AgentsRegistry
-from .cluster import CodeMakerCluster, WorkerConfig, extract_final_text
+from .cli_worker_backend import CLIWorkerBackend, WorkerConfig, extract_final_text
 from .log_setup import setup_logging
 
 log = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ async def run_test(
     )
 
     print("Launching cluster with 1 worker...")
-    async with await CodeMakerCluster.create(workers=[wc], port=9150) as cluster:
+    async with await CLIWorkerBackend.create(workers=[wc], port=9150) as cluster:
         print(f"Cluster up. Sending prompt...\n")
 
         result = await cluster.run_single(

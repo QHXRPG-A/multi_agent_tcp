@@ -1,0 +1,29 @@
+flowchart TD
+  U["用户 / UI / GuLiCode 顶层 Agent"] --> CP["GraphRuntimeControlPlane 控制面"]
+  CP --> ORG["organization.read / top_agent.context：读取组织与顶层上下文"]
+  CP --> VAL["run.validate_start：校验启动计划"]
+  VAL --> START["run.start：创建运行并投递初始任务"]
+
+  START --> GR["GraphRuntime 运行时"]
+  GR --> GD["GraphDefinition：Agent、exec 边、组织视图"]
+  START --> Q0["向 start_nodes 队列投递 top_agent_task"]
+  START --> B0["为下游目标创建 outgoing batch"]
+
+  Q0 --> TICK["runtime tick 调度帧"]
+  TICK --> AGENT["普通 AgentNode"]
+  AGENT --> DISPATCH["agent.dispatch(batch_id, target, body)：普通 Agent 分发接口"]
+  DISPATCH --> STAGE["stage_outgoing_message：暂存 / 覆盖消息"]
+  STAGE -->|remaining_targets 非空| REMIND["AgentOutgoingTargetsReminder：提醒补齐目标"]
+  STAGE -->|全部目标补齐| FANOUT["dispatch_outgoing_batch：批量入队"]
+  FANOUT --> QN["下游 Agent 消息队列"]
+
+  QN --> TICK
+  TICK --> CLUSTER["cluster.run_single：调用单个 worker"]
+  CLUSTER --> TCP["AgentTCPClient / Broker TCP：底层通信"]
+  TCP --> WORKER["codemaker / codex worker adapter：真实 CLI 执行"]
+  WORKER --> TCP
+  TCP --> CLUSTER
+  CLUSTER --> GR
+
+  GR --> STATUS["status_snapshot / explain_status：状态快照与解释"]
+  GR --> END["run.end：归档 / 取消 / 失败 / 完成"]

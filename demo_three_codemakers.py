@@ -1,5 +1,5 @@
 """
-Three ``codemaker-worker`` agents in a serial chain via :class:`CodeMakerCluster`.
+Three ``codemaker-worker`` agents in a serial chain via :class:`CLIWorkerBackend`.
 
 cm1 → cm2 → cm3, each step's answer is injected as ``context`` into the next.
 
@@ -19,7 +19,7 @@ import json
 import sys
 from pathlib import Path
 
-from multi_agent_tcp.cluster import CodeMakerCluster, WorkerConfig
+from multi_agent_tcp.cli_worker_backend import CLIWorkerBackend, WorkerConfig
 from multi_agent_tcp.log_setup import setup_logging
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +35,7 @@ def _make_workers(cwd: Path, model: str) -> list[WorkerConfig]:
 
 async def _run(host: str, port: int, cwd: Path, model: str, verbose: bool) -> None:
     workers = _make_workers(cwd, model)
-    async with await CodeMakerCluster.create(
+    async with await CLIWorkerBackend.create(
         workers, host=host, port=port, verbose=verbose,
     ) as cluster:
         results = await cluster.run_chain([
@@ -51,7 +51,7 @@ async def _run(host: str, port: int, cwd: Path, model: str, verbose: bool) -> No
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Broker + 3 codemaker-worker chain demo (CodeMakerCluster)")
+    p = argparse.ArgumentParser(description="Broker + 3 codemaker-worker chain demo (CLIWorkerBackend)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=9133)
     p.add_argument("--cwd", type=Path, default=REPO_ROOT)

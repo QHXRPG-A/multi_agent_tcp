@@ -1,23 +1,23 @@
-"""High-level facade for orchestrating multiple CodeMaker CLI workers.
+"""High-level backend for orchestrating multiple CLI-backed Agent workers.
 
 Two creation modes:
 
-* ``CodeMakerCluster.create(workers, ...)`` — start broker + worker subprocesses
-  (persistent cluster, accepts many task submissions).
-* ``CodeMakerCluster.connect(...)`` — attach to an already-running cluster.
+* ``CLIWorkerBackend.create(workers, ...)`` — start broker + worker subprocesses
+  (persistent backend, accepts many task submissions).
+* ``CLIWorkerBackend.connect(...)`` — attach to an already-running broker/backend.
 
 Typical usage::
 
-    from multi_agent_tcp import CodeMakerCluster, WorkerConfig
+    from multi_agent_tcp import CLIWorkerBackend, WorkerConfig
 
-    async with await CodeMakerCluster.create(
+    async with await CLIWorkerBackend.create(
         workers=[
             WorkerConfig("cm1", cwd=Path("F:/src")),
             WorkerConfig("cm2", cwd=Path("F:/src")),
         ],
         port=9140,
-    ) as cluster:
-        result = await cluster.run_parallel([
+    ) as backend:
+        result = await backend.run_parallel([
             ("cm1", {"prompt": "Task A"}),
             ("cm2", {"prompt": "Task B"}),
         ])
@@ -120,7 +120,7 @@ class WorkerConfig:
 
 @dataclass
 class WorkerResult:
-    """Structured result from a single CodeMaker CLI worker execution."""
+    """Structured result from a single CLI worker execution."""
 
     worker: str
     status: str  # "success" | "error" | "timeout" | "empty"
@@ -150,7 +150,7 @@ class WorkerResult:
 
 
 class ParallelResult:
-    """Structured result from :meth:`CodeMakerCluster.run_parallel`.
+    """Structured result from :meth:`CLIWorkerBackend.run_parallel`.
 
     Attributes:
         succeeded: workers that finished successfully.
@@ -229,7 +229,7 @@ class ParallelResult:
 
 @dataclass
 class ReduceResult:
-    """Result from :meth:`CodeMakerCluster.run_parallel_reduce`.
+    """Result from :meth:`CLIWorkerBackend.run_parallel_reduce`.
 
     Combines a ``ParallelResult`` (fan-out) with a final ``WorkerResult``
     (reduce step).
@@ -507,11 +507,16 @@ def _spawn(cmd: List[str], title: str, *, verbose: bool, env: Dict[str, str]) ->
 
 
 # ---------------------------------------------------------------------------
-# CodeMakerCluster
+# CLIWorkerBackend
 # ---------------------------------------------------------------------------
 
-class CodeMakerCluster:
-    """Manage a broker + N CodeMaker CLI worker processes, submit tasks."""
+class CLIWorkerBackend:
+    """Manage a broker plus N CLI-backed worker processes and submit tasks.
+
+    The historical public name was ``CodeMakerCluster``. The implementation is
+    now CLI-agnostic: each worker chooses its adapter via ``WorkerConfig.cli_kind``
+    and can point at CodeMaker, Codex, or another compatible CLI command.
+    """
 
     def __init__(self) -> None:
         self._host: str = "127.0.0.1"
@@ -541,10 +546,10 @@ class CodeMakerCluster:
         port: int = 9140,
         verbose: bool = False,
         allow_empty: bool = False,
-    ) -> "CodeMakerCluster":
+    ) -> "CLIWorkerBackend":
         """Start a broker + N worker subprocesses.
 
-        The returned cluster owns the processes; call ``stop()`` (or use as
+        The returned backend owns the processes; call ``stop()`` (or use as
         async context manager) to tear them down.
         """
         if not workers and not allow_empty:
@@ -566,8 +571,8 @@ class CodeMakerCluster:
         port: int = 9140,
         self_id: str = "orchestrator",
         worker_ids: Optional[List[str]] = None,
-    ) -> "CodeMakerCluster":
-        """Connect to an already-running cluster (broker + workers managed externally)."""
+    ) -> "CLIWorkerBackend":
+        """Connect to an already-running broker and externally managed workers."""
         inst = cls()
         inst._host = host
         inst._port = int(port)
@@ -589,8 +594,8 @@ class CodeMakerCluster:
         port: int = 9140,
         verbose: bool = False,
         skill_mode: str = "catalog",
-    ) -> "CodeMakerCluster":
-        """Start a cluster whose workers are defined in ``agents_registry.json``.
+    ) -> "CLIWorkerBackend":
+        """Start a backend whose workers are defined in ``agents_registry.json``.
 
         This is the **recommended** creation method.  It reads model, cwd,
         timeout, and skills from the registry so that ``run_parallel`` /
@@ -644,7 +649,7 @@ class CodeMakerCluster:
     ) -> None:
         """Attach a registry to an existing cluster for skill injection.
 
-        Useful for clusters created via ``create()`` or ``connect()`` that
+        Useful for backends created via ``create()`` or ``connect()`` that
         should also benefit from automatic skill injection.
         """
         self._registry = registry
@@ -709,7 +714,7 @@ class CodeMakerCluster:
         await asyncio.sleep(settle)
         self._started = True
         log.info(
-            "cluster ready host=%s port=%s workers=%s",
+            "CLI worker backend ready host=%s port=%s workers=%s",
             self._host, self._port, [w.agent_id for w in self._workers],
         )
 
@@ -724,7 +729,7 @@ class CodeMakerCluster:
             return
         if not self._owns_processes:
             raise RuntimeError(
-                f"cannot start worker {worker.agent_id!r}: cluster does not own processes"
+                f"cannot start worker {worker.agent_id!r}: backend does not own processes"
             )
         if self._broker_proc is None or self._broker_proc.poll() is not None:
             raise RuntimeError("cannot start worker: broker process is not running")
@@ -760,7 +765,7 @@ class CodeMakerCluster:
     async def restart_worker(self, worker: WorkerConfig) -> None:
         """Kill and relaunch one owned worker with the supplied config."""
         if not self._owns_processes:
-            raise RuntimeError("cannot restart worker: cluster does not own processes")
+            raise RuntimeError("cannot restart worker: backend does not own processes")
         proc = self._agent_proc_by_id.pop(worker.agent_id, None)
         if proc is not None:
             terminate_and_wait(proc, timeout=10)
@@ -773,7 +778,7 @@ class CodeMakerCluster:
         if self._client is not None:
             return self._client
         cid = f"{self._self_id}-{uuid.uuid4().hex[:8]}"
-        client = AgentTCPClient(cid, self._host, self._port, role="cluster-orch")
+        client = AgentTCPClient(cid, self._host, self._port, role="cli-worker-backend")
         await client.connect()
         self._client = client
         return client
@@ -1027,7 +1032,7 @@ class CodeMakerCluster:
     # ---- Lifecycle ---------------------------------------------------------
 
     async def stop(self) -> None:
-        """Stop all managed subprocesses (only meaningful for ``create()`` clusters)."""
+        """Stop all managed subprocesses (only meaningful for owned backends)."""
         await self._release_client()
         if not self._owns_processes:
             return
@@ -1045,13 +1050,13 @@ class CodeMakerCluster:
                 pass
         self._tmp_files.clear()
         self._started = False
-        log.info("cluster stopped port=%s", self._port)
+        log.info("CLI worker backend stopped port=%s", self._port)
 
     async def close(self) -> None:
         """Close TCP connection without stopping subprocesses."""
         await self._release_client()
 
-    async def __aenter__(self) -> "CodeMakerCluster":
+    async def __aenter__(self) -> "CLIWorkerBackend":
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -1095,3 +1100,7 @@ class CodeMakerCluster:
     def host_port_from_json(cls, data: Dict[str, Any]) -> Tuple[str, int]:
         """Extract host/port from a ``cluster.json`` config."""
         return str(data.get("host", "127.0.0.1")), int(data.get("port", 9140))
+
+
+# Backward-compatible alias. New code should import CLIWorkerBackend.
+CodeMakerCluster = CLIWorkerBackend

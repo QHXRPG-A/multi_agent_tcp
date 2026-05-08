@@ -12,10 +12,10 @@ broker / agent / cluster / orchestrate primitives, all of which work the
 same as before -- only the narrative changed. Commands and config are
 unchanged.
 
-Quick Start with CodeMakerCluster (recommended initiator entrypoint)
+Quick Start with CLIWorkerBackend (recommended initiator entrypoint)
 --------------------------------------------------------------------
 
-CodeMakerCluster is one convenient initiator-side entrypoint: it manages a
+CLIWorkerBackend is one convenient initiator-side entrypoint: it manages a
 broker plus N agent processes for you. Today the agent processes are
 CodeMaker workers; once the CLI Adapter abstraction lands (ROADMAP P0)
 other CLIs will be selectable through the same class.
@@ -23,10 +23,10 @@ other CLIs will be selectable through the same class.
 Python API — parallel tasks (returns ParallelResult):
 
     from pathlib import Path
-    from multi_agent_tcp import CodeMakerCluster, WorkerConfig
+    from multi_agent_tcp import CLIWorkerBackend, WorkerConfig
 
     async def main():
-        async with await CodeMakerCluster.create(
+        async with await CLIWorkerBackend.create(
             workers=[
                 WorkerConfig("cm1", cwd=Path("F:/src")),
                 WorkerConfig("cm2", cwd=Path("F:/src")),
@@ -78,7 +78,7 @@ Python API — serial chain (structured context injection):
 
 Python API — connect to an already-running cluster:
 
-    cluster = await CodeMakerCluster.connect(port=9140)
+    cluster = await CLIWorkerBackend.connect(port=9140)
     result = await cluster.run_parallel(tasks)
     await cluster.close()
 

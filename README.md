@@ -1,8 +1,26 @@
 # multi_agent_tcp
 
-A **peer-to-peer agent CLI communication bus** with multi-agent lifecycle, session and capability management. Any agent CLI (CodeMaker / Claude Code / Codex / custom) connects to a shared broker and can act as both **receiver** (handle inbound tasks) and **initiator** (dispatch sub-tasks to other peer agents). The framework provides addressing, mailboxes, heartbeat, batch_gather, serial chains, structured results — but **does not** replace any agent's own LLM reasoning, tool calling, or planning.
+A multi-agent runtime substrate for the current **GuLiCode desktop app + blueprint system** direction. The main line is: GuLiCode / UI submits a structured plan, `GraphRuntimeControlPlane` validates it, `GraphRuntime` schedules `AgentNode` queues, outgoing batches, fan-in joins, workspace state and events, and a pluggable execution backend runs the actual CLI worker when an AgentNode needs model work.
 
-> **Project pivot**: As of 2026-04-30 the project moved away from the earlier "Cursor / CodeMaker as upstream orchestrator + N CodeMaker workers" framing and toward "agent CLIs collaborating as peers". CodeMaker remains the only fully-implemented CLI adapter today; Claude Code / Codex adapters are tracked in `ROADMAP.md` (P0). See `KM_docs/multi-cli-node-workflow-brainstorm.md` for the design discussion.
+The low-level TCP worker path still exists, but it is now best understood as a backend adapter:
+
+```text
+GraphRuntime
+  -> CLIWorkerBackend
+  -> AgentTCPClient
+  -> Broker
+  -> Worker Agent process
+  -> CLIAdapter
+```
+
+`CLIWorkerBackend` is the new semantic name for the old `CodeMakerCluster` concept. `CodeMakerCluster` remains as a backward-compatible alias, but new code and documentation should prefer `CLIWorkerBackend`.
+
+## Current Architecture Notes
+
+- `GraphRuntimeControlPlane` is the non-UI control surface for organization reads, top-agent context, run start/status/end, outgoing message batches, ordinary `agent.dispatch`, and join contribution commands.
+- `GraphRuntime` is the trusted scheduler. Agents do not directly message each other; they stage intent through framework APIs, and the runtime owns queueing, dispatch, reminders, join aggregation and event emission.
+- `CLIWorkerBackend` is not the center of the blueprint architecture. It is one execution backend used when a scheduled AgentNode needs to call a CLI worker through TCP.
+- In one-to-many dispatch, `stage_outgoing_message()` immediately returns `remaining_targets` to the caller after each `agent.dispatch`. Separately, `tick()` emits `AgentOutgoingTargetsReminder` only when the source Agent is idle/can accept messages and a staging batch still has missing targets. So the diagram concern about "should this wait for idle?" is a diagram wording issue, not a runtime bug: immediate return and idle reminder are two different feedback channels.
 
 ## Requirements
 

@@ -27,7 +27,7 @@ from multi_agent_tcp.skill_space import SkillSpace
 
 
 class DemoCluster:
-    """Small stand-in for CodeMakerCluster used by GraphRuntime."""
+    """Small stand-in for CLIWorkerBackend used by GraphRuntime."""
 
     def __init__(self) -> None:
         self.started_workers: list[dict[str, Any]] = []

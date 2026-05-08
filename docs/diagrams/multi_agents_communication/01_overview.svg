@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1180" viewBox="0 0 1600 1180" role="img" aria-labelledby="title desc">
+  <title id="title">多 Agents 通信总览</title>
+  <desc id="desc">展示用户、GuLiCode 顶层 Agent、控制面、运行时、消息队列、出站批次、TCP broker、worker adapter、状态查询与结束归档的整体链路。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#34515f"/>
+    </marker>
+    <style>
+      .bg{fill:#f7f9fb}
+      .box{fill:#fff;stroke:#34515f;stroke-width:2;rx:8}
+      .accent{fill:#e9f3ff;stroke:#1f6feb;stroke-width:2;rx:8}
+      .runtime{fill:#fff7e6;stroke:#b7791f;stroke-width:2;rx:8}
+      .queue{fill:#ecfdf3;stroke:#238636;stroke-width:2;rx:8}
+      .tcp{fill:#f4edff;stroke:#8250df;stroke-width:2;rx:8}
+      .end{fill:#fff1f2;stroke:#cf222e;stroke-width:2;rx:8}
+      .note{fill:#ffffff;stroke:#8c959f;stroke-width:1.8;rx:8}
+      .label{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:18px;fill:#1f2328}
+      .small{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:15px;fill:#3b434b}
+      .title{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:30px;font-weight:700;fill:#1f2328}
+      .subtitle{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:20px;font-weight:700;fill:#1f2328}
+      .line{stroke:#34515f;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+      .dash{stroke:#607080;stroke-width:2;stroke-dasharray:8 6;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1600" height="1180"/>
+  <text class="title" x="60" y="55">多 Agents 通信流程总览：框架负责调度，Agent 只提交意图和结果</text>
+
+  <rect class="accent" x="70" y="95" width="280" height="76"/>
+  <text class="label" x="96" y="126">用户 / UI / GuLiCode</text>
+  <text class="small" x="96" y="151">顶层协调入口，生成启动计划</text>
+
+  <rect class="accent" x="500" y="95" width="310" height="76"/>
+  <text class="label" x="530" y="126">GraphRuntimeControlPlane</text>
+  <text class="small" x="530" y="151">控制面：统一 JSON 命令入口</text>
+
+  <rect class="box" x="940" y="65" width="300" height="56"/>
+  <text class="label" x="964" y="100">organization.read：读取组织</text>
+  <rect class="box" x="940" y="140" width="300" height="56"/>
+  <text class="label" x="964" y="175">run.validate_start：校验启动</text>
+  <rect class="box" x="940" y="215" width="300" height="56"/>
+  <text class="label" x="964" y="250">run.start：启动运行</text>
+
+  <rect class="runtime" x="500" y="335" width="310" height="86"/>
+  <text class="label" x="585" y="368">GraphRuntime</text>
+  <text class="small" x="532" y="393">维护状态、队列、事件、join、batch</text>
+
+  <rect class="box" x="70" y="335" width="300" height="86"/>
+  <text class="label" x="116" y="368">GraphDefinition</text>
+  <text class="small" x="100" y="393">Agent 节点、exec 边、组织视图</text>
+
+  <rect class="queue" x="940" y="335" width="320" height="86"/>
+  <text class="label" x="968" y="368">top_agent_task 初始消息</text>
+  <text class="small" x="968" y="393">投递到 start_nodes 的队列</text>
+
+  <rect class="queue" x="940" y="465" width="320" height="86"/>
+  <text class="label" x="995" y="498">OutgoingMessageBatch</text>
+  <text class="small" x="970" y="523">记录本轮必须通知的下游目标</text>
+
+  <rect class="runtime" x="500" y="535" width="310" height="86"/>
+  <text class="label" x="585" y="568">runtime tick</text>
+  <text class="small" x="540" y="593">逐帧调度 idle Agent 的消息队列</text>
+
+  <rect class="box" x="70" y="535" width="300" height="86"/>
+  <text class="label" x="132" y="568">普通 AgentNode</text>
+  <text class="small" x="96" y="593">接收 framework_context 后执行任务</text>
+
+  <rect class="box" x="70" y="690" width="300" height="86"/>
+  <text class="label" x="138" y="723">agent.dispatch</text>
+  <text class="small" x="98" y="748">提交 batch_id、target、body</text>
+
+  <rect class="queue" x="500" y="690" width="310" height="86"/>
+  <text class="label" x="535" y="723">stage_outgoing_message</text>
+  <text class="small" x="535" y="748">暂存或覆盖目标消息</text>
+
+  <rect class="queue" x="940" y="665" width="320" height="76"/>
+  <text class="label" x="990" y="696">AgentOutgoingTargetsReminder</text>
+  <text class="small" x="982" y="720">remaining_targets 非空时提醒补齐</text>
+
+  <rect class="queue" x="940" y="765" width="320" height="76"/>
+  <text class="label" x="990" y="796">dispatch_outgoing_batch</text>
+  <text class="small" x="980" y="820">全部目标补齐后批量入队</text>
+
+  <rect class="tcp" x="500" y="850" width="310" height="86"/>
+  <text class="label" x="575" y="883">cluster.run_single</text>
+  <text class="small" x="535" y="908">调用 AgentTCPClient / Broker TCP</text>
+
+  <rect class="tcp" x="70" y="850" width="300" height="86"/>
+  <text class="label" x="126" y="883">Worker adapter</text>
+  <text class="small" x="98" y="908">codemaker / codex CLI 真实执行</text>
+
+  <rect class="end" x="1300" y="335" width="240" height="86"/>
+  <text class="label" x="1320" y="368">status_snapshot</text>
+  <text class="small" x="1320" y="393">运行时状态快照</text>
+
+  <rect class="end" x="1300" y="465" width="240" height="86"/>
+  <text class="label" x="1320" y="498">run.end</text>
+  <text class="small" x="1320" y="523">完成、取消、失败、归档</text>
+
+  <path class="line" d="M350 133 H500"/>
+  <path class="line" d="M810 133 H940"/>
+  <path class="line" d="M1090 121 V140"/>
+  <path class="line" d="M1090 196 V215"/>
+  <path class="line" d="M1090 271 C1090 315 850 338 810 370"/>
+  <path class="line" d="M500 378 H370"/>
+  <path class="line" d="M810 378 H940"/>
+  <path class="line" d="M1100 421 V465"/>
+  <path class="line" d="M940 508 C860 515 820 540 810 575"/>
+  <path class="line" d="M500 578 H370"/>
+  <path class="line" d="M220 621 V690"/>
+  <path class="line" d="M370 733 H500"/>
+  <path class="line" d="M810 733 C870 715 895 703 940 703"/>
+  <path class="line" d="M810 752 C870 778 895 802 940 803"/>
+  <path class="line" d="M940 803 C860 835 820 865 810 893"/>
+  <path class="line" d="M500 893 H370"/>
+  <path class="dash" d="M370 893 C450 965 880 955 940 841"/>
+  <path class="line" d="M810 378 H1300"/>
+  <path class="line" d="M810 378 C1050 440 1165 495 1300 508"/>
+
+  <rect class="note" x="60" y="985" width="1480" height="150"/>
+  <text class="subtitle" x="90" y="1020">函数 / 变量中文解释</text>
+  <text class="small" x="90" y="1050">GraphRuntimeControlPlane：运行时控制面，负责接收 organization.read、run.start、agent.dispatch、join.create 等稳定命令。</text>
+  <text class="small" x="90" y="1074">GraphRuntime：可信调度者，维护 _agent_message_queues、_outgoing_batches、_join_barriers、_events 和 run 状态。</text>
+  <text class="small" x="90" y="1098">outgoing batch / remaining_targets：一对多分发批次；remaining_targets 表示本轮尚未补齐消息的下游 Agent。</text>
+  <text class="small" x="90" y="1122">tick：运行时调度帧，只在 Agent 可接收消息时从队列取消息并调用 cluster.run_single。</text>
+</svg>

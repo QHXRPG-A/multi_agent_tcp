@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +15,15 @@ from multi_agent_tcp import (
     BlueprintTerminalNode,
     CodexAdapter,
     CodeMakerAdapter,
+    GuLiCodeTopAgentProfile,
     GraphDefinition,
     GraphEdge,
     GraphExecutor,
+    GraphJob,
     GraphRuntime,
     MultiModalEnvelope,
     RouteNode,
+    TopAgentStartPlan,
     WorkspaceManifest,
     WorkerConfig,
     adapter_from_agent_config,
@@ -558,6 +562,355 @@ async def test_graph_runtime_tick_dispatches_only_one_queued_message_per_frame()
 
 
 @pytest.mark.asyncio
+async def test_graph_runtime_stages_outgoing_messages_until_all_targets_are_ready() -> None:
+    cluster = _FakeCluster()
+    source = AgentNode(node_id="agent-a", agent_id="worker-a", cwd=Path("."))
+    target_b = AgentNode(node_id="agent-b", agent_id="worker-b", cwd=Path("."))
+    target_c = AgentNode(node_id="agent-c", agent_id="worker-c", cwd=Path("."))
+    runtime = GraphRuntime(cluster)
+
+    batch = await runtime.create_outgoing_batch(
+        source,
+        [target_b, target_c],
+        batch_id="batch-1",
+    )
+
+    first = runtime.stage_outgoing_message(
+        "batch-1",
+        target_b,
+        {"prompt": "initial for b"},
+    )
+    overwrite = runtime.stage_outgoing_message(
+        "batch-1",
+        target_b,
+        {"prompt": "revised for b"},
+    )
+
+    assert first["ready_to_dispatch"] is False
+    assert first["remaining_targets"] == ["agent-c"]
+    assert overwrite["overwritten"] is True
+    assert runtime.outgoing_batches["batch-1"].status == "staging"
+    assert runtime.agent_message_queues["agent-b"] == []
+    assert batch.staged_messages["agent-b"].body == {"prompt": "revised for b"}
+
+    final = runtime.stage_outgoing_message("batch-1", target_c, {"prompt": ""})
+
+    assert final["ready_to_dispatch"] is True
+    assert runtime.outgoing_batches["batch-1"].status == "dispatched"
+    assert len(runtime.agent_message_queues["agent-b"]) == 1
+    assert len(runtime.agent_message_queues["agent-c"]) == 1
+    assert runtime.agent_message_queues["agent-b"][0].body == {"prompt": "revised for b"}
+    assert runtime.agent_message_queues["agent-c"][0].body == {"prompt": ""}
+    assert runtime.agent_message_queues["agent-b"][0].source_agent_id == "worker-a"
+    assert [event.event_type for event in runtime.events] == [
+        "AgentOutgoingBatchCreated",
+        "AgentMessageStaged",
+        "AgentMessageStaged",
+        "AgentMessageStaged",
+        "AgentMessageQueued",
+        "AgentMessageQueued",
+        "AgentOutgoingBatchDispatched",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_rejects_outgoing_message_to_unrequired_target() -> None:
+    cluster = _FakeCluster()
+    source = AgentNode(node_id="agent-a", cwd=Path("."))
+    target_b = AgentNode(node_id="agent-b", cwd=Path("."))
+    target_c = AgentNode(node_id="agent-c", cwd=Path("."))
+    runtime = GraphRuntime(cluster)
+
+    await runtime.create_outgoing_batch(source, [target_b], batch_id="batch-1")
+
+    with pytest.raises(ValueError, match="not required"):
+        runtime.stage_outgoing_message("batch-1", target_c, {"prompt": "nope"})
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_rejects_required_target_outside_allowed_connections() -> None:
+    cluster = _FakeCluster()
+    source = AgentNode(node_id="agent-a", cwd=Path("."))
+    target_b = AgentNode(node_id="agent-b", cwd=Path("."))
+    target_c = AgentNode(node_id="agent-c", cwd=Path("."))
+    runtime = GraphRuntime(cluster)
+
+    with pytest.raises(ValueError, match="not reachable"):
+        await runtime.create_outgoing_batch(
+            source,
+            [target_b, target_c],
+            allowed_targets=[target_b],
+        )
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_reminds_idle_source_about_remaining_outgoing_targets() -> None:
+    cluster = _FakeCluster()
+    source = AgentNode(node_id="agent-a", cwd=Path("."))
+    target_b = AgentNode(node_id="agent-b", cwd=Path("."))
+    target_c = AgentNode(node_id="agent-c", cwd=Path("."))
+    runtime = GraphRuntime(cluster)
+
+    await runtime.create_outgoing_batch(source, [target_b, target_c], batch_id="batch-1")
+    runtime.stage_outgoing_message("batch-1", target_b, {"prompt": "for b"})
+
+    await runtime.tick()
+    await runtime.tick()
+
+    reminders = [
+        event
+        for event in runtime.events
+        if event.event_type == "AgentOutgoingTargetsReminder"
+    ]
+    assert len(reminders) == 1
+    assert reminders[0].payload["remaining_targets"] == ["agent-c"]
+    assert reminders[0].payload["required_outgoing_targets"] == ["agent-b", "agent-c"]
+
+
+def test_graph_runtime_join_barrier_wait_all_aggregates_source_metadata() -> None:
+    runtime = GraphRuntime(_FakeCluster())
+    target = AgentNode(node_id="reviewer", agent_id="worker-reviewer", cwd=Path("."))
+
+    barrier = runtime.create_join_barrier(
+        required_sources=["coder", "tester"],
+        target_node=target,
+        policy="wait-all",
+        join_id="join-1",
+    )
+
+    first = runtime.submit_join_contribution(
+        "join-1",
+        "coder",
+        source_agent_id="worker-coder",
+        result={"summary": "implemented"},
+        accepted_changesets=[{"changeset_id": "cs-1", "files": ["src/a.py"]}],
+        artifacts=[{"path": "artifacts/build.log"}],
+        reports=[{"path": "reports/coder.md"}],
+        test_results=[{"name": "unit", "status": "passed"}],
+        metadata={"risk": "low"},
+    )
+    final = runtime.submit_join_contribution(
+        "join-1",
+        "tester",
+        source_agent_id="worker-tester",
+        result={"summary": "verified"},
+        reports=[{"path": "reports/tester.md"}],
+    )
+
+    assert first["ready"] is False
+    assert first["missing_sources"] == ["tester"]
+    assert final["ready"] is True
+    assert barrier.status == "ready"
+    assert barrier.final_reason == "all_sources_submitted"
+    aggregate = final["aggregate"]
+    assert aggregate["accepted_changesets"] == [{"changeset_id": "cs-1", "files": ["src/a.py"]}]
+    assert aggregate["artifacts"] == [{"path": "artifacts/build.log"}]
+    assert aggregate["reports"] == [
+        {"path": "reports/coder.md"},
+        {"path": "reports/tester.md"},
+    ]
+    assert aggregate["test_results"] == [{"name": "unit", "status": "passed"}]
+    assert aggregate["source_metadata"] == {"coder": {"risk": "low"}}
+    assert barrier.aggregate_message_id == "join-msg-join-1"
+    assert runtime.agent_message_queues["reviewer"][0].body["type"] == "join_aggregate"
+    assert runtime.agent_message_queues["reviewer"][0].body["aggregate"]["accepted_changesets"] == [
+        {"changeset_id": "cs-1", "files": ["src/a.py"]}
+    ]
+    assert [event.event_type for event in runtime.events] == [
+        "JoinBarrierCreated",
+        "JoinContributionSubmitted",
+        "JoinContributionSubmitted",
+        "AgentMessageQueued",
+        "JoinBarrierAggregateQueued",
+        "JoinBarrierReady",
+    ]
+
+
+def test_graph_runtime_join_barrier_wait_any_quorum_timeout_and_rejections() -> None:
+    runtime = GraphRuntime(_FakeCluster())
+
+    any_barrier = runtime.create_join_barrier(
+        required_sources=["a", "b"],
+        policy="wait-any",
+        join_id="join-any",
+    )
+    any_result = runtime.submit_join_contribution("join-any", "b", result={"ok": True})
+    assert any_result["ready"] is True
+    assert any_barrier.final_reason == "any_source_submitted"
+    assert any_result["missing_sources"] == ["a"]
+
+    quorum_barrier = runtime.create_join_barrier(
+        required_sources=["a", "b", "c"],
+        policy="quorum",
+        quorum=2,
+        join_id="join-quorum",
+    )
+    runtime.submit_join_contribution("join-quorum", "a", status="failed")
+    quorum_result = runtime.submit_join_contribution("join-quorum", "b", status="completed")
+    assert quorum_result["ready"] is False
+    quorum_result = runtime.submit_join_contribution("join-quorum", "c", status="passed")
+    assert quorum_result["ready"] is True
+    assert quorum_barrier.final_reason == "quorum_reached"
+
+    timeout_barrier = runtime.create_join_barrier(
+        required_sources=["slow"],
+        timeout_sec=0,
+        join_id="join-timeout",
+    )
+    runtime._check_join_timeouts()
+    assert timeout_barrier.status == "timed_out"
+    assert runtime.compute_final_status() == "timed_out"
+
+    waiting_barrier = runtime.create_join_barrier(
+        required_sources=["known"],
+        join_id="join-waiting",
+    )
+    with pytest.raises(ValueError, match="not required"):
+        runtime.submit_join_contribution(waiting_barrier.join_id, "ghost")
+    with pytest.raises(RuntimeError, match="already ready"):
+        runtime.submit_join_contribution("join-any", "a")
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_status_snapshot_includes_run_queues_batches_and_workspace(
+    tmp_path: Path,
+) -> None:
+    cluster = _FakeCluster()
+    workspace = WorkspaceManifest("ws-1", tmp_path)
+    source = AgentNode(node_id="agent-a", agent_id="worker-a", cwd=Path("."))
+    target = AgentNode(node_id="agent-b", agent_id="worker-b", cwd=Path("."))
+    graph = GraphDefinition(
+        agent_nodes={"agent-a": source, "agent-b": target},
+        edges=[GraphEdge("agent-a", "agent-b", edge_type="exec")],
+    )
+    runtime = GraphRuntime(cluster, workspace=workspace)
+
+    await runtime.ensure_agent(source)
+    await runtime.create_outgoing_batch(source, [target], batch_id="batch-1")
+    runtime.stage_outgoing_message("batch-1", target, {"prompt": "go"})
+    runtime.create_join_barrier(
+        required_sources=["agent-a"],
+        target_node=target,
+        join_id="join-1",
+    )
+
+    snapshot = runtime.status_snapshot(graph=graph, recent_events_limit=3)
+
+    assert snapshot["run"]["status"] == "running"
+    assert snapshot["agents"]["agent-a"]["state"] == "idle"
+    assert snapshot["agents"]["agent-b"]["state"] == "queued"
+    assert snapshot["queues"]["by_agent"]["agent-b"][0]["body"] == {"prompt": "go"}
+    assert snapshot["outgoing_batches"]["batch-1"]["status"] == "dispatched"
+    assert snapshot["joins"]["join-1"]["missing_sources"] == ["agent-a"]
+    assert snapshot["workspace"]["workspace_id"] == "ws-1"
+    assert snapshot["organization"]["agent_connections"] == {"agent-a": ["agent-b"], "agent-b": []}
+    assert len(snapshot["recent_events"]) == 3
+
+
+def test_graph_runtime_end_run_final_statuses_are_deterministic() -> None:
+    success_runtime = GraphRuntime(_FakeCluster())
+    success_runtime.create_join_barrier(
+        required_sources=["coder"],
+        policy="wait-all",
+        join_id="join-ok",
+    )
+    success_runtime.submit_join_contribution(
+        "join-ok",
+        "coder",
+        accepted_changesets=[{"changeset_id": "cs-1"}],
+    )
+    success = success_runtime.end_run("complete", reason="all work accepted")
+
+    assert success.final_status == "success"
+    assert success.run_status == "completed"
+    assert success.summary["accepted_changesets"] == [{"changeset_id": "cs-1"}]
+    assert success_runtime.status_snapshot()["run"]["final_status"] == "success"
+
+    conflicted_runtime = GraphRuntime(_FakeCluster())
+    conflicted_runtime.create_join_barrier(required_sources=["coder"], join_id="join-cf")
+    conflicted_runtime.submit_join_contribution(
+        "join-cf",
+        "coder",
+        conflicts=[{"path": "src/a.py", "reason": "merge_conflict"}],
+    )
+    conflicted = conflicted_runtime.end_run("complete", reason="needs repair")
+    assert conflicted.final_status == "conflicted"
+
+    partial_runtime = GraphRuntime(_FakeCluster())
+    partial_runtime.create_join_barrier(required_sources=["coder", "reviewer"], join_id="join-open")
+    partial_runtime.submit_join_contribution(
+        "join-open",
+        "coder",
+        accepted_changesets=[{"changeset_id": "cs-2"}],
+    )
+    partial = partial_runtime.end_run("complete", reason="reviewer still pending")
+    assert partial.final_status == "partial_success"
+
+    cancelled = GraphRuntime(_FakeCluster()).end_run("cancel", reason="user cancelled")
+    assert cancelled.final_status == "cancelled"
+
+    paused_runtime = GraphRuntime(_FakeCluster())
+    paused = paused_runtime.end_run("pause", reason="waiting for user")
+    assert paused.final_status is None
+    assert paused_runtime.status_snapshot()["run"]["status"] == "paused"
+
+    archived = paused_runtime.end_run("archive_only", reason="save snapshot")
+    assert archived.archived is True
+    assert archived.run_status == "paused"
+
+
+def test_graph_runtime_records_start_manifest_and_writes_workspace_json(tmp_path: Path) -> None:
+    workspace = WorkspaceManifest("ws-1", tmp_path)
+    runtime = GraphRuntime(_FakeCluster(), workspace=workspace)
+    manifest_path = tmp_path / "run_manifest.json"
+
+    entry = runtime.record_start_manifest(
+        top_agent={"agent_id": "gulicode"},
+        start_plan={"user_goal": "Ship it.", "start_nodes": ["planner"]},
+        organization={"agents": {"planner": {"node_id": "planner"}}},
+        queued_messages=[{"message_id": "msg-1", "node_id": "planner"}],
+        manifest_path=manifest_path,
+    )
+
+    assert entry["start_plan"]["user_goal"] == "Ship it."
+    assert runtime.status_snapshot()["run"]["manifest"]["start"]["top_agent"]["agent_id"] == "gulicode"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert data["run"]["start"]["queued_messages"][0]["message_id"] == "msg-1"
+    assert "RunStarted" in [event.event_type for event in runtime.events]
+
+
+def test_graph_runtime_cancel_run_clears_pending_messages_jobs_and_waiting_joins() -> None:
+    runtime = GraphRuntime(_FakeCluster())
+    node = AgentNode(node_id="worker", agent_id="worker-a", cwd=Path("."))
+    runtime.queue_agent_message(node, {"prompt": "queued"})
+    runtime.create_join_barrier(
+        required_sources=["coder"],
+        target_node=node,
+        join_id="join-open",
+    )
+    job = GraphJob(
+        job_id="job-open",
+        node_id="worker",
+        agent_id="worker-a",
+        body={"prompt": "background"},
+        status="queued",
+    )
+    runtime._jobs[job.job_id] = job
+
+    result = runtime.end_run("cancel", reason="user stopped")
+
+    assert result.final_status == "cancelled"
+    assert result.summary["cancelled"]["messages"]
+    assert result.summary["cancelled"]["jobs"] == ["job-open"]
+    assert result.summary["cancelled"]["joins"] == ["join-open"]
+    assert runtime.agent_message_queues["worker"] == []
+    assert runtime.pending_messages[result.summary["cancelled"]["messages"][0]].status == "cancelled"
+    assert runtime.jobs["job-open"].status == "cancelled"
+    assert runtime.join_barriers["join-open"].status == "cancelled"
+    assert "RunPendingWorkCancelled" in [event.event_type for event in runtime.events]
+
+
+@pytest.mark.asyncio
 async def test_nonblocking_agent_job_records_events_and_manifest(tmp_path: Path) -> None:
     cluster = _FakeCluster()
     workspace = WorkspaceManifest("ws-1", tmp_path)
@@ -763,6 +1116,179 @@ def test_graph_definition_validate_runnable_uses_exec_edges_for_path() -> None:
         graph.validate_runnable()
 
 
+def test_graph_definition_builds_agent_connections_and_organization_view() -> None:
+    graph = GraphDefinition(
+        terminal_nodes={
+            "start": BlueprintTerminalNode("start", "start"),
+            "end": BlueprintTerminalNode("end", "end"),
+        },
+        agent_nodes={
+            "planner": AgentNode(
+                node_id="planner",
+                agent_id="worker-planner",
+                cli_kind="codex",
+                execution_mode="blocking",
+            ),
+            "coder": AgentNode(node_id="coder", write_scope=["src/**"]),
+            "doc": AgentNode(node_id="doc", write_scope=["docs/**"]),
+            "reviewer": AgentNode(node_id="reviewer"),
+        },
+        edges=[
+            GraphEdge("start", "planner", edge_type="exec"),
+            GraphEdge("planner", "coder", edge_type="exec"),
+            GraphEdge("planner", "doc", edge_type="exec"),
+            GraphEdge("planner", "reviewer", edge_type="data"),
+            GraphEdge("coder", "reviewer", edge_type="exec"),
+            GraphEdge("doc", "reviewer", edge_type="exec"),
+            GraphEdge("reviewer", "end", edge_type="exec"),
+        ],
+    )
+
+    assert graph.agent_connections() == {
+        "planner": ["coder", "doc"],
+        "coder": ["reviewer"],
+        "doc": ["reviewer"],
+        "reviewer": [],
+    }
+
+    view = graph.agent_organization_view()
+    assert view["agent_connections"]["planner"] == ["coder", "doc"]
+    assert view["start_policy"] == {
+        "selected_by": "top_agent",
+        "framework_role": "validate_only",
+        "valid_start_nodes": ["planner", "coder", "doc", "reviewer"],
+    }
+    assert view["agents"]["planner"]["agent_id"] == "worker-planner"
+    assert view["agents"]["planner"]["downstream_agents"] == ["coder", "doc"]
+    assert view["agents"]["reviewer"]["upstream_agents"] == ["coder", "doc"]
+    assert view["agents"]["coder"]["write_scope"] == ["src/**"]
+    assert view["graph"]["terminal_nodes"] == {"start": "start", "end": "end"}
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_creates_outgoing_batch_from_graph_connections() -> None:
+    cluster = _FakeCluster()
+    graph = GraphDefinition(
+        agent_nodes={
+            "agent-a": AgentNode(node_id="agent-a", agent_id="worker-a"),
+            "agent-b": AgentNode(node_id="agent-b", agent_id="worker-b"),
+            "agent-c": AgentNode(node_id="agent-c", agent_id="worker-c"),
+            "agent-d": AgentNode(node_id="agent-d", agent_id="worker-d"),
+        },
+        edges=[
+            GraphEdge("agent-a", "agent-b", edge_type="exec"),
+            GraphEdge("agent-a", "agent-c", edge_type="exec"),
+            GraphEdge("agent-a", "agent-d", edge_type="data"),
+        ],
+    )
+    runtime = GraphRuntime(cluster)
+
+    batch = await runtime.create_outgoing_batch_from_graph(
+        graph,
+        "agent-a",
+        batch_id="batch-1",
+    )
+
+    assert batch.required_target_node_ids == ["agent-b", "agent-c"]
+    assert batch.required_target_agent_ids == ["worker-b", "worker-c"]
+    assert cluster.started == ["worker-a", "worker-b", "worker-c"]
+
+    with pytest.raises(ValueError, match="not reachable"):
+        await runtime.create_outgoing_batch_from_graph(
+            graph,
+            "agent-a",
+            required_target_node_ids=["agent-d"],
+        )
+
+
+def test_gulicode_top_agent_context_and_start_plan_validation() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "planner": AgentNode(node_id="planner", cli_kind="codex"),
+            "coder": AgentNode(node_id="coder", write_scope=["src/**"]),
+            "reviewer": AgentNode(node_id="reviewer"),
+        },
+        edges=[
+            GraphEdge("planner", "coder", edge_type="exec"),
+            GraphEdge("coder", "reviewer", edge_type="exec"),
+        ],
+    )
+    profile = GuLiCodeTopAgentProfile()
+
+    context = profile.organization_context(graph)
+    assert context["top_agent"]["agent_id"] == "gulicode"
+    assert "Choose start_nodes explicitly" in context["top_agent"]["rule"]
+    assert context["organization"]["start_policy"]["selected_by"] == "top_agent"
+
+    plan = TopAgentStartPlan.from_dict(
+        {
+            "user_goal": "Implement and review the feature.",
+            "agent_descriptions": {
+                "planner": "Breaks down the user goal and coordinates downstream work.",
+                "coder": "Implements source changes.",
+                "reviewer": "Reviews accepted changes and risks.",
+            },
+            "start_nodes": ["planner"],
+            "tasks": {
+                "planner": {
+                    "goal": "Plan the implementation and decide downstream messages.",
+                    "expected_output": "A staged dispatch plan for coder and reviewer.",
+                    "acceptance": "Plan references concrete files and risks.",
+                }
+            },
+            "run_policy": {"allow_parallel": True},
+        }
+    )
+    validation = profile.validate_start_plan(graph, plan)
+
+    assert validation.ok is True
+    assert validation.errors == []
+    assert validation.normalized_plan is not None
+    assert validation.normalized_plan["start_nodes"] == ["planner"]
+
+
+def test_gulicode_top_agent_start_plan_validation_rejects_unsafe_shape() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "planner": AgentNode(node_id="planner"),
+            "coder": AgentNode(node_id="coder"),
+        }
+    )
+    profile = GuLiCodeTopAgentProfile()
+    plan = TopAgentStartPlan.from_dict(
+        {
+            "user_goal": "",
+            "agent_descriptions": {"planner": "Plans.", "ghost": "Unknown."},
+            "start_nodes": ["coder", "coder", "ghost"],
+            "tasks": {
+                "coder": {
+                    "goal": "Do work.",
+                    "expected_output": "",
+                    "acceptance": "Done.",
+                },
+                "planner": {
+                    "goal": "Extra task.",
+                    "expected_output": "Nope.",
+                    "acceptance": "Nope.",
+                },
+            },
+        }
+    )
+
+    validation = profile.validate_start_plan(graph, plan)
+
+    assert validation.ok is False
+    assert validation.normalized_plan is None
+    joined = "\n".join(validation.errors)
+    assert "user_goal is required" in joined
+    assert "missing: coder" in joined
+    assert "unknown AgentNode ids: ghost" in joined
+    assert "start_nodes contains unknown AgentNode ids: ghost" in joined
+    assert "start_nodes must not contain duplicates" in joined
+    assert "task 'coder' missing required fields: expected_output" in joined
+    assert "tasks contains entries for non-start nodes: planner" in joined
+
+
 def test_compile_ryven_flow_builds_graph_definition_with_port_semantics() -> None:
     import os
 
@@ -870,6 +1396,66 @@ async def test_graph_executor_runs_minimal_blueprint_and_starts_agents() -> None
         "NodeCompleted",
         "BlueprintCompleted",
     ]
+
+
+@pytest.mark.asyncio
+async def test_graph_executor_auto_joins_multi_input_exec_edges() -> None:
+    cluster = _FakeCluster()
+    runtime = GraphRuntime(cluster)
+    executor = GraphExecutor(runtime)
+    graph = GraphDefinition(
+        terminal_nodes={
+            "start": BlueprintTerminalNode("start", "start"),
+            "end": BlueprintTerminalNode("end", "end"),
+        },
+        agent_nodes={
+            "coder": AgentNode(node_id="coder", prompt="code"),
+            "doc": AgentNode(node_id="doc", prompt="docs"),
+            "reviewer": AgentNode(node_id="reviewer", prompt="review"),
+        },
+        edges=[
+            GraphEdge("start", "coder", edge_type="exec"),
+            GraphEdge("start", "doc", edge_type="exec"),
+            GraphEdge("coder", "reviewer", edge_type="exec"),
+            GraphEdge("doc", "reviewer", edge_type="exec"),
+            GraphEdge("reviewer", "end", edge_type="exec"),
+        ],
+    )
+
+    result = await executor.run_blueprint(graph)
+
+    assert result["ok"] is True
+    assert result["executed_nodes"] == ["coder", "doc", "reviewer"]
+    assert cluster.sent[0] == ("coder", {"prompt": "code"}, 1800.0)
+    assert cluster.sent[1] == ("doc", {"prompt": "docs"}, 1800.0)
+    assert cluster.sent[2][0] == "reviewer"
+    assert cluster.sent[2][1]["type"] == "join_aggregate"
+    assert cluster.sent[2][1]["aggregate"]["required_source_node_ids"] == ["coder", "doc"]
+    assert runtime.join_barriers["join-reviewer-3"].aggregate_message_id == "join-msg-join-reviewer-3"
+    assert runtime.pending_messages["join-msg-join-reviewer-3"].status == "completed"
+    assert "JoinBarrierAggregateQueued" in [event.event_type for event in runtime.events]
+
+
+def test_graph_runtime_complete_writes_final_report_and_archive_index(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-final")
+    runtime = GraphRuntime(_FakeCluster(), archive_manager=manager, archive_run=run)
+
+    result = runtime.end_run("complete", reason="done")
+
+    assert result.final_status == "success"
+    assert result.archived is True
+    archive_path = Path(result.summary["archive_path"])
+    report_path = archive_path / "shared" / "reports" / "final_report.json"
+    assert Path(result.summary["final_report_path"]) == report_path
+    assert report_path.is_file()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["final_status"] == "success"
+    archives = manager.list_long_term_archives()
+    assert archives[0]["archive_id"] == "run-final-completed"
+    assert "FinalReportPublished" in [event.event_type for event in runtime.events]
+    assert "RunArchiveIndexed" in [event.event_type for event in runtime.events]
 
 
 @pytest.mark.asyncio

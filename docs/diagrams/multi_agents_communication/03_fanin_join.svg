@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="900" viewBox="0 0 1300 900" role="img" aria-labelledby="title desc">
+  <title id="title">多对一 fan-in 汇聚</title>
+  <desc id="desc">多个 Agent 结果提交到 JoinBarrier。等待策略满足后，运行时生成 join_aggregate 消息并投递到目标 AgentNode 队列。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#34515f"/>
+    </marker>
+    <style>
+      .bg{fill:#f7f9fb}
+      .source{fill:#e9f3ff;stroke:#1f6feb;stroke-width:2;rx:8}
+      .join{fill:#fff7e6;stroke:#b7791f;stroke-width:2;rx:8}
+      .queue{fill:#ecfdf3;stroke:#238636;stroke-width:2;rx:8}
+      .runtime{fill:#f4edff;stroke:#8250df;stroke-width:2;rx:8}
+      .explain{fill:#ffffff;stroke:#8c959f;stroke-width:1.8;rx:8}
+      .label{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:19px;fill:#1f2328}
+      .small{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:15px;fill:#3b434b}
+      .title{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:30px;font-weight:700;fill:#1f2328}
+      .subtitle{font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;font-size:20px;font-weight:700;fill:#1f2328}
+      .line{stroke:#34515f;stroke-width:2.5;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1300" height="900"/>
+  <text class="title" x="60" y="55">多对一汇聚：JoinBarrier 收齐上游结果后投递 join_aggregate</text>
+
+  <rect class="source" x="80" y="120" width="280" height="82"/>
+  <text class="label" x="130" y="154">Agent A 结果</text>
+  <text class="small" x="112" y="180">result + source metadata</text>
+
+  <rect class="source" x="80" y="310" width="280" height="82"/>
+  <text class="label" x="130" y="344">Agent B 结果</text>
+  <text class="small" x="112" y="370">changeset / report / artifact</text>
+
+  <rect class="source" x="80" y="500" width="280" height="82"/>
+  <text class="label" x="130" y="534">Agent C 结果</text>
+  <text class="small" x="112" y="560">test result / conflict / risk</text>
+
+  <rect class="join" x="500" y="282" width="310" height="132"/>
+  <text class="label" x="600" y="320">JoinBarrier</text>
+  <text class="small" x="535" y="350">required_source_node_ids：必需来源</text>
+  <text class="small" x="535" y="376">policy：wait-all / wait-any / quorum</text>
+  <text class="small" x="535" y="402">timeout_sec：可选超时</text>
+
+  <rect class="runtime" x="930" y="285" width="280" height="82"/>
+  <text class="label" x="988" y="319">JoinBarrierReady</text>
+  <text class="small" x="984" y="345">等待策略满足，状态变 ready</text>
+
+  <rect class="queue" x="930" y="445" width="280" height="82"/>
+  <text class="label" x="1000" y="479">join_aggregate</text>
+  <text class="small" x="970" y="505">运行时生成的聚合消息</text>
+
+  <rect class="queue" x="500" y="620" width="310" height="82"/>
+  <text class="label" x="575" y="654">目标 AgentNode</text>
+  <text class="small" x="548" y="680">由 tick 或 dispatch_queued_message_now 投递</text>
+
+  <path class="line" d="M360 161 C440 195 462 275 500 318"/>
+  <path class="line" d="M360 351 H500"/>
+  <path class="line" d="M360 541 C440 510 462 430 500 382"/>
+  <path class="line" d="M810 348 H930"/>
+  <path class="line" d="M1070 367 V445"/>
+  <path class="line" d="M930 486 C820 525 760 585 690 620"/>
+  <text class="small" x="850" y="255">aggregate() 会合并来源、结果、changeset、conflict、artifact、report、test_results</text>
+
+  <rect class="explain" x="60" y="745" width="1180" height="115"/>
+  <text class="subtitle" x="90" y="780">函数 / 变量中文解释</text>
+  <text class="small" x="90" y="808">create_join_barrier：创建多对一汇聚屏障，声明 required_sources、target_node、policy、quorum、timeout_sec。</text>
+  <text class="small" x="90" y="832">submit_join_contribution：某个上游 Agent 提交贡献；非 required source 会被拒绝，ready 后也不能继续提交。</text>
+  <text class="small" x="90" y="856">join_aggregate：屏障 ready 后由运行时生成的聚合消息，进入目标 AgentNode 队列。</text>
+</svg>
