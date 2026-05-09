@@ -346,6 +346,43 @@ def test_workspace_api_rpc_checkout_submit(
         server.close()
 
 
+def test_workspace_api_rpc_project_reference_checkout_path_submit(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    _write(tmp_path / "src" / "b.txt", "base b\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-rpc-reference", code_mode="project_reference")
+    private = manager.agent_workspace_dir(run, "agent-a")
+    server = WorkspaceRPCServer(manager, run)
+    server.start()
+    try:
+        context_path = private / "workspace_api_context.json"
+        context_path.write_text(
+            json.dumps(server.context_for("agent-a"), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(CONTEXT_ENV, str(context_path))
+
+        assert main(["checkout", "--path", "src/a.txt"]) == 0
+        checkout = json.loads(capsys.readouterr().out)
+        checkout_path = Path(checkout["checkout_path"])
+        assert (checkout_path / "src" / "a.txt").read_text(encoding="utf-8") == "base\n"
+        assert not (checkout_path / "src" / "b.txt").exists()
+        _write(checkout_path / "src" / "a.txt", "rpc reference changed\n")
+
+        assert main(["submit"]) == 0
+        submit = json.loads(capsys.readouterr().out)
+        assert submit["ok"] is True
+        assert submit["merged_files"] == ["src/a.txt"]
+        assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "rpc reference changed\n"
+        assert not (run.integration_dir / "src" / "a.txt").exists()
+    finally:
+        server.close()
+
+
 def test_workspace_api_rpc_conflict_blocks_then_sync_resubmit(
     tmp_path: Path,
     monkeypatch,

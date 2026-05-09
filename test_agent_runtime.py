@@ -1163,6 +1163,8 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert inst.node.cwd == checkout
         assert cluster.worker_cwds["agent-cx"] == checkout
         assert (checkout / "AGENTS.md").is_file()
+        assert (private / "state" / "base" / "AGENTS.md").is_file()
+        assert manager.status_checkout(run, manager.open_agent_checkout(run, "agent-cx")) == []
         assert "Business Review Rule" in (checkout / "AGENTS.md").read_text(encoding="utf-8")
         assert (private / "rules" / "01-business-rule.md").is_file()
         assert (codex_home / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
@@ -1206,6 +1208,36 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert (private / "workspace_api_context.json").is_file()
     finally:
         server.close()
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_auto_private_context_uses_project_reference_mode(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "app.py").write_text("print('base')\n", encoding="utf-8")
+    cluster = _RestartableCluster()
+    runtime = GraphRuntime(cluster, enforce_private_agent_context=True)
+    node = AgentNode(
+        node_id="agent-node",
+        agent_id="agent-cx",
+        cli_kind="codex",
+        cwd=project,
+    )
+
+    inst = await runtime.ensure_agent(node)
+
+    assert runtime.private_context_manager is not None
+    assert runtime.private_context_run is not None
+    assert runtime.private_context_run.code_mode == "project_reference"
+    assert not (runtime.private_context_run.integration_dir / "src" / "app.py").exists()
+    private = runtime.private_context_manager.agent_workspace_dir(
+        runtime.private_context_run,
+        "agent-cx",
+    )
+    assert inst.node.cwd == private / "checkout"
+    assert not (private / "checkout" / "src" / "app.py").exists()
 
 
 def test_graph_definition_detects_cycles() -> None:

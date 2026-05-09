@@ -72,12 +72,11 @@ def framework_agent_rules() -> str:
         [
             "# Multi-Agent Framework Baseline Rules",
             "",
-            "- Work only inside your private working directory unless a framework API says otherwise.",
-            "- Treat the real project directory and long-term workspace as read-only context.",
-            "- Do not write project changes directly outside the private checkout.",
-            "- Submit code changes through `python -m multi_agent_tcp.workspace_api submit`.",
-            "- Publish reports and artifacts through the Workspace API.",
-            "- Communicate with other AgentNodes only through framework messages and shared references.",
+            "- Understand the three workspace zones before acting: project directory is the authoritative code source/final target, private checkout is your personal workbench, temporary shared workspace is for collaboration records.",
+            "- Fetch or checkout only task-relevant code into your private checkout before editing.",
+            "- Submit code changes from the private checkout through `python -m multi_agent_tcp.workspace_api submit`.",
+            "- Publish reports, artifacts, summaries, file/version references, and changeset ids through the Workspace API.",
+            "- Communicate with other AgentNodes through framework messages and shared references, not by copying project source trees into shared space.",
             "- Your natural-language worker reply is a framework-private utterance record; it is not delivered to other AgentNodes.",
             "- To provide information to another AgentNode, use the injected `agent.dispatch` interface for the current batch.",
             "- To provide durable results to the framework, use Workspace API submit/publish or an assigned structured framework tool.",
@@ -104,11 +103,12 @@ def framework_agent_skill() -> str:
             "It is not a communication channel to other AgentNodes and is not proof of submitted work.",
             "",
             "For code changes, edit the private checkout in the current working directory, "
+            "fetching only task-relevant project files with `python -m multi_agent_tcp.workspace_api checkout --path ...` or `--scope-path ...`, "
             "inspect with `python -m multi_agent_tcp.workspace_api status` or `diff`, "
             "then submit through `python -m multi_agent_tcp.workspace_api submit`.",
             "",
             "For reports and artifacts, publish through `python -m multi_agent_tcp.workspace_api` "
-            "instead of writing into shared workspace paths directly.",
+            "as shared run context. Use summaries, file paths, versions, and changeset ids when another AgentNode needs code context.",
         ]
     )
 
@@ -279,6 +279,7 @@ def materialize_private_agent_context(
         business_rule_catalog=rule_catalog,
     )
     _write_text_no_bom(checkout.checkout_dir / "AGENTS.md", agents_md)
+    _write_text_no_bom(checkout.base_dir / "AGENTS.md", agents_md)
 
     api_context_path = private_dir / "workspace_api_context.json"
     _write_text_no_bom(
@@ -294,10 +295,10 @@ def materialize_private_agent_context(
     data["artifact_scope"] = list(node.artifact_scope)
 
     preamble = (
-        "You are running inside a framework-managed private Agent workspace. "
-        "The real project directory is read-only context; do not write code changes directly there. "
-        "Your writable code workspace is the private checkout at the current working directory. "
-        "Submit code changes with `python -m multi_agent_tcp.workspace_api submit` after editing the private checkout.\n\n"
+        "You are running inside a framework-managed three-zone workspace. "
+        "The project directory is the authoritative code source and final code target, but ordinary agents do not edit it directly. "
+        "Your private checkout is your personal workbench: fetch only the task-relevant code into it, edit there, and submit code changes as a changeset. "
+        "The temporary shared workspace is for run collaboration only: publish reports, artifacts, summaries, file/version references, and changeset ids there instead of copying project source trees.\n\n"
         f"{workspace_api_doc()}"
     )
     adapter_options = dict(data.get("adapter_options", {}))
@@ -332,8 +333,10 @@ def materialize_private_agent_context(
     }
     execution_context["code_workspace"] = {
         "mode": "vcs_checkout",
+        "code_mode": manager._run_code_mode(run),
         "project_context": str(project_context),
         "integration_dir": str(run.integration_dir),
+        "project_code_root": str(manager.project_root),
         "checkout_path": str(checkout.checkout_dir),
         "checkout_id": checkout.checkout_id,
         "base_ref": checkout.base_ref,

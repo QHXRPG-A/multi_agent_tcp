@@ -251,14 +251,30 @@ def _cmd_list(args: argparse.Namespace) -> None:
 def _cmd_checkout(args: argparse.Namespace) -> None:
     ctx = _load_context()
     scopes = list(args.scope_path or [])
+    paths = list(args.path or [])
     if _is_rpc_context(ctx):
-        out = _rpc_result(ctx, "checkout", {"write_scope": scopes, "mode": args.mode, "owner": args.owner})
+        out = _rpc_result(
+            ctx,
+            "checkout",
+            {
+                "write_scope": scopes,
+                "checkout_paths": paths,
+                "mode": args.mode,
+                "owner": args.owner,
+            },
+        )
         _json_out(out)
         return
 
     manager, run, ctx = _manager_and_run()
     owner = str(args.owner or ctx.get("agent_id") or "agent")
-    checkout = manager.checkout_agent(run, owner, write_scope=scopes, mode=args.mode)
+    checkout = manager.checkout_agent(
+        run,
+        owner,
+        write_scope=scopes,
+        checkout_paths=paths,
+        mode=args.mode,
+    )
     data = checkout.to_dict()
     data["ok"] = True
     _json_out(data)
@@ -422,6 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     checkout = sub.add_parser("checkout", help="create or refresh the agent private code checkout")
     checkout.add_argument("--scope-path", action="append", default=[], help="allowed code path glob; repeatable")
+    checkout.add_argument("--path", action="append", default=[], help="specific relative code file or directory to fetch; repeatable")
     checkout.add_argument("--mode", default="full", choices=["full"])
     checkout.add_argument("--owner", help="override agent id")
     checkout.set_defaults(func=_cmd_checkout)

@@ -1445,7 +1445,9 @@ class GraphRuntime:
         if not project_root.is_dir():
             raise FileNotFoundError(f"private agent context project root is not a directory: {project_root}")
         self.private_context_manager = DulwichWorkspaceManager.open_or_init(project_root)
-        self.private_context_run = self.private_context_manager.create_run()
+        self.private_context_run = self.private_context_manager.create_run(
+            code_mode="project_reference",
+        )
         self.private_context_rpc_server = WorkspaceRPCServer(
             self.private_context_manager,
             self.private_context_run,

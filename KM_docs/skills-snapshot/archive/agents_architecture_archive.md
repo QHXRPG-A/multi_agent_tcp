@@ -866,3 +866,87 @@ python -m py_compile graph_runtime.py graph_control.py __main__.py agent_launch_
    - `join.contribute` for fan-in contributions.
 3. Top Agent may inspect utterances for oversight and explanation, but ordinary Agents do not receive the utterance inspection tool or the utterance records through their `framework_context`.
 4. Future UI should expose utterance records only as a top-agent / operator audit surface, not as an Agent-to-Agent message stream.
+
+
+---
+
+### 2026-05-09 - Project-reference three-zone workspace model
+
+#### Summary
+
+This round changed the workspace direction from "copy less project code into the run" to "do not use the temporary shared workspace as a code copy or transfer area".
+
+The new active model is:
+
+```text
+project directory
+  -> on-demand checkout/fetch into Agent private checkout
+  -> Agent edits only private checkout
+  -> changeset submit
+  -> framework validates/merges
+  -> accepted changes write back to project directory
+
+Agent private checkout
+  -> publish report/artifact/summary/reference
+  -> temporary shared workspace
+  -> other Agents consume summaries/references, then fetch code on demand
+```
+
+#### Landed
+
+1. Added `RunWorkspace.code_mode` with two modes:
+   - `snapshot_copy`: legacy behavior, keeping `base/` and `shared/code/` as copied code state;
+   - `project_reference`: new behavior, where project root is the authoritative source and final code target.
+2. Changed `GraphRuntime` automatic private-Agent workspace creation to use `project_reference`.
+   - run startup no longer copies the whole project into `shared/code` for this path;
+   - `shared/code` remains present only as an empty compatibility directory.
+3. Added on-demand checkout paths:
+   - manager: `checkout_agent(..., checkout_paths=[...])`;
+   - CLI/RPC: `python -m multi_agent_tcp.workspace_api checkout --path src/file.py`.
+4. In `project_reference` mode, empty checkout scope no longer means "all project files".
+   - empty checkout starts as an empty private workbench;
+   - submit of files outside explicit path/scope is rejected.
+5. Changed VCS submit/sync helpers to use code-source/code-target abstraction.
+   - `project_reference` submit writes accepted changes to the project directory;
+   - legacy `snapshot_copy` submit still writes to run integration.
+6. Updated ordinary-Agent injected baseline rule/skill and Workspace API docs to teach the three-zone model:
+   - project directory: authoritative code source/final code target;
+   - private checkout: personal workbench;
+   - temporary shared workspace: reports, artifacts, summaries, file/version references, changeset ids.
+7. Updated the collaboration/workspace diagram and README explanation to show `project_reference`, on-demand checkout, changeset validation, and shared references.
+8. Kept framework-injected `AGENTS.md` synchronized into checkout base snapshots so it does not pollute agent changesets.
+
+#### Affected Code and Docs
+
+- `workspace_manager.py`
+- `workspace_api.py`
+- `workspace_rpc.py`
+- `graph_runtime.py`
+- `agent_launch_context.py`
+- `docs/workspace_api.md`
+- `docs/diagrams/agents_collaboration_workspace_flow.mmd`
+- `docs/diagrams/agents_collaboration_workspace_flow.svg`
+- `README.md`
+- `test_workspace_manager.py`
+- `test_workspace_api.py`
+- `test_agent_runtime.py`
+
+#### Validation
+
+```text
+python -m pytest test_workspace_manager.py test_workspace_api.py
+41 passed
+
+python -m pytest test_agent_runtime.py -k "private_context"
+2 passed
+
+python -m pytest test_workspace_manager.py test_workspace_api.py test_graph_control.py test_agent_runtime.py -k "private_context or workspace_context or write_scope or project_reference or checkout or submit"
+17 passed
+```
+
+#### Current Boundaries
+
+1. `snapshot_copy` remains for legacy job/worktree flows and compatibility tests.
+2. New private-Agent runtime creation uses `project_reference`, but older manually supplied `private_context_run` values keep their configured mode.
+3. Temporary shared workspace should not be described as a source-code integration area in new docs. It is now collaboration records plus archives: reports, artifacts, manifest events, changeset references, conflict records, and file/version summaries.
+4. The next cleanup target is to reduce remaining references to `integration_dir` / `shared_code` in status and legacy job docs by routing them through the code-source/code-target abstraction.

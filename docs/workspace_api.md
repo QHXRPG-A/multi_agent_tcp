@@ -4,16 +4,17 @@ Agents should publish run-scope reports and artifacts through the framework Work
 
 The framework prepares the API context before the agent starts. Agents do not need to know the physical workspace directories. In blueprint runs the context normally points at a runtime-owned local RPC endpoint with an opaque token; the CLI below is only the thin client.
 
-Blueprint agents edit code through a VCS-style private checkout. The runtime creates the checkout before the agent starts, launches the CLI with that checkout as `cwd`, and expects final code changes to be submitted back to the framework as a changeset. Run-scope reports and artifacts still use `publish`/`publish-file`; run-scope code never does.
+Blueprint agents edit code through a VCS-style private checkout. In the current project-reference mode, the project directory remains the authoritative code source and final code target; the private checkout starts as an agent workbench and materializes only the files requested by `checkout --path` or `checkout --scope-path`. Final code changes are submitted back to the framework as a changeset. Run-scope reports and artifacts still use `publish`/`publish-file`; run-scope code never does.
 
 The long-term shared workspace is read-only for agents. The framework archives each run's temporary shared workspace into a named zip under the long-term workspace. Agents can list those archives and extract interesting results into their own private workspace for reading.
 
 ## Agent Project Working Directory
 
-Blueprint AgentNodes receive two code views:
+Blueprint AgentNodes receive three workspace zones:
 
-- `project_context`: the node's requested project path, resolved against the blueprint project root and treated as read-only context.
-- `checkout_path`: the writable private checkout. The worker process starts with this path as `cwd`.
+- `project_context` / `project_code_root`: the authoritative code source and final code target, accessed through framework checkout/submit operations.
+- `checkout_path`: the writable private workbench. The worker process starts with this path as `cwd`.
+- temporary shared workspace areas: `reports` and `artifacts`, used for collaboration records, summaries, produced files, file/version references, and changeset ids.
 
 For Codex workers, the blueprint runtime defaults to `codex exec --sandbox workspace-write --cd <checkout_path>` unless the node explicitly overrides the Codex sandbox option.
 
@@ -37,10 +38,16 @@ Use these commands when the runtime asks agents to work in private code checkout
 Create or refresh the agent checkout:
 
 ```powershell
+python -m multi_agent_tcp.workspace_api checkout --path "src/parser.py" --path "tests/test_parser.py"
+```
+
+or:
+
+```powershell
 python -m multi_agent_tcp.workspace_api checkout --scope-path "src/**" --scope-path "tests/**"
 ```
 
-The command returns JSON with `checkout_path`, `checkout_id`, `base_ref`, and `writable`. Edit files under `checkout_path`.
+The command returns JSON with `checkout_path`, `checkout_id`, `base_ref`, and `writable`. Edit files under `checkout_path`. Prefer explicit `--path` entries for focused tasks; use broad `--scope-path` only when the task truly needs that whole area.
 
 Inspect checkout changes:
 
@@ -56,7 +63,7 @@ Submit the checkout as a changeset:
 python -m multi_agent_tcp.workspace_api submit --task-id task-123 --summary "Implement parser fix"
 ```
 
-Accepted submissions are merged into the run integration tree and archived under `changesets/<changeset_id>/`. Conflicts return `ok: false`, `status: "conflict"`, and structured file entries with `reason`, hashes, and a merge preview when available. After a conflict, refresh from the latest integration state:
+Accepted submissions are merged into the current code target and archived under `changesets/<changeset_id>/`. In project-reference mode the code target is the project directory; in legacy snapshot mode it is the run integration tree. Conflicts return `ok: false`, `status: "conflict"`, and structured file entries with `reason`, hashes, and a merge preview when available. After a conflict, refresh from the latest code target:
 
 ```powershell
 python -m multi_agent_tcp.workspace_api sync
@@ -141,8 +148,9 @@ The command prints JSON containing relative paths.
 ## Rules
 
 - Do not write task outcomes directly to filesystem paths.
-- Direct code edits are allowed only under the private checkout.
+- Treat the project directory as the authoritative code source and final code target, but make task edits in the private checkout.
 - Code collaboration must use `checkout -> edit -> status/diff -> submit`.
+- Use the temporary shared workspace for reports, artifacts, summaries, file/version references, and changeset ids instead of copying project source trees into it.
 - Use `publish-file --area artifacts` for generated assets such as images or binary files.
 - Use `publish --area reports` for summaries, manifests, and test output.
 - Keep private scratch files private. Only data published through the API is treated as a run outcome.

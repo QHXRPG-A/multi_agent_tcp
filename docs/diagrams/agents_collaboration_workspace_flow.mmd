@@ -3,24 +3,36 @@ flowchart TB
     top["总控 Agent\n理解目标、拆解任务、解释状态"]
     fw["框架调度与消息中心\n校验计划、排队投递、等待汇合、记录事件"]
 
-    a["Agent A\n处理一个子任务"]
-    b["Agent B\n并行处理另一个子任务"]
-    r["汇总 / 评审 Agent\n接收框架整理后的汇总包"]
+    project["工程目录\n代码权威源 / 最终代码目标\n不在 run 启动时整体复制到 shared/code"]
+    agents["Agents\n多个普通 AgentNode 并行处理子任务\n通过框架消息和共享引用协作"]
 
-    p["每个 Agent 的私有工作区\n私有代码检出 / 授权规则与技能 / 上下文令牌"]
-    s["本次运行的临时共享工作区\n统一合并代码 / 保存报告产物 / 记录变更冲突"]
-    z["长期归档\n完成后保存报告、产物、变更和冲突"]
+    private["Agent 私有区\n个人工作台 / 可写 checkout\n按需 fetch 或 checkout 任务相关文件"]
+    shared["临时共享区\nreports / artifacts / manifest / changeset 引用\n不承载工程代码副本"]
+    changeset["框架 changeset 管道\nscope 校验 / base 版本检查 / 冲突检测 / 合并审计"]
+    archive["长期归档\n保存报告、产物、changeset、冲突和 run 记录"]
 
     user -->|"目标 / 追问"| top
-    top -->|"计划 / 状态请求"| fw
-    fw -->|"下发任务与上下文"| a
-    fw -->|"下发任务与上下文"| b
-    a -->|"提交消息意图 / 完成回执"| fw
-    b -->|"提交消息意图 / 完成回执"| fw
-    fw -->|"汇总后投递"| r
+    top -->|"启动计划 / 状态请求"| fw
+    fw -->|"下发任务、三区说明、消息上下文"| agents
+    agents -->|"完成回执、dispatch 意图、共享引用"| fw
 
-    a -->|"私有修改"| p
-    b -->|"私有修改"| p
-    p -->|"提交变更 / 发布报告产物"| s
-    s -->|"共享结果进入汇总"| r
-    s -->|"收口归档"| z
+    fw -->|"创建 project_reference run\n初始化 reports/artifacts/manifest"| shared
+    project -->|"checkout --path / --scope-path\n按需物化文件"| private
+    agents -->|"阅读与修改任务相关文件"| private
+    private -->|"submit changeset"| changeset
+    changeset -->|"接受后写回工程目录"| project
+    changeset -->|"accepted / conflict / touched files"| shared
+
+    private -->|"publish report/artifact/summary/reference"| shared
+    shared -->|"摘要、产物、文件路径、版本、changeset id"| agents
+    shared -->|"run 收口归档"| archive
+
+    classDef authority fill:#eef6ff,stroke:#2f6fab,color:#16324f
+    classDef private fill:#f6fff1,stroke:#4a8f3a,color:#183b16
+    classDef shared fill:#fff8e8,stroke:#b88318,color:#4a3300
+    classDef control fill:#f5f0ff,stroke:#7952b3,color:#2f1b52
+
+    class project authority
+    class private private
+    class shared,archive shared
+    class fw,changeset,top control

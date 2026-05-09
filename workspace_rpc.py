@@ -221,6 +221,7 @@ class WorkspaceRPCServer:
                 self.run,
                 owner,
                 write_scope=[str(s) for s in args.get("write_scope", [])],
+                checkout_paths=[str(s) for s in args.get("checkout_paths", args.get("paths", []))],
                 mode=str(args.get("mode", "full")),
             )
             data = checkout.to_dict()

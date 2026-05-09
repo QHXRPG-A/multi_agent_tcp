@@ -48,6 +48,28 @@ else:
 
 WORKSPACE_DIRNAME = ".multi_agent_workspace"
 MANIFEST_NAME = "workspace.json"
+BASIC_COPY_EXCLUDE_PATTERNS = (
+    ".git",
+    WORKSPACE_DIRNAME,
+    "__pycache__",
+    ".pytest_cache",
+    "*.pyc",
+)
+DEFAULT_SNAPSHOT_EXCLUDE_PATTERNS = (
+    *BASIC_COPY_EXCLUDE_PATTERNS,
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    "target",
+    "coverage",
+)
 
 
 def _utc_now() -> str:
@@ -90,9 +112,15 @@ def _relative_files(
     root: Path,
     *,
     excluded_roots: Optional[Sequence[Path]] = None,
+    exclude_patterns: Optional[Sequence[str]] = None,
 ) -> Dict[str, Path]:
     root = root.resolve()
     excluded = [Path(p).resolve() for p in (excluded_roots or [])]
+    patterns = [
+        str(pattern).replace("\\", "/").strip()
+        for pattern in (exclude_patterns or BASIC_COPY_EXCLUDE_PATTERNS)
+        if str(pattern).strip()
+    ]
     out: Dict[str, Path] = {}
     if not root.is_dir():
         return out
@@ -103,12 +131,29 @@ def _relative_files(
         if any(resolved == ex or _path_within(resolved, ex) for ex in excluded):
             continue
         rel = path.relative_to(root).as_posix()
-        if rel.startswith(f"{WORKSPACE_DIRNAME}/"):
+        parts = rel.split("/")
+        if any(_snapshot_pattern_matches(rel, part, patterns) for part in parts):
             continue
-        if "/.git/" in f"/{rel}/" or rel == ".git":
+        if _snapshot_pattern_matches(rel, rel, patterns):
             continue
         out[rel] = path
     return out
+
+
+def _snapshot_pattern_matches(rel_path: str, name: str, patterns: Sequence[str]) -> bool:
+    rel_path = rel_path.replace("\\", "/").strip("/")
+    name = name.strip("/")
+    for pattern in patterns:
+        normalized = pattern.replace("\\", "/").strip("/")
+        if not normalized:
+            continue
+        if "/" not in normalized and fnmatch.fnmatch(name, normalized):
+            return True
+        if fnmatch.fnmatch(rel_path, normalized):
+            return True
+        if rel_path == normalized or rel_path.startswith(f"{normalized}/"):
+            return True
+    return False
 
 
 def _copy_project_tree(
@@ -116,26 +161,33 @@ def _copy_project_tree(
     dst: Path,
     *,
     excluded_roots: Optional[Sequence[Path]] = None,
+    exclude_patterns: Optional[Sequence[str]] = None,
     include_scopes: Optional[Sequence[str]] = None,
 ) -> None:
     src = Path(src).resolve()
     excluded = [Path(p).resolve() for p in (excluded_roots or [])]
+    patterns = [
+        str(pattern).replace("\\", "/").strip()
+        for pattern in (exclude_patterns or BASIC_COPY_EXCLUDE_PATTERNS)
+        if str(pattern).strip()
+    ]
     scopes = [str(scope) for scope in (include_scopes or []) if str(scope).strip()]
 
     def ignore(dir_path: str, names: List[str]) -> set[str]:
         ignored: set[str] = set()
         base = Path(dir_path).resolve()
-        pattern_ignore = shutil.ignore_patterns(
-            ".git",
-            WORKSPACE_DIRNAME,
-            "__pycache__",
-            ".pytest_cache",
-            "*.pyc",
-        )
+        pattern_ignore = shutil.ignore_patterns(*patterns)
         ignored.update(pattern_ignore(dir_path, names))
         for name in names:
             child = (base / name).resolve()
+            try:
+                child_rel = child.relative_to(src).as_posix()
+            except ValueError:
+                child_rel = name
             if any(child == ex or _path_within(child, ex) for ex in excluded):
+                ignored.add(name)
+                continue
+            if _snapshot_pattern_matches(child_rel, name, patterns):
                 ignored.add(name)
         return ignored
 
@@ -143,7 +195,11 @@ def _copy_project_tree(
         shutil.rmtree(dst)
     if scopes:
         dst.mkdir(parents=True, exist_ok=True)
-        for rel, path in _relative_files(src, excluded_roots=excluded).items():
+        for rel, path in _relative_files(
+            src,
+            excluded_roots=excluded,
+            exclude_patterns=patterns,
+        ).items():
             if not _scope_allows(rel, scopes):
                 continue
             target = dst / rel
@@ -168,6 +224,35 @@ def _scope_allows(path: str, scopes: Sequence[str]) -> bool:
         if normalized == pattern or normalized.startswith(f"{pattern}/"):
             return True
     return False
+
+
+def _dedupe_scopes(scopes: Sequence[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in scopes:
+        scope = str(raw).replace("\\", "/").strip()
+        if not scope or scope in seen:
+            continue
+        seen.add(scope)
+        out.append(scope)
+    return out
+
+
+def _checkout_paths_to_scopes(paths: Sequence[str]) -> List[str]:
+    scopes: List[str] = []
+    for raw in paths:
+        path = str(raw).replace("\\", "/").strip("/")
+        if not path or path in {".", ".."} or ":" in path:
+            raise ValueError(f"checkout path must be a safe relative path: {raw!r}")
+        parts = path.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            raise ValueError(f"checkout path must be a safe relative path: {raw!r}")
+        if any(ch in path for ch in ("*", "?", "[")):
+            scopes.append(path)
+        else:
+            scopes.append(path)
+            scopes.append(f"{path}/**")
+    return _dedupe_scopes(scopes)
 
 
 def _is_binary(path: Path) -> bool:
@@ -326,6 +411,7 @@ class RunWorkspace:
     shared_locks_dir: Optional[Path] = None
     status: str = "created"
     long_term_workspace_root: Optional[Path] = None
+    code_mode: str = "snapshot_copy"
 
 
 @dataclass
@@ -534,7 +620,16 @@ class DulwichWorkspaceManager:
             agent_access_mode="readonly",
         )
 
-    def create_run(self, *, run_id: Optional[str] = None) -> RunWorkspace:
+    def create_run(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        code_mode: str = "snapshot_copy",
+        snapshot_scope: Optional[Sequence[str]] = None,
+        snapshot_exclude: Optional[Sequence[str]] = None,
+    ) -> RunWorkspace:
+        if code_mode not in {"snapshot_copy", "project_reference"}:
+            raise ValueError("code_mode must be snapshot_copy or project_reference")
         run_id = run_id or f"run-{uuid.uuid4().hex[:12]}"
         run_path = self.workspace_root / "runs" / "active" / run_id
         if run_path.exists():
@@ -548,12 +643,23 @@ class DulwichWorkspaceManager:
         jobs_dir = run_path / "jobs"
         agents_dir = run_path / "agents"
         run_path.mkdir(parents=True)
-        _copy_project_tree(
-            self.project_root,
-            base_dir,
-            excluded_roots=[self.workspace_root],
-        )
-        _copy_project_tree(base_dir, integration_dir)
+        scopes = [str(s) for s in (snapshot_scope or []) if str(s).strip()]
+        exclude_patterns = [
+            *DEFAULT_SNAPSHOT_EXCLUDE_PATTERNS,
+            *[str(s) for s in (snapshot_exclude or []) if str(s).strip()],
+        ]
+        if code_mode == "snapshot_copy":
+            _copy_project_tree(
+                self.project_root,
+                base_dir,
+                excluded_roots=[self.workspace_root],
+                exclude_patterns=exclude_patterns,
+                include_scopes=scopes,
+            )
+            _copy_project_tree(base_dir, integration_dir)
+        else:
+            base_dir.mkdir(parents=True)
+            integration_dir.mkdir(parents=True)
         shared_artifacts_dir.mkdir(parents=True)
         shared_reports_dir.mkdir(parents=True)
         shared_locks_dir.mkdir(parents=True)
@@ -585,6 +691,10 @@ class DulwichWorkspaceManager:
             "created_at": _utc_now(),
             "archive_mode": "full_directory",
             "private_workspace_retention": "discard_on_archive",
+            "code_mode": code_mode,
+            "project_code_root": str(self.project_root),
+            "snapshot_scope": list(scopes),
+            "snapshot_exclude": list(exclude_patterns),
         }
         _write_json(run_path / "run_manifest.json", data)
         return RunWorkspace(
@@ -601,12 +711,14 @@ class DulwichWorkspaceManager:
             shared_locks_dir=shared_locks_dir,
             status="running",
             long_term_workspace_root=self.workspace_root,
+            code_mode=code_mode,
         )
 
     def open_run(self, run_id: str) -> RunWorkspace:
         run_path = self.workspace_root / "runs" / "active" / run_id
         if not run_path.is_dir():
             raise FileNotFoundError(f"active run not found: {run_path}")
+        manifest = _read_json(run_path / "run_manifest.json", {})
         return RunWorkspace(
             run_id=run_id,
             path=run_path,
@@ -619,8 +731,9 @@ class DulwichWorkspaceManager:
             shared_artifacts_dir=run_path / "shared" / "artifacts",
             shared_reports_dir=run_path / "shared" / "reports",
             shared_locks_dir=run_path / "shared" / ".locks",
-            status=_read_json(run_path / "run_manifest.json", {}).get("status", "running"),
+            status=manifest.get("status", "running"),
             long_term_workspace_root=self.workspace_root,
+            code_mode=str(manifest.get("code_mode", "snapshot_copy")),
         )
 
     def agent_workspace_dir(self, run: RunWorkspace, agent_id: str) -> Path:
@@ -645,12 +758,52 @@ class DulwichWorkspaceManager:
         )
         return path
 
+    def _run_code_mode(self, run: RunWorkspace) -> str:
+        mode = getattr(run, "code_mode", "") or ""
+        if mode:
+            return str(mode)
+        data = _read_json(run.path / "run_manifest.json", {})
+        return str(data.get("code_mode", "snapshot_copy"))
+
+    def _run_code_source(self, run: RunWorkspace) -> Path:
+        if self._run_code_mode(run) == "project_reference":
+            return self.project_root
+        return run.integration_dir
+
+    def _run_code_target(self, run: RunWorkspace) -> Path:
+        if self._run_code_mode(run) == "project_reference":
+            return self.project_root
+        return run.integration_dir
+
+    def _checkout_scopes(self, write_scope: Optional[Sequence[str]]) -> List[str]:
+        return [str(s) for s in (write_scope or []) if str(s).strip()]
+
+    def _checkout_scope_allows(
+        self,
+        run: RunWorkspace,
+        path: str,
+        scopes: Sequence[str],
+    ) -> bool:
+        if self._run_code_mode(run) == "project_reference" and not scopes:
+            return False
+        return _scope_allows(path, scopes)
+
+    def _restore_checkout_framework_files(self, checkout: AgentCheckout) -> None:
+        """Keep framework-injected checkout files out of the agent changeset."""
+        for name in ("AGENTS.md",):
+            source = checkout.checkout_dir / name
+            if source.is_file():
+                target = checkout.base_dir / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+
     def checkout_agent(
         self,
         run: RunWorkspace,
         agent_id: str,
         *,
         write_scope: Optional[Sequence[str]] = None,
+        checkout_paths: Optional[Sequence[str]] = None,
         mode: str = "full",
     ) -> AgentCheckout:
         """Create or refresh a VCS-style private checkout for an agent."""
@@ -663,9 +816,23 @@ class DulwichWorkspaceManager:
         state_dir = private / "state"
         checkout_base_dir = state_dir / "base"
         state_dir.mkdir(parents=True, exist_ok=True)
-        scopes = [str(s) for s in (write_scope or [])]
-        _copy_project_tree(run.integration_dir, checkout_dir, include_scopes=scopes)
-        _copy_project_tree(run.integration_dir, checkout_base_dir, include_scopes=scopes)
+        scopes = _dedupe_scopes(
+            [
+                *self._checkout_scopes(write_scope),
+                *_checkout_paths_to_scopes(checkout_paths or []),
+            ]
+        )
+        source = self._run_code_source(run)
+        if self._run_code_mode(run) == "project_reference" and not scopes:
+            if checkout_dir.exists():
+                shutil.rmtree(checkout_dir)
+            if checkout_base_dir.exists():
+                shutil.rmtree(checkout_base_dir)
+            checkout_dir.mkdir(parents=True, exist_ok=True)
+            checkout_base_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            _copy_project_tree(source, checkout_dir, include_scopes=scopes)
+            _copy_project_tree(source, checkout_base_dir, include_scopes=scopes)
         checkout_id = f"co-{uuid.uuid4().hex[:12]}"
         base_ref = f"int-{run.run_id}-checkout"
         checkout = AgentCheckout(
@@ -690,6 +857,8 @@ class DulwichWorkspaceManager:
                 "checkout_id": checkout_id,
                 "base_ref": base_ref,
                 "write_scope": list(checkout.write_scope),
+                "code_mode": self._run_code_mode(run),
+                "code_source": str(source),
             },
         )
         return checkout
@@ -731,7 +900,9 @@ class DulwichWorkspaceManager:
         changeset_id = f"cs-{uuid.uuid4().hex[:12]}"
         allowed_scopes = list(checkout.write_scope)
         scope_violations = [
-            change.path for change in changes if not _scope_allows(change.path, allowed_scopes)
+            change.path
+            for change in changes
+            if not self._checkout_scope_allows(run, change.path, allowed_scopes)
         ]
         file_dicts = [change.to_dict() for change in changes]
         self._record_workspace_event(
@@ -785,7 +956,12 @@ class DulwichWorkspaceManager:
             integration_ref = f"int-{uuid.uuid4().hex[:12]}"
             if checkout.base_dir.exists():
                 shutil.rmtree(checkout.base_dir)
-            _copy_project_tree(run.integration_dir, checkout.base_dir, include_scopes=checkout.write_scope)
+            _copy_project_tree(
+                self._run_code_source(run),
+                checkout.base_dir,
+                include_scopes=checkout.write_scope,
+            )
+            self._restore_checkout_framework_files(checkout)
             checkout.base_ref = integration_ref
             data = checkout.to_dict()
             data["submitted_at"] = _utc_now()
@@ -842,8 +1018,21 @@ class DulwichWorkspaceManager:
             shutil.rmtree(checkout.checkout_dir)
         if checkout.base_dir.exists():
             shutil.rmtree(checkout.base_dir)
-        _copy_project_tree(run.integration_dir, checkout.checkout_dir, include_scopes=checkout.write_scope)
-        _copy_project_tree(run.integration_dir, checkout.base_dir, include_scopes=checkout.write_scope)
+        source = self._run_code_source(run)
+        framework_files: Dict[str, str] = {}
+        for name in ("AGENTS.md",):
+            existing = checkout.checkout_dir / name
+            if existing.is_file():
+                framework_files[name] = existing.read_text(encoding="utf-8")
+        if self._run_code_mode(run) == "project_reference" and not checkout.write_scope:
+            checkout.checkout_dir.mkdir(parents=True, exist_ok=True)
+            checkout.base_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            _copy_project_tree(source, checkout.checkout_dir, include_scopes=checkout.write_scope)
+            _copy_project_tree(source, checkout.base_dir, include_scopes=checkout.write_scope)
+        for name, text in framework_files.items():
+            _write_text(checkout.checkout_dir / name, text)
+            _write_text(checkout.base_dir / name, text)
         checkout.base_ref = f"int-{uuid.uuid4().hex[:12]}"
         data = checkout.to_dict()
         data["synced_at"] = _utc_now()
@@ -855,6 +1044,8 @@ class DulwichWorkspaceManager:
                 "agent_id": checkout.agent_id,
                 "checkout_id": checkout.checkout_id,
                 "base_ref": checkout.base_ref,
+                "code_mode": self._run_code_mode(run),
+                "code_source": str(source),
             },
         )
         return checkout
@@ -866,6 +1057,8 @@ class DulwichWorkspaceManager:
             "private_workspace": str(agent_private_dir) if agent_private_dir else None,
             "shared_workspace": str(shared_dir),
             "shared_code": str(run.integration_dir),
+            "code_mode": self._run_code_mode(run),
+            "project_code_root": str(self.project_root),
             "shared_artifacts": str(run.shared_artifacts_dir or (shared_dir / "artifacts")),
             "shared_reports": str(run.shared_reports_dir or (shared_dir / "reports")),
             "shared_manifest": str(shared_dir / "manifest.json"),
@@ -1452,7 +1645,7 @@ class DulwichWorkspaceManager:
     ) -> tuple[bool, Optional[bytes], Optional[Dict[str, Any]]]:
         rel = Path(change.path)
         base_file = checkout.base_dir / rel
-        current_file = run.integration_dir / rel
+        current_file = self._run_code_target(run) / rel
         checkout_file = checkout.checkout_dir / rel
 
         def conflict(reason: str, *, merge_preview: str = "", hint: str = "") -> Dict[str, Any]:
@@ -1520,7 +1713,7 @@ class DulwichWorkspaceManager:
         merged_bytes: Optional[bytes],
     ) -> None:
         rel = Path(change.path)
-        target = run.integration_dir / rel
+        target = self._run_code_target(run) / rel
         if merged_bytes is None:
             if target.exists():
                 target.unlink()

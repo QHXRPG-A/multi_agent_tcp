@@ -39,6 +39,7 @@ Primary design source:
 - Worker replies are reduced to framework-private utterance receipts instead of raw runtime facts.
 - Top Agent can inspect Agent utterance records through a dedicated `top_agent.utterances` / `runtime top-agent-utterances` interface.
 - Ordinary Agent baseline rule/skill now states that final CLI replies are not an Agent-to-Agent communication channel; durable information must go through framework APIs.
+- Private-Agent workspaces now use the `project_reference` three-zone model by default: project directory as code authority/final target, private checkout as on-demand workbench, temporary shared workspace as reports/artifacts/changeset-reference space.
 
 ## Active Priorities
 
@@ -47,7 +48,7 @@ Primary design source:
 3. Continue tightening AgentNode startup context so ordinary Agents see the correct baseline rule/skill/tool contract and no top-agent-only inspection APIs.
 4. Continue hardening status explanation and event summaries for GuLiCode/top Agent and UI.
 5. Connect GuLiCode desktop UI to runtime/control-plane state without duplicating scheduling semantics.
-6. Keep workspace/archive behavior aligned with framework-owned changeset, conflict, report, and artifact records.
+6. Keep workspace/archive behavior aligned with the `project_reference` three-zone model and framework-owned changeset, conflict, report, artifact, and reference records.
 7. Surface utterance records in future UI only as a top-agent/operator audit view, not as Agent-to-Agent message context.
 
 ## Deferred / Secondary Tracks

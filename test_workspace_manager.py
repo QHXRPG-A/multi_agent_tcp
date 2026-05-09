@@ -62,6 +62,86 @@ def test_custom_long_term_workspace_inside_project_is_readonly_and_not_snapshott
     assert manager.is_agent_path_writable(job, tmp_path / ".agent_shared" / "notes.md") is False
 
 
+def test_run_snapshot_excludes_generated_dependency_trees(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    _write(tmp_path / "node_modules" / "pkg" / "index.js", "generated\n")
+    _write(tmp_path / ".next" / "cache" / "page.js", "generated\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+
+    run = manager.create_run(run_id="run-small-snapshot")
+
+    assert (run.base_dir / "src" / "a.txt").is_file()
+    assert not (run.base_dir / "node_modules").exists()
+    assert not (run.base_dir / ".next").exists()
+    assert not (run.integration_dir / "node_modules").exists()
+    assert not (run.integration_dir / ".next").exists()
+
+
+def test_run_snapshot_scope_limits_base_and_integration(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    _write(tmp_path / "docs" / "note.md", "docs\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+
+    run = manager.create_run(run_id="run-scoped-snapshot", snapshot_scope=["src/**"])
+    manifest = json.loads((run.path / "run_manifest.json").read_text(encoding="utf-8"))
+
+    assert (run.base_dir / "src" / "a.txt").is_file()
+    assert not (run.base_dir / "docs" / "note.md").exists()
+    assert (run.integration_dir / "src" / "a.txt").is_file()
+    assert not (run.integration_dir / "docs" / "note.md").exists()
+    assert manifest["snapshot_scope"] == ["src/**"]
+
+
+def test_project_reference_run_does_not_copy_project_code_to_shared_code(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    _write(tmp_path / "docs" / "note.md", "docs\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+
+    run = manager.create_run(run_id="run-reference", code_mode="project_reference")
+    manifest = json.loads((run.path / "run_manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["code_mode"] == "project_reference"
+    assert not (run.base_dir / "src" / "a.txt").exists()
+    assert not (run.integration_dir / "src" / "a.txt").exists()
+    assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "base\n"
+
+
+def test_project_reference_checkout_fetches_specific_paths_and_submits_to_project(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    _write(tmp_path / "src" / "b.txt", "base b\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-reference-submit", code_mode="project_reference")
+
+    checkout = manager.checkout_agent(run, "agent-a", checkout_paths=["src/a.txt"])
+
+    assert (checkout.checkout_dir / "src" / "a.txt").read_text(encoding="utf-8") == "base\n"
+    assert not (checkout.checkout_dir / "src" / "b.txt").exists()
+    _write(checkout.checkout_dir / "src" / "a.txt", "changed\n")
+    result = manager.submit_checkout(run, checkout, task_id="task-1")
+
+    assert result.ok is True
+    assert result.merged_files == ["src/a.txt"]
+    assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "changed\n"
+    assert not (run.integration_dir / "src" / "a.txt").exists()
+
+
+def test_project_reference_empty_scope_checkout_stays_empty_and_rejects_changes(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-reference-empty", code_mode="project_reference")
+
+    checkout = manager.checkout_agent(run, "agent-a")
+    assert not any(checkout.checkout_dir.iterdir())
+
+    _write(checkout.checkout_dir / "src" / "a.txt", "changed\n")
+    result = manager.submit_checkout(run, checkout)
+
+    assert result.ok is False
+    assert result.status == "rejected"
+    assert result.scope_violations == ["src/a.txt"]
+    assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "base\n"
+
+
 def test_run_has_private_scratch_and_shared_outcome_space(tmp_path: Path) -> None:
     _write(tmp_path / "src" / "a.txt", "base\n")
     manager = DulwichWorkspaceManager.open_or_init(tmp_path)

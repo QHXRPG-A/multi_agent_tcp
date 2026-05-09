@@ -25,7 +25,7 @@ The current communication model is summarized in the main overview diagram:
 
 ![Agents collaboration and workspace flow](docs/diagrams/agents_collaboration_workspace_flow.svg)
 
-中文注释：这张图把协作拆成三层：上层是用户、总控 Agent 和框架调度；中层是普通 Agent 的任务执行与汇总；下层是私有工作区、临时共享工作区和长期归档。普通 Agent 只在自己的私有工作区修改内容，通过框架提交消息意图、代码变更、报告和产物；框架负责校验、合并、排队、汇总和归档。
+中文注释：这张图把协作拆成三层：上层是用户、总控 Agent 和框架调度；中层是多个普通 AgentNode 并行处理子任务，并通过框架消息和共享引用协作；下层是工程目录、Agent 私有区、临时共享区、changeset 管道和长期归档。当前 `project_reference` 模式下，工程目录是代码权威源和最终代码目标，run 启动不再整体复制工程代码到 `shared/code`；Agent 私有区只按需 `checkout --path` / `--scope-path` 物化任务相关文件；临时共享区只保存报告、产物、manifest 和 changeset 引用，不承载工程代码副本。
 
 More focused diagrams live in [`docs/diagrams/multi_agents_communication/`](docs/diagrams/multi_agents_communication/):
 

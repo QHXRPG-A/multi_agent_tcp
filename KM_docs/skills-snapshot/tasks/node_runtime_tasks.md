@@ -219,9 +219,14 @@ The file/snapshot VCS-style workspace MVP is now implemented and tested in the c
 Completed:
 
 - `checkout/status/diff/submit/sync` exist at manager, RPC, and CLI levels.
-- Agent checkouts are scoped and copied from current `run.integration_dir`.
+- Agent private checkouts are now compatible with two code modes:
+  - legacy `snapshot_copy`, copied from current `run.integration_dir`;
+  - active `project_reference`, fetched on demand from the project directory.
+- `workspace_api checkout --path <relative-file-or-dir>` supports focused task-level materialization; `--scope-path` remains available for broader scopes.
+- In `project_reference`, empty scope no longer means full-project checkout/write access; it starts empty and rejects out-of-scope submit changes.
 - Each checkout keeps its own base snapshot under `agents/<agent_id>/private/state/base`.
-- Submit compares checkout base, latest integration, and agent checkout to decide accept/conflict.
+- Submit compares checkout base, current code target, and agent checkout to decide accept/conflict.
+- In `project_reference`, accepted changes write back to the project directory; temporary shared workspace records changeset/conflict metadata rather than serving as code integration storage.
 - Conflict responses are structured and preserved over RPC.
 - The conflict repair loop is tested end to end.
 - Text merge uses Dulwich `merge_blobs()` when available and falls back to conservative conflict behavior otherwise.
@@ -229,8 +234,8 @@ Completed:
 
 Next runtime tasks:
 
-1. Inject the VCS code-collaboration contract into AgentNode prompts and execution context.
-2. Prefer `checkout -> edit -> status/diff -> submit` for source edits; keep `publish` for reports/artifacts and non-source outputs.
+1. Continue reducing remaining legacy `integration_dir` / `shared_code` wording in status surfaces and docs by using the code-source/code-target abstraction.
+2. Prefer `checkout --path -> edit -> status/diff -> submit` for source edits; keep `publish` for reports/artifacts, summaries, references, and non-source outputs.
 3. Launch strict agents with project context read-only and private checkout writable.
 4. Attach changeset ids, conflict ids, test results, and repair attempts to `TaskCompleted` / final blueprint reports.
 5. Surface `CheckoutCreated`, `ChangesetSubmitted`, `ChangesetAccepted`, `ConflictDetected`, `CheckoutSynced`, and `WorkspaceChanged` in the UI/runtime event stream.

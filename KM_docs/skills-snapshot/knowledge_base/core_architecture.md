@@ -41,6 +41,7 @@ The old low-level TCP worker path remains valid as an execution backend. It is n
 - Complete outgoing batches enter downstream Agent queues instead of directly invoking worker processes.
 - Fan-in joins aggregate contributions, changesets, conflicts, artifacts, reports, tests, and source statuses before queueing a `join_aggregate` envelope.
 - Workspace writes should flow through controlled workspace APIs and changeset submission, not uncontrolled shared-path writes.
+- The active private-Agent workspace model is `project_reference`: the project directory is the authoritative code source and final code target; Agent private checkouts materialize only task-relevant files via `checkout --path` / `--scope-path`; the temporary shared workspace stores reports, artifacts, manifests, changeset references, and conflict records rather than project code copies. Legacy `snapshot_copy` remains for old job/worktree compatibility.
 - Worker process replies are not treated as framework facts. `GraphRuntime` extracts a framework-private minimal Agent utterance record (`who`, `said`, `received_at`, `task_id` / `message_id`) and discards raw adapter payloads for runtime semantics.
 - Top Agent may inspect Agent utterance records through the dedicated `top_agent.utterances` / `runtime top-agent-utterances` control-plane interface when its profile has the `utterances` permission.
 - Ordinary Agents do not receive utterance records or the utterance inspection interface through `framework_context`; downstream communication still requires `agent.dispatch`.
