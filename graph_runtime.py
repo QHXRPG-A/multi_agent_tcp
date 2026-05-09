@@ -35,7 +35,7 @@ _VALID_EXECUTION_MODES = {"blocking", "nonblocking"}
 _VALID_ROUTE_KINDS = {"sequence", "parallel", "parallel_reduce"}
 _VALID_SKILL_SELECTION_MODES = {"none", "all", "selected", "upstream"}
 _VALID_BLUEPRINT_TERMINAL_KINDS = {"start", "end"}
-_VALID_TOP_AGENT_RUN_PERMISSIONS = {"ask", "start", "status", "end"}
+_VALID_TOP_AGENT_RUN_PERMISSIONS = {"ask", "start", "status", "end", "utterances"}
 _VALID_JOIN_POLICIES = {"wait-all", "wait-any", "quorum"}
 _VALID_RUN_END_ACTIONS = {"complete", "cancel", "fail", "pause", "archive_only"}
 _AGENT_CAN_ACCEPT_STATES = {"idle", "queued"}
@@ -164,6 +164,33 @@ class GraphEvent:
             data["status"] = self.status
         if self.payload:
             data["payload"] = dict(self.payload)
+        return data
+
+
+@dataclass
+class AgentUtterance:
+    """Framework-private minimal record extracted from a worker reply."""
+
+    utterance_id: str
+    agent_id: str
+    node_id: str
+    said: str
+    received_at: float
+    task_id: Optional[str] = None
+    message_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "utterance_id": self.utterance_id,
+            "agent_id": self.agent_id,
+            "node_id": self.node_id,
+            "said": self.said,
+            "received_at": self.received_at,
+        }
+        if self.task_id is not None:
+            data["task_id"] = self.task_id
+        if self.message_id is not None:
+            data["message_id"] = self.message_id
         return data
 
 
@@ -408,6 +435,7 @@ class AgentNode:
     cwd: Path = Path(".")
     skills: List[str] = field(default_factory=list)
     skill_selection: AgentSkillSelection = field(default_factory=AgentSkillSelection)
+    rule_paths: List[str] = field(default_factory=list)
     timeout_sec: float = 1800.0
     prompt_via_file: str = "auto"
     command: str = "codemaker"
@@ -436,6 +464,7 @@ class AgentNode:
             )
         if not self.skills and self.skill_selection.mode == "selected":
             self.skills = list(self.skill_selection.skill_hashes)
+        self.rule_paths = [str(path).strip() for path in self.rule_paths if str(path).strip()]
         self.cwd = Path(self.cwd).expanduser()
         if self.workspace_root is not None:
             self.workspace_root = Path(self.workspace_root).expanduser()
@@ -480,6 +509,7 @@ class AgentNode:
             "cwd": str(self.cwd),
             "skills": list(self.skills),
             "skill_selection": self.skill_selection.to_dict(),
+            "rule_paths": list(self.rule_paths),
             "timeout_sec": self.timeout_sec,
             "prompt_via_file": self.prompt_via_file,
             "command": self.command,
@@ -530,6 +560,7 @@ class AgentNode:
             cwd=Path(str(raw_cwd)).expanduser(),
             skills=[str(s) for s in skills],
             skill_selection=skill_selection,
+            rule_paths=[str(s) for s in data.get("rule_paths", [])],
             timeout_sec=float(data.get("timeout_sec", 1800.0)),
             prompt_via_file=str(data.get("prompt_via_file", "auto")),
             command=str(data.get("command", "codemaker")),
@@ -711,7 +742,7 @@ class GuLiCodeTopAgentProfile:
     extra_env: Dict[str, str] = field(default_factory=dict)
     external: bool = False
     allowed_run_permissions: List[TopAgentRunPermission] = field(
-        default_factory=lambda: ["ask", "start", "status", "end"]
+        default_factory=lambda: ["ask", "start", "status", "end", "utterances"]
     )
     rule: Optional[str] = None
     skill: Optional[str] = None
@@ -753,7 +784,7 @@ class GuLiCodeTopAgentProfile:
         permissions = (
             [str(item) for item in raw_permissions]
             if raw_permissions is not None
-            else ["ask", "start", "status", "end"]
+            else ["ask", "start", "status", "end", "utterances"]
         )
         return cls(
             agent_id=str(data.get("agent_id", "gulicode")),
@@ -830,6 +861,8 @@ class GuLiCodeTopAgentProfile:
                 "- Each task must include goal, expected_output, and acceptance.",
                 "- Do not ask ordinary agents to bypass framework workspace, VCS, or message APIs.",
                 "- Do not expose private scratch paths, real skill-space paths, tokens, or RPC internals to ordinary agents.",
+                "- You may read framework-private Agent utterance records through the dedicated top-agent interface, but do not forward those records into ordinary Agent messages unless the user explicitly asks for a human-facing summary.",
+                "- Treat worker reply utterances as private observability records, not as proof of submitted work.",
                 "- Explain failures, conflicts, timeouts, or missing permissions instead of pretending success.",
                 "- Request end/cancel/pause through the framework; final state aggregation belongs to the framework.",
             ]
@@ -846,8 +879,10 @@ class GuLiCodeTopAgentProfile:
                 "- Start plan: submit user_goal, agent_descriptions, start_nodes, tasks, and run_policy.",
                 "- Status: read runtime events, agent states, queues, jobs, changesets, conflicts, artifacts, and reports.",
                 "- Status explanation: use framework status summaries and recent events; do not infer hidden progress.",
+                "- Utterance records: use the dedicated top-agent utterance interface to inspect who said what, when, and for which task/message.",
                 "- Messaging: ordinary AgentNode communication is staged, validated, and queued by the framework.",
                 "- Ordinary agents receive a per-message framework_context containing outgoing_batch_id, required_outgoing_targets, remaining_targets, scoped organization, and agent.dispatch usage.",
+                "- Ordinary Agent worker replies are framework-private utterance records and are not automatically passed to other Agents.",
                 "- Workspace: source edits use checkout/status/diff/submit/sync; reports and artifacts use publish APIs.",
                 "- End control: request complete, cancel, fail, pause, or archive_only; unresolved work remains visible.",
             ]
@@ -1003,10 +1038,10 @@ class PendingAgentMessage:
     dispatched_at: Optional[float] = None
     completed_at: Optional[float] = None
     status: str = "queued"
-    result: Any = None
+    receipt: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, *, include_receipt: bool = False) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "message_id": self.message_id,
             "node_id": self.node_id,
@@ -1025,8 +1060,10 @@ class PendingAgentMessage:
             data["dispatched_at"] = self.dispatched_at
         if self.completed_at is not None:
             data["completed_at"] = self.completed_at
-        if self.result is not None:
-            data["result"] = self.result
+        if include_receipt and self.receipt is not None:
+            data["receipt"] = dict(self.receipt)
+        elif self.receipt is not None:
+            data["utterance_id"] = self.receipt.get("utterance_id")
         if self.error is not None:
             data["error"] = self.error
         return data
@@ -1346,16 +1383,29 @@ class GraphRuntime:
         workspace: Optional[WorkspaceManifest] = None,
         archive_manager: Any = None,
         archive_run: Any = None,
+        enforce_private_agent_context: bool = False,
+        private_context_manager: Any = None,
+        private_context_run: Any = None,
+        private_context_rpc_server: Any = None,
+        skill_space: Any = None,
         tick_interval_sec: float = 0.5,
     ) -> None:
         self.cluster = cluster
         self.workspace = workspace
         self.archive_manager = archive_manager
         self.archive_run = archive_run
+        self.enforce_private_agent_context = bool(enforce_private_agent_context)
+        self.private_context_manager = private_context_manager
+        self.private_context_run = private_context_run
+        self.private_context_rpc_server = private_context_rpc_server
+        self.skill_space = skill_space
         self.tick_interval_sec = float(tick_interval_sec)
         self._instances: Dict[str, AgentInstance] = {}
+        self._launch_nodes: Dict[str, AgentNode] = {}
         self._agent_message_queues: Dict[str, List[PendingAgentMessage]] = {}
         self._pending_messages: Dict[str, PendingAgentMessage] = {}
+        self._agent_utterances: Dict[str, AgentUtterance] = {}
+        self._utterances_by_task: Dict[str, List[str]] = {}
         self._outgoing_batches: Dict[str, OutgoingMessageBatch] = {}
         self._join_barriers: Dict[str, JoinBarrier] = {}
         self._join_target_nodes: Dict[str, AgentNode] = {}
@@ -1372,6 +1422,55 @@ class GraphRuntime:
         self._run_manifest: Dict[str, Any] = {}
         self._closed = False
 
+    def _ensure_private_context_runtime(self, node: AgentNode) -> None:
+        if not self.enforce_private_agent_context:
+            return
+        if self.private_context_manager is not None and self.private_context_run is not None:
+            if self.private_context_rpc_server is None:
+                from .workspace_rpc import WorkspaceRPCServer
+
+                self.private_context_rpc_server = WorkspaceRPCServer(
+                    self.private_context_manager,
+                    self.private_context_run,
+                )
+                self.private_context_rpc_server.start()
+            return
+
+        from .workspace_manager import DulwichWorkspaceManager
+        from .workspace_rpc import WorkspaceRPCServer
+
+        raw_cwd = Path(node.cwd).expanduser()
+        project_root = raw_cwd if raw_cwd.is_absolute() else Path.cwd() / raw_cwd
+        project_root = project_root.resolve()
+        if not project_root.is_dir():
+            raise FileNotFoundError(f"private agent context project root is not a directory: {project_root}")
+        self.private_context_manager = DulwichWorkspaceManager.open_or_init(project_root)
+        self.private_context_run = self.private_context_manager.create_run()
+        self.private_context_rpc_server = WorkspaceRPCServer(
+            self.private_context_manager,
+            self.private_context_run,
+        )
+        self.private_context_rpc_server.start()
+
+    def _node_for_launch(self, node: AgentNode) -> AgentNode:
+        if not self.enforce_private_agent_context or node.external:
+            return node
+        cached = self._launch_nodes.get(node.node_id)
+        if cached is not None:
+            return cached
+        self._ensure_private_context_runtime(node)
+        from .agent_launch_context import materialize_private_agent_context
+
+        launch_node = materialize_private_agent_context(
+            node,
+            manager=self.private_context_manager,
+            run=self.private_context_run,
+            rpc_server=self.private_context_rpc_server,
+            skill_space=self.skill_space,
+        )
+        self._launch_nodes[node.node_id] = launch_node
+        return launch_node
+
     @property
     def instances(self) -> Dict[str, AgentInstance]:
         return dict(self._instances)
@@ -1387,6 +1486,22 @@ class GraphRuntime:
     @property
     def pending_messages(self) -> Dict[str, PendingAgentMessage]:
         return dict(self._pending_messages)
+
+    @property
+    def agent_utterances(self) -> Dict[str, AgentUtterance]:
+        return dict(self._agent_utterances)
+
+    def private_agent_utterances(
+        self,
+        *,
+        task_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return framework-private worker reply utterances for audit/UI owners."""
+
+        if task_id is not None:
+            ids = self._utterances_by_task.get(str(task_id), [])
+            return [self._agent_utterances[item].to_dict() for item in ids]
+        return [utterance.to_dict() for utterance in self._agent_utterances.values()]
 
     @property
     def outgoing_batches(self) -> Dict[str, OutgoingMessageBatch]:
@@ -1407,6 +1522,67 @@ class GraphRuntime:
     def _emit(self, event: GraphEvent) -> GraphEvent:
         self._events.append(event)
         return event
+
+    def _extract_agent_said(self, reply: Any) -> str:
+        if isinstance(reply, dict):
+            body = reply.get("body")
+            if isinstance(body, dict):
+                codex = body.get("codex")
+                if isinstance(codex, dict):
+                    for key in ("final_text", "last_message"):
+                        value = codex.get(key)
+                        if isinstance(value, str) and value.strip():
+                            return value.strip()
+                for key in ("final_text", "message", "text", "answer", "content"):
+                    value = body.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+                if body:
+                    return json.dumps(body, ensure_ascii=False, default=str)
+            if isinstance(body, str) and body.strip():
+                return body.strip()
+        if isinstance(reply, str):
+            return reply.strip()
+        return ""
+
+    def _record_agent_utterance(
+        self,
+        *,
+        node_id: str,
+        agent_id: str,
+        reply: Any,
+        message_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+    ) -> AgentUtterance:
+        utterance = AgentUtterance(
+            utterance_id=f"utt-{uuid.uuid4().hex[:12]}",
+            agent_id=agent_id,
+            node_id=node_id,
+            said=self._extract_agent_said(reply),
+            received_at=time.monotonic(),
+            task_id=task_id,
+            message_id=message_id,
+        )
+        self._agent_utterances[utterance.utterance_id] = utterance
+        if task_id:
+            self._utterances_by_task.setdefault(task_id, []).append(utterance.utterance_id)
+        return utterance
+
+    def _task_id_from_body(self, body: Any, *, message_id: Optional[str]) -> Optional[str]:
+        if isinstance(body, dict):
+            for key in ("task_id", "job_id", "run_task_id"):
+                value = body.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            task = body.get("task")
+            if isinstance(task, dict):
+                for key in ("task_id", "id"):
+                    value = task.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+        if isinstance(message_id, str) and message_id.startswith("job-"):
+            return message_id
+        return None
 
     def _mark_run_running(self) -> None:
         if self._run_status in {"created", "paused"}:
@@ -1808,7 +1984,7 @@ class GraphRuntime:
         )
         node = self._instances[pending.node_id].node
         try:
-            pending.result = await self._dispatch_agent_message(
+            pending.receipt = await self._dispatch_agent_message(
                 node,
                 pending.body,
                 timeout_sec=pending.timeout_sec,
@@ -2421,6 +2597,7 @@ class GraphRuntime:
         if node.node_id in self._instances:
             return self._instances[node.node_id]
 
+        node = self._node_for_launch(node)
         agent_id = node.runtime_agent_id
         inst = AgentInstance(
             node=node,
@@ -2733,7 +2910,7 @@ class GraphRuntime:
         pending: PendingAgentMessage,
     ) -> None:
         try:
-            pending.result = await self._dispatch_agent_message(
+            pending.receipt = await self._dispatch_agent_message(
                 node,
                 pending.body,
                 timeout_sec=pending.timeout_sec,
@@ -2791,7 +2968,15 @@ class GraphRuntime:
             inst.busy_count = max(0, inst.busy_count - 1)
         inst.messages_sent += 1
         self._set_agent_state(inst, "idle")
-        return reply
+        task_id = self._task_id_from_body(body, message_id=message_id)
+        utterance = self._record_agent_utterance(
+            node_id=node.node_id,
+            agent_id=inst.agent_id,
+            reply=reply,
+            message_id=message_id,
+            task_id=task_id,
+        )
+        return utterance.to_dict()
 
     async def submit_agent_job(
         self,
@@ -2861,7 +3046,7 @@ class GraphRuntime:
             )
         )
         try:
-            reply = await self._dispatch_agent_message(
+            receipt = await self._dispatch_agent_message(
                 node,
                 body,
                 timeout_sec=timeout_sec,
@@ -2904,7 +3089,7 @@ class GraphRuntime:
         if inst is not None:
             inst.messages_sent += 1
         if self.workspace is not None:
-            self.workspace.update_job(job.job_id, status=job.status, result=reply)
+            self.workspace.update_job(job.job_id, status=job.status, result=receipt)
         self._emit(
             GraphEvent(
                 "TaskCompleted",
@@ -2912,7 +3097,7 @@ class GraphRuntime:
                 node_id=job.node_id,
                 agent_id=job.agent_id,
                 status=job.status,
-                payload={"result": reply},
+                payload={"receipt": receipt},
             )
         )
         self._job_tasks.pop(job.job_id, None)
@@ -2994,6 +3179,13 @@ class GraphRuntime:
         for inst in self._instances.values():
             self._set_agent_state(inst, "stopped")
         self._instances.clear()
+        self._launch_nodes.clear()
+        rpc_server = self.private_context_rpc_server
+        if rpc_server is not None and self.enforce_private_agent_context:
+            close = getattr(rpc_server, "close", None)
+            if callable(close):
+                close()
+            self.private_context_rpc_server = None
         self._closed = True
 
     async def __aenter__(self) -> "GraphRuntime":
@@ -3187,6 +3379,7 @@ class GraphDefinition:
                 "execution_mode": node.execution_mode,
                 "skill_selection": node.skill_selection.to_dict(),
                 "skills": list(node.skills),
+                "rule_paths": list(node.rule_paths),
                 "read_scope": list(node.read_scope),
                 "write_scope": list(node.write_scope),
                 "artifact_scope": list(node.artifact_scope),
@@ -3480,7 +3673,7 @@ class GraphExecutor:
                     pending = await self.runtime.dispatch_queued_message_now(
                         barrier.aggregate_message_id
                     )
-                    reply = pending.result
+                    reply = pending.receipt
                 else:
                     reply = await self.runtime.send_agent_message(node, body)
                 last_reply = reply

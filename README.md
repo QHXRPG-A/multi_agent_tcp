@@ -21,6 +21,12 @@ The current communication model is summarized in the main overview diagram:
 
 ![Multi-agent communication overview](docs/diagrams/multi_agents_communication/01_overview.svg)
 
+### Agents 协同与工作区流转
+
+![Agents collaboration and workspace flow](docs/diagrams/agents_collaboration_workspace_flow.svg)
+
+中文注释：这张图把协作拆成三层：上层是用户、总控 Agent 和框架调度；中层是普通 Agent 的任务执行与汇总；下层是私有工作区、临时共享工作区和长期归档。普通 Agent 只在自己的私有工作区修改内容，通过框架提交消息意图、代码变更、报告和产物；框架负责校验、合并、排队、汇总和归档。
+
 More focused diagrams live in [`docs/diagrams/multi_agents_communication/`](docs/diagrams/multi_agents_communication/):
 
 - [One-to-many outgoing batch dispatch](docs/diagrams/multi_agents_communication/02_fanout_dispatch.svg)
@@ -66,3 +72,4 @@ See [`examples/HOWTO.txt`](examples/HOWTO.txt) for low-level setup and [`GUIDE_F
 | [`examples/HOWTO.txt`](examples/HOWTO.txt) | Low-level: `broker` / `agent` / `spawn` / orchestrate recipes / library API. |
 | [`KM_docs/`](KM_docs/) | Design notes (multi-CLI brainstorm, vendored Ryven editor analysis, etc.). |
 | [`codemaker_cli.md`](codemaker_cli.md) | (Local-only, gitignored) CodeMaker CLI reference notes. |
+

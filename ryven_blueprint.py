@@ -19,14 +19,17 @@ from .graph_runtime import (
     GraphExecutor,
     GraphRuntime,
 )
-from .codex_bridge import validate_codex_launch_safety
+from .agent_launch_context import (
+    WORKSPACE_API_CONTEXT_ENV,
+    materialize_private_agent_context,
+    workspace_api_doc,
+)
 from .workspace_manager import DulwichWorkspaceManager, RunWorkspace
 from .workspace_rpc import WorkspaceRPCServer
 
 
 BLUEPRINT_START_NODE_ID = "blueprint-start"
 BLUEPRINT_END_NODE_ID = "blueprint-end"
-WORKSPACE_API_CONTEXT_ENV = "MULTI_AGENT_WORKSPACE_CONTEXT"
 
 _START_POS = (180.0, 260.0)
 _END_POS = (760.0, 260.0)
@@ -102,14 +105,7 @@ def _set_visual_status(flow: Any, node_id: str, status: str, payload: Optional[d
 
 
 def _workspace_api_doc() -> str:
-    doc_path = Path(__file__).resolve().parent / "docs" / "workspace_api.md"
-    if not doc_path.is_file():
-        return (
-            "# Workspace API for Blueprint Agents\n\n"
-            "Publish outputs with `python -m multi_agent_tcp.workspace_api publish "
-            "--area <artifacts|reports> --path <relative-path> --stdin`."
-        )
-    return doc_path.read_text(encoding="utf-8")
+    return workspace_api_doc()
 
 
 def _resolve_agent_workdir(raw_cwd: Path, project_root: Path) -> Path:
@@ -132,86 +128,12 @@ def _apply_run_workspace_to_node(
     private_dir: Path,
     rpc_server: WorkspaceRPCServer,
 ) -> RuntimeAgentNode:
-    project_context = _resolve_agent_workdir(node.cwd, manager.project_root)
-    checkout = manager.checkout_agent(
-        run,
-        node.runtime_agent_id,
-        write_scope=node.write_scope,
+    return materialize_private_agent_context(
+        node,
+        manager=manager,
+        run=run,
+        rpc_server=rpc_server,
     )
-    data = node.to_dict()
-    data["cwd"] = str(checkout.checkout_dir)
-    data["workspace_id"] = run.run_id
-    data["read_scope"] = list(node.read_scope)
-    data["write_scope"] = list(node.write_scope)
-    data["artifact_scope"] = list(node.artifact_scope)
-
-    api_context_path = private_dir / "workspace_api_context.json"
-    api_context_path.write_text(
-        json.dumps(rpc_server.context_for(node.runtime_agent_id), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    preamble = (
-        "You are running inside a visual blueprint run. The real project "
-        "directory is read-only context; do not write code changes directly "
-        "there. Your writable code workspace is the private checkout at the "
-        "current working directory. Publish reports/artifacts through the "
-        "Workspace API in the run scope, and submit code changes with "
-        "`python -m multi_agent_tcp.workspace_api submit` after editing the "
-        "private checkout. Use list-archives/extract-archive to inspect "
-        "archived run outputs.\n\n"
-        f"{_workspace_api_doc()}"
-    )
-    adapter_options = dict(data.get("adapter_options", {}))
-    if node.cli_kind == "codex" and not adapter_options.get("sandbox"):
-        adapter_options["sandbox"] = "workspace-write"
-    if node.cli_kind == "codex":
-        extra_args = adapter_options.get("extra_args", [])
-        if not isinstance(extra_args, list) or not all(isinstance(x, str) for x in extra_args):
-            raise ValueError("Codex AgentNode adapter_options.extra_args must be a list of strings")
-        validate_codex_launch_safety(
-            cwd=checkout.checkout_dir,
-            sandbox=adapter_options.get("sandbox"),
-            extra_args=[str(x) for x in extra_args],
-            protected_readonly_roots=[project_context],
-        )
-    existing = adapter_options.get("prompt_preamble")
-    if isinstance(existing, str) and existing.strip():
-        adapter_options["prompt_preamble"] = f"{existing.strip()}\n\n{preamble}"
-    else:
-        adapter_options["prompt_preamble"] = preamble
-    execution_context = dict(adapter_options.get("execution_context", {}))
-    execution_context["workspace_api"] = {
-        "command": "python -m multi_agent_tcp.workspace_api",
-        "context_env": WORKSPACE_API_CONTEXT_ENV,
-        "areas": ["artifacts", "reports"],
-        "transport": "rpc",
-        "rpc_url": rpc_server.url,
-    }
-    execution_context["code_workspace"] = {
-        "mode": "vcs_checkout",
-        "project_context": str(project_context),
-        "integration_dir": str(run.integration_dir),
-        "checkout_path": str(checkout.checkout_dir),
-        "checkout_id": checkout.checkout_id,
-        "base_ref": checkout.base_ref,
-        "write_scope": list(checkout.write_scope),
-        "submit_command": "python -m multi_agent_tcp.workspace_api submit",
-    }
-    execution_context["workspace_scopes"] = ["run"]
-    adapter_options["execution_context"] = execution_context
-    adapter_options.setdefault("codex_home", str(private_dir / "codex_home"))
-    data["adapter_options"] = adapter_options
-    extra_env = {str(k): str(v) for k, v in dict(data.get("extra_env", {})).items()}
-    extra_env[WORKSPACE_API_CONTEXT_ENV] = str(api_context_path)
-    package_parent = str(Path(__file__).resolve().parent.parent)
-    existing_pythonpath = extra_env.get("PYTHONPATH") or os.environ.get("PYTHONPATH")
-    extra_env["PYTHONPATH"] = (
-        f"{package_parent}{os.pathsep}{existing_pythonpath}"
-        if existing_pythonpath
-        else package_parent
-    )
-    data["extra_env"] = extra_env
-    return RuntimeAgentNode.from_dict(data)
 
 
 class BlueprintRunController:

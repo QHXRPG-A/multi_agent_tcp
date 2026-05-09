@@ -604,6 +604,13 @@ def _cmd_runtime(args: argparse.Namespace) -> None:
             "include_status": not args.no_status,
             "recent_events_limit": args.recent_events_limit,
         }
+    elif command == "top-agent-utterances":
+        rpc_command = "top_agent.utterances"
+        rpc_args = {
+            "task_id": args.task_id,
+            "agent_id": args.agent_id,
+            "node_id": args.node_id,
+        }
     elif command == "end":
         rpc_command = "run.end"
         rpc_args = {"action": args.action, "reason": args.reason, "archive": args.archive}
@@ -1101,6 +1108,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     p_top_ask.add_argument("--prompt", required=True)
     p_top_ask.add_argument("--no-status", action="store_true", help="omit status explanation context")
     p_top_ask.add_argument("--recent-events-limit", type=int, default=20)
+
+    p_top_utterances = runtime_sub.add_parser(
+        "top-agent-utterances",
+        help="read framework-private Agent utterance records for the top-level agent",
+    )
+    _add_runtime_rpc_args(p_top_utterances)
+    p_top_utterances.add_argument("--task-id")
+    p_top_utterances.add_argument("--agent-id")
+    p_top_utterances.add_argument("--node-id")
 
     p_rt_end = runtime_sub.add_parser("end", help="end, pause, cancel, fail, or archive a run")
     _add_runtime_rpc_args(p_rt_end)

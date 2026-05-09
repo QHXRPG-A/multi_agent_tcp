@@ -327,6 +327,25 @@ class GraphRuntimeControlPlane:
                 },
             ).to_dict()
 
+        if command == "top_agent.utterances":
+            return self.top_agent_utterances(
+                task_id=(
+                    str(args["task_id"])
+                    if args.get("task_id") is not None
+                    else None
+                ),
+                agent_id=(
+                    str(args["agent_id"])
+                    if args.get("agent_id") is not None
+                    else None
+                ),
+                node_id=(
+                    str(args["node_id"])
+                    if args.get("node_id") is not None
+                    else None
+                ),
+            )
+
         if command == "run.validate_start":
             plan = TopAgentStartPlan.from_dict(dict(args.get("plan", args)))
             return self.top_agent.validate_start_plan(self.graph, plan).to_dict()
@@ -592,6 +611,40 @@ class GraphRuntimeControlPlane:
                     "agent_id": self.top_agent.agent_id,
                 },
                 "reply": reply,
+            },
+        ).to_dict()
+
+    def top_agent_utterances(
+        self,
+        *,
+        task_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        node_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if "utterances" not in self.top_agent.allowed_run_permissions:
+            raise PermissionError(
+                f"top agent {self.top_agent.agent_id!r} is not allowed to read Agent utterances"
+            )
+        utterances = self.runtime.private_agent_utterances(task_id=task_id)
+        if agent_id is not None:
+            utterances = [
+                item for item in utterances
+                if str(item.get("agent_id")) == agent_id
+            ]
+        if node_id is not None:
+            utterances = [
+                item for item in utterances
+                if str(item.get("node_id")) == node_id
+            ]
+        return GraphControlResponse(
+            True,
+            {
+                "utterances": utterances,
+                "filters": {
+                    "task_id": task_id,
+                    "agent_id": agent_id,
+                    "node_id": node_id,
+                },
             },
         ).to_dict()
 

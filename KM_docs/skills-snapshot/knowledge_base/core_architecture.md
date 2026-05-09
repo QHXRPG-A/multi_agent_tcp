@@ -41,6 +41,9 @@ The old low-level TCP worker path remains valid as an execution backend. It is n
 - Complete outgoing batches enter downstream Agent queues instead of directly invoking worker processes.
 - Fan-in joins aggregate contributions, changesets, conflicts, artifacts, reports, tests, and source statuses before queueing a `join_aggregate` envelope.
 - Workspace writes should flow through controlled workspace APIs and changeset submission, not uncontrolled shared-path writes.
+- Worker process replies are not treated as framework facts. `GraphRuntime` extracts a framework-private minimal Agent utterance record (`who`, `said`, `received_at`, `task_id` / `message_id`) and discards raw adapter payloads for runtime semantics.
+- Top Agent may inspect Agent utterance records through the dedicated `top_agent.utterances` / `runtime top-agent-utterances` control-plane interface when its profile has the `utterances` permission.
+- Ordinary Agents do not receive utterance records or the utterance inspection interface through `framework_context`; downstream communication still requires `agent.dispatch`.
 - UI should consume runtime/control-plane state rather than rebuilding scheduling semantics in the renderer.
 
 ## Backend Adapter Boundary

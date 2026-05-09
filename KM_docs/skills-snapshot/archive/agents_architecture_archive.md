@@ -793,3 +793,76 @@ python -m pytest test_workspace_api.py test_workspace_manager.py test_agent_runt
 For Codex-backed blueprint agents, the earlier short-term task "add runtime/tool-layer checks for direct writes outside checkout paths" is no longer tracked as an active task. The current boundary is Codex `workspace-write` sandbox plus launch-time rejection of writable `project_context` escape hatches.
 
 This conclusion is Codex-specific. Other CLI adapters without equivalent sandbox semantics should be evaluated separately if they are brought into strict launch mode.
+
+---
+
+### 2026-05-09 - Worker reply minimization and top-agent utterance inspection
+
+#### Summary
+
+This round tightened the boundary between worker process replies, framework-owned facts, and Agent-to-Agent communication.
+
+The new contract is:
+
+```text
+worker reply channel
+  -> framework extracts a private minimal utterance record
+  -> raw adapter payload/stdout/stderr is not propagated as runtime truth
+  -> ordinary Agents never receive these records through framework_context
+  -> top Agent may inspect them only through a dedicated top-agent interface
+```
+
+#### Landed
+
+1. Added a framework-private `AgentUtterance` record in `graph_runtime.py`.
+   - Records only `utterance_id`, `agent_id`, `node_id`, `said`, `received_at`, optional `task_id`, and optional `message_id`.
+   - Raw worker reply payloads, Codex JSONL stdout, stderr, and adapter debug payloads are not stored in queued-message results or task-completion payloads.
+2. Changed runtime message/job completion behavior:
+   - `PendingAgentMessage.result` became `PendingAgentMessage.receipt`.
+   - `PendingAgentMessage.to_dict()` exposes only `utterance_id` by default after completion.
+   - `TaskCompleted` events now carry a minimal `receipt` instead of raw worker reply data.
+   - Worker natural-language replies are not emitted as normal runtime events, so they do not enter `status_snapshot()`, `explain_status()`, or ordinary Agent context.
+3. Added top-agent-only utterance inspection:
+   - `GraphRuntime.private_agent_utterances(task_id=...)`;
+   - `GraphRuntimeControlPlane` command `top_agent.utterances`;
+   - CLI thin client `python -m multi_agent_tcp runtime top-agent-utterances`;
+   - filters: `task_id`, `agent_id`, and `node_id`.
+4. Extended `GuLiCodeTopAgentProfile` permissions:
+   - default `allowed_run_permissions` now include `utterances`;
+   - profiles without `utterances` permission are denied access to the utterance interface.
+5. Synchronized baseline rule/skill text:
+   - top-agent rule/skill now explains that top Agent may read framework-private utterance records through the dedicated interface;
+   - ordinary-agent baseline rule/skill now explains that final CLI replies are private utterance records, not Agent-to-Agent communication and not proof of submitted work;
+   - ordinary agents must use `agent.dispatch` for downstream communication and Workspace API / structured framework tools for durable results.
+
+#### Affected Code
+
+- `graph_runtime.py`
+- `graph_control.py`
+- `__main__.py`
+- `agent_launch_context.py`
+- `test_agent_runtime.py`
+- `test_graph_control.py`
+
+#### Validation
+
+```text
+python -m pytest test_graph_control.py test_agent_runtime.py -q
+63 passed
+
+python -m pytest test_graph_control.py test_workspace_api.py test_workspace_manager.py test_agent_runtime.py -q
+98 passed
+
+python -m py_compile graph_runtime.py graph_control.py __main__.py agent_launch_context.py test_graph_control.py test_agent_runtime.py
+```
+
+#### Current Boundaries
+
+1. Worker replies are still accepted as process-level replies, but the framework treats them as private utterance receipts only.
+2. Framework facts must continue to come from framework-owned interfaces:
+   - `agent.dispatch` for downstream Agent messages;
+   - Workspace API `submit` for code changes;
+   - Workspace API `publish` / `publish-file` for reports and artifacts;
+   - `join.contribute` for fan-in contributions.
+3. Top Agent may inspect utterances for oversight and explanation, but ordinary Agents do not receive the utterance inspection tool or the utterance records through their `framework_context`.
+4. Future UI should expose utterance records only as a top-agent / operator audit surface, not as an Agent-to-Agent message stream.

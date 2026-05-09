@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from multi_agent_tcp import (
+    body_to_agent_message,
     GuLiCodeTopAgentProfile,
     GraphRuntime,
     GraphRuntimeControlPlane,
@@ -177,6 +178,14 @@ def test_top_agent_profile_json_round_trip(tmp_path: Path) -> None:
     assert loaded.to_agent_node().external is True
 
 
+def test_top_agent_default_rules_include_utterance_contract() -> None:
+    profile = GuLiCodeTopAgentProfile()
+
+    assert "utterances" in profile.allowed_run_permissions
+    assert "utterance records" in profile.rule_text()
+    assert "Utterance records" in profile.skill_text()
+
+
 def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
     graph = graph_definition_from_dict(_graph_dict())
     runtime = GraphRuntime(_FakeCluster())
@@ -205,12 +214,24 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
         queued_body = snapshot["queues"]["by_agent"]["planner"][0]["body"]
         ctx = queued_body["context"]["framework_context"]
         assert ctx["message_envelope"]["required_outgoing_targets"] == ["coder"]
+        assert ctx["message_envelope"]["reachable_downstream_targets"] == ["coder"]
+        assert ctx["organization"]["scope"] == "agent"
+        assert ctx["organization"]["agent"]["node_id"] == "planner"
         assert ctx["tools"]["agent.dispatch"]["required_args"] == [
             "source_node_id",
             "target_node_id",
             "batch_id",
             "body",
         ]
+        queued_message = body_to_agent_message(queued_body)
+        assert queued_message.prompt == "Plan implementation."
+        assert queued_message.context is not None
+        queued_context = json.loads(queued_message.context)
+        assert queued_context["framework_context"]["agent_node_id"] == "planner"
+        assert (
+            queued_context["framework_context"]["message_envelope"]["outgoing_batch_id"]
+            == ctx["message_envelope"]["outgoing_batch_id"]
+        )
         assert snapshot["run"]["manifest"]["start"]["start_plan"]["user_goal"] == "Implement and review."
         assert started["start_manifest"]["organization"]["agents"]["planner"]["node_id"] == "planner"
 
@@ -248,6 +269,18 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
                     },
                 }
             )
+        with pytest.raises(KeyError, match="unknown outgoing batch"):
+            control.handle_request(
+                {
+                    "command": "agent.dispatch",
+                    "args": {
+                        "source_node_id": "coder",
+                        "target_node_id": "reviewer",
+                        "body": {"prompt": "review this"},
+                        "batch_id": "missing-batch",
+                    },
+                }
+            )
 
         coder_batch = control.handle_request(
             {
@@ -260,6 +293,30 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
             }
         )
         coder_batch_id = coder_batch["batch"]["batch_id"]
+        with pytest.raises(ValueError, match="belongs to source"):
+            control.handle_request(
+                {
+                    "command": "agent.dispatch",
+                    "args": {
+                        "source_node_id": "planner",
+                        "target_node_id": "reviewer",
+                        "body": {"prompt": "wrong source"},
+                        "batch_id": coder_batch_id,
+                    },
+                }
+            )
+        with pytest.raises(ValueError, match="not in current required_outgoing_targets"):
+            control.handle_request(
+                {
+                    "command": "agent.dispatch",
+                    "args": {
+                        "source_node_id": "coder",
+                        "target_node_id": "planner",
+                        "body": {"prompt": "wrong target"},
+                        "batch_id": coder_batch_id,
+                    },
+                }
+            )
         dispatched = control.handle_request(
             {
                 "command": "agent.dispatch",
@@ -277,6 +334,21 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
         assert reviewer_body["prompt"] == "review this"
         assert reviewer_body["context"]["framework_context"]["agent_node_id"] == "reviewer"
         assert reviewer_body["context"]["framework_context"]["message_envelope"]["required_outgoing_targets"] == []
+        assert (
+            reviewer_body["context"]["framework_context"]["message_envelope"][
+                "reachable_downstream_targets"
+            ]
+            == []
+        )
+        reviewer_message = body_to_agent_message(reviewer_body)
+        assert reviewer_message.prompt == "review this"
+        assert reviewer_message.context is not None
+        reviewer_context = json.loads(reviewer_message.context)
+        assert reviewer_context["framework_context"]["agent_node_id"] == "reviewer"
+        assert (
+            reviewer_context["framework_context"]["message_envelope"]["outgoing_batch_id"]
+            is None
+        )
 
         agent_context = control.handle_request(
             {
@@ -349,3 +421,44 @@ def test_top_agent_session_and_ask_use_long_lived_worker() -> None:
     assert runtime.cluster.sent[0][0] == "gu"
     assert runtime.cluster.sent[0][1]["context"]["top_agent"]["agent_id"] == "gu"
     assert "status_explanation" in runtime.cluster.sent[0][1]["context"]
+
+
+def test_top_agent_utterances_interface_is_top_agent_only() -> None:
+    graph = graph_definition_from_dict(_graph_dict())
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph)
+
+    receipt = runtime._record_agent_utterance(
+        node_id="coder",
+        agent_id="worker-coder",
+        reply={"type": "message", "body": {"codex": {"final_text": "done via API"}}},
+        message_id="msg-1",
+        task_id="task-1",
+    ).to_dict()
+
+    out = control.handle_request(
+        {
+            "command": "top_agent.utterances",
+            "args": {"task_id": "task-1", "agent_id": "worker-coder"},
+        }
+    )
+    assert out["ok"] is True
+    assert out["utterances"] == [receipt]
+    assert out["filters"]["task_id"] == "task-1"
+
+    agent_ctx = control.handle_request(
+        {
+            "command": "agent.context",
+            "args": {"source_node_id": "coder"},
+        }
+    )
+    assert "top_agent.utterances" not in json.dumps(agent_ctx)
+    assert "utterance" not in json.dumps(agent_ctx).lower()
+
+    no_access = GraphRuntimeControlPlane(
+        runtime,
+        graph,
+        top_agent=GuLiCodeTopAgentProfile(allowed_run_permissions=["ask", "status"]),
+    )
+    with pytest.raises(PermissionError):
+        no_access.handle_request({"command": "top_agent.utterances", "args": {}})

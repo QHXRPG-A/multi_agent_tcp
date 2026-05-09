@@ -290,3 +290,22 @@ python -m pytest test_graph_control.py test_agent_runtime.py test_workspace_api.
 
 - `knowledge_base/multi_cli_workflow.md`
 - `knowledge_base/agent_node_ryven_integration.md`
+
+---
+
+## 2026-05-09 worker reply / utterance boundary update
+
+Completed:
+
+- Worker replies are reduced to framework-private `AgentUtterance` receipts with `agent_id`, `node_id`, `said`, receive time, and optional task/message identity.
+- Raw worker reply payloads, Codex stdout/stderr, and adapter debug bodies are no longer treated as Agent-to-Agent communication or framework facts.
+- `top_agent.utterances` is exposed through `GraphRuntimeControlPlane`, RPC, and CLI as `runtime top-agent-utterances`.
+- `GuLiCodeTopAgentProfile` default permissions now include `utterances`; profiles without it are denied access to the utterance interface.
+- Top-agent and ordinary-agent baseline rule/skill text now describes the utterance boundary:
+  - top Agent may inspect utterances through the dedicated interface;
+  - ordinary Agents do not receive utterance records or the inspection tool;
+  - durable information must be submitted through `agent.dispatch`, Workspace API, `join.contribute`, or later structured task APIs.
+
+Still pending:
+
+- GuLiCode UI should expose utterances only as a top-agent/operator audit view, not as ordinary Agent message context.

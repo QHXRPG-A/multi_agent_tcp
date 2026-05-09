@@ -34,12 +34,15 @@ from multi_agent_tcp import (
 )
 
 from multi_agent_tcp.skill_space import SkillSpace, SuperAgentProfile
+from multi_agent_tcp.workspace_rpc import WorkspaceRPCServer
 from multi_agent_tcp.codemaker_bridge import _merge_prompt as _merge_codemaker_prompt
 from multi_agent_tcp.codemaker_bridge import load_codemaker_runtime
+from multi_agent_tcp.codex_bridge import _merge_prompt as _merge_codex_prompt
 from multi_agent_tcp.codex_bridge import load_codex_runtime
 from multi_agent_tcp.ryven_blueprint import _apply_run_workspace_to_node
+from multi_agent_tcp.workspace_api import CONTEXT_ENV as WORKSPACE_API_CONTEXT_ENV
+from multi_agent_tcp.workspace_api import main as workspace_api_main
 from multi_agent_tcp.workspace_manager import DulwichWorkspaceManager
-from multi_agent_tcp.workspace_rpc import WorkspaceRPCServer
 
 
 def test_body_to_agent_message_preserves_prompt_context_and_attachments() -> None:
@@ -347,9 +350,11 @@ class _FakeCluster:
     def __init__(self) -> None:
         self.started: list[str] = []
         self.sent: list[tuple[str, Any, float]] = []
+        self.worker_configs: dict[str, WorkerConfig] = {}
 
     async def ensure_worker(self, worker: WorkerConfig) -> None:
         self.started.append(worker.agent_id)
+        self.worker_configs[worker.agent_id] = worker
 
     async def run_single(
         self,
@@ -460,6 +465,31 @@ class _SequencedCluster(_FakeCluster):
         self._release_events[idx].set()
 
 
+class _VerboseReplyCluster(_FakeCluster):
+    async def run_single(
+        self,
+        worker_id: str,
+        body: Any,
+        *,
+        timeout_sec: float = 600.0,
+        _skip_skill_inject: bool = False,
+    ) -> dict[str, Any]:
+        self.sent.append((worker_id, body, timeout_sec))
+        return {
+            "type": "message",
+            "from": worker_id,
+            "body": {
+                "ok": True,
+                "codex": {
+                    "final_text": "submitted report through workspace API",
+                    "stdout": "raw jsonl debug stream",
+                    "stderr": "diagnostic warning",
+                },
+                "adapter": {"debug": "drop-me"},
+            },
+        }
+
+
 @pytest.mark.asyncio
 async def test_graph_runtime_lazy_starts_and_reuses_agent_node() -> None:
     cluster = _FakeCluster()
@@ -474,7 +504,10 @@ async def test_graph_runtime_lazy_starts_and_reuses_agent_node() -> None:
     assert cluster.started == ["node-a"]
     assert cluster.sent == [("node-a", {"prompt": "next"}, 42.0)]
     assert first.messages_sent == 1
-    assert reply["body"]["ok"] is True
+    assert reply["agent_id"] == "node-a"
+    assert reply["node_id"] == "node-a"
+    assert reply["said"] == json.dumps({"ok": True}, ensure_ascii=False)
+    assert len(runtime.agent_utterances) == 1
 
 
 @pytest.mark.asyncio
@@ -500,7 +533,7 @@ async def test_graph_runtime_queues_messages_until_agent_is_idle() -> None:
 
     cluster.release(0)
     first_reply = await first_task
-    assert first_reply["body"]["idx"] == 0
+    assert first_reply["said"] == json.dumps({"ok": True, "idx": 0}, ensure_ascii=False)
     assert runtime.instances["node-a"].state == "idle"
 
     await runtime.tick()
@@ -518,7 +551,11 @@ async def test_graph_runtime_queues_messages_until_agent_is_idle() -> None:
     pending = runtime.pending_messages[queued["message_id"]]
     assert pending.status == "completed"
     assert pending.source_node_id == "node-b"
-    assert pending.result["body"]["idx"] == 1
+    assert pending.receipt is not None
+    assert pending.receipt["agent_id"] == "node-a"
+    assert pending.receipt["node_id"] == "node-a"
+    assert pending.receipt["message_id"] == queued["message_id"]
+    assert pending.receipt["said"] == json.dumps({"ok": True, "idx": 1}, ensure_ascii=False)
     assert runtime.instances["node-a"].messages_sent == 2
     states = [entry["state"] for entry in runtime.instances["node-a"].state_history]
     assert "starting" in states
@@ -527,6 +564,31 @@ async def test_graph_runtime_queues_messages_until_agent_is_idle() -> None:
     assert "running" in states
     assert "waiting_for_reply" in states
     assert "processing_reply" in states
+
+
+@pytest.mark.asyncio
+async def test_worker_reply_is_reduced_to_framework_private_utterance() -> None:
+    cluster = _VerboseReplyCluster()
+    node = AgentNode(node_id="node-a", agent_id="worker-a", cwd=Path("."))
+    runtime = GraphRuntime(cluster)
+
+    receipt = await runtime.send_agent_message(
+        node,
+        {"prompt": "do work", "task_id": "task-1"},
+        timeout_sec=7.0,
+        source_node_id="node-top",
+    )
+
+    assert receipt["agent_id"] == "worker-a"
+    assert receipt["node_id"] == "node-a"
+    assert receipt["task_id"] == "task-1"
+    assert receipt["said"] == "submitted report through workspace API"
+    assert "stdout" not in json.dumps(receipt)
+    assert "stderr" not in json.dumps(receipt)
+    assert runtime.agent_utterances[receipt["utterance_id"]].said == receipt["said"]
+    assert runtime.private_agent_utterances(task_id="task-1") == [receipt]
+    assert runtime.status_snapshot()["recent_events"] == []
+    assert [event.event_type for event in runtime.events] == []
 
 
 @pytest.mark.asyncio
@@ -1045,6 +1107,107 @@ def test_blueprint_workspace_application_rejects_codex_project_add_dir(
         server.close()
 
 
+@pytest.mark.asyncio
+async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    rule = project / "business-rule.md"
+    rule.write_text("# Business Review Rule\n\nDo the private thing.\n", encoding="utf-8")
+
+    source_skill = tmp_path / "source-skills" / "biz-skill"
+    source_skill.mkdir(parents=True)
+    (source_skill / "SKILL.md").write_text(
+        "---\n"
+        "name: biz-skill\n"
+        "description: PRIVATE_RUNTIME_SKILL_DESCRIPTION\n"
+        "---\n"
+        "# Biz Skill\n\n"
+        "PRIVATE_RUNTIME_SKILL_BODY\n",
+        encoding="utf-8",
+    )
+    skill_space = SkillSpace.open_or_init(tmp_path / "skill-space")
+    rec = skill_space.add_skill_copy(source_skill)
+
+    manager = DulwichWorkspaceManager.open_or_init(project)
+    run = manager.create_run(run_id="run-private")
+    server = WorkspaceRPCServer(manager, run)
+    server.start()
+    cluster = _RestartableCluster()
+    try:
+        runtime = GraphRuntime(
+            cluster,
+            enforce_private_agent_context=True,
+            private_context_manager=manager,
+            private_context_run=run,
+            private_context_rpc_server=server,
+            skill_space=skill_space,
+        )
+        node = AgentNode(
+            node_id="agent-node",
+            agent_id="agent-cx",
+            cli_kind="codex",
+            cwd=project,
+            write_scope=["src/**"],
+            skill_selection={"mode": "selected", "skill_hashes": [rec.skill_hash]},
+            rule_paths=[str(rule)],
+        )
+
+        inst = await runtime.ensure_agent(node)
+
+        private = manager.agent_workspace_dir(run, "agent-cx")
+        checkout = private / "checkout"
+        codex_home = private / "codex_home"
+        assert inst.node.cwd == checkout
+        assert cluster.worker_cwds["agent-cx"] == checkout
+        assert (checkout / "AGENTS.md").is_file()
+        assert "Business Review Rule" in (checkout / "AGENTS.md").read_text(encoding="utf-8")
+        assert (private / "rules" / "01-business-rule.md").is_file()
+        assert (codex_home / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
+        framework_skill = (
+            codex_home / "skills" / "framework-agent-runtime" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assert "framework-private utterance record" in framework_skill
+        assert "not a communication channel to other AgentNodes" in framework_skill
+        copied_skills = list((codex_home / "skills").glob(f"{rec.skill_hash}-biz-skill/SKILL.md"))
+        assert copied_skills
+        assert not (codex_home / "skills" / "biz-skill").exists()
+        assert inst.node.adapter_options["sandbox"] == "workspace-write"
+        assert inst.node.adapter_options["codex_home"] == str(codex_home)
+        assert inst.node.extra_env["MULTI_AGENT_WORKSPACE_CONTEXT"] == str(
+            private / "workspace_api_context.json"
+        )
+        assert str(Path(__file__).resolve().parent.parent) in inst.node.extra_env["PYTHONPATH"]
+        launched_worker = cluster.worker_configs["agent-cx"]
+        worker_json = launched_worker.to_agent_json("127.0.0.1", 9140)
+        assert worker_json["codex"]["cwd"] == str(checkout)
+        assert worker_json["extra_env"]["MULTI_AGENT_WORKSPACE_CONTEXT"] == str(
+            private / "workspace_api_context.json"
+        )
+        merged_prompt = _merge_codex_prompt(
+            "Implement the task.",
+            '{"framework_context": {"message_envelope": {"outgoing_batch_id": "out-1"}}}',
+            worker_json["codex"],
+        )
+        assert "Workspace API" in merged_prompt
+        assert "Codex Execution Context" in merged_prompt
+        assert "checkout_path" in merged_prompt
+        assert json.dumps(str(checkout), ensure_ascii=False)[1:-1] in merged_prompt
+        assert "project_context" in merged_prompt
+        assert json.dumps(str(project), ensure_ascii=False)[1:-1] in merged_prompt
+        assert "PRIVATE_RUNTIME_SKILL_DESCRIPTION" in merged_prompt
+        assert "outgoing_batch_id" in merged_prompt
+        assert "out-1" in merged_prompt
+        private_context = inst.node.adapter_options["execution_context"]["private_context"]
+        assert private_context["codex_home"] == str(codex_home)
+        assert private_context["rule_catalog"][0]["rule_path"] == str(private / "rules" / "01-business-rule.md")
+        assert (private / "workspace_api_context.json").is_file()
+    finally:
+        server.close()
+
+
 def test_graph_definition_detects_cycles() -> None:
     graph = GraphDefinition(
         agent_nodes={
@@ -1456,6 +1619,133 @@ def test_graph_runtime_complete_writes_final_report_and_archive_index(tmp_path: 
     assert archives[0]["archive_id"] == "run-final-completed"
     assert "FinalReportPublished" in [event.event_type for event in runtime.events]
     assert "RunArchiveIndexed" in [event.event_type for event in runtime.events]
+
+
+@pytest.mark.asyncio
+async def test_agent_workspace_outputs_feed_join_and_final_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('base')\n", encoding="utf-8")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-output-chain")
+    private = manager.agent_workspace_dir(run, "agent-coder")
+    server = WorkspaceRPCServer(manager, run)
+    server.start()
+    try:
+        context_path = private / "workspace_api_context.json"
+        context_path.write_text(
+            json.dumps(server.context_for("agent-coder"), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(WORKSPACE_API_CONTEXT_ENV, str(context_path))
+
+        assert workspace_api_main(["checkout", "--scope-path", "src/**"]) == 0
+        checkout_out = json.loads(capsys.readouterr().out)
+        checkout_path = Path(checkout_out["checkout_path"])
+        (checkout_path / "src" / "app.py").write_text("print('changed')\n", encoding="utf-8")
+
+        assert workspace_api_main(["status"]) == 0
+        status_out = json.loads(capsys.readouterr().out)
+        assert status_out["files"][0]["path"] == "src/app.py"
+
+        assert workspace_api_main(["submit", "--task-id", "task-code", "--summary", "change app"]) == 0
+        changeset = json.loads(capsys.readouterr().out)
+        assert changeset["ok"] is True
+        assert changeset["status"] == "accepted"
+        assert changeset["merged_files"] == ["src/app.py"]
+        assert (run.integration_dir / "src" / "app.py").read_text(encoding="utf-8") == "print('changed')\n"
+
+        assert workspace_api_main(
+            ["publish", "--area", "reports", "--path", "coder.md", "--text", "implemented"]
+        ) == 0
+        report_out = json.loads(capsys.readouterr().out)
+        artifact_source = private / "build.log"
+        artifact_source.write_text("build ok\n", encoding="utf-8")
+        assert workspace_api_main(
+            [
+                "publish-file",
+                "--area",
+                "artifacts",
+                "--path",
+                "logs/build.log",
+                "--file",
+                str(artifact_source),
+            ]
+        ) == 0
+        artifact_out = json.loads(capsys.readouterr().out)
+
+        runtime = GraphRuntime(_FakeCluster(), archive_manager=manager, archive_run=run)
+        target = AgentNode(node_id="reviewer", agent_id="worker-reviewer", cwd=Path("."))
+        await runtime.ensure_agent(target)
+        runtime.create_join_barrier(
+            required_sources=["coder"],
+            target_node=target,
+            policy="wait-all",
+            join_id="join-products",
+        )
+        contribution = runtime.submit_join_contribution(
+            "join-products",
+            "coder",
+            source_agent_id="agent-coder",
+            accepted_changesets=[
+                {
+                    "changeset_id": changeset["changeset_id"],
+                    "status": changeset["status"],
+                    "merged_files": changeset["merged_files"],
+                    "archive_path": changeset["archive_path"],
+                }
+            ],
+            artifacts=[
+                {
+                    "area": artifact_out["area"],
+                    "path": artifact_out["path"],
+                    "owner": artifact_out["owner"],
+                    "version": artifact_out["version"],
+                }
+            ],
+            reports=[
+                {
+                    "area": report_out["area"],
+                    "path": report_out["path"],
+                    "owner": report_out["owner"],
+                    "version": report_out["version"],
+                }
+            ],
+            test_results=[{"name": "workspace-output-chain", "status": "passed"}],
+            metadata={"task_id": "task-code"},
+        )
+
+        assert contribution["ready"] is True
+        aggregate = contribution["aggregate"]
+        assert aggregate["accepted_changesets"][0]["changeset_id"] == changeset["changeset_id"]
+        assert aggregate["reports"] == [
+            {"area": "reports", "path": "coder.md", "owner": "agent-coder", "version": 1}
+        ]
+        assert aggregate["artifacts"] == [
+            {"area": "artifacts", "path": "logs/build.log", "owner": "agent-coder", "version": 1}
+        ]
+        assert runtime.agent_message_queues["reviewer"][0].body["aggregate"]["test_results"] == [
+            {"name": "workspace-output-chain", "status": "passed"}
+        ]
+        pending = await runtime.dispatch_queued_message_now("join-msg-join-products")
+        assert pending.status == "completed"
+        assert pending.receipt is not None
+        assert pending.receipt["node_id"] == "reviewer"
+
+        result = runtime.end_run("complete", reason="products verified")
+        assert result.final_status == "success"
+        assert result.summary["accepted_changesets"][0]["changeset_id"] == changeset["changeset_id"]
+        final_report = Path(result.summary["final_report_path"])
+        assert final_report.is_file()
+        report = json.loads(final_report.read_text(encoding="utf-8"))
+        assert report["summary"]["accepted_changesets"][0]["merged_files"] == ["src/app.py"]
+        assert report["status_snapshot"]["joins"]["join-products"]["reports"][0]["path"] == "coder.md"
+        assert report["status_snapshot"]["joins"]["join-products"]["artifacts"][0]["path"] == "logs/build.log"
+    finally:
+        server.close()
 
 
 @pytest.mark.asyncio
