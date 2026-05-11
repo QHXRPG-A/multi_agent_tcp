@@ -45,15 +45,20 @@ Primary design source:
 
 ## Active Priorities
 
-Testing is now the immediate focus before further feature expansion. Use the 2026-05-11 testing notes below as the current execution bias.
+Nested/branching ring support is now the immediate highest-priority runtime task. Use the 2026-05-11 testing notes below after the ring recursion/folding path is scoped.
 
-1. Wire the non-UI control plane into a real long-lived GuLiCode/top-Agent session.
-2. Keep ordinary-Agent communication and durable output restricted to framework interfaces: `agent.dispatch`, Workspace API, and join/task contribution APIs.
-3. Keep AgentNode startup context minimal and audit future additions so ordinary Agents keep seeing only the baseline rule/skill/tool contract and no top-agent-only inspection APIs.
-4. Continue hardening status explanation and event summaries for GuLiCode/top Agent and UI.
-5. Connect GuLiCode desktop UI to runtime/control-plane state without duplicating scheduling semantics.
-6. Keep workspace/archive behavior aligned with the `project_reference` three-zone model and framework-owned changeset, conflict, report, artifact, and reference records.
-7. Surface utterance records in future UI only as a top-agent/operator audit view, not as Agent-to-Agent message context.
+1. Implement recursive ring handling for nested rings and branching/shared-node rings.
+   - Detect nested or overlapping cyclic structures instead of assuming one simple directed cycle.
+   - Fold each inner ring into a ring-class Agent for the outer ring view.
+   - Define parent/child ring-session lifecycle, entry-message routing, final-output handoff, idempotency, timeout, and failure propagation.
+   - Keep the current simple single-pass ring behavior as the base case.
+2. Wire the non-UI control plane into a real long-lived GuLiCode/top-Agent session.
+3. Keep ordinary-Agent communication and durable output restricted to framework interfaces: `agent.dispatch`, Workspace API, and join/task contribution APIs.
+4. Keep AgentNode startup context minimal and audit future additions so ordinary Agents keep seeing only the baseline rule/skill/tool contract and no top-agent-only inspection APIs.
+5. Continue hardening status explanation and event summaries for GuLiCode/top Agent and UI.
+6. Connect GuLiCode desktop UI to runtime/control-plane state without duplicating scheduling semantics.
+7. Keep workspace/archive behavior aligned with the `project_reference` three-zone model and framework-owned changeset, conflict, report, artifact, and reference records.
+8. Surface utterance records in future UI only as a top-agent/operator audit view, not as Agent-to-Agent message context.
 
 ## 2026-05-11 Testing Focus
 
