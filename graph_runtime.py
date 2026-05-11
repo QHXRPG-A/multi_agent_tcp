@@ -1086,6 +1086,8 @@ class PendingAgentMessage:
     source_node_id: Optional[str] = None
     source_agent_id: Optional[str] = None
     timeout_sec: Optional[float] = None
+    ring_session_id: Optional[str] = None
+    ring_phase: Optional[str] = None
     created_at: float = field(default_factory=time.monotonic)
     dispatched_at: Optional[float] = None
     completed_at: Optional[float] = None
@@ -1108,6 +1110,10 @@ class PendingAgentMessage:
             data["source_agent_id"] = self.source_agent_id
         if self.timeout_sec is not None:
             data["timeout_sec"] = self.timeout_sec
+        if self.ring_session_id is not None:
+            data["ring_session_id"] = self.ring_session_id
+        if self.ring_phase is not None:
+            data["ring_phase"] = self.ring_phase
         if self.dispatched_at is not None:
             data["dispatched_at"] = self.dispatched_at
         if self.completed_at is not None:
@@ -1156,6 +1162,9 @@ class OutgoingMessageBatch:
     dispatched_message_ids: List[str] = field(default_factory=list)
     reminder_count: int = 0
     last_reminder_targets: List[str] = field(default_factory=list)
+    ring_session_id: Optional[str] = None
+    ring_phase: Optional[str] = None
+    is_ring_final_output: bool = False
 
     @property
     def remaining_targets(self) -> List[str]:
@@ -1185,6 +1194,291 @@ class OutgoingMessageBatch:
             },
             "dispatched_message_ids": list(self.dispatched_message_ids),
             "reminder_count": self.reminder_count,
+            "ring_session_id": self.ring_session_id,
+            "ring_phase": self.ring_phase,
+            "is_ring_final_output": self.is_ring_final_output,
+        }
+
+
+_VALID_RING_REACHABILITY_PHASES = {"ring", "post_internal", "final"}
+_VALID_RING_DISPATCH_PHASES = _VALID_RING_REACHABILITY_PHASES | {"execution"}
+
+
+@dataclass
+class RingSessionEntry:
+    """One external entry message that belongs to a ring session."""
+
+    target_node_id: str
+    body: Any
+    source_node_id: Optional[str] = None
+    source_agent_id: Optional[str] = None
+    message_id: Optional[str] = None
+    ordinal: int = 0
+
+    def __post_init__(self) -> None:
+        self.target_node_id = str(self.target_node_id).strip()
+        if not self.target_node_id:
+            raise ValueError("RingSessionEntry.target_node_id must be non-empty")
+        if self.source_node_id is not None:
+            self.source_node_id = str(self.source_node_id).strip() or None
+        if self.source_agent_id is not None:
+            self.source_agent_id = str(self.source_agent_id).strip() or None
+        if self.message_id is not None:
+            self.message_id = str(self.message_id).strip() or None
+        self.ordinal = int(self.ordinal)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "target_node_id": self.target_node_id,
+            "body": self.body,
+            "ordinal": self.ordinal,
+        }
+        if self.source_node_id is not None:
+            data["source_node_id"] = self.source_node_id
+        if self.source_agent_id is not None:
+            data["source_agent_id"] = self.source_agent_id
+        if self.message_id is not None:
+            data["message_id"] = self.message_id
+        return data
+
+
+@dataclass
+class RingSessionPlan:
+    """Runtime reachability plan for one single-pass ring execution session."""
+
+    session_id: str
+    cycle_node_ids: List[str]
+    ordered_node_ids: List[str]
+    start_node_id: str
+    auditor_node_id: str
+    entry_node_ids: List[str]
+    ring_targets_by_node: Dict[str, List[str]]
+    post_internal_targets_by_node: Dict[str, List[str]]
+    final_targets_by_node: Dict[str, List[str]]
+    deferred_external_targets_by_node: Dict[str, List[str]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.session_id = str(self.session_id).strip()
+        if not self.session_id:
+            raise ValueError("RingSessionPlan.session_id must be non-empty")
+        self.cycle_node_ids = [str(node_id).strip() for node_id in self.cycle_node_ids if str(node_id).strip()]
+        self.ordered_node_ids = [str(node_id).strip() for node_id in self.ordered_node_ids if str(node_id).strip()]
+        self.start_node_id = str(self.start_node_id).strip()
+        self.auditor_node_id = str(self.auditor_node_id).strip()
+        self.entry_node_ids = [str(node_id).strip() for node_id in self.entry_node_ids if str(node_id).strip()]
+        if not self.cycle_node_ids:
+            raise ValueError("RingSessionPlan.cycle_node_ids must not be empty")
+        if len(set(self.cycle_node_ids)) != len(self.cycle_node_ids):
+            raise ValueError("RingSessionPlan.cycle_node_ids must not contain duplicates")
+        if len(set(self.ordered_node_ids)) != len(self.ordered_node_ids):
+            raise ValueError("RingSessionPlan.ordered_node_ids must not contain duplicates")
+        if set(self.cycle_node_ids) != set(self.ordered_node_ids):
+            raise ValueError("RingSessionPlan.ordered_node_ids must cover the cycle nodes")
+        if self.start_node_id not in self.ordered_node_ids:
+            raise ValueError("RingSessionPlan.start_node_id must be in ordered_node_ids")
+        if self.auditor_node_id not in self.ordered_node_ids:
+            raise ValueError("RingSessionPlan.auditor_node_id must be in ordered_node_ids")
+        if not set(self.entry_node_ids).issubset(set(self.ordered_node_ids)):
+            raise ValueError("RingSessionPlan.entry_node_ids must be inside the ring")
+        self.ring_targets_by_node = {
+            str(node_id): [str(target) for target in targets]
+            for node_id, targets in self.ring_targets_by_node.items()
+        }
+        self.post_internal_targets_by_node = {
+            str(node_id): [str(target) for target in targets]
+            for node_id, targets in self.post_internal_targets_by_node.items()
+        }
+        self.final_targets_by_node = {
+            str(node_id): [str(target) for target in targets]
+            for node_id, targets in self.final_targets_by_node.items()
+        }
+        self.deferred_external_targets_by_node = {
+            str(node_id): [str(target) for target in targets]
+            for node_id, targets in self.deferred_external_targets_by_node.items()
+        }
+
+    def reachable_targets(self, node_id: str, *, phase: str = "ring") -> List[str]:
+        """Return the dynamic reachable-node view for one ring session phase."""
+
+        node_id = str(node_id).strip()
+        phase = str(phase).strip()
+        if phase not in _VALID_RING_REACHABILITY_PHASES:
+            raise ValueError(
+                "phase must be one of: " + ", ".join(sorted(_VALID_RING_REACHABILITY_PHASES))
+            )
+        if node_id not in self.ordered_node_ids:
+            raise KeyError(f"node {node_id!r} is not in ring session {self.session_id!r}")
+        if phase == "ring":
+            return list(self.ring_targets_by_node.get(node_id, []))
+        if phase == "post_internal":
+            return list(self.post_internal_targets_by_node.get(node_id, []))
+        return list(self.final_targets_by_node.get(node_id, []))
+
+    def dispatch_targets(self, node_id: str, *, phase: str = "execution") -> List[str]:
+        """Return the targets that may be exposed to an agent for dispatch."""
+
+        node_id = str(node_id).strip()
+        phase = str(phase).strip()
+        if phase not in _VALID_RING_DISPATCH_PHASES:
+            raise ValueError(
+                "phase must be one of: " + ", ".join(sorted(_VALID_RING_DISPATCH_PHASES))
+            )
+        if phase == "execution":
+            targets: List[str] = []
+            for target in self.reachable_targets(node_id, phase="ring"):
+                if target not in targets:
+                    targets.append(target)
+            for target in self.reachable_targets(node_id, phase="post_internal"):
+                if target not in targets:
+                    targets.append(target)
+            return targets
+        return self.reachable_targets(node_id, phase=phase)
+
+    def merged_input_for(
+        self,
+        node_id: str,
+        *,
+        from_previous: Any = None,
+        entry_messages: Optional[Sequence[RingSessionEntry | Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Build the structured input envelope for a node receiving merged entries."""
+
+        node_id = str(node_id).strip()
+        if node_id not in self.ordered_node_ids:
+            raise KeyError(f"node {node_id!r} is not in ring session {self.session_id!r}")
+        entries: List[Dict[str, Any]] = []
+        for index, raw_entry in enumerate(entry_messages or []):
+            if isinstance(raw_entry, RingSessionEntry):
+                entry = raw_entry
+            elif isinstance(raw_entry, dict):
+                data = dict(raw_entry)
+                data.setdefault("target_node_id", node_id)
+                data.setdefault("ordinal", index)
+                entry = RingSessionEntry(**data)
+            else:
+                entry = RingSessionEntry(target_node_id=node_id, body=raw_entry, ordinal=index)
+            if entry.target_node_id != node_id:
+                raise ValueError(
+                    f"entry for {entry.target_node_id!r} cannot be merged into node {node_id!r}"
+                )
+            entries.append(entry.to_dict())
+        return {
+            "type": "ring_node_input",
+            "ring_session_id": self.session_id,
+            "node_id": node_id,
+            "from_previous": from_previous,
+            "entry_messages": entries,
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "cycle_node_ids": list(self.cycle_node_ids),
+            "ordered_node_ids": list(self.ordered_node_ids),
+            "start_node_id": self.start_node_id,
+            "auditor_node_id": self.auditor_node_id,
+            "entry_node_ids": list(self.entry_node_ids),
+            "ring_targets_by_node": {
+                node_id: list(targets)
+                for node_id, targets in self.ring_targets_by_node.items()
+            },
+            "post_internal_targets_by_node": {
+                node_id: list(targets)
+                for node_id, targets in self.post_internal_targets_by_node.items()
+            },
+            "final_targets_by_node": {
+                node_id: list(targets)
+                for node_id, targets in self.final_targets_by_node.items()
+            },
+            "deferred_external_targets_by_node": {
+                node_id: list(targets)
+                for node_id, targets in self.deferred_external_targets_by_node.items()
+            },
+        }
+
+
+@dataclass
+class RingSessionState:
+    """Mutable runtime state for one single-pass ring execution session."""
+
+    plan: RingSessionPlan
+    entry_messages: Dict[str, List[RingSessionEntry]] = field(default_factory=dict)
+    status: str = "active"
+    completed_node_ids: List[str] = field(default_factory=list)
+    node_receipts: Dict[str, Any] = field(default_factory=dict)
+    final_output_batch_id: Optional[str] = None
+    final_output_dispatched: bool = False
+    created_at: float = field(default_factory=time.monotonic)
+    updated_at: float = field(default_factory=time.monotonic)
+    completed_at: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        normalized: Dict[str, List[RingSessionEntry]] = {
+            node_id: [] for node_id in self.plan.ordered_node_ids
+        }
+        for node_id, entries in self.entry_messages.items():
+            node_id = str(node_id).strip()
+            if node_id not in normalized:
+                raise KeyError(f"ring entry target {node_id!r} is not in the session")
+            for index, raw_entry in enumerate(entries):
+                entry = (
+                    raw_entry
+                    if isinstance(raw_entry, RingSessionEntry)
+                    else RingSessionEntry(target_node_id=node_id, body=raw_entry, ordinal=index)
+                )
+                if entry.target_node_id != node_id:
+                    raise ValueError(
+                        f"entry for {entry.target_node_id!r} cannot be registered under {node_id!r}"
+                    )
+                normalized[node_id].append(entry)
+        self.entry_messages = normalized
+        self.completed_node_ids = [
+            str(node_id).strip()
+            for node_id in self.completed_node_ids
+            if str(node_id).strip()
+        ]
+
+    def entries_for(self, node_id: str) -> List[RingSessionEntry]:
+        node_id = str(node_id).strip()
+        if node_id not in self.plan.ordered_node_ids:
+            raise KeyError(f"node {node_id!r} is not in ring session {self.plan.session_id!r}")
+        return list(self.entry_messages.get(node_id, []))
+
+    def mark_node_completed(self, node_id: str, receipt: Any = None) -> None:
+        node_id = str(node_id).strip()
+        if node_id not in self.plan.ordered_node_ids:
+            raise KeyError(f"node {node_id!r} is not in ring session {self.plan.session_id!r}")
+        if node_id not in self.completed_node_ids:
+            self.completed_node_ids.append(node_id)
+        if receipt is not None:
+            self.node_receipts[node_id] = receipt
+        self.updated_at = time.monotonic()
+
+    def mark_final_output_dispatched(self, batch_id: str) -> None:
+        if self.final_output_dispatched:
+            raise RuntimeError(f"ring session {self.plan.session_id} already dispatched final output")
+        self.final_output_batch_id = str(batch_id)
+        self.final_output_dispatched = True
+        self.status = "completed"
+        self.completed_at = time.monotonic()
+        self.updated_at = self.completed_at
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "plan": self.plan.to_dict(),
+            "entry_messages": {
+                node_id: [entry.to_dict() for entry in entries]
+                for node_id, entries in self.entry_messages.items()
+                if entries
+            },
+            "completed_node_ids": list(self.completed_node_ids),
+            "node_receipts": dict(self.node_receipts),
+            "final_output_batch_id": self.final_output_batch_id,
+            "final_output_dispatched": self.final_output_dispatched,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "completed_at": self.completed_at,
         }
 
 
@@ -1478,6 +1772,7 @@ class GraphRuntime:
         self._message_journal: List[RuntimeMessageRecord] = []
         self._outgoing_batches: Dict[str, OutgoingMessageBatch] = {}
         self._join_barriers: Dict[str, JoinBarrier] = {}
+        self._ring_sessions: Dict[str, RingSessionState] = {}
         self._join_target_nodes: Dict[str, AgentNode] = {}
         self._dispatch_tasks: Dict[str, asyncio.Task[None]] = {}
         self._job_tasks: Dict[str, asyncio.Task[None]] = {}
@@ -1582,6 +1877,196 @@ class GraphRuntime:
     @property
     def join_barriers(self) -> Dict[str, JoinBarrier]:
         return dict(self._join_barriers)
+
+    @property
+    def ring_sessions(self) -> Dict[str, RingSessionState]:
+        return dict(self._ring_sessions)
+
+    def register_ring_session(
+        self,
+        plan: RingSessionPlan,
+        *,
+        entry_messages: Optional[Sequence[RingSessionEntry | Dict[str, Any]]] = None,
+    ) -> RingSessionState:
+        if self._closed:
+            raise RuntimeError("GraphRuntime is closed")
+        entries_by_node: Dict[str, List[RingSessionEntry]] = {
+            node_id: [] for node_id in plan.ordered_node_ids
+        }
+        for index, raw_entry in enumerate(entry_messages or []):
+            if isinstance(raw_entry, RingSessionEntry):
+                entry = raw_entry
+            elif isinstance(raw_entry, dict):
+                data = dict(raw_entry)
+                data.setdefault("ordinal", index)
+                entry = RingSessionEntry(**data)
+            else:
+                raise ValueError("ring session entry messages must be RingSessionEntry or dict")
+            if entry.target_node_id not in entries_by_node:
+                raise KeyError(
+                    f"ring entry target {entry.target_node_id!r} is not in session {plan.session_id!r}"
+                )
+            entries_by_node[entry.target_node_id].append(entry)
+
+        state = RingSessionState(plan=plan, entry_messages=entries_by_node)
+        self._ring_sessions[plan.session_id] = state
+        self._emit(
+            GraphEvent(
+                "RingSessionRegistered",
+                node_id=plan.start_node_id,
+                agent_id=plan.auditor_node_id,
+                status="registered",
+                payload=state.to_dict(),
+            )
+        )
+        return state
+
+    def unregister_ring_session(self, session_id: str) -> Optional[RingSessionState]:
+        session_id = str(session_id).strip()
+        state = self._ring_sessions.pop(session_id, None)
+        if state is not None:
+            plan = state.plan
+            self._emit(
+                GraphEvent(
+                    "RingSessionUnregistered",
+                    node_id=plan.start_node_id,
+                    agent_id=plan.auditor_node_id,
+                    status="unregistered",
+                    payload=state.to_dict(),
+                )
+            )
+        return state
+
+    def ring_session_reachable_targets(
+        self,
+        session_id: str,
+        node_id: str,
+        *,
+        phase: str = "ring",
+    ) -> List[str]:
+        state = self._ring_sessions.get(str(session_id).strip())
+        if state is None:
+            raise KeyError(f"unknown ring session: {session_id}")
+        return state.plan.reachable_targets(node_id, phase=phase)
+
+    def ring_session_dispatch_targets(
+        self,
+        session_id: str,
+        node_id: str,
+        *,
+        phase: str = "execution",
+    ) -> List[str]:
+        state = self._ring_sessions.get(str(session_id).strip())
+        if state is None:
+            raise KeyError(f"unknown ring session: {session_id}")
+        return state.plan.dispatch_targets(node_id, phase=phase)
+
+    def ring_session_state(self, session_id: str) -> RingSessionState:
+        state = self._ring_sessions.get(str(session_id).strip())
+        if state is None:
+            raise KeyError(f"unknown ring session: {session_id}")
+        return state
+
+    def _validate_ring_final_output_ready(self, state: RingSessionState) -> None:
+        plan = state.plan
+        if state.final_output_dispatched:
+            raise RuntimeError(f"ring session {plan.session_id} already dispatched final output")
+        auditor_queue = self._agent_message_queues.get(plan.auditor_node_id, [])
+        if auditor_queue:
+            raise RuntimeError(
+                f"ring auditor {plan.auditor_node_id!r} still has queued messages"
+            )
+        for node_id in plan.ordered_node_ids:
+            if node_id == plan.auditor_node_id:
+                continue
+            inst = self._instances.get(node_id)
+            if inst is None:
+                continue
+            if inst.busy_count > 0 or inst.state != "idle":
+                raise RuntimeError(
+                    f"ring node {node_id!r} is not idle; state={inst.state}"
+                )
+
+    def _body_for_ring_target(
+        self,
+        state: RingSessionState,
+        target_node_id: str,
+        body: Any,
+    ) -> Any:
+        if target_node_id not in state.plan.ordered_node_ids:
+            return body
+        merged = state.plan.merged_input_for(
+            target_node_id,
+            from_previous=body,
+            entry_messages=state.entries_for(target_node_id),
+        )
+        if isinstance(body, dict):
+            if "prompt" in body:
+                merged["prompt"] = body["prompt"]
+            if "context" in body:
+                merged["context"] = body["context"]
+        return merged
+
+    def ring_session_can_dispatch_pending(self, pending: PendingAgentMessage) -> bool:
+        if pending.ring_session_id is None:
+            return True
+        state = self.ring_session_state(pending.ring_session_id)
+        plan = state.plan
+        if pending.node_id != plan.auditor_node_id:
+            return True
+        for node_id in plan.ordered_node_ids:
+            if node_id == plan.auditor_node_id:
+                continue
+            inst = self._instances.get(node_id)
+            if inst is None:
+                continue
+            if inst.busy_count > 0 or inst.state != "idle":
+                return False
+        return True
+
+    def complete_ring_node(
+        self,
+        session_id: str,
+        node_id: str,
+        *,
+        receipt: Any = None,
+    ) -> Dict[str, Any]:
+        state = self.ring_session_state(session_id)
+        state.mark_node_completed(node_id, receipt=receipt)
+        self._emit(
+            GraphEvent(
+                "RingNodeCompleted",
+                node_id=node_id,
+                agent_id=self._instances.get(node_id).agent_id if node_id in self._instances else None,
+                status=state.status,
+                payload={
+                    "session_id": state.plan.session_id,
+                    "completed_node_ids": list(state.completed_node_ids),
+                },
+            )
+        )
+        return state.to_dict()
+
+    def _mark_ring_pending_completed(self, pending: PendingAgentMessage) -> None:
+        if pending.ring_session_id is None:
+            return
+        state = self.ring_session_state(pending.ring_session_id)
+        if pending.node_id not in state.plan.ordered_node_ids:
+            return
+        state.mark_node_completed(pending.node_id, receipt=pending.receipt)
+        self._emit(
+            GraphEvent(
+                "RingNodeCompleted",
+                node_id=pending.node_id,
+                agent_id=pending.agent_id,
+                status=state.status,
+                payload={
+                    "session_id": state.plan.session_id,
+                    "message_id": pending.message_id,
+                    "completed_node_ids": list(state.completed_node_ids),
+                },
+            )
+        )
 
     @property
     def events(self) -> List[GraphEvent]:
@@ -1840,7 +2325,10 @@ class GraphRuntime:
             queue = self._agent_message_queues.get(node_id, [])
             if not queue or not inst.can_accept_message:
                 continue
-            pending = queue.pop(0)
+            pending = queue[0]
+            if not self.ring_session_can_dispatch_pending(pending):
+                continue
+            queue.pop(0)
             pending.status = "dispatching"
             pending.dispatched_at = time.monotonic()
             self._emit(
@@ -2098,6 +2586,8 @@ class GraphRuntime:
         if pending.status != "queued":
             raise RuntimeError(f"message {message_id} is {pending.status}, not queued")
         queue = self._agent_message_queues.get(pending.node_id, [])
+        if not self.ring_session_can_dispatch_pending(pending):
+            raise RuntimeError(f"message {message_id} is waiting for ring session readiness")
         self._agent_message_queues[pending.node_id] = [
             item for item in queue if item.message_id != message_id
         ]
@@ -2121,6 +2611,7 @@ class GraphRuntime:
                 message_id=pending.message_id,
             )
             pending.status = "completed"
+            self._mark_ring_pending_completed(pending)
         except Exception as exc:
             pending.status = "failed"
             pending.error = str(exc)
@@ -2220,6 +2711,10 @@ class GraphRuntime:
             join_id: barrier.to_dict()
             for join_id, barrier in self._join_barriers.items()
         }
+        ring_state = {
+            session_id: state.to_dict()
+            for session_id, state in self._ring_sessions.items()
+        }
         jobs_state = {
             job_id: job.to_dict()
             for job_id, job in self._jobs.items()
@@ -2245,6 +2740,7 @@ class GraphRuntime:
             },
             "outgoing_batches": outgoing_state,
             "joins": join_state,
+            "ring_sessions": ring_state,
             "jobs": jobs_state,
             "recent_events": [event.to_dict() for event in events],
             "workspace": self._workspace_state_snapshot(),
@@ -2567,6 +3063,7 @@ class GraphRuntime:
             )
         self._dispatch_tasks.clear()
         self._job_tasks.clear()
+        self._ring_sessions.clear()
         return summary
 
     def _archive_status_for_final(self) -> str:
@@ -2768,6 +3265,9 @@ class GraphRuntime:
         *,
         batch_id: Optional[str] = None,
         allowed_targets: Optional[Sequence[AgentNode]] = None,
+        ring_session_id: Optional[str] = None,
+        ring_phase: Optional[str] = None,
+        is_ring_final_output: bool = False,
     ) -> OutgoingMessageBatch:
         """Start a framework-owned one-to-many handoff.
 
@@ -2786,6 +3286,16 @@ class GraphRuntime:
             if allowed_targets is not None
             else {node.node_id for node in required_targets}
         )
+        if ring_session_id is not None:
+            state = self.ring_session_state(ring_session_id)
+            ring_phase = ring_phase or ("final" if is_ring_final_output else "execution")
+            allowed_node_ids = set(
+                state.plan.dispatch_targets(source_node.node_id, phase=ring_phase)
+            )
+            if not required_targets:
+                raise ValueError("required_targets must not be empty")
+            if is_ring_final_output:
+                self._validate_ring_final_output_ready(state)
         seen_targets: set[str] = set()
         target_node_ids: List[str] = []
         target_agent_ids: List[str] = []
@@ -2807,6 +3317,9 @@ class GraphRuntime:
             source_agent_id=source_inst.agent_id,
             required_target_node_ids=target_node_ids,
             required_target_agent_ids=target_agent_ids,
+            ring_session_id=ring_session_id,
+            ring_phase=ring_phase,
+            is_ring_final_output=is_ring_final_output,
         )
         self._outgoing_batches[batch.batch_id] = batch
         self._emit(
@@ -2827,12 +3340,23 @@ class GraphRuntime:
         *,
         required_target_node_ids: Optional[Sequence[str]] = None,
         batch_id: Optional[str] = None,
+        ring_session_id: Optional[str] = None,
+        ring_phase: Optional[str] = None,
+        is_ring_final_output: bool = False,
     ) -> OutgoingMessageBatch:
         """Create an outgoing batch using graph-derived agent connections."""
         if source_node_id not in graph.agent_nodes:
             raise KeyError(f"unknown source AgentNode: {source_node_id}")
-        connections = graph.agent_connections()
-        allowed_target_ids = connections.get(source_node_id, [])
+        if ring_session_id is not None:
+            phase = ring_phase or ("final" if is_ring_final_output else "execution")
+            allowed_target_ids = self.ring_session_dispatch_targets(
+                ring_session_id,
+                source_node_id,
+                phase=phase,
+            )
+        else:
+            connections = graph.agent_connections()
+            allowed_target_ids = connections.get(source_node_id, [])
         if required_target_node_ids is None:
             required_ids = list(allowed_target_ids)
         else:
@@ -2847,6 +3371,9 @@ class GraphRuntime:
             required_targets,
             batch_id=batch_id,
             allowed_targets=allowed_targets,
+            ring_session_id=ring_session_id,
+            ring_phase=ring_phase,
+            is_ring_final_output=is_ring_final_output,
         )
 
     def stage_outgoing_message(
@@ -2945,16 +3472,26 @@ class GraphRuntime:
             target_inst = self._instances.get(target_node_id)
             if target_inst is None:
                 raise KeyError(f"target agent is not started: {target_node_id}")
+            body = staged.body
+            if batch.ring_session_id is not None and not batch.is_ring_final_output:
+                state = self.ring_session_state(batch.ring_session_id)
+                body = self._body_for_ring_target(state, target_node_id, staged.body)
             pending = self.queue_agent_message(
                 target_inst.node,
-                staged.body,
+                body,
                 source_node_id=batch.source_node_id,
                 source_agent_id=batch.source_agent_id,
+                ring_session_id=batch.ring_session_id,
+                ring_phase=batch.ring_phase,
             )
             message_ids.append(pending.message_id)
 
         batch.status = "dispatched"
         batch.dispatched_message_ids = message_ids
+        if batch.ring_session_id is not None and batch.is_ring_final_output:
+            self.ring_session_state(batch.ring_session_id).mark_final_output_dispatched(
+                batch.batch_id
+            )
         self._emit(
             GraphEvent(
                 "AgentOutgoingBatchDispatched",
@@ -3023,6 +3560,8 @@ class GraphRuntime:
         source_node_id: Optional[str] = None,
         source_agent_id: Optional[str] = None,
         message_id: Optional[str] = None,
+        ring_session_id: Optional[str] = None,
+        ring_phase: Optional[str] = None,
     ) -> PendingAgentMessage:
         """Store a message until the target agent returns to an idle state."""
         if self._closed:
@@ -3038,6 +3577,8 @@ class GraphRuntime:
             source_node_id=source_node_id,
             source_agent_id=source_agent_id,
             timeout_sec=timeout_sec,
+            ring_session_id=ring_session_id,
+            ring_phase=ring_phase,
         )
         self._agent_message_queues.setdefault(node.node_id, []).append(pending)
         self._pending_messages[pending.message_id] = pending
@@ -3054,6 +3595,10 @@ class GraphRuntime:
             payload=body,
             message_id=pending.message_id,
             status=pending.status,
+            metadata={
+                "ring_session_id": ring_session_id,
+                "ring_phase": ring_phase,
+            } if ring_session_id is not None or ring_phase is not None else {},
         )
         self._emit(
             GraphEvent(
@@ -3079,6 +3624,7 @@ class GraphRuntime:
                 message_id=pending.message_id,
             )
             pending.status = "completed"
+            self._mark_ring_pending_completed(pending)
         except asyncio.CancelledError:
             pending.status = "cancelled"
             raise
@@ -3373,6 +3919,7 @@ class GraphRuntime:
             self._set_agent_state(inst, "stopped")
         self._instances.clear()
         self._launch_nodes.clear()
+        self._ring_sessions.clear()
         rpc_server = self.private_context_rpc_server
         if rpc_server is not None and self.enforce_private_agent_context:
             close = getattr(rpc_server, "close", None)
@@ -3554,6 +4101,222 @@ class GraphDefinition:
             if edge.target not in connections[edge.source]:
                 connections[edge.source].append(edge.target)
         return connections
+
+    def _ring_cycle_links(
+        self,
+        cycle_node_ids: Sequence[str],
+    ) -> tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+        cycle = [str(node_id).strip() for node_id in cycle_node_ids if str(node_id).strip()]
+        if not cycle:
+            raise ValueError("cycle_node_ids must not be empty")
+        cycle_set = set(cycle)
+        missing = [node_id for node_id in cycle if node_id not in self.agent_nodes]
+        if missing:
+            raise KeyError(f"unknown ring AgentNode(s): {', '.join(missing)}")
+
+        successors: Dict[str, List[str]] = {node_id: [] for node_id in cycle}
+        predecessors: Dict[str, List[str]] = {node_id: [] for node_id in cycle}
+        for edge in self.edges:
+            if not edge.is_exec_edge:
+                continue
+            if edge.source not in cycle_set or edge.target not in cycle_set:
+                continue
+            if edge.target not in successors[edge.source]:
+                successors[edge.source].append(edge.target)
+            if edge.source not in predecessors[edge.target]:
+                predecessors[edge.target].append(edge.source)
+
+        for node_id in cycle:
+            if len(successors[node_id]) != 1:
+                raise ValueError(
+                    f"ring node {node_id!r} must have exactly one internal exec successor"
+                )
+            if len(predecessors[node_id]) != 1:
+                raise ValueError(
+                    f"ring node {node_id!r} must have exactly one internal exec predecessor"
+                )
+        return successors, predecessors
+
+    def _ordered_ring_cycle(
+        self,
+        cycle_node_ids: Sequence[str],
+        *,
+        start_node_id: str,
+    ) -> List[str]:
+        successors, _ = self._ring_cycle_links(cycle_node_ids)
+        start_node_id = str(start_node_id).strip()
+        if start_node_id not in successors:
+            raise KeyError(f"start node {start_node_id!r} is not part of the ring cycle")
+
+        ordered = [start_node_id]
+        seen = {start_node_id}
+        current = start_node_id
+        while True:
+            next_node = successors[current][0]
+            if next_node == start_node_id:
+                break
+            if next_node in seen:
+                raise ValueError("ring cycle contains a repeated internal node")
+            ordered.append(next_node)
+            seen.add(next_node)
+            current = next_node
+
+        if len(ordered) != len(successors):
+            missing = [node_id for node_id in successors if node_id not in seen]
+            raise ValueError(
+                "ring cycle does not form a single pass ordering; missing: "
+                + ", ".join(sorted(missing))
+            )
+        return ordered
+
+    def plan_ring_session(
+        self,
+        cycle_node_ids: Sequence[str],
+        *,
+        start_node_id: str,
+        entry_node_ids: Optional[Sequence[str]] = None,
+        session_id: Optional[str] = None,
+        post_internal_targets_by_node: Optional[Dict[str, Sequence[str]]] = None,
+        final_targets_by_node: Optional[Dict[str, Sequence[str]]] = None,
+        deferred_external_targets_by_node: Optional[Dict[str, Sequence[str]]] = None,
+    ) -> RingSessionPlan:
+        """Build a single-pass ring session plan from a simple exec cycle.
+
+        The returned plan is intentionally runtime-shaped: it describes the
+        current session's internal ordering, the auditor node, and per-node
+        reachability views without mutating the graph itself.
+        """
+
+        start_node_id = str(start_node_id).strip()
+        ordered_node_ids = self._ordered_ring_cycle(cycle_node_ids, start_node_id=start_node_id)
+        cycle_set = set(ordered_node_ids)
+        successors, _ = self._ring_cycle_links(ordered_node_ids)
+        auditor_node_id = ordered_node_ids[-1]
+        entry_node_ids = (
+            [str(node_id).strip() for node_id in entry_node_ids if str(node_id).strip()]
+            if entry_node_ids is not None
+            else [start_node_id]
+        )
+        if not entry_node_ids:
+            raise ValueError("entry_node_ids must not be empty")
+        if not set(entry_node_ids).issubset(cycle_set):
+            unknown = sorted(set(entry_node_ids) - cycle_set)
+            raise KeyError("entry_node_ids must stay inside the ring: " + ", ".join(unknown))
+
+        connections = self.agent_connections()
+        default_post_internal: Dict[str, List[str]] = {}
+        default_final: Dict[str, List[str]] = {}
+        deferred_targets: Dict[str, List[str]] = {node_id: [] for node_id in ordered_node_ids}
+        for node_id in ordered_node_ids:
+            external_targets = [
+                target
+                for target in connections.get(node_id, [])
+                if target not in cycle_set
+            ]
+            if node_id == auditor_node_id:
+                default_post_internal[node_id] = []
+                default_final[node_id] = list(external_targets)
+            else:
+                next_internal = successors[node_id][0]
+                if next_internal == auditor_node_id:
+                    default_post_internal[node_id] = []
+                    deferred_targets[node_id] = list(external_targets)
+                else:
+                    default_post_internal[node_id] = list(external_targets)
+                default_final[node_id] = []
+
+        def _merge_targets(
+            default_map: Dict[str, List[str]],
+            override_map: Optional[Dict[str, Sequence[str]]],
+        ) -> Dict[str, List[str]]:
+            merged = {node_id: list(targets) for node_id, targets in default_map.items()}
+            if override_map is None:
+                return merged
+            for node_id, targets in override_map.items():
+                node_id = str(node_id).strip()
+                if node_id not in cycle_set:
+                    raise KeyError(f"ring target override {node_id!r} is not in the cycle")
+                merged[node_id] = [str(target).strip() for target in targets if str(target).strip()]
+            return merged
+
+        post_internal_targets_by_node = _merge_targets(
+            default_post_internal,
+            post_internal_targets_by_node,
+        )
+        final_targets_by_node = _merge_targets(
+            default_final,
+            final_targets_by_node,
+        )
+        deferred_external_targets_by_node = _merge_targets(
+            deferred_targets,
+            deferred_external_targets_by_node,
+        )
+
+        final_targets_by_node[auditor_node_id] = sorted(
+            {
+                *final_targets_by_node[auditor_node_id],
+                *(
+                    target
+                    for targets in deferred_external_targets_by_node.values()
+                    for target in targets
+                ),
+            }
+        )
+
+        ring_targets_by_node = {
+            node_id: list(successors[node_id]) if node_id != auditor_node_id else []
+            for node_id in ordered_node_ids
+        }
+
+        return RingSessionPlan(
+            session_id=session_id or f"ring-{uuid.uuid4().hex[:12]}",
+            cycle_node_ids=list(ordered_node_ids),
+            ordered_node_ids=list(ordered_node_ids),
+            start_node_id=start_node_id,
+            auditor_node_id=auditor_node_id,
+            entry_node_ids=list(entry_node_ids),
+            ring_targets_by_node=ring_targets_by_node,
+            post_internal_targets_by_node=post_internal_targets_by_node,
+            final_targets_by_node=final_targets_by_node,
+            deferred_external_targets_by_node=deferred_external_targets_by_node,
+        )
+
+    def plan_ring_session_from_entries(
+        self,
+        cycle_node_ids: Sequence[str],
+        entry_messages: Sequence[RingSessionEntry | Dict[str, Any]],
+        *,
+        fallback_start_node_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> RingSessionPlan:
+        """Build a ring session plan and choose the earliest entry as start."""
+
+        cycle = [str(node_id).strip() for node_id in cycle_node_ids if str(node_id).strip()]
+        if not cycle:
+            raise ValueError("cycle_node_ids must not be empty")
+        fallback = str(fallback_start_node_id or cycle[0]).strip()
+        ordered_from_fallback = self._ordered_ring_cycle(cycle, start_node_id=fallback)
+        order_index = {node_id: index for index, node_id in enumerate(ordered_from_fallback)}
+        entry_node_ids: List[str] = []
+        for raw_entry in entry_messages:
+            node_id = (
+                raw_entry.target_node_id
+                if isinstance(raw_entry, RingSessionEntry)
+                else str(raw_entry.get("target_node_id", "")).strip()
+            )
+            if not node_id:
+                raise ValueError("ring entry message target_node_id is required")
+            if node_id not in order_index:
+                raise KeyError(f"ring entry target {node_id!r} is not in the cycle")
+            if node_id not in entry_node_ids:
+                entry_node_ids.append(node_id)
+        start = min(entry_node_ids, key=lambda node_id: order_index[node_id]) if entry_node_ids else fallback
+        return self.plan_ring_session(
+            cycle,
+            start_node_id=start,
+            entry_node_ids=entry_node_ids or [start],
+            session_id=session_id,
+        )
 
     def agent_cycle_groups(self) -> List[List[str]]:
         """Return AgentNode groups that participate in exec-edge cycles.
@@ -4196,6 +4959,135 @@ class GraphExecutor:
             "integration_attempts": integration_attempts,
         }
         self._emit_executor_event(GraphEvent("BlueprintCompleted", status="completed", payload=result), event_callback)
+        return result
+
+    async def run_ring_session(
+        self,
+        graph: GraphDefinition,
+        cycle_node_ids: Sequence[str],
+        *,
+        start_node_id: str,
+        entry_messages: Optional[Sequence[RingSessionEntry | Dict[str, Any]]] = None,
+        session_id: Optional[str] = None,
+        initial_prompt: str = "",
+        event_callback: Optional[Callable[[GraphEvent], None]] = None,
+    ) -> Dict[str, Any]:
+        """Run one simple single-pass ring session through real Agent dispatch.
+
+        This is the runtime shape of the ring-agent contract: the graph keeps
+        its original cycle, but the session exposes a linear one-pass view
+        from ``start_node_id`` to the auditor and merges delayed entry
+        messages at their ordered node.
+        """
+
+        if entry_messages:
+            plan = graph.plan_ring_session_from_entries(
+                cycle_node_ids,
+                entry_messages,
+                fallback_start_node_id=start_node_id,
+                session_id=session_id,
+            )
+        else:
+            plan = graph.plan_ring_session(
+                cycle_node_ids,
+                start_node_id=start_node_id,
+                entry_node_ids=[start_node_id],
+                session_id=session_id,
+            )
+        state = self.runtime.register_ring_session(plan, entry_messages=entry_messages)
+        await self.runtime.prestart_agents([graph.agent_nodes[node_id] for node_id in plan.ordered_node_ids])
+        final_targets = plan.reachable_targets(plan.auditor_node_id, phase="final")
+        if final_targets:
+            await self.runtime.prestart_agents([graph.agent_nodes[node_id] for node_id in final_targets])
+
+        def emit(event: GraphEvent) -> None:
+            self._emit_executor_event(event, event_callback)
+
+        emit(GraphEvent("RingSessionStarted", node_id=plan.start_node_id, status="running", payload=state.to_dict()))
+        replies: Dict[str, Any] = {}
+        previous: Any = None
+        last_reply: Any = None
+
+        try:
+            for node_id in plan.ordered_node_ids:
+                node = graph.agent_nodes[node_id]
+                prompt = node.prompt.strip() or initial_prompt.strip() or f"Run ring AgentNode {node_id}."
+                body = plan.merged_input_for(
+                    node_id,
+                    from_previous=previous,
+                    entry_messages=state.entries_for(node_id),
+                )
+                body["prompt"] = prompt
+
+                downstream = plan.dispatch_targets(node_id, phase="execution")
+                body["context"] = {
+                    "framework_context": {
+                        "agent_node_id": node_id,
+                        "agent_id": node.runtime_agent_id,
+                        "downstream_agents": list(downstream),
+                        "message_envelope": {
+                            "outgoing_batch_id": None,
+                            "required_outgoing_targets": list(downstream),
+                        },
+                        "ring_session": {
+                            "session_id": plan.session_id,
+                            "phase": "execution",
+                            "auditor_node_id": plan.auditor_node_id,
+                        },
+                    }
+                }
+
+                emit(GraphEvent("RingNodeRunning", node_id=node_id, status="running", payload={"session_id": plan.session_id}))
+                reply = await self.runtime.send_agent_message(node, body)
+                replies[node_id] = reply
+                last_reply = reply
+                previous = reply
+                state = self.runtime.ring_session_state(plan.session_id)
+                self.runtime.complete_ring_node(plan.session_id, node_id, receipt=reply)
+                emit(GraphEvent("RingNodeCompleted", node_id=node_id, status="completed", payload={"session_id": plan.session_id, "text": self._reply_text(reply)}))
+
+            final_batch = None
+            if final_targets:
+                final_batch = await self.runtime.create_outgoing_batch_from_graph(
+                    graph,
+                    plan.auditor_node_id,
+                    required_target_node_ids=final_targets,
+                    ring_session_id=plan.session_id,
+                    ring_phase="final",
+                    is_ring_final_output=True,
+                )
+                for target_id in final_targets:
+                    self.runtime.stage_outgoing_message(
+                        final_batch.batch_id,
+                        graph.agent_nodes[target_id],
+                        {
+                            "type": "ring_final_output",
+                            "ring_session_id": plan.session_id,
+                            "source_node_id": plan.auditor_node_id,
+                            "prompt": f"Process final ring output from {plan.auditor_node_id}.",
+                            "result": last_reply,
+                        },
+                    )
+
+        except asyncio.CancelledError:
+            emit(GraphEvent("RingSessionCancelled", node_id=plan.start_node_id, status="cancelled", payload={"session_id": plan.session_id}))
+            raise
+        except Exception as exc:
+            emit(GraphEvent("RingSessionFailed", node_id=plan.start_node_id, status="failed", payload={"session_id": plan.session_id, "error": str(exc)}))
+            raise
+
+        state = self.runtime.ring_session_state(plan.session_id)
+        result = {
+            "ok": True,
+            "status": state.status,
+            "session_id": plan.session_id,
+            "ordered_node_ids": list(plan.ordered_node_ids),
+            "auditor_node_id": plan.auditor_node_id,
+            "executed_nodes": list(replies),
+            "final_output_batch_id": final_batch.batch_id if final_batch is not None else None,
+            "result": last_reply,
+        }
+        emit(GraphEvent("RingSessionCompleted", node_id=plan.auditor_node_id, status=state.status, payload=result))
         return result
 
     async def run_blueprint(

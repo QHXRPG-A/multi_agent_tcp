@@ -36,6 +36,7 @@ Primary design source:
 - Cancel/fail cleanup for pending runtime work.
 - Sequential DAG runner with automatic multi-input fan-in.
 - Final report generation and archive indexing on completion.
+- RingSession / 环状结构 single-pass runtime, with dynamic reachable targets, entry-message merging, auditor gating, and idempotent final output.
 - Worker replies are reduced to framework-private utterance receipts instead of raw runtime facts.
 - Top Agent can inspect Agent utterance records through a dedicated `top_agent.utterances` / `runtime top-agent-utterances` interface.
 - Ordinary Agent baseline rule/skill now states that final CLI replies are not an Agent-to-Agent communication channel; durable information must go through framework APIs.
@@ -89,6 +90,10 @@ Conversation-derived testing tasks:
    - Report whether the provider appeared as `aiapi_world/gpt-5.5`.
    - Report whether Electron main/preload/renderer and sidecar readiness were observed.
    - Link logs when useful, but do not echo credentials.
+
+6. Keep the ring-session / 环状结构 path in the runtime regression suite.
+   - Preserve coverage for entry merging, queue gating, auditor final-output idempotency, and single-pass dynamic reachability.
+   - Keep `knowledge_base/ring_structure_solution.md` as the canonical current spec instead of restating the whole protocol elsewhere.
 
 ## Deferred / Secondary Tracks
 

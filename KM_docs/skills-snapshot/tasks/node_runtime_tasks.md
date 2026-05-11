@@ -29,6 +29,23 @@
 4. 多对一 fan-in / join；
 5. 状态查询与结束/最终聚合接口。
 
+### 2026-05-11 环状结构 / ring session runtime
+
+已完成并纳入当前知识：
+
+- 环类 `agent` 对外视为普通 `agent`，对内按单向单轮次执行会话流转；
+- `RingSessionEntry` / `RingSessionPlan` / `RingSessionState` 已落地到运行时；
+- `GraphDefinition.plan_ring_session()` 与 `plan_ring_session_from_entries()` 已可根据环顺序和入口消息生成会话计划；
+- `GraphRuntime.register_ring_session()`、`ring_session_reachable_targets()`、`ring_session_dispatch_targets()`、`ring_session_state()` 已支持动态可达节点、队列门控和审核官 final output；
+- 控制面已支持 `ring.register`，并与普通消息批次 / 分发路径共用框架接口；
+- 已验证 `python -m pytest test_agent_runtime.py test_graph_control.py test_workspace_api.py test_workspace_manager.py -q` 为 `120 passed`。
+
+短期收口：
+
+1. 把 ring-session 的队列上限、超时、审核官幂等输出、迟到消息阻断，继续保留在 runtime 状态与事件解释里。
+2. 以后若出现嵌套环、长短环叠加或多轮次环流转，不要直接扩大当前单轮 ring 语义，单独重新设计。
+3. 继续把 `knowledge_base/ring_structure_solution.md` 作为当前 ring 方案的主文档。
+
 ### 历史最小闭环路径（已降级）
 
 以下路径曾用于 Ryven / runtime 融合早期验证，现在只作为历史背景：

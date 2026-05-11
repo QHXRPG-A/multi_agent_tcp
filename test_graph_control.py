@@ -8,7 +8,10 @@ import pytest
 
 from multi_agent_tcp import (
     body_to_agent_message,
+    AgentNode,
     GuLiCodeTopAgentProfile,
+    GraphDefinition,
+    GraphEdge,
     GraphRuntime,
     GraphRuntimeControlPlane,
     GraphRuntimeRPCServer,
@@ -390,6 +393,166 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
         assert ended["final_status"] == "partial_success"
     finally:
         server.close()
+
+
+def test_control_plane_ring_context_uses_dynamic_reachability() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "e": AgentNode(node_id="e"),
+            "a": AgentNode(node_id="a"),
+            "b": AgentNode(node_id="b"),
+            "c": AgentNode(node_id="c"),
+            "d": AgentNode(node_id="d"),
+            "external-b": AgentNode(node_id="external-b"),
+            "external-c": AgentNode(node_id="external-c"),
+        },
+        edges=[
+            GraphEdge("e", "a", edge_type="exec"),
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "c", edge_type="exec"),
+            GraphEdge("c", "d", edge_type="exec"),
+            GraphEdge("d", "e", edge_type="exec"),
+            GraphEdge("b", "external-b", edge_type="exec"),
+            GraphEdge("c", "external-c", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    plan = graph.plan_ring_session(["e", "a", "b", "c", "d"], start_node_id="e", session_id="ring-ctx")
+    runtime.register_ring_session(plan)
+    control = GraphRuntimeControlPlane(runtime, graph)
+
+    b_context = control.handle_request(
+        {
+            "command": "agent.context",
+            "args": {"source_node_id": "b", "ring_session_id": "ring-ctx"},
+        }
+    )["context"]
+    c_context = control.handle_request(
+        {
+            "command": "agent.context",
+            "args": {"source_node_id": "c", "ring_session_id": "ring-ctx"},
+        }
+    )["context"]
+    d_context = control.handle_request(
+        {
+            "command": "agent.context",
+            "args": {
+                "source_node_id": "d",
+                "ring_session_id": "ring-ctx",
+                "ring_phase": "final",
+            },
+        }
+    )["context"]
+
+    assert b_context["downstream_agents"] == ["c", "external-b"]
+    assert c_context["downstream_agents"] == ["d"]
+    assert d_context["downstream_agents"] == ["external-c"]
+    assert c_context["ring_session"]["auditor_node_id"] == "d"
+
+
+def test_control_plane_registers_ring_session_from_entries() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "a": AgentNode(node_id="a"),
+            "b": AgentNode(node_id="b"),
+            "c": AgentNode(node_id="c"),
+            "d": AgentNode(node_id="d"),
+        },
+        edges=[
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "c", edge_type="exec"),
+            GraphEdge("c", "d", edge_type="exec"),
+            GraphEdge("d", "a", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph)
+
+    registered = control.handle_request(
+        {
+            "command": "ring.register",
+            "args": {
+                "cycle_node_ids": ["a", "b", "c", "d"],
+                "start_node_id": "a",
+                "session_id": "ring-control",
+                "entry_messages": [
+                    {"target_node_id": "c", "body": {"prompt": "later"}},
+                    {"target_node_id": "b", "body": {"prompt": "earlier"}},
+                ],
+            },
+        }
+    )
+
+    assert registered["ok"] is True
+    assert registered["ring_session"]["plan"]["start_node_id"] == "b"
+    assert registered["ring_session"]["entry_messages"]["c"][0]["body"] == {"prompt": "later"}
+    assert runtime.ring_sessions["ring-control"].plan.auditor_node_id == "a"
+
+
+def test_control_plane_ring_final_dispatch_is_idempotent() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "e": AgentNode(node_id="e"),
+            "a": AgentNode(node_id="a"),
+            "b": AgentNode(node_id="b"),
+            "c": AgentNode(node_id="c"),
+            "d": AgentNode(node_id="d"),
+            "external-c": AgentNode(node_id="external-c"),
+        },
+        edges=[
+            GraphEdge("e", "a", edge_type="exec"),
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "c", edge_type="exec"),
+            GraphEdge("c", "d", edge_type="exec"),
+            GraphEdge("d", "e", edge_type="exec"),
+            GraphEdge("c", "external-c", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    plan = graph.plan_ring_session(["e", "a", "b", "c", "d"], start_node_id="e", session_id="ring-final")
+    runtime.register_ring_session(plan)
+    control = GraphRuntimeControlPlane(runtime, graph)
+
+    batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "d",
+                "ring_session_id": "ring-final",
+                "ring_phase": "final",
+                "is_ring_final_output": True,
+            },
+        }
+    )
+    dispatched = control.handle_request(
+        {
+            "command": "agent.dispatch",
+            "args": {
+                "source_node_id": "d",
+                "target_node_id": "external-c",
+                "batch_id": batch["batch"]["batch_id"],
+                "body": {"prompt": "final"},
+                "ring_session_id": "ring-final",
+                "ring_phase": "final",
+                "is_ring_final_output": True,
+            },
+        }
+    )
+
+    assert dispatched["ok"] is True
+    assert runtime.ring_sessions["ring-final"].final_output_dispatched is True
+    with pytest.raises(RuntimeError, match="already dispatched"):
+        control.handle_request(
+            {
+                "command": "message.create_batch",
+                "args": {
+                    "source_node_id": "d",
+                    "ring_session_id": "ring-final",
+                    "ring_phase": "final",
+                    "is_ring_final_output": True,
+                },
+            }
+        )
 
 
 def test_complex_blueprint_fixture_compiles_validates_and_starts(tmp_path: Path) -> None:

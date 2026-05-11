@@ -25,6 +25,7 @@ from .graph_runtime import (
     GraphExecutor,
     GraphRuntime,
     GuLiCodeTopAgentProfile,
+    RingSessionEntry,
     RouteNode,
     TopAgentStartPlan,
 )
@@ -187,11 +188,34 @@ def scoped_organization_view(graph: GraphDefinition, *, agent_id: Optional[str] 
     }
 
 
+def _dynamic_downstream_agents(
+    runtime: Optional[GraphRuntime],
+    graph: GraphDefinition,
+    node_id: str,
+    *,
+    ring_session_id: Optional[str] = None,
+    ring_phase: str = "execution",
+) -> list[str]:
+    if runtime is not None and ring_session_id is not None:
+        state = runtime.ring_session_state(ring_session_id)
+        if node_id not in state.plan.ordered_node_ids:
+            return list(graph.agent_connections().get(node_id, []))
+        return runtime.ring_session_dispatch_targets(
+            ring_session_id,
+            node_id,
+            phase=ring_phase,
+        )
+    return list(graph.agent_connections().get(node_id, []))
+
+
 def ordinary_agent_framework_context(
     graph: GraphDefinition,
     source_node_id: str,
     *,
     batch: Any = None,
+    runtime: Optional[GraphRuntime] = None,
+    ring_session_id: Optional[str] = None,
+    ring_phase: str = "execution",
 ) -> Dict[str, Any]:
     """Build the stable framework tool context injected into ordinary agents."""
 
@@ -200,7 +224,15 @@ def ordinary_agent_framework_context(
         raise KeyError(f"unknown AgentNode: {node_id}")
     organization = graph.agent_organization_summary(agent_id=node_id)
     agent_view = organization["agent"]
-    downstream = list(graph.agent_connections().get(node_id, []))
+    downstream = _dynamic_downstream_agents(
+        runtime,
+        graph,
+        node_id,
+        ring_session_id=ring_session_id,
+        ring_phase=ring_phase,
+    )
+    organization["agent_connections"] = {node_id: list(downstream)}
+    organization["agent"]["downstream_agents"] = list(downstream)
     required_targets = list(batch.required_target_node_ids) if batch is not None else []
     remaining_targets = list(batch.remaining_targets) if batch is not None else []
     message_envelope: Dict[str, Any] = {
@@ -216,6 +248,17 @@ def ordinary_agent_framework_context(
         "downstream_agents": downstream,
         "organization": organization,
         "message_envelope": message_envelope,
+        "ring_session": (
+            {
+                "session_id": ring_session_id,
+                "phase": ring_phase,
+                "auditor_node_id": runtime.ring_session_state(ring_session_id).plan.auditor_node_id
+                if runtime is not None and ring_session_id is not None
+                else None,
+            }
+            if ring_session_id is not None
+            else None
+        ),
     }
 
 
@@ -371,12 +414,39 @@ class GraphRuntimeControlPlane:
                 },
             ).to_dict()
 
+        if command == "ring.register":
+            entries = [
+                RingSessionEntry(**dict(item))
+                for item in args.get("entry_messages", [])
+            ]
+            plan = self.graph.plan_ring_session_from_entries(
+                [str(item) for item in args.get("cycle_node_ids", [])],
+                entries,
+                fallback_start_node_id=(
+                    str(args["start_node_id"])
+                    if args.get("start_node_id") is not None
+                    else None
+                ),
+                session_id=(
+                    str(args["session_id"])
+                    if args.get("session_id") is not None
+                    else None
+                ),
+            )
+            state = self.runtime.register_ring_session(plan, entry_messages=entries)
+            return GraphControlResponse(True, {"ring_session": state.to_dict()}).to_dict()
+
         if command == "agent.context":
             batch_id = args.get("batch_id")
             batch = (
                 self.runtime.outgoing_batches[str(batch_id)]
                 if batch_id is not None
                 else None
+            )
+            ring_session_id = (
+                str(args["ring_session_id"])
+                if args.get("ring_session_id") is not None
+                else getattr(batch, "ring_session_id", None)
             )
             return GraphControlResponse(
                 True,
@@ -385,6 +455,13 @@ class GraphRuntimeControlPlane:
                         self.graph,
                         str(args["source_node_id"]),
                         batch=batch,
+                        runtime=self.runtime,
+                        ring_session_id=ring_session_id,
+                        ring_phase=(
+                            str(args["ring_phase"])
+                            if args.get("ring_phase") is not None
+                            else getattr(batch, "ring_phase", None) or "execution"
+                        ),
                     )
                 },
             ).to_dict()
@@ -403,6 +480,17 @@ class GraphRuntimeControlPlane:
                     str(args["source_node_id"]),
                     [str(item) for item in args.get("required_target_node_ids", [])],
                     batch_id=args.get("batch_id"),
+                    ring_session_id=(
+                        str(args["ring_session_id"])
+                        if args.get("ring_session_id") is not None
+                        else None
+                    ),
+                    ring_phase=(
+                        str(args["ring_phase"])
+                        if args.get("ring_phase") is not None
+                        else None
+                    ),
+                    is_ring_final_output=bool(args.get("is_ring_final_output", False)),
                 )
             )
 
@@ -426,6 +514,17 @@ class GraphRuntimeControlPlane:
                         if args.get("batch_id") is not None
                         else None
                     ),
+                    ring_session_id=(
+                        str(args["ring_session_id"])
+                        if args.get("ring_session_id") is not None
+                        else None
+                    ),
+                    ring_phase=(
+                        str(args["ring_phase"])
+                        if args.get("ring_phase") is not None
+                        else None
+                    ),
+                    is_ring_final_output=bool(args.get("is_ring_final_output", False)),
                 )
             )
 
@@ -572,12 +671,18 @@ class GraphRuntimeControlPlane:
         target_node_ids: Sequence[str],
         *,
         batch_id: Optional[str] = None,
+        ring_session_id: Optional[str] = None,
+        ring_phase: Optional[str] = None,
+        is_ring_final_output: bool = False,
     ) -> Dict[str, Any]:
         batch = await self.runtime.create_outgoing_batch_from_graph(
             self.graph,
             source_node_id,
             required_target_node_ids=target_node_ids or None,
             batch_id=batch_id,
+            ring_session_id=ring_session_id,
+            ring_phase=ring_phase,
+            is_ring_final_output=is_ring_final_output,
         )
         return GraphControlResponse(True, {"batch": batch.to_dict()}).to_dict()
 
@@ -679,6 +784,9 @@ class GraphRuntimeControlPlane:
         body: Any,
         *,
         batch_id: Optional[str] = None,
+        ring_session_id: Optional[str] = None,
+        ring_phase: Optional[str] = None,
+        is_ring_final_output: bool = False,
     ) -> Dict[str, Any]:
         if source_node_id not in self.graph.agent_nodes:
             raise KeyError(f"unknown source AgentNode: {source_node_id}")
@@ -698,13 +806,38 @@ class GraphRuntimeControlPlane:
             raise ValueError(
                 f"target {target_node_id!r} is not in current required_outgoing_targets"
             )
+        if ring_session_id is None:
+            ring_session_id = batch.ring_session_id
+        if ring_phase is None:
+            ring_phase = batch.ring_phase
         downstream_batch = None
-        downstream = self.graph.agent_connections().get(target_node_id, [])
+        if ring_session_id is not None:
+            ring_state = self.runtime.ring_session_state(ring_session_id)
+            if target_node_id in ring_state.plan.ordered_node_ids:
+                downstream = self.runtime.ring_session_dispatch_targets(
+                    ring_session_id,
+                    target_node_id,
+                    phase=ring_phase or "execution",
+                )
+            else:
+                downstream = self.graph.agent_connections().get(target_node_id, [])
+        else:
+            downstream = self.graph.agent_connections().get(target_node_id, [])
         if downstream:
             downstream_batch = await self.runtime.create_outgoing_batch_from_graph(
                 self.graph,
                 target_node_id,
                 required_target_node_ids=downstream,
+                ring_session_id=ring_session_id,
+                ring_phase=ring_phase,
+                is_ring_final_output=(
+                    is_ring_final_output
+                    or (
+                        ring_session_id is not None
+                        and target_node_id == self.runtime.ring_session_state(ring_session_id).plan.auditor_node_id
+                        and (ring_phase or "execution") == "final"
+                    )
+                ),
             )
 
         staged = self.runtime.stage_outgoing_message(
@@ -716,6 +849,9 @@ class GraphRuntimeControlPlane:
                     self.graph,
                     target_node_id,
                     batch=downstream_batch,
+                    runtime=self.runtime,
+                    ring_session_id=ring_session_id,
+                    ring_phase=ring_phase or "execution",
                 ),
             ),
         )

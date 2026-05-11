@@ -19,6 +19,7 @@ Historical TCP / CodeMaker / Ryven information may still be useful, but it is no
 - `core_architecture.md`: current architecture, ownership boundaries, and how GuLiCode, runtime control, graph scheduling, workspace, events, and CLI backend adapters fit together. Includes **`GraphDefinition.agent_cycle_groups()`** (exec-edge SCCs, agent-only cycle groups).
 - `gulicode_desktop.md`: GuLiCode desktop source structure, Electron/Tauri startup, main/preload/renderer/app layering, and desktop integration path.
 - `dispatch_workflows.md`: current GraphRuntimeControlPlane CLI/RPC workflows plus legacy dispatch notes.
+- `ring_structure_solution.md`: ring / 环状结构 / 环审核官 / single-pass ring session engineering spec.
 - `registry_and_skills.md`: `agents_registry.json`, skill selection, skill injection, and registry workflow.
 - `runtime_notes.md`: encoding, logs, process cleanup, heartbeats, retries, and CLI runtime pitfalls.
 - `cluster_api.md`: `CLIWorkerBackend` / legacy `CodeMakerCluster` compatibility API.
