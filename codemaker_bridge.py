@@ -85,6 +85,9 @@ def _parse_codemaker_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     execution_context = raw.get("execution_context")
     if execution_context is not None and not isinstance(execution_context, dict):
         raise ValueError("codemaker.execution_context must be an object when set")
+    prompt_execution_context = raw.get("prompt_execution_context")
+    if prompt_execution_context is not None and not isinstance(prompt_execution_context, dict):
+        raise ValueError("codemaker.prompt_execution_context must be an object when set")
     return {
         "command": command,
         "base_args": list(base_args),
@@ -97,6 +100,7 @@ def _parse_codemaker_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "extra_env": extra_env_dict,
         "prompt_preamble": raw.get("prompt_preamble"),
         "execution_context": dict(execution_context or {}),
+        "prompt_execution_context": dict(prompt_execution_context or {}),
     }
 
 
@@ -117,7 +121,10 @@ def _merge_prompt(prompt: str, stdin_context: Optional[str], rt: Dict[str, Any])
     preamble = rt.get("prompt_preamble")
     if isinstance(preamble, str) and preamble.strip():
         parts.append(preamble.strip())
-    context_block = _format_execution_context(rt.get("execution_context", {}))
+    prompt_context = rt.get("prompt_execution_context")
+    if not prompt_context:
+        prompt_context = rt.get("execution_context", {})
+    context_block = _format_execution_context(prompt_context)
     if context_block:
         parts.append(context_block)
     parts.append(prompt)

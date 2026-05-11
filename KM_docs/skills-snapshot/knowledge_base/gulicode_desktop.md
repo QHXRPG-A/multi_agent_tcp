@@ -535,6 +535,117 @@ node          renderer dev server
 bun           --cwd packages/desktop-electron dev
 ```
 
+## 测试环境顶层 GuLiCode 启动规则
+
+当用户要求“按测试环境配置启动 GuLiCode”“顶层 GuLiCode 拉起测试”或类似任务时，默认走 Electron dev 入口，并使用下面这套模型与 provider 配置。
+
+### 固定入口
+
+仓库根目录：
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode
+bun --cwd packages/desktop-electron dev
+```
+
+不要优先尝试 Tauri。当前本机测试重点是 Electron 桌面端能否把临时环境变量传给内嵌 GuLiCode/OpenCode server，并进入 `init step { phase: 'done' }`。
+
+### 测试 provider
+
+- 分组：`gpt-pro`
+- provider id：`aiapi_world`
+- 展示名称：`centos.hk`
+- base URL：`https://ai.centos.hk/v1`
+- env key：`OPENAI_API_KEY`
+- model：`gpt-5.5`
+- reasoning effort：`high`
+- OpenCode/GuLiCode 模型名：`aiapi_world/gpt-5.5`
+- 默认 primary agent：`build`、`plan` 都使用 `aiapi_world/gpt-5.5`，variant 使用 `high`
+
+### 测试环境变量
+
+按用户要求，测试密钥固定写入本技能知识中。后续启动测试时直接设置为子进程环境变量，不要写入仓库文件、日志或最终回复。
+
+```powershell
+$env:OPENAI_API_KEY='sk-iBSeAsPp82EwQTyh3XsXpK28bMfKYlfKc1hP1iI1eD8meBIJ'
+```
+
+### OPENCODE_CONFIG_CONTENT
+
+后续测试启动前设置这份临时配置。它会注册 `aiapi_world` 这个 openai-compatible provider，并把 `high` 映射到 `reasoningEffort: "high"`。
+
+```powershell
+$env:OPENCODE_CONFIG_CONTENT=@'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "aiapi_world/gpt-5.5",
+  "small_model": "aiapi_world/gpt-5.5",
+  "enabled_providers": ["aiapi_world"],
+  "provider": {
+    "aiapi_world": {
+      "name": "centos.hk",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": ["OPENAI_API_KEY"],
+      "api": "https://ai.centos.hk/v1",
+      "models": {
+        "gpt-5.5": {
+          "name": "gpt-5.5",
+          "reasoning": true,
+          "tool_call": true,
+          "limit": { "context": 128000, "output": 32768 },
+          "variants": {
+            "high": { "reasoningEffort": "high" }
+          }
+        }
+      },
+      "options": {
+        "baseURL": "https://ai.centos.hk/v1"
+      }
+    }
+  },
+  "agent": {
+    "build": { "model": "aiapi_world/gpt-5.5", "variant": "high" },
+    "plan": { "model": "aiapi_world/gpt-5.5", "variant": "high" }
+  }
+}
+'@
+```
+
+### 推荐启动验证步骤
+
+1. 先用轻量命令确认 provider 配置可被识别：
+
+```powershell
+bun --cwd .\GuLiCode\packages\opencode src\index.ts models aiapi_world
+```
+
+期望输出包含：
+
+```text
+aiapi_world/gpt-5.5
+```
+
+2. 再启动 Electron dev：
+
+```powershell
+bun --cwd packages/desktop-electron dev
+```
+
+3. 看到以下关键日志即可判定“能按测试配置拉起 GuLiCode”：
+
+```text
+electron main process built successfully
+electron preload scripts built successfully
+dev server running for the electron renderer process at:
+starting electron app...
+app starting { version: '1.14.19', packaged: false }
+sidecar connection started { url: 'http://127.0.0.1:<port>' }
+loading task finished
+init step { step: { phase: 'done' } }
+```
+
+4. 若只是验证能否拉起，测试完成后清理 `bun` / `electron` / `node` 子进程，避免后台残留。
+
 ## 维护提醒
 
 - 桌面端深度开发优先从 Electron 路线入手，Tauri 暂作为备用路线。

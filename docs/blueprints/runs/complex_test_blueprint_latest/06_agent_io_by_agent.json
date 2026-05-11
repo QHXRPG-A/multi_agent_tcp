@@ -1,0 +1,823 @@
+{
+  "agent-requirements": [
+    {
+      "index": 1,
+      "agent_id": "agent-requirements",
+      "timeout_sec": 1800.0,
+      "input": {
+        "type": "top_agent_task",
+        "prompt": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+        "user_goal": "Run the fixed complex blueprint test task from planning through archive.",
+        "agent_description": "Breaks down the user goal and fans out required work.",
+        "task": {
+          "goal": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+          "context_refs": [],
+          "expected_output": "A complete outgoing batch for risk_scan, architecture, and test_planner.",
+          "acceptance": "Every required downstream target receives a framework-queued message and the message journal is persisted."
+        },
+        "organization": {
+          "scope": "agent",
+          "graph": {
+            "nodes": [
+              "architecture",
+              "requirements",
+              "risk_scan",
+              "test_planner"
+            ],
+            "agent_nodes": [
+              "requirements"
+            ],
+            "edges": [
+              {
+                "from": "requirements",
+                "to": "risk_scan",
+                "edge_type": "exec",
+                "output_port": null,
+                "input_port": null
+              },
+              {
+                "from": "requirements",
+                "to": "architecture",
+                "edge_type": "exec",
+                "output_port": null,
+                "input_port": null
+              },
+              {
+                "from": "requirements",
+                "to": "test_planner",
+                "edge_type": "exec",
+                "output_port": null,
+                "input_port": null
+              }
+            ]
+          },
+          "agent": {
+            "node_id": "requirements",
+            "agent_id": "agent-requirements",
+            "upstream_agents": [],
+            "downstream_agents": [
+              "risk_scan",
+              "architecture",
+              "test_planner"
+            ],
+            "read_scope": [
+              "docs/**"
+            ],
+            "write_scope": [
+              "shared/reports/**"
+            ],
+            "artifact_scope": [
+              "shared/artifacts/**"
+            ],
+            "skill_selection_mode": "none"
+          },
+          "agent_connections": {
+            "requirements": [
+              "risk_scan",
+              "architecture",
+              "test_planner"
+            ]
+          }
+        },
+        "context": {
+          "framework_context": {
+            "agent_node_id": "requirements",
+            "agent_id": "agent-requirements",
+            "upstream_agents": [],
+            "downstream_agents": [
+              "risk_scan",
+              "architecture",
+              "test_planner"
+            ],
+            "organization": {
+              "scope": "agent",
+              "graph": {
+                "nodes": [
+                  "architecture",
+                  "requirements",
+                  "risk_scan",
+                  "test_planner"
+                ],
+                "agent_nodes": [
+                  "requirements"
+                ],
+                "edges": [
+                  {
+                    "from": "requirements",
+                    "to": "risk_scan",
+                    "edge_type": "exec",
+                    "output_port": null,
+                    "input_port": null
+                  },
+                  {
+                    "from": "requirements",
+                    "to": "architecture",
+                    "edge_type": "exec",
+                    "output_port": null,
+                    "input_port": null
+                  },
+                  {
+                    "from": "requirements",
+                    "to": "test_planner",
+                    "edge_type": "exec",
+                    "output_port": null,
+                    "input_port": null
+                  }
+                ]
+              },
+              "agent": {
+                "node_id": "requirements",
+                "agent_id": "agent-requirements",
+                "upstream_agents": [],
+                "downstream_agents": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ],
+                "read_scope": [
+                  "docs/**"
+                ],
+                "write_scope": [
+                  "shared/reports/**"
+                ],
+                "artifact_scope": [
+                  "shared/artifacts/**"
+                ],
+                "skill_selection_mode": "none"
+              },
+              "agent_connections": {
+                "requirements": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ]
+              }
+            },
+            "message_envelope": {
+              "outgoing_batch_id": "out-8a92b82a42a9",
+              "required_outgoing_targets": [
+                "risk_scan",
+                "architecture",
+                "test_planner"
+              ],
+              "remaining_targets": [
+                "risk_scan",
+                "architecture",
+                "test_planner"
+              ]
+            }
+          }
+        }
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-requirements",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-requirements",
+          "step": 1,
+          "final_text": "agent-requirements completed step 1: Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-requirements completed step 1: Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+            "context_keys": [
+              "framework_context"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "agent-risk-scan": [
+    {
+      "index": 2,
+      "agent_id": "agent-risk-scan",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from requirements to risk_scan."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-risk-scan",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-risk-scan",
+          "step": 2,
+          "final_text": "agent-risk-scan completed step 2: Continue complex blueprint work from requirements to risk_scan.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-risk-scan completed step 2: Continue complex blueprint work from requirements to risk_scan.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-security-review": [
+    {
+      "index": 3,
+      "agent_id": "agent-security-review",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from risk_scan to security_review."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-security-review",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-security-review",
+          "step": 3,
+          "final_text": "agent-security-review completed step 3: Continue complex blueprint work from risk_scan to security_review.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-security-review completed step 3: Continue complex blueprint work from risk_scan to security_review.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-architecture": [
+    {
+      "index": 4,
+      "agent_id": "agent-architecture",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from requirements to architecture."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-architecture",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-architecture",
+          "step": 4,
+          "final_text": "agent-architecture completed step 4: Continue complex blueprint work from requirements to architecture.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-architecture completed step 4: Continue complex blueprint work from requirements to architecture.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-test-planner": [
+    {
+      "index": 5,
+      "agent_id": "agent-test-planner",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from requirements to test_planner."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-test-planner",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-test-planner",
+          "step": 5,
+          "final_text": "agent-test-planner completed step 5: Continue complex blueprint work from requirements to test_planner.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-test-planner completed step 5: Continue complex blueprint work from requirements to test_planner.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-backend-impl": [
+    {
+      "index": 6,
+      "agent_id": "agent-backend-impl",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from architecture to backend_impl."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-backend-impl",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-backend-impl",
+          "step": 6,
+          "final_text": "agent-backend-impl completed step 6: Continue complex blueprint work from architecture to backend_impl.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-backend-impl completed step 6: Continue complex blueprint work from architecture to backend_impl.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-frontend-impl": [
+    {
+      "index": 7,
+      "agent_id": "agent-frontend-impl",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from architecture to frontend_impl."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-frontend-impl",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-frontend-impl",
+          "step": 7,
+          "final_text": "agent-frontend-impl completed step 7: Continue complex blueprint work from architecture to frontend_impl.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-frontend-impl completed step 7: Continue complex blueprint work from architecture to frontend_impl.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-review": [
+    {
+      "index": 8,
+      "agent_id": "agent-review",
+      "timeout_sec": 1800.0,
+      "input": {
+        "type": "join_aggregate",
+        "join_id": "join-implementation-ready",
+        "prompt": "Process fan-in join aggregate join-implementation-ready.",
+        "aggregate": {
+          "join_id": "join-implementation-ready",
+          "target_node_id": "review",
+          "required_source_node_ids": [
+            "backend_impl",
+            "frontend_impl"
+          ],
+          "policy": "wait-all",
+          "quorum": null,
+          "status": "ready",
+          "final_reason": "all_sources_submitted",
+          "missing_sources": [],
+          "contribution_count": 2,
+          "successful_count": 2,
+          "source_statuses": {
+            "backend_impl": "completed",
+            "frontend_impl": "completed"
+          },
+          "source_metadata": {},
+          "accepted_changesets": [
+            {
+              "changeset_id": "backend_impl-changeset"
+            },
+            {
+              "changeset_id": "frontend_impl-changeset"
+            }
+          ],
+          "conflicts": [],
+          "artifacts": [
+            {
+              "path": "backend/build.log"
+            },
+            {
+              "path": "frontend/build.log"
+            }
+          ],
+          "reports": [
+            {
+              "path": "backend/report.md"
+            },
+            {
+              "path": "frontend/report.md"
+            }
+          ],
+          "test_results": [],
+          "contributions": {
+            "backend_impl": {
+              "source_node_id": "backend_impl",
+              "status": "completed",
+              "result": {
+                "node_id": "backend_impl",
+                "status": "completed"
+              },
+              "accepted_changesets": [
+                {
+                  "changeset_id": "backend_impl-changeset"
+                }
+              ],
+              "conflicts": [],
+              "artifacts": [
+                {
+                  "path": "backend/build.log"
+                }
+              ],
+              "reports": [
+                {
+                  "path": "backend/report.md"
+                }
+              ],
+              "test_results": [],
+              "metadata": {},
+              "submitted_at": 220577.5726552,
+              "overwrite_count": 0,
+              "source_agent_id": "agent-backend-impl"
+            },
+            "frontend_impl": {
+              "source_node_id": "frontend_impl",
+              "status": "completed",
+              "result": {
+                "node_id": "frontend_impl",
+                "status": "completed"
+              },
+              "accepted_changesets": [
+                {
+                  "changeset_id": "frontend_impl-changeset"
+                }
+              ],
+              "conflicts": [],
+              "artifacts": [
+                {
+                  "path": "frontend/build.log"
+                }
+              ],
+              "reports": [
+                {
+                  "path": "frontend/report.md"
+                }
+              ],
+              "test_results": [],
+              "metadata": {},
+              "submitted_at": 220577.5727085,
+              "overwrite_count": 0,
+              "source_agent_id": "agent-frontend-impl"
+            }
+          },
+          "created_at": 220577.5725918,
+          "completed_at": 220577.5727173,
+          "aggregate_message_id": null
+        }
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-review",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-review",
+          "step": 8,
+          "final_text": "agent-review completed step 8: Process fan-in join aggregate join-implementation-ready.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-review completed step 8: Process fan-in join aggregate join-implementation-ready.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-patch": [
+    {
+      "index": 9,
+      "agent_id": "agent-patch",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from review to patch."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-patch",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-patch",
+          "step": 9,
+          "final_text": "agent-patch completed step 9: Continue complex blueprint work from review to patch.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-patch completed step 9: Continue complex blueprint work from review to patch.",
+            "context_keys": []
+          }
+        }
+      }
+    },
+    {
+      "index": 14,
+      "agent_id": "agent-patch",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from failure_analysis to patch."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-patch",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-patch",
+          "step": 14,
+          "final_text": "agent-patch completed step 14: Continue complex blueprint work from failure_analysis to patch.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-patch completed step 14: Continue complex blueprint work from failure_analysis to patch.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-unit-tests": [
+    {
+      "index": 10,
+      "agent_id": "agent-unit-tests",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from test_planner to unit_tests."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-unit-tests",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-unit-tests",
+          "step": 10,
+          "final_text": "agent-unit-tests completed step 10: Continue complex blueprint work from test_planner to unit_tests.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-unit-tests completed step 10: Continue complex blueprint work from test_planner to unit_tests.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-e2e-tests": [
+    {
+      "index": 11,
+      "agent_id": "agent-e2e-tests",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from test_planner to e2e_tests."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-e2e-tests",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-e2e-tests",
+          "step": 11,
+          "final_text": "agent-e2e-tests completed step 11: Continue complex blueprint work from test_planner to e2e_tests.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-e2e-tests completed step 11: Continue complex blueprint work from test_planner to e2e_tests.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-integration": [
+    {
+      "index": 12,
+      "agent_id": "agent-integration",
+      "timeout_sec": 1800.0,
+      "input": {
+        "type": "join_aggregate",
+        "join_id": "join-test-ready",
+        "prompt": "Process fan-in join aggregate join-test-ready.",
+        "aggregate": {
+          "join_id": "join-test-ready",
+          "target_node_id": "integration",
+          "required_source_node_ids": [
+            "unit_tests",
+            "e2e_tests"
+          ],
+          "policy": "wait-all",
+          "quorum": null,
+          "status": "ready",
+          "final_reason": "all_sources_submitted",
+          "missing_sources": [],
+          "contribution_count": 2,
+          "successful_count": 2,
+          "source_statuses": {
+            "unit_tests": "completed",
+            "e2e_tests": "completed"
+          },
+          "source_metadata": {},
+          "accepted_changesets": [],
+          "conflicts": [],
+          "artifacts": [
+            {
+              "path": "tests/unit.log"
+            },
+            {
+              "path": "tests/e2e.log"
+            }
+          ],
+          "reports": [],
+          "test_results": [
+            {
+              "suite": "unit",
+              "status": "passed"
+            },
+            {
+              "suite": "e2e",
+              "status": "passed"
+            }
+          ],
+          "contributions": {
+            "unit_tests": {
+              "source_node_id": "unit_tests",
+              "status": "completed",
+              "result": {
+                "node_id": "unit_tests",
+                "status": "completed"
+              },
+              "accepted_changesets": [],
+              "conflicts": [],
+              "artifacts": [
+                {
+                  "path": "tests/unit.log"
+                }
+              ],
+              "reports": [],
+              "test_results": [
+                {
+                  "suite": "unit",
+                  "status": "passed"
+                }
+              ],
+              "metadata": {},
+              "submitted_at": 220577.577012,
+              "overwrite_count": 0,
+              "source_agent_id": "agent-unit-tests"
+            },
+            "e2e_tests": {
+              "source_node_id": "e2e_tests",
+              "status": "completed",
+              "result": {
+                "node_id": "e2e_tests",
+                "status": "completed"
+              },
+              "accepted_changesets": [],
+              "conflicts": [],
+              "artifacts": [
+                {
+                  "path": "tests/e2e.log"
+                }
+              ],
+              "reports": [],
+              "test_results": [
+                {
+                  "suite": "e2e",
+                  "status": "passed"
+                }
+              ],
+              "metadata": {},
+              "submitted_at": 220577.5770478,
+              "overwrite_count": 0,
+              "source_agent_id": "agent-e2e-tests"
+            }
+          },
+          "created_at": 220577.5769632,
+          "completed_at": 220577.5770562,
+          "aggregate_message_id": null
+        }
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-integration",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-integration",
+          "step": 12,
+          "final_text": "agent-integration completed step 12: Process fan-in join aggregate join-test-ready.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-integration completed step 12: Process fan-in join aggregate join-test-ready.",
+            "context_keys": []
+          }
+        }
+      }
+    },
+    {
+      "index": 15,
+      "agent_id": "agent-integration",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from patch to integration."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-integration",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-integration",
+          "step": 15,
+          "final_text": "agent-integration completed step 15: Continue complex blueprint work from patch to integration.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-integration completed step 15: Continue complex blueprint work from patch to integration.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-failure-analysis": [
+    {
+      "index": 13,
+      "agent_id": "agent-failure-analysis",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from integration to failure_analysis."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-failure-analysis",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-failure-analysis",
+          "step": 13,
+          "final_text": "agent-failure-analysis completed step 13: Continue complex blueprint work from integration to failure_analysis.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-failure-analysis completed step 13: Continue complex blueprint work from integration to failure_analysis.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-summary": [
+    {
+      "index": 16,
+      "agent_id": "agent-summary",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Continue complex blueprint work from integration to summary."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-summary",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-summary",
+          "step": 16,
+          "final_text": "agent-summary completed step 16: Continue complex blueprint work from integration to summary.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-summary completed step 16: Continue complex blueprint work from integration to summary.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-event-monitor": [
+    {
+      "index": 17,
+      "agent_id": "agent-event-monitor",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Run the fixed complex blueprint test task from planning through archive."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-event-monitor",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-event-monitor",
+          "step": 17,
+          "final_text": "agent-event-monitor completed step 17: Run the fixed complex blueprint test task from planning through archive.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-event-monitor completed step 17: Run the fixed complex blueprint test task from planning through archive.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ],
+  "agent-workspace-state": [
+    {
+      "index": 18,
+      "agent_id": "agent-workspace-state",
+      "timeout_sec": 1800.0,
+      "input": {
+        "prompt": "Run the fixed complex blueprint test task from planning through archive."
+      },
+      "output": {
+        "type": "message",
+        "from": "agent-workspace-state",
+        "body": {
+          "ok": true,
+          "agent_id": "agent-workspace-state",
+          "step": 18,
+          "final_text": "agent-workspace-state completed step 18: Run the fixed complex blueprint test task from planning through archive.",
+          "result": {
+            "status": "completed",
+            "summary": "agent-workspace-state completed step 18: Run the fixed complex blueprint test task from planning through archive.",
+            "context_keys": []
+          }
+        }
+      }
+    }
+  ]
+}

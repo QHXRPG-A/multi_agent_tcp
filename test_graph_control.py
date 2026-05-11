@@ -15,6 +15,7 @@ from multi_agent_tcp import (
     graph_definition_from_dict,
     load_top_agent_profile,
     scoped_organization_view,
+    TopAgentStartPlan,
 )
 from multi_agent_tcp.__main__ import main
 
@@ -214,15 +215,11 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
         queued_body = snapshot["queues"]["by_agent"]["planner"][0]["body"]
         ctx = queued_body["context"]["framework_context"]
         assert ctx["message_envelope"]["required_outgoing_targets"] == ["coder"]
-        assert ctx["message_envelope"]["reachable_downstream_targets"] == ["coder"]
+        assert ctx["downstream_agents"] == ["coder"]
         assert ctx["organization"]["scope"] == "agent"
         assert ctx["organization"]["agent"]["node_id"] == "planner"
-        assert ctx["tools"]["agent.dispatch"]["required_args"] == [
-            "source_node_id",
-            "target_node_id",
-            "batch_id",
-            "body",
-        ]
+        assert "tools" not in ctx
+        assert "rules" not in ctx
         queued_message = body_to_agent_message(queued_body)
         assert queued_message.prompt == "Plan implementation."
         assert queued_message.context is not None
@@ -334,12 +331,7 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
         assert reviewer_body["prompt"] == "review this"
         assert reviewer_body["context"]["framework_context"]["agent_node_id"] == "reviewer"
         assert reviewer_body["context"]["framework_context"]["message_envelope"]["required_outgoing_targets"] == []
-        assert (
-            reviewer_body["context"]["framework_context"]["message_envelope"][
-                "reachable_downstream_targets"
-            ]
-            == []
-        )
+        assert reviewer_body["context"]["framework_context"]["downstream_agents"] == []
         reviewer_message = body_to_agent_message(reviewer_body)
         assert reviewer_message.prompt == "review this"
         assert reviewer_message.context is not None
@@ -398,6 +390,61 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
         assert ended["final_status"] == "partial_success"
     finally:
         server.close()
+
+
+def test_complex_blueprint_fixture_compiles_validates_and_starts(tmp_path: Path) -> None:
+    fixture_path = Path("docs/blueprints/complex_test_blueprint.json")
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    graph = graph_definition_from_dict(fixture["graph"])
+    graph.validate_runnable()
+    profile = GuLiCodeTopAgentProfile()
+    start_plan = TopAgentStartPlan.from_dict(fixture["top_agent_start_plan"])
+    validation = profile.validate_start_plan(graph, start_plan)
+
+    assert validation.ok is True
+    organization = graph.agent_organization_view()
+    assert organization["agent_connections"]["requirements"] == [
+        "risk_scan",
+        "architecture",
+        "test_planner",
+    ]
+    assert organization["agent_connections"]["architecture"] == [
+        "backend_impl",
+        "frontend_impl",
+    ]
+    assert organization["agent_connections"]["test_planner"] == [
+        "unit_tests",
+        "e2e_tests",
+    ]
+
+    journal_path = tmp_path / "shared" / "logs" / "message_journal.jsonl"
+    runtime = GraphRuntime(_FakeCluster(), message_journal_path=journal_path)
+    control = GraphRuntimeControlPlane(runtime, graph, top_agent=profile)
+    started = control.handle_request(
+        {
+            "command": "run.start",
+            "args": {"plan": start_plan.to_dict()},
+        }
+    )
+
+    assert started["ok"] is True
+    assert started["queued_messages"][0]["node_id"] == "requirements"
+    assert journal_path.is_file()
+    records = [
+        json.loads(line)
+        for line in journal_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert records[0]["record_type"] == "framework.message.queued"
+    assert records[0]["receiver"]["node_id"] == "requirements"
+    queued_body = runtime.status_snapshot()["queues"]["by_agent"]["requirements"][0]["body"]
+    envelope = queued_body["context"]["framework_context"]["message_envelope"]
+    assert envelope["required_outgoing_targets"] == [
+        "risk_scan",
+        "architecture",
+        "test_planner",
+    ]
+    assert runtime.status_snapshot()["run"]["message_journal"]["record_count"] == 1
 
 
 def test_top_agent_session_and_ask_use_long_lived_worker() -> None:

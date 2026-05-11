@@ -109,6 +109,11 @@ def framework_agent_skill() -> str:
             "",
             "For reports and artifacts, publish through `python -m multi_agent_tcp.workspace_api` "
             "as shared run context. Use summaries, file paths, versions, and changeset ids when another AgentNode needs code context.",
+            "",
+            "For downstream messages, use `python -m multi_agent_tcp runtime agent-dispatch "
+            "--source-node-id <self> --target-node-id <target> --batch-id <outgoing_batch_id> "
+            "--body-json '{...}'`. The target must be listed in the current message's "
+            "`framework_context.message_envelope.required_outgoing_targets`.",
         ]
     )
 
@@ -208,6 +213,65 @@ def materialize_rule_paths(
             }
         )
     return catalog
+
+
+def _build_prompt_execution_context(execution_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a reduced execution context suitable for prompt injection."""
+    prompt_context: Dict[str, Any] = {}
+
+    workspace_api = execution_context.get("workspace_api")
+    if isinstance(workspace_api, dict):
+        prompt_workspace_api = {
+            key: workspace_api[key]
+            for key in ("command", "context_env")
+            if key in workspace_api
+        }
+        if prompt_workspace_api:
+            prompt_context["workspace_api"] = prompt_workspace_api
+
+    code_workspace = execution_context.get("code_workspace")
+    if isinstance(code_workspace, dict):
+        prompt_code_workspace = {
+            key: code_workspace[key]
+            for key in ("write_scope", "submit_command")
+            if key in code_workspace
+        }
+        if prompt_code_workspace:
+            prompt_context["code_workspace"] = prompt_code_workspace
+
+    private_context = execution_context.get("private_context")
+    if isinstance(private_context, dict):
+        prompt_private_context: Dict[str, Any] = {}
+        skill_catalog = private_context.get("skill_catalog")
+        if isinstance(skill_catalog, list):
+            prompt_private_context["skill_catalog"] = [
+                {
+                    key: item[key]
+                    for key in ("name", "description")
+                    if isinstance(item, dict) and key in item
+                }
+                for item in skill_catalog
+                if isinstance(item, dict)
+            ]
+        rule_catalog = private_context.get("rule_catalog")
+        if isinstance(rule_catalog, list):
+            prompt_private_context["rule_catalog"] = [
+                {
+                    key: item[key]
+                    for key in ("name", "description")
+                    if isinstance(item, dict) and key in item
+                }
+                for item in rule_catalog
+                if isinstance(item, dict)
+            ]
+        if prompt_private_context:
+            prompt_context["private_context"] = prompt_private_context
+
+    workspace_scopes = execution_context.get("workspace_scopes")
+    if workspace_scopes is not None:
+        prompt_context["workspace_scopes"] = workspace_scopes
+
+    return prompt_context
 
 
 def build_private_agents_md(
@@ -352,6 +416,7 @@ def materialize_private_agent_context(
     }
     execution_context["workspace_scopes"] = ["run"]
     adapter_options["execution_context"] = execution_context
+    adapter_options["prompt_execution_context"] = _build_prompt_execution_context(execution_context)
     data["adapter_options"] = adapter_options
 
     extra_env = {str(k): str(v) for k, v in dict(data.get("extra_env", {})).items()}

@@ -1,0 +1,4494 @@
+{
+  "ok": true,
+  "start": {
+    "ok": true,
+    "run_status": "running",
+    "validation": {
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "normalized_plan": {
+        "user_goal": "Run the fixed complex blueprint test task from planning through archive.",
+        "agent_descriptions": {
+          "requirements": "Breaks down the user goal and fans out required work.",
+          "risk_scan": "Scans requirements and architecture for risk level.",
+          "architecture": "Creates implementation architecture and splits backend/frontend work.",
+          "test_planner": "Creates the unit and end-to-end testing strategy.",
+          "backend_impl": "Produces backend changes and artifacts.",
+          "frontend_impl": "Produces frontend changes and artifacts.",
+          "unit_tests": "Runs unit tests and publishes test results.",
+          "e2e_tests": "Runs end-to-end tests and publishes test results.",
+          "security_review": "Reviews high-risk paths before regular review.",
+          "review": "Aggregates implementation, risk, and test inputs for review.",
+          "patch": "Fixes review or integration failures and feeds retry work.",
+          "integration": "Validates integrated changes and decides success or failure attribution.",
+          "failure_analysis": "Classifies integration failure and produces retry guidance.",
+          "summary": "Builds the final report and archive summary.",
+          "event_monitor": "Collects side-channel runtime events.",
+          "workspace_state": "Collects side-channel workspace state."
+        },
+        "start_nodes": [
+          "requirements"
+        ],
+        "tasks": {
+          "requirements": {
+            "goal": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+            "context_refs": [],
+            "expected_output": "A complete outgoing batch for risk_scan, architecture, and test_planner.",
+            "acceptance": "Every required downstream target receives a framework-queued message and the message journal is persisted."
+          }
+        },
+        "run_policy": {
+          "allow_parallel": true,
+          "persist_message_io": true,
+          "archive_on_complete": true
+        }
+      }
+    },
+    "queued_messages": [
+      {
+        "message_id": "msg-1214c09648e1",
+        "node_id": "requirements",
+        "agent_id": "agent-requirements",
+        "body": {
+          "type": "top_agent_task",
+          "prompt": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+          "user_goal": "Run the fixed complex blueprint test task from planning through archive.",
+          "agent_description": "Breaks down the user goal and fans out required work.",
+          "task": {
+            "goal": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+            "context_refs": [],
+            "expected_output": "A complete outgoing batch for risk_scan, architecture, and test_planner.",
+            "acceptance": "Every required downstream target receives a framework-queued message and the message journal is persisted."
+          },
+          "organization": {
+            "scope": "agent",
+            "graph": {
+              "nodes": [
+                "architecture",
+                "requirements",
+                "risk_scan",
+                "test_planner"
+              ],
+              "agent_nodes": [
+                "requirements"
+              ],
+              "edges": [
+                {
+                  "from": "requirements",
+                  "to": "risk_scan",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "requirements",
+                  "to": "architecture",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "requirements",
+                  "to": "test_planner",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                }
+              ]
+            },
+            "agent": {
+              "node_id": "requirements",
+              "agent_id": "agent-requirements",
+              "upstream_agents": [],
+              "downstream_agents": [
+                "risk_scan",
+                "architecture",
+                "test_planner"
+              ],
+              "read_scope": [
+                "docs/**"
+              ],
+              "write_scope": [
+                "shared/reports/**"
+              ],
+              "artifact_scope": [
+                "shared/artifacts/**"
+              ],
+              "skill_selection_mode": "none"
+            },
+            "agent_connections": {
+              "requirements": [
+                "risk_scan",
+                "architecture",
+                "test_planner"
+              ]
+            }
+          },
+          "context": {
+            "framework_context": {
+              "agent_node_id": "requirements",
+              "agent_id": "agent-requirements",
+              "upstream_agents": [],
+              "downstream_agents": [
+                "risk_scan",
+                "architecture",
+                "test_planner"
+              ],
+              "organization": {
+                "scope": "agent",
+                "graph": {
+                  "nodes": [
+                    "architecture",
+                    "requirements",
+                    "risk_scan",
+                    "test_planner"
+                  ],
+                  "agent_nodes": [
+                    "requirements"
+                  ],
+                  "edges": [
+                    {
+                      "from": "requirements",
+                      "to": "risk_scan",
+                      "edge_type": "exec",
+                      "output_port": null,
+                      "input_port": null
+                    },
+                    {
+                      "from": "requirements",
+                      "to": "architecture",
+                      "edge_type": "exec",
+                      "output_port": null,
+                      "input_port": null
+                    },
+                    {
+                      "from": "requirements",
+                      "to": "test_planner",
+                      "edge_type": "exec",
+                      "output_port": null,
+                      "input_port": null
+                    }
+                  ]
+                },
+                "agent": {
+                  "node_id": "requirements",
+                  "agent_id": "agent-requirements",
+                  "upstream_agents": [],
+                  "downstream_agents": [
+                    "risk_scan",
+                    "architecture",
+                    "test_planner"
+                  ],
+                  "read_scope": [
+                    "docs/**"
+                  ],
+                  "write_scope": [
+                    "shared/reports/**"
+                  ],
+                  "artifact_scope": [
+                    "shared/artifacts/**"
+                  ],
+                  "skill_selection_mode": "none"
+                },
+                "agent_connections": {
+                  "requirements": [
+                    "risk_scan",
+                    "architecture",
+                    "test_planner"
+                  ]
+                }
+              },
+              "message_envelope": {
+                "outgoing_batch_id": "out-8a92b82a42a9",
+                "required_outgoing_targets": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ],
+                "remaining_targets": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ]
+              }
+            }
+          }
+        },
+        "status": "queued",
+        "created_at": 220577.5586966,
+        "source_agent_id": "gulicode"
+      }
+    ],
+    "start_manifest": {
+      "top_agent": {
+        "agent_id": "gulicode",
+        "display_name": "GuLiCode",
+        "cli_kind": "codex",
+        "model": "gpt-5.4",
+        "cwd": ".",
+        "timeout_sec": 1800.0,
+        "prompt_via_file": "auto",
+        "command": "codex",
+        "adapter_options": {},
+        "extra_env": {},
+        "external": false,
+        "allowed_run_permissions": [
+          "ask",
+          "start",
+          "status",
+          "end",
+          "utterances"
+        ],
+        "rule": "# GuLiCode Top Agent Rules\n\n- Read the latest organization view before proposing a start plan.\n- Produce one concise responsibility description for every AgentNode.\n- Choose start_nodes explicitly from existing AgentNode ids; the framework does not choose them for you.\n- Provide one task for every selected start node.\n- Each task must include goal, expected_output, and acceptance.\n- Do not ask ordinary agents to bypass framework workspace, VCS, or message APIs.\n- Do not expose private scratch paths, real skill-space paths, tokens, or RPC internals to ordinary agents.\n- You may read framework-private Agent utterance records through the dedicated top-agent interface, but do not forward those records into ordinary Agent messages unless the user explicitly asks for a human-facing summary.\n- Treat worker reply utterances as private observability records, not as proof of submitted work.\n- Explain failures, conflicts, timeouts, or missing permissions instead of pretending success.\n- Request end/cancel/pause through the framework; final state aggregation belongs to the framework.",
+        "skill": "# GuLiCode Top Agent Framework Console\n\n- Organization view: inspect graph, agents, edges, scopes, and agent_connections.\n- Start plan: submit user_goal, agent_descriptions, start_nodes, tasks, and run_policy.\n- Status: read runtime events, agent states, queues, jobs, changesets, conflicts, artifacts, and reports.\n- Status explanation: use framework status summaries and recent events; do not infer hidden progress.\n- Utterance records: use the dedicated top-agent utterance interface to inspect who said what, when, and for which task/message.\n- Messaging: ordinary AgentNode communication is staged, validated, and queued by the framework.\n- Ordinary agents receive a per-message framework_context containing outgoing_batch_id, required_outgoing_targets, remaining_targets, scoped organization, and agent.dispatch usage.\n- Ordinary Agent worker replies are framework-private utterance records and are not automatically passed to other Agents.\n- Workspace: source edits use checkout/status/diff/submit/sync; reports and artifacts use publish APIs.\n- End control: request complete, cancel, fail, pause, or archive_only; unresolved work remains visible."
+      },
+      "start_plan": {
+        "user_goal": "Run the fixed complex blueprint test task from planning through archive.",
+        "agent_descriptions": {
+          "requirements": "Breaks down the user goal and fans out required work.",
+          "risk_scan": "Scans requirements and architecture for risk level.",
+          "architecture": "Creates implementation architecture and splits backend/frontend work.",
+          "test_planner": "Creates the unit and end-to-end testing strategy.",
+          "backend_impl": "Produces backend changes and artifacts.",
+          "frontend_impl": "Produces frontend changes and artifacts.",
+          "unit_tests": "Runs unit tests and publishes test results.",
+          "e2e_tests": "Runs end-to-end tests and publishes test results.",
+          "security_review": "Reviews high-risk paths before regular review.",
+          "review": "Aggregates implementation, risk, and test inputs for review.",
+          "patch": "Fixes review or integration failures and feeds retry work.",
+          "integration": "Validates integrated changes and decides success or failure attribution.",
+          "failure_analysis": "Classifies integration failure and produces retry guidance.",
+          "summary": "Builds the final report and archive summary.",
+          "event_monitor": "Collects side-channel runtime events.",
+          "workspace_state": "Collects side-channel workspace state."
+        },
+        "start_nodes": [
+          "requirements"
+        ],
+        "tasks": {
+          "requirements": {
+            "goal": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+            "context_refs": [],
+            "expected_output": "A complete outgoing batch for risk_scan, architecture, and test_planner.",
+            "acceptance": "Every required downstream target receives a framework-queued message and the message journal is persisted."
+          }
+        },
+        "run_policy": {
+          "allow_parallel": true,
+          "persist_message_io": true,
+          "archive_on_complete": true
+        }
+      },
+      "organization": {
+        "graph": {
+          "nodes": [
+            "architecture",
+            "backend_impl",
+            "e2e_tests",
+            "end",
+            "event_monitor",
+            "failure_analysis",
+            "frontend_impl",
+            "integration",
+            "patch",
+            "requirements",
+            "review",
+            "risk_scan",
+            "security_review",
+            "start",
+            "summary",
+            "test_planner",
+            "unit_tests",
+            "workspace_state"
+          ],
+          "agent_nodes": [
+            "requirements",
+            "risk_scan",
+            "architecture",
+            "test_planner",
+            "backend_impl",
+            "frontend_impl",
+            "unit_tests",
+            "e2e_tests",
+            "security_review",
+            "review",
+            "patch",
+            "integration",
+            "failure_analysis",
+            "summary",
+            "event_monitor",
+            "workspace_state"
+          ],
+          "route_nodes": [],
+          "terminal_nodes": {
+            "start": "start",
+            "end": "end"
+          },
+          "edges": [
+            {
+              "from": "start",
+              "to": "requirements",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "requirements",
+              "to": "risk_scan",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "requirements",
+              "to": "architecture",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "requirements",
+              "to": "test_planner",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "architecture",
+              "to": "backend_impl",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "architecture",
+              "to": "frontend_impl",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "test_planner",
+              "to": "unit_tests",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "test_planner",
+              "to": "e2e_tests",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "risk_scan",
+              "to": "security_review",
+              "edge_type": "exec",
+              "output_port": "high_risk",
+              "input_port": null
+            },
+            {
+              "from": "risk_scan",
+              "to": "review",
+              "edge_type": "condition_low_medium",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "security_review",
+              "to": "review",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "backend_impl",
+              "to": "review",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "frontend_impl",
+              "to": "review",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "review",
+              "to": "patch",
+              "edge_type": "condition_review_failed",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "review",
+              "to": "integration",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "patch",
+              "to": "integration",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "unit_tests",
+              "to": "integration",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "e2e_tests",
+              "to": "integration",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "integration",
+              "to": "summary",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "summary",
+              "to": "end",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "requirements",
+              "to": "event_monitor",
+              "edge_type": "side_channel",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "backend_impl",
+              "to": "workspace_state",
+              "edge_type": "side_channel",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "frontend_impl",
+              "to": "workspace_state",
+              "edge_type": "side_channel",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "unit_tests",
+              "to": "workspace_state",
+              "edge_type": "side_channel",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "e2e_tests",
+              "to": "workspace_state",
+              "edge_type": "side_channel",
+              "output_port": null,
+              "input_port": null
+            }
+          ]
+        },
+        "agent_connections": {
+          "requirements": [
+            "risk_scan",
+            "architecture",
+            "test_planner"
+          ],
+          "risk_scan": [
+            "security_review"
+          ],
+          "architecture": [
+            "backend_impl",
+            "frontend_impl"
+          ],
+          "test_planner": [
+            "unit_tests",
+            "e2e_tests"
+          ],
+          "backend_impl": [
+            "review"
+          ],
+          "frontend_impl": [
+            "review"
+          ],
+          "unit_tests": [
+            "integration"
+          ],
+          "e2e_tests": [
+            "integration"
+          ],
+          "security_review": [
+            "review"
+          ],
+          "review": [
+            "integration"
+          ],
+          "patch": [
+            "integration"
+          ],
+          "integration": [
+            "summary"
+          ],
+          "failure_analysis": [],
+          "summary": [],
+          "event_monitor": [],
+          "workspace_state": []
+        },
+        "agents": {
+          "requirements": {
+            "node_id": "requirements",
+            "agent_id": "agent-requirements",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [
+              "docs/**"
+            ],
+            "write_scope": [
+              "shared/reports/**"
+            ],
+            "artifact_scope": [
+              "shared/artifacts/**"
+            ],
+            "upstream_agents": [],
+            "downstream_agents": [
+              "risk_scan",
+              "architecture",
+              "test_planner"
+            ]
+          },
+          "risk_scan": {
+            "node_id": "risk_scan",
+            "agent_id": "agent-risk-scan",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "shared/reports/risk/**"
+            ],
+            "artifact_scope": [],
+            "upstream_agents": [
+              "requirements"
+            ],
+            "downstream_agents": [
+              "security_review"
+            ]
+          },
+          "architecture": {
+            "node_id": "architecture",
+            "agent_id": "agent-architecture",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "shared/reports/architecture/**"
+            ],
+            "artifact_scope": [],
+            "upstream_agents": [
+              "requirements"
+            ],
+            "downstream_agents": [
+              "backend_impl",
+              "frontend_impl"
+            ]
+          },
+          "test_planner": {
+            "node_id": "test_planner",
+            "agent_id": "agent-test-planner",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "shared/reports/testing/**"
+            ],
+            "artifact_scope": [],
+            "upstream_agents": [
+              "requirements"
+            ],
+            "downstream_agents": [
+              "unit_tests",
+              "e2e_tests"
+            ]
+          },
+          "backend_impl": {
+            "node_id": "backend_impl",
+            "agent_id": "agent-backend-impl",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "src/backend/**"
+            ],
+            "artifact_scope": [
+              "shared/artifacts/backend/**"
+            ],
+            "upstream_agents": [
+              "architecture"
+            ],
+            "downstream_agents": [
+              "review"
+            ]
+          },
+          "frontend_impl": {
+            "node_id": "frontend_impl",
+            "agent_id": "agent-frontend-impl",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "src/frontend/**"
+            ],
+            "artifact_scope": [
+              "shared/artifacts/frontend/**"
+            ],
+            "upstream_agents": [
+              "architecture"
+            ],
+            "downstream_agents": [
+              "review"
+            ]
+          },
+          "unit_tests": {
+            "node_id": "unit_tests",
+            "agent_id": "agent-unit-tests",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [],
+            "artifact_scope": [
+              "shared/artifacts/tests/unit/**"
+            ],
+            "upstream_agents": [
+              "test_planner"
+            ],
+            "downstream_agents": [
+              "integration"
+            ]
+          },
+          "e2e_tests": {
+            "node_id": "e2e_tests",
+            "agent_id": "agent-e2e-tests",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [],
+            "artifact_scope": [
+              "shared/artifacts/tests/e2e/**"
+            ],
+            "upstream_agents": [
+              "test_planner"
+            ],
+            "downstream_agents": [
+              "integration"
+            ]
+          },
+          "security_review": {
+            "node_id": "security_review",
+            "agent_id": "agent-security-review",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "shared/reports/security/**"
+            ],
+            "artifact_scope": [],
+            "upstream_agents": [
+              "risk_scan"
+            ],
+            "downstream_agents": [
+              "review"
+            ]
+          },
+          "review": {
+            "node_id": "review",
+            "agent_id": "agent-review",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "shared/reports/review/**"
+            ],
+            "artifact_scope": [],
+            "upstream_agents": [
+              "backend_impl",
+              "frontend_impl",
+              "security_review"
+            ],
+            "downstream_agents": [
+              "integration"
+            ]
+          },
+          "patch": {
+            "node_id": "patch",
+            "agent_id": "agent-patch",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "src/**"
+            ],
+            "artifact_scope": [
+              "shared/artifacts/patch/**"
+            ],
+            "upstream_agents": [],
+            "downstream_agents": [
+              "integration"
+            ]
+          },
+          "integration": {
+            "node_id": "integration",
+            "agent_id": "agent-integration",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [],
+            "artifact_scope": [
+              "shared/artifacts/integration/**"
+            ],
+            "upstream_agents": [
+              "unit_tests",
+              "e2e_tests",
+              "review",
+              "patch"
+            ],
+            "downstream_agents": [
+              "summary"
+            ]
+          },
+          "failure_analysis": {
+            "node_id": "failure_analysis",
+            "agent_id": "agent-failure-analysis",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "shared/reports/failures/**"
+            ],
+            "artifact_scope": [],
+            "upstream_agents": [],
+            "downstream_agents": []
+          },
+          "summary": {
+            "node_id": "summary",
+            "agent_id": "agent-summary",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "shared/reports/**"
+            ],
+            "artifact_scope": [],
+            "upstream_agents": [
+              "integration"
+            ],
+            "downstream_agents": []
+          },
+          "event_monitor": {
+            "node_id": "event_monitor",
+            "agent_id": "agent-event-monitor",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "shared/reports/events/**"
+            ],
+            "artifact_scope": [],
+            "upstream_agents": [],
+            "downstream_agents": []
+          },
+          "workspace_state": {
+            "node_id": "workspace_state",
+            "agent_id": "agent-workspace-state",
+            "cli_kind": "codemaker",
+            "execution_mode": "blocking",
+            "skill_selection": {
+              "mode": "none"
+            },
+            "skills": [],
+            "rule_paths": [],
+            "read_scope": [],
+            "write_scope": [
+              "shared/reports/workspace/**"
+            ],
+            "artifact_scope": [],
+            "upstream_agents": [],
+            "downstream_agents": []
+          }
+        },
+        "start_policy": {
+          "selected_by": "top_agent",
+          "framework_role": "validate_only",
+          "valid_start_nodes": [
+            "requirements",
+            "risk_scan",
+            "architecture",
+            "test_planner",
+            "backend_impl",
+            "frontend_impl",
+            "unit_tests",
+            "e2e_tests",
+            "security_review",
+            "review",
+            "patch",
+            "integration",
+            "failure_analysis",
+            "summary",
+            "event_monitor",
+            "workspace_state"
+          ]
+        }
+      },
+      "queued_messages": [
+        {
+          "message_id": "msg-1214c09648e1",
+          "node_id": "requirements",
+          "agent_id": "agent-requirements",
+          "body": {
+            "type": "top_agent_task",
+            "prompt": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+            "user_goal": "Run the fixed complex blueprint test task from planning through archive.",
+            "agent_description": "Breaks down the user goal and fans out required work.",
+            "task": {
+              "goal": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+              "context_refs": [],
+              "expected_output": "A complete outgoing batch for risk_scan, architecture, and test_planner.",
+              "acceptance": "Every required downstream target receives a framework-queued message and the message journal is persisted."
+            },
+            "organization": {
+              "scope": "agent",
+              "graph": {
+                "nodes": [
+                  "architecture",
+                  "requirements",
+                  "risk_scan",
+                  "test_planner"
+                ],
+                "agent_nodes": [
+                  "requirements"
+                ],
+                "edges": [
+                  {
+                    "from": "requirements",
+                    "to": "risk_scan",
+                    "edge_type": "exec",
+                    "output_port": null,
+                    "input_port": null
+                  },
+                  {
+                    "from": "requirements",
+                    "to": "architecture",
+                    "edge_type": "exec",
+                    "output_port": null,
+                    "input_port": null
+                  },
+                  {
+                    "from": "requirements",
+                    "to": "test_planner",
+                    "edge_type": "exec",
+                    "output_port": null,
+                    "input_port": null
+                  }
+                ]
+              },
+              "agent": {
+                "node_id": "requirements",
+                "agent_id": "agent-requirements",
+                "upstream_agents": [],
+                "downstream_agents": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ],
+                "read_scope": [
+                  "docs/**"
+                ],
+                "write_scope": [
+                  "shared/reports/**"
+                ],
+                "artifact_scope": [
+                  "shared/artifacts/**"
+                ],
+                "skill_selection_mode": "none"
+              },
+              "agent_connections": {
+                "requirements": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ]
+              }
+            },
+            "context": {
+              "framework_context": {
+                "agent_node_id": "requirements",
+                "agent_id": "agent-requirements",
+                "upstream_agents": [],
+                "downstream_agents": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ],
+                "organization": {
+                  "scope": "agent",
+                  "graph": {
+                    "nodes": [
+                      "architecture",
+                      "requirements",
+                      "risk_scan",
+                      "test_planner"
+                    ],
+                    "agent_nodes": [
+                      "requirements"
+                    ],
+                    "edges": [
+                      {
+                        "from": "requirements",
+                        "to": "risk_scan",
+                        "edge_type": "exec",
+                        "output_port": null,
+                        "input_port": null
+                      },
+                      {
+                        "from": "requirements",
+                        "to": "architecture",
+                        "edge_type": "exec",
+                        "output_port": null,
+                        "input_port": null
+                      },
+                      {
+                        "from": "requirements",
+                        "to": "test_planner",
+                        "edge_type": "exec",
+                        "output_port": null,
+                        "input_port": null
+                      }
+                    ]
+                  },
+                  "agent": {
+                    "node_id": "requirements",
+                    "agent_id": "agent-requirements",
+                    "upstream_agents": [],
+                    "downstream_agents": [
+                      "risk_scan",
+                      "architecture",
+                      "test_planner"
+                    ],
+                    "read_scope": [
+                      "docs/**"
+                    ],
+                    "write_scope": [
+                      "shared/reports/**"
+                    ],
+                    "artifact_scope": [
+                      "shared/artifacts/**"
+                    ],
+                    "skill_selection_mode": "none"
+                  },
+                  "agent_connections": {
+                    "requirements": [
+                      "risk_scan",
+                      "architecture",
+                      "test_planner"
+                    ]
+                  }
+                },
+                "message_envelope": {
+                  "outgoing_batch_id": "out-8a92b82a42a9",
+                  "required_outgoing_targets": [
+                    "risk_scan",
+                    "architecture",
+                    "test_planner"
+                  ],
+                  "remaining_targets": [
+                    "risk_scan",
+                    "architecture",
+                    "test_planner"
+                  ]
+                }
+              }
+            }
+          },
+          "status": "queued",
+          "created_at": 220577.5586966,
+          "source_agent_id": "gulicode"
+        }
+      ],
+      "started_at": 220577.5596457
+    }
+  },
+  "execution": {
+    "ok": true,
+    "status": "completed",
+    "executed_nodes": [
+      "requirements",
+      "risk_scan",
+      "security_review",
+      "architecture",
+      "test_planner",
+      "backend_impl",
+      "frontend_impl",
+      "review",
+      "patch",
+      "unit_tests",
+      "e2e_tests",
+      "integration",
+      "failure_analysis",
+      "patch",
+      "integration",
+      "summary",
+      "event_monitor",
+      "workspace_state"
+    ],
+    "route_history": [
+      {
+        "from": "risk_scan",
+        "to": "security_review",
+        "condition": "risk == high",
+        "event_type": "ConditionalRouteTaken"
+      },
+      {
+        "from": "review",
+        "to": "patch",
+        "condition": "review == failed",
+        "event_type": "ConditionalRouteTaken"
+      },
+      {
+        "from": "integration",
+        "to": "failure_analysis",
+        "condition": "integration == failed",
+        "attempt": 1,
+        "event_type": "RetryRouteTaken"
+      },
+      {
+        "from": "failure_analysis",
+        "to": "patch",
+        "condition": "retry_allowed",
+        "attempt": 1,
+        "event_type": "RetryRouteTaken"
+      }
+    ],
+    "integration_attempts": 2
+  },
+  "end": {
+    "ok": true,
+    "action": "complete",
+    "run_status": "completed",
+    "reason": "complex blueprint completed",
+    "summary": {
+      "agent_states": {
+        "requirements": "idle",
+        "risk_scan": "idle",
+        "architecture": "idle",
+        "test_planner": "idle",
+        "backend_impl": "idle",
+        "frontend_impl": "idle",
+        "unit_tests": "idle",
+        "e2e_tests": "idle",
+        "security_review": "idle",
+        "review": "idle",
+        "patch": "idle",
+        "integration": "idle",
+        "failure_analysis": "idle",
+        "summary": "idle",
+        "event_monitor": "idle",
+        "workspace_state": "idle"
+      },
+      "pending_messages": [],
+      "failed_messages": [],
+      "failed_jobs": [],
+      "running_jobs": [],
+      "waiting_joins": [],
+      "timed_out_joins": [],
+      "conflicts": [],
+      "accepted_changesets": [
+        {
+          "changeset_id": "backend_impl-changeset"
+        },
+        {
+          "changeset_id": "frontend_impl-changeset"
+        }
+      ],
+      "completed_jobs": [],
+      "event_count": 150,
+      "final_report_path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\archived\\run-complex-data\\shared\\reports\\final_report.json",
+      "archive_path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\archived\\run-complex-data"
+    },
+    "archived": true,
+    "ended_at": 220577.5869155,
+    "final_status": "success"
+  },
+  "status": {
+    "run": {
+      "status": "completed",
+      "final_status": "success",
+      "ended_at": 220577.5869155,
+      "end_reason": "complex blueprint completed",
+      "closed": false,
+      "last_tick_at": null,
+      "manifest": {
+        "message_journal": {
+          "path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\active\\run-complex-data\\shared\\logs\\message_journal.jsonl",
+          "record_count": 65
+        },
+        "start": {
+          "top_agent": {
+            "agent_id": "gulicode",
+            "display_name": "GuLiCode",
+            "cli_kind": "codex",
+            "model": "gpt-5.4",
+            "cwd": ".",
+            "timeout_sec": 1800.0,
+            "prompt_via_file": "auto",
+            "command": "codex",
+            "adapter_options": {},
+            "extra_env": {},
+            "external": false,
+            "allowed_run_permissions": [
+              "ask",
+              "start",
+              "status",
+              "end",
+              "utterances"
+            ],
+            "rule": "# GuLiCode Top Agent Rules\n\n- Read the latest organization view before proposing a start plan.\n- Produce one concise responsibility description for every AgentNode.\n- Choose start_nodes explicitly from existing AgentNode ids; the framework does not choose them for you.\n- Provide one task for every selected start node.\n- Each task must include goal, expected_output, and acceptance.\n- Do not ask ordinary agents to bypass framework workspace, VCS, or message APIs.\n- Do not expose private scratch paths, real skill-space paths, tokens, or RPC internals to ordinary agents.\n- You may read framework-private Agent utterance records through the dedicated top-agent interface, but do not forward those records into ordinary Agent messages unless the user explicitly asks for a human-facing summary.\n- Treat worker reply utterances as private observability records, not as proof of submitted work.\n- Explain failures, conflicts, timeouts, or missing permissions instead of pretending success.\n- Request end/cancel/pause through the framework; final state aggregation belongs to the framework.",
+            "skill": "# GuLiCode Top Agent Framework Console\n\n- Organization view: inspect graph, agents, edges, scopes, and agent_connections.\n- Start plan: submit user_goal, agent_descriptions, start_nodes, tasks, and run_policy.\n- Status: read runtime events, agent states, queues, jobs, changesets, conflicts, artifacts, and reports.\n- Status explanation: use framework status summaries and recent events; do not infer hidden progress.\n- Utterance records: use the dedicated top-agent utterance interface to inspect who said what, when, and for which task/message.\n- Messaging: ordinary AgentNode communication is staged, validated, and queued by the framework.\n- Ordinary agents receive a per-message framework_context containing outgoing_batch_id, required_outgoing_targets, remaining_targets, scoped organization, and agent.dispatch usage.\n- Ordinary Agent worker replies are framework-private utterance records and are not automatically passed to other Agents.\n- Workspace: source edits use checkout/status/diff/submit/sync; reports and artifacts use publish APIs.\n- End control: request complete, cancel, fail, pause, or archive_only; unresolved work remains visible."
+          },
+          "start_plan": {
+            "user_goal": "Run the fixed complex blueprint test task from planning through archive.",
+            "agent_descriptions": {
+              "requirements": "Breaks down the user goal and fans out required work.",
+              "risk_scan": "Scans requirements and architecture for risk level.",
+              "architecture": "Creates implementation architecture and splits backend/frontend work.",
+              "test_planner": "Creates the unit and end-to-end testing strategy.",
+              "backend_impl": "Produces backend changes and artifacts.",
+              "frontend_impl": "Produces frontend changes and artifacts.",
+              "unit_tests": "Runs unit tests and publishes test results.",
+              "e2e_tests": "Runs end-to-end tests and publishes test results.",
+              "security_review": "Reviews high-risk paths before regular review.",
+              "review": "Aggregates implementation, risk, and test inputs for review.",
+              "patch": "Fixes review or integration failures and feeds retry work.",
+              "integration": "Validates integrated changes and decides success or failure attribution.",
+              "failure_analysis": "Classifies integration failure and produces retry guidance.",
+              "summary": "Builds the final report and archive summary.",
+              "event_monitor": "Collects side-channel runtime events.",
+              "workspace_state": "Collects side-channel workspace state."
+            },
+            "start_nodes": [
+              "requirements"
+            ],
+            "tasks": {
+              "requirements": {
+                "goal": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+                "context_refs": [],
+                "expected_output": "A complete outgoing batch for risk_scan, architecture, and test_planner.",
+                "acceptance": "Every required downstream target receives a framework-queued message and the message journal is persisted."
+              }
+            },
+            "run_policy": {
+              "allow_parallel": true,
+              "persist_message_io": true,
+              "archive_on_complete": true
+            }
+          },
+          "organization": {
+            "graph": {
+              "nodes": [
+                "architecture",
+                "backend_impl",
+                "e2e_tests",
+                "end",
+                "event_monitor",
+                "failure_analysis",
+                "frontend_impl",
+                "integration",
+                "patch",
+                "requirements",
+                "review",
+                "risk_scan",
+                "security_review",
+                "start",
+                "summary",
+                "test_planner",
+                "unit_tests",
+                "workspace_state"
+              ],
+              "agent_nodes": [
+                "requirements",
+                "risk_scan",
+                "architecture",
+                "test_planner",
+                "backend_impl",
+                "frontend_impl",
+                "unit_tests",
+                "e2e_tests",
+                "security_review",
+                "review",
+                "patch",
+                "integration",
+                "failure_analysis",
+                "summary",
+                "event_monitor",
+                "workspace_state"
+              ],
+              "route_nodes": [],
+              "terminal_nodes": {
+                "start": "start",
+                "end": "end"
+              },
+              "edges": [
+                {
+                  "from": "start",
+                  "to": "requirements",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "requirements",
+                  "to": "risk_scan",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "requirements",
+                  "to": "architecture",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "requirements",
+                  "to": "test_planner",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "architecture",
+                  "to": "backend_impl",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "architecture",
+                  "to": "frontend_impl",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "test_planner",
+                  "to": "unit_tests",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "test_planner",
+                  "to": "e2e_tests",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "risk_scan",
+                  "to": "security_review",
+                  "edge_type": "exec",
+                  "output_port": "high_risk",
+                  "input_port": null
+                },
+                {
+                  "from": "risk_scan",
+                  "to": "review",
+                  "edge_type": "condition_low_medium",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "security_review",
+                  "to": "review",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "backend_impl",
+                  "to": "review",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "frontend_impl",
+                  "to": "review",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "review",
+                  "to": "patch",
+                  "edge_type": "condition_review_failed",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "review",
+                  "to": "integration",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "patch",
+                  "to": "integration",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "unit_tests",
+                  "to": "integration",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "e2e_tests",
+                  "to": "integration",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "integration",
+                  "to": "summary",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "summary",
+                  "to": "end",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "requirements",
+                  "to": "event_monitor",
+                  "edge_type": "side_channel",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "backend_impl",
+                  "to": "workspace_state",
+                  "edge_type": "side_channel",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "frontend_impl",
+                  "to": "workspace_state",
+                  "edge_type": "side_channel",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "unit_tests",
+                  "to": "workspace_state",
+                  "edge_type": "side_channel",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "e2e_tests",
+                  "to": "workspace_state",
+                  "edge_type": "side_channel",
+                  "output_port": null,
+                  "input_port": null
+                }
+              ]
+            },
+            "agent_connections": {
+              "requirements": [
+                "risk_scan",
+                "architecture",
+                "test_planner"
+              ],
+              "risk_scan": [
+                "security_review"
+              ],
+              "architecture": [
+                "backend_impl",
+                "frontend_impl"
+              ],
+              "test_planner": [
+                "unit_tests",
+                "e2e_tests"
+              ],
+              "backend_impl": [
+                "review"
+              ],
+              "frontend_impl": [
+                "review"
+              ],
+              "unit_tests": [
+                "integration"
+              ],
+              "e2e_tests": [
+                "integration"
+              ],
+              "security_review": [
+                "review"
+              ],
+              "review": [
+                "integration"
+              ],
+              "patch": [
+                "integration"
+              ],
+              "integration": [
+                "summary"
+              ],
+              "failure_analysis": [],
+              "summary": [],
+              "event_monitor": [],
+              "workspace_state": []
+            },
+            "agents": {
+              "requirements": {
+                "node_id": "requirements",
+                "agent_id": "agent-requirements",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [
+                  "docs/**"
+                ],
+                "write_scope": [
+                  "shared/reports/**"
+                ],
+                "artifact_scope": [
+                  "shared/artifacts/**"
+                ],
+                "upstream_agents": [],
+                "downstream_agents": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ]
+              },
+              "risk_scan": {
+                "node_id": "risk_scan",
+                "agent_id": "agent-risk-scan",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "shared/reports/risk/**"
+                ],
+                "artifact_scope": [],
+                "upstream_agents": [
+                  "requirements"
+                ],
+                "downstream_agents": [
+                  "security_review"
+                ]
+              },
+              "architecture": {
+                "node_id": "architecture",
+                "agent_id": "agent-architecture",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "shared/reports/architecture/**"
+                ],
+                "artifact_scope": [],
+                "upstream_agents": [
+                  "requirements"
+                ],
+                "downstream_agents": [
+                  "backend_impl",
+                  "frontend_impl"
+                ]
+              },
+              "test_planner": {
+                "node_id": "test_planner",
+                "agent_id": "agent-test-planner",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "shared/reports/testing/**"
+                ],
+                "artifact_scope": [],
+                "upstream_agents": [
+                  "requirements"
+                ],
+                "downstream_agents": [
+                  "unit_tests",
+                  "e2e_tests"
+                ]
+              },
+              "backend_impl": {
+                "node_id": "backend_impl",
+                "agent_id": "agent-backend-impl",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "src/backend/**"
+                ],
+                "artifact_scope": [
+                  "shared/artifacts/backend/**"
+                ],
+                "upstream_agents": [
+                  "architecture"
+                ],
+                "downstream_agents": [
+                  "review"
+                ]
+              },
+              "frontend_impl": {
+                "node_id": "frontend_impl",
+                "agent_id": "agent-frontend-impl",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "src/frontend/**"
+                ],
+                "artifact_scope": [
+                  "shared/artifacts/frontend/**"
+                ],
+                "upstream_agents": [
+                  "architecture"
+                ],
+                "downstream_agents": [
+                  "review"
+                ]
+              },
+              "unit_tests": {
+                "node_id": "unit_tests",
+                "agent_id": "agent-unit-tests",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [],
+                "artifact_scope": [
+                  "shared/artifacts/tests/unit/**"
+                ],
+                "upstream_agents": [
+                  "test_planner"
+                ],
+                "downstream_agents": [
+                  "integration"
+                ]
+              },
+              "e2e_tests": {
+                "node_id": "e2e_tests",
+                "agent_id": "agent-e2e-tests",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [],
+                "artifact_scope": [
+                  "shared/artifacts/tests/e2e/**"
+                ],
+                "upstream_agents": [
+                  "test_planner"
+                ],
+                "downstream_agents": [
+                  "integration"
+                ]
+              },
+              "security_review": {
+                "node_id": "security_review",
+                "agent_id": "agent-security-review",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "shared/reports/security/**"
+                ],
+                "artifact_scope": [],
+                "upstream_agents": [
+                  "risk_scan"
+                ],
+                "downstream_agents": [
+                  "review"
+                ]
+              },
+              "review": {
+                "node_id": "review",
+                "agent_id": "agent-review",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "shared/reports/review/**"
+                ],
+                "artifact_scope": [],
+                "upstream_agents": [
+                  "backend_impl",
+                  "frontend_impl",
+                  "security_review"
+                ],
+                "downstream_agents": [
+                  "integration"
+                ]
+              },
+              "patch": {
+                "node_id": "patch",
+                "agent_id": "agent-patch",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "src/**"
+                ],
+                "artifact_scope": [
+                  "shared/artifacts/patch/**"
+                ],
+                "upstream_agents": [],
+                "downstream_agents": [
+                  "integration"
+                ]
+              },
+              "integration": {
+                "node_id": "integration",
+                "agent_id": "agent-integration",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [],
+                "artifact_scope": [
+                  "shared/artifacts/integration/**"
+                ],
+                "upstream_agents": [
+                  "unit_tests",
+                  "e2e_tests",
+                  "review",
+                  "patch"
+                ],
+                "downstream_agents": [
+                  "summary"
+                ]
+              },
+              "failure_analysis": {
+                "node_id": "failure_analysis",
+                "agent_id": "agent-failure-analysis",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "shared/reports/failures/**"
+                ],
+                "artifact_scope": [],
+                "upstream_agents": [],
+                "downstream_agents": []
+              },
+              "summary": {
+                "node_id": "summary",
+                "agent_id": "agent-summary",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "shared/reports/**"
+                ],
+                "artifact_scope": [],
+                "upstream_agents": [
+                  "integration"
+                ],
+                "downstream_agents": []
+              },
+              "event_monitor": {
+                "node_id": "event_monitor",
+                "agent_id": "agent-event-monitor",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "shared/reports/events/**"
+                ],
+                "artifact_scope": [],
+                "upstream_agents": [],
+                "downstream_agents": []
+              },
+              "workspace_state": {
+                "node_id": "workspace_state",
+                "agent_id": "agent-workspace-state",
+                "cli_kind": "codemaker",
+                "execution_mode": "blocking",
+                "skill_selection": {
+                  "mode": "none"
+                },
+                "skills": [],
+                "rule_paths": [],
+                "read_scope": [],
+                "write_scope": [
+                  "shared/reports/workspace/**"
+                ],
+                "artifact_scope": [],
+                "upstream_agents": [],
+                "downstream_agents": []
+              }
+            },
+            "start_policy": {
+              "selected_by": "top_agent",
+              "framework_role": "validate_only",
+              "valid_start_nodes": [
+                "requirements",
+                "risk_scan",
+                "architecture",
+                "test_planner",
+                "backend_impl",
+                "frontend_impl",
+                "unit_tests",
+                "e2e_tests",
+                "security_review",
+                "review",
+                "patch",
+                "integration",
+                "failure_analysis",
+                "summary",
+                "event_monitor",
+                "workspace_state"
+              ]
+            }
+          },
+          "queued_messages": [
+            {
+              "message_id": "msg-1214c09648e1",
+              "node_id": "requirements",
+              "agent_id": "agent-requirements",
+              "body": {
+                "type": "top_agent_task",
+                "prompt": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+                "user_goal": "Run the fixed complex blueprint test task from planning through archive.",
+                "agent_description": "Breaks down the user goal and fans out required work.",
+                "task": {
+                  "goal": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+                  "context_refs": [],
+                  "expected_output": "A complete outgoing batch for risk_scan, architecture, and test_planner.",
+                  "acceptance": "Every required downstream target receives a framework-queued message and the message journal is persisted."
+                },
+                "organization": {
+                  "scope": "agent",
+                  "graph": {
+                    "nodes": [
+                      "architecture",
+                      "requirements",
+                      "risk_scan",
+                      "test_planner"
+                    ],
+                    "agent_nodes": [
+                      "requirements"
+                    ],
+                    "edges": [
+                      {
+                        "from": "requirements",
+                        "to": "risk_scan",
+                        "edge_type": "exec",
+                        "output_port": null,
+                        "input_port": null
+                      },
+                      {
+                        "from": "requirements",
+                        "to": "architecture",
+                        "edge_type": "exec",
+                        "output_port": null,
+                        "input_port": null
+                      },
+                      {
+                        "from": "requirements",
+                        "to": "test_planner",
+                        "edge_type": "exec",
+                        "output_port": null,
+                        "input_port": null
+                      }
+                    ]
+                  },
+                  "agent": {
+                    "node_id": "requirements",
+                    "agent_id": "agent-requirements",
+                    "upstream_agents": [],
+                    "downstream_agents": [
+                      "risk_scan",
+                      "architecture",
+                      "test_planner"
+                    ],
+                    "read_scope": [
+                      "docs/**"
+                    ],
+                    "write_scope": [
+                      "shared/reports/**"
+                    ],
+                    "artifact_scope": [
+                      "shared/artifacts/**"
+                    ],
+                    "skill_selection_mode": "none"
+                  },
+                  "agent_connections": {
+                    "requirements": [
+                      "risk_scan",
+                      "architecture",
+                      "test_planner"
+                    ]
+                  }
+                },
+                "context": {
+                  "framework_context": {
+                    "agent_node_id": "requirements",
+                    "agent_id": "agent-requirements",
+                    "upstream_agents": [],
+                    "downstream_agents": [
+                      "risk_scan",
+                      "architecture",
+                      "test_planner"
+                    ],
+                    "organization": {
+                      "scope": "agent",
+                      "graph": {
+                        "nodes": [
+                          "architecture",
+                          "requirements",
+                          "risk_scan",
+                          "test_planner"
+                        ],
+                        "agent_nodes": [
+                          "requirements"
+                        ],
+                        "edges": [
+                          {
+                            "from": "requirements",
+                            "to": "risk_scan",
+                            "edge_type": "exec",
+                            "output_port": null,
+                            "input_port": null
+                          },
+                          {
+                            "from": "requirements",
+                            "to": "architecture",
+                            "edge_type": "exec",
+                            "output_port": null,
+                            "input_port": null
+                          },
+                          {
+                            "from": "requirements",
+                            "to": "test_planner",
+                            "edge_type": "exec",
+                            "output_port": null,
+                            "input_port": null
+                          }
+                        ]
+                      },
+                      "agent": {
+                        "node_id": "requirements",
+                        "agent_id": "agent-requirements",
+                        "upstream_agents": [],
+                        "downstream_agents": [
+                          "risk_scan",
+                          "architecture",
+                          "test_planner"
+                        ],
+                        "read_scope": [
+                          "docs/**"
+                        ],
+                        "write_scope": [
+                          "shared/reports/**"
+                        ],
+                        "artifact_scope": [
+                          "shared/artifacts/**"
+                        ],
+                        "skill_selection_mode": "none"
+                      },
+                      "agent_connections": {
+                        "requirements": [
+                          "risk_scan",
+                          "architecture",
+                          "test_planner"
+                        ]
+                      }
+                    },
+                    "message_envelope": {
+                      "outgoing_batch_id": "out-8a92b82a42a9",
+                      "required_outgoing_targets": [
+                        "risk_scan",
+                        "architecture",
+                        "test_planner"
+                      ],
+                      "remaining_targets": [
+                        "risk_scan",
+                        "architecture",
+                        "test_planner"
+                      ]
+                    }
+                  }
+                }
+              },
+              "status": "queued",
+              "created_at": 220577.5586966,
+              "source_agent_id": "gulicode"
+            }
+          ],
+          "started_at": 220577.5596457
+        }
+      },
+      "message_journal": {
+        "path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\active\\run-complex-data\\shared\\logs\\message_journal.jsonl",
+        "record_count": 65
+      }
+    },
+    "agents": {
+      "requirements": {
+        "node_id": "requirements",
+        "agent_id": "agent-requirements",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5581881,
+        "updated_at": 220577.5607103
+      },
+      "risk_scan": {
+        "node_id": "risk_scan",
+        "agent_id": "agent-risk-scan",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5582463,
+        "updated_at": 220577.5643053
+      },
+      "architecture": {
+        "node_id": "architecture",
+        "agent_id": "agent-architecture",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5582608,
+        "updated_at": 220577.5669896
+      },
+      "test_planner": {
+        "node_id": "test_planner",
+        "agent_id": "agent-test-planner",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5582718,
+        "updated_at": 220577.569344
+      },
+      "backend_impl": {
+        "node_id": "backend_impl",
+        "agent_id": "agent-backend-impl",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5597932,
+        "updated_at": 220577.5714778
+      },
+      "frontend_impl": {
+        "node_id": "frontend_impl",
+        "agent_id": "agent-frontend-impl",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5598183,
+        "updated_at": 220577.572194
+      },
+      "unit_tests": {
+        "node_id": "unit_tests",
+        "agent_id": "agent-unit-tests",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5598286,
+        "updated_at": 220577.5757845
+      },
+      "e2e_tests": {
+        "node_id": "e2e_tests",
+        "agent_id": "agent-e2e-tests",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5598369,
+        "updated_at": 220577.5765823
+      },
+      "security_review": {
+        "node_id": "security_review",
+        "agent_id": "agent-security-review",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5598439,
+        "updated_at": 220577.5661631
+      },
+      "review": {
+        "node_id": "review",
+        "agent_id": "agent-review",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5598516,
+        "updated_at": 220577.5735352
+      },
+      "patch": {
+        "node_id": "patch",
+        "agent_id": "agent-patch",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 2,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5598589,
+        "updated_at": 220577.5815921
+      },
+      "integration": {
+        "node_id": "integration",
+        "agent_id": "agent-integration",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 2,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5598674,
+        "updated_at": 220577.5831553
+      },
+      "failure_analysis": {
+        "node_id": "failure_analysis",
+        "agent_id": "agent-failure-analysis",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5598761,
+        "updated_at": 220577.5800246
+      },
+      "summary": {
+        "node_id": "summary",
+        "agent_id": "agent-summary",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.559884,
+        "updated_at": 220577.5846822
+      },
+      "event_monitor": {
+        "node_id": "event_monitor",
+        "agent_id": "agent-event-monitor",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5598908,
+        "updated_at": 220577.5855493
+      },
+      "workspace_state": {
+        "node_id": "workspace_state",
+        "agent_id": "agent-workspace-state",
+        "external": false,
+        "state": "idle",
+        "busy_count": 0,
+        "messages_sent": 1,
+        "current_message_id": null,
+        "last_error": null,
+        "queue_size": 0,
+        "started_at": 220577.5598973,
+        "updated_at": 220577.586409
+      }
+    },
+    "queues": {
+      "by_agent": {
+        "requirements": [],
+        "risk_scan": [],
+        "architecture": [],
+        "test_planner": [],
+        "backend_impl": [],
+        "frontend_impl": [],
+        "unit_tests": [],
+        "e2e_tests": [],
+        "security_review": [],
+        "review": [],
+        "patch": [],
+        "integration": [],
+        "failure_analysis": [],
+        "summary": [],
+        "event_monitor": [],
+        "workspace_state": []
+      },
+      "pending_messages": {
+        "msg-1214c09648e1": {
+          "message_id": "msg-1214c09648e1",
+          "node_id": "requirements",
+          "agent_id": "agent-requirements",
+          "body": {
+            "type": "top_agent_task",
+            "prompt": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+            "user_goal": "Run the fixed complex blueprint test task from planning through archive.",
+            "agent_description": "Breaks down the user goal and fans out required work.",
+            "task": {
+              "goal": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+              "context_refs": [],
+              "expected_output": "A complete outgoing batch for risk_scan, architecture, and test_planner.",
+              "acceptance": "Every required downstream target receives a framework-queued message and the message journal is persisted."
+            },
+            "organization": {
+              "scope": "agent",
+              "graph": {
+                "nodes": [
+                  "architecture",
+                  "requirements",
+                  "risk_scan",
+                  "test_planner"
+                ],
+                "agent_nodes": [
+                  "requirements"
+                ],
+                "edges": [
+                  {
+                    "from": "requirements",
+                    "to": "risk_scan",
+                    "edge_type": "exec",
+                    "output_port": null,
+                    "input_port": null
+                  },
+                  {
+                    "from": "requirements",
+                    "to": "architecture",
+                    "edge_type": "exec",
+                    "output_port": null,
+                    "input_port": null
+                  },
+                  {
+                    "from": "requirements",
+                    "to": "test_planner",
+                    "edge_type": "exec",
+                    "output_port": null,
+                    "input_port": null
+                  }
+                ]
+              },
+              "agent": {
+                "node_id": "requirements",
+                "agent_id": "agent-requirements",
+                "upstream_agents": [],
+                "downstream_agents": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ],
+                "read_scope": [
+                  "docs/**"
+                ],
+                "write_scope": [
+                  "shared/reports/**"
+                ],
+                "artifact_scope": [
+                  "shared/artifacts/**"
+                ],
+                "skill_selection_mode": "none"
+              },
+              "agent_connections": {
+                "requirements": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ]
+              }
+            },
+            "context": {
+              "framework_context": {
+                "agent_node_id": "requirements",
+                "agent_id": "agent-requirements",
+                "upstream_agents": [],
+                "downstream_agents": [
+                  "risk_scan",
+                  "architecture",
+                  "test_planner"
+                ],
+                "organization": {
+                  "scope": "agent",
+                  "graph": {
+                    "nodes": [
+                      "architecture",
+                      "requirements",
+                      "risk_scan",
+                      "test_planner"
+                    ],
+                    "agent_nodes": [
+                      "requirements"
+                    ],
+                    "edges": [
+                      {
+                        "from": "requirements",
+                        "to": "risk_scan",
+                        "edge_type": "exec",
+                        "output_port": null,
+                        "input_port": null
+                      },
+                      {
+                        "from": "requirements",
+                        "to": "architecture",
+                        "edge_type": "exec",
+                        "output_port": null,
+                        "input_port": null
+                      },
+                      {
+                        "from": "requirements",
+                        "to": "test_planner",
+                        "edge_type": "exec",
+                        "output_port": null,
+                        "input_port": null
+                      }
+                    ]
+                  },
+                  "agent": {
+                    "node_id": "requirements",
+                    "agent_id": "agent-requirements",
+                    "upstream_agents": [],
+                    "downstream_agents": [
+                      "risk_scan",
+                      "architecture",
+                      "test_planner"
+                    ],
+                    "read_scope": [
+                      "docs/**"
+                    ],
+                    "write_scope": [
+                      "shared/reports/**"
+                    ],
+                    "artifact_scope": [
+                      "shared/artifacts/**"
+                    ],
+                    "skill_selection_mode": "none"
+                  },
+                  "agent_connections": {
+                    "requirements": [
+                      "risk_scan",
+                      "architecture",
+                      "test_planner"
+                    ]
+                  }
+                },
+                "message_envelope": {
+                  "outgoing_batch_id": "out-8a92b82a42a9",
+                  "required_outgoing_targets": [
+                    "risk_scan",
+                    "architecture",
+                    "test_planner"
+                  ],
+                  "remaining_targets": [
+                    "risk_scan",
+                    "architecture",
+                    "test_planner"
+                  ]
+                }
+              }
+            }
+          },
+          "status": "completed",
+          "created_at": 220577.5586966,
+          "source_agent_id": "gulicode",
+          "dispatched_at": 220577.559931,
+          "completed_at": 220577.5612162,
+          "utterance_id": "utt-012bcbe3e16d"
+        },
+        "msg-853b9c74e2b1": {
+          "message_id": "msg-853b9c74e2b1",
+          "node_id": "risk_scan",
+          "agent_id": "agent-risk-scan",
+          "body": {
+            "prompt": "Continue complex blueprint work from requirements to risk_scan."
+          },
+          "status": "completed",
+          "created_at": 220577.5626892,
+          "source_node_id": "requirements",
+          "source_agent_id": "agent-requirements",
+          "dispatched_at": 220577.563891,
+          "completed_at": 220577.5647893,
+          "utterance_id": "utt-be9881da97ef"
+        },
+        "msg-1eb6a2e448a5": {
+          "message_id": "msg-1eb6a2e448a5",
+          "node_id": "architecture",
+          "agent_id": "agent-architecture",
+          "body": {
+            "prompt": "Continue complex blueprint work from requirements to architecture."
+          },
+          "status": "completed",
+          "created_at": 220577.5631085,
+          "source_node_id": "requirements",
+          "source_agent_id": "agent-requirements",
+          "dispatched_at": 220577.5666344,
+          "completed_at": 220577.5673265,
+          "utterance_id": "utt-3ab12245ab81"
+        },
+        "msg-329d3423648e": {
+          "message_id": "msg-329d3423648e",
+          "node_id": "test_planner",
+          "agent_id": "agent-test-planner",
+          "body": {
+            "prompt": "Continue complex blueprint work from requirements to test_planner."
+          },
+          "status": "completed",
+          "created_at": 220577.5634806,
+          "source_node_id": "requirements",
+          "source_agent_id": "agent-requirements",
+          "dispatched_at": 220577.5689542,
+          "completed_at": 220577.5697571,
+          "utterance_id": "utt-85a69da3cf21"
+        },
+        "msg-7946b697a109": {
+          "message_id": "msg-7946b697a109",
+          "node_id": "security_review",
+          "agent_id": "agent-security-review",
+          "body": {
+            "prompt": "Continue complex blueprint work from risk_scan to security_review."
+          },
+          "status": "completed",
+          "created_at": 220577.5652596,
+          "source_node_id": "risk_scan",
+          "source_agent_id": "agent-risk-scan",
+          "dispatched_at": 220577.5656885,
+          "completed_at": 220577.5665855,
+          "utterance_id": "utt-d99113238194"
+        },
+        "msg-49fba163016c": {
+          "message_id": "msg-49fba163016c",
+          "node_id": "backend_impl",
+          "agent_id": "agent-backend-impl",
+          "body": {
+            "prompt": "Continue complex blueprint work from architecture to backend_impl."
+          },
+          "status": "completed",
+          "created_at": 220577.5681351,
+          "source_node_id": "architecture",
+          "source_agent_id": "agent-architecture",
+          "dispatched_at": 220577.571124,
+          "completed_at": 220577.5718467,
+          "utterance_id": "utt-5d5a4cafe697"
+        },
+        "msg-04a8f43a97f4": {
+          "message_id": "msg-04a8f43a97f4",
+          "node_id": "frontend_impl",
+          "agent_id": "agent-frontend-impl",
+          "body": {
+            "prompt": "Continue complex blueprint work from architecture to frontend_impl."
+          },
+          "status": "completed",
+          "created_at": 220577.5685037,
+          "source_node_id": "architecture",
+          "source_agent_id": "agent-architecture",
+          "dispatched_at": 220577.5718858,
+          "completed_at": 220577.5725425,
+          "utterance_id": "utt-f2281890f532"
+        },
+        "msg-22200aa57a4f": {
+          "message_id": "msg-22200aa57a4f",
+          "node_id": "unit_tests",
+          "agent_id": "agent-unit-tests",
+          "body": {
+            "prompt": "Continue complex blueprint work from test_planner to unit_tests."
+          },
+          "status": "completed",
+          "created_at": 220577.5704508,
+          "source_node_id": "test_planner",
+          "source_agent_id": "agent-test-planner",
+          "dispatched_at": 220577.5754158,
+          "completed_at": 220577.5761741,
+          "utterance_id": "utt-18027dfb65f3"
+        },
+        "msg-1000ad938343": {
+          "message_id": "msg-1000ad938343",
+          "node_id": "e2e_tests",
+          "agent_id": "agent-e2e-tests",
+          "body": {
+            "prompt": "Continue complex blueprint work from test_planner to e2e_tests."
+          },
+          "status": "completed",
+          "created_at": 220577.5707664,
+          "source_node_id": "test_planner",
+          "source_agent_id": "agent-test-planner",
+          "dispatched_at": 220577.5762198,
+          "completed_at": 220577.5769071,
+          "utterance_id": "utt-b507e2244717"
+        },
+        "join-msg-join-implementation-ready": {
+          "message_id": "join-msg-join-implementation-ready",
+          "node_id": "review",
+          "agent_id": "agent-review",
+          "body": {
+            "type": "join_aggregate",
+            "join_id": "join-implementation-ready",
+            "prompt": "Process fan-in join aggregate join-implementation-ready.",
+            "aggregate": {
+              "join_id": "join-implementation-ready",
+              "target_node_id": "review",
+              "required_source_node_ids": [
+                "backend_impl",
+                "frontend_impl"
+              ],
+              "policy": "wait-all",
+              "quorum": null,
+              "status": "ready",
+              "final_reason": "all_sources_submitted",
+              "missing_sources": [],
+              "contribution_count": 2,
+              "successful_count": 2,
+              "source_statuses": {
+                "backend_impl": "completed",
+                "frontend_impl": "completed"
+              },
+              "source_metadata": {},
+              "accepted_changesets": [
+                {
+                  "changeset_id": "backend_impl-changeset"
+                },
+                {
+                  "changeset_id": "frontend_impl-changeset"
+                }
+              ],
+              "conflicts": [],
+              "artifacts": [
+                {
+                  "path": "backend/build.log"
+                },
+                {
+                  "path": "frontend/build.log"
+                }
+              ],
+              "reports": [
+                {
+                  "path": "backend/report.md"
+                },
+                {
+                  "path": "frontend/report.md"
+                }
+              ],
+              "test_results": [],
+              "contributions": {
+                "backend_impl": {
+                  "source_node_id": "backend_impl",
+                  "status": "completed",
+                  "result": {
+                    "node_id": "backend_impl",
+                    "status": "completed"
+                  },
+                  "accepted_changesets": [
+                    {
+                      "changeset_id": "backend_impl-changeset"
+                    }
+                  ],
+                  "conflicts": [],
+                  "artifacts": [
+                    {
+                      "path": "backend/build.log"
+                    }
+                  ],
+                  "reports": [
+                    {
+                      "path": "backend/report.md"
+                    }
+                  ],
+                  "test_results": [],
+                  "metadata": {},
+                  "submitted_at": 220577.5726552,
+                  "overwrite_count": 0,
+                  "source_agent_id": "agent-backend-impl"
+                },
+                "frontend_impl": {
+                  "source_node_id": "frontend_impl",
+                  "status": "completed",
+                  "result": {
+                    "node_id": "frontend_impl",
+                    "status": "completed"
+                  },
+                  "accepted_changesets": [
+                    {
+                      "changeset_id": "frontend_impl-changeset"
+                    }
+                  ],
+                  "conflicts": [],
+                  "artifacts": [
+                    {
+                      "path": "frontend/build.log"
+                    }
+                  ],
+                  "reports": [
+                    {
+                      "path": "frontend/report.md"
+                    }
+                  ],
+                  "test_results": [],
+                  "metadata": {},
+                  "submitted_at": 220577.5727085,
+                  "overwrite_count": 0,
+                  "source_agent_id": "agent-frontend-impl"
+                }
+              },
+              "created_at": 220577.5725918,
+              "completed_at": 220577.5727173,
+              "aggregate_message_id": null
+            }
+          },
+          "status": "completed",
+          "created_at": 220577.5727391,
+          "source_agent_id": "graph-runtime",
+          "dispatched_at": 220577.5731641,
+          "completed_at": 220577.5738986,
+          "utterance_id": "utt-717dccb5ea7c"
+        },
+        "msg-dda9181e9b86": {
+          "message_id": "msg-dda9181e9b86",
+          "node_id": "patch",
+          "agent_id": "agent-patch",
+          "body": {
+            "prompt": "Continue complex blueprint work from review to patch."
+          },
+          "status": "completed",
+          "created_at": 220577.5742813,
+          "source_node_id": "review",
+          "source_agent_id": "agent-review",
+          "dispatched_at": 220577.5746024,
+          "completed_at": 220577.5753706,
+          "utterance_id": "utt-52daa1290f6d"
+        },
+        "join-msg-join-test-ready": {
+          "message_id": "join-msg-join-test-ready",
+          "node_id": "integration",
+          "agent_id": "agent-integration",
+          "body": {
+            "type": "join_aggregate",
+            "join_id": "join-test-ready",
+            "prompt": "Process fan-in join aggregate join-test-ready.",
+            "aggregate": {
+              "join_id": "join-test-ready",
+              "target_node_id": "integration",
+              "required_source_node_ids": [
+                "unit_tests",
+                "e2e_tests"
+              ],
+              "policy": "wait-all",
+              "quorum": null,
+              "status": "ready",
+              "final_reason": "all_sources_submitted",
+              "missing_sources": [],
+              "contribution_count": 2,
+              "successful_count": 2,
+              "source_statuses": {
+                "unit_tests": "completed",
+                "e2e_tests": "completed"
+              },
+              "source_metadata": {},
+              "accepted_changesets": [],
+              "conflicts": [],
+              "artifacts": [
+                {
+                  "path": "tests/unit.log"
+                },
+                {
+                  "path": "tests/e2e.log"
+                }
+              ],
+              "reports": [],
+              "test_results": [
+                {
+                  "suite": "unit",
+                  "status": "passed"
+                },
+                {
+                  "suite": "e2e",
+                  "status": "passed"
+                }
+              ],
+              "contributions": {
+                "unit_tests": {
+                  "source_node_id": "unit_tests",
+                  "status": "completed",
+                  "result": {
+                    "node_id": "unit_tests",
+                    "status": "completed"
+                  },
+                  "accepted_changesets": [],
+                  "conflicts": [],
+                  "artifacts": [
+                    {
+                      "path": "tests/unit.log"
+                    }
+                  ],
+                  "reports": [],
+                  "test_results": [
+                    {
+                      "suite": "unit",
+                      "status": "passed"
+                    }
+                  ],
+                  "metadata": {},
+                  "submitted_at": 220577.577012,
+                  "overwrite_count": 0,
+                  "source_agent_id": "agent-unit-tests"
+                },
+                "e2e_tests": {
+                  "source_node_id": "e2e_tests",
+                  "status": "completed",
+                  "result": {
+                    "node_id": "e2e_tests",
+                    "status": "completed"
+                  },
+                  "accepted_changesets": [],
+                  "conflicts": [],
+                  "artifacts": [
+                    {
+                      "path": "tests/e2e.log"
+                    }
+                  ],
+                  "reports": [],
+                  "test_results": [
+                    {
+                      "suite": "e2e",
+                      "status": "passed"
+                    }
+                  ],
+                  "metadata": {},
+                  "submitted_at": 220577.5770478,
+                  "overwrite_count": 0,
+                  "source_agent_id": "agent-e2e-tests"
+                }
+              },
+              "created_at": 220577.5769632,
+              "completed_at": 220577.5770562,
+              "aggregate_message_id": null
+            }
+          },
+          "status": "completed",
+          "created_at": 220577.5770704,
+          "source_agent_id": "graph-runtime",
+          "dispatched_at": 220577.5775963,
+          "completed_at": 220577.5787126,
+          "utterance_id": "utt-917ac1cbda92"
+        },
+        "msg-44d84fe8e499": {
+          "message_id": "msg-44d84fe8e499",
+          "node_id": "failure_analysis",
+          "agent_id": "agent-failure-analysis",
+          "body": {
+            "prompt": "Continue complex blueprint work from integration to failure_analysis."
+          },
+          "status": "completed",
+          "created_at": 220577.5791864,
+          "source_node_id": "integration",
+          "source_agent_id": "agent-integration",
+          "dispatched_at": 220577.5796279,
+          "completed_at": 220577.5804318,
+          "utterance_id": "utt-e439b560cb26"
+        },
+        "msg-eadc2d6eb1bd": {
+          "message_id": "msg-eadc2d6eb1bd",
+          "node_id": "patch",
+          "agent_id": "agent-patch",
+          "body": {
+            "prompt": "Continue complex blueprint work from failure_analysis to patch."
+          },
+          "status": "completed",
+          "created_at": 220577.5808412,
+          "source_node_id": "failure_analysis",
+          "source_agent_id": "agent-failure-analysis",
+          "dispatched_at": 220577.5811747,
+          "completed_at": 220577.5819227,
+          "utterance_id": "utt-78e16c42cf00"
+        },
+        "msg-0c45a12af42a": {
+          "message_id": "msg-0c45a12af42a",
+          "node_id": "integration",
+          "agent_id": "agent-integration",
+          "body": {
+            "prompt": "Continue complex blueprint work from patch to integration."
+          },
+          "status": "completed",
+          "created_at": 220577.5823707,
+          "source_node_id": "patch",
+          "source_agent_id": "agent-patch",
+          "dispatched_at": 220577.5827244,
+          "completed_at": 220577.5835615,
+          "utterance_id": "utt-812b82a34dad"
+        },
+        "msg-aa421ab64d39": {
+          "message_id": "msg-aa421ab64d39",
+          "node_id": "summary",
+          "agent_id": "agent-summary",
+          "body": {
+            "prompt": "Continue complex blueprint work from integration to summary."
+          },
+          "status": "completed",
+          "created_at": 220577.5839404,
+          "source_node_id": "integration",
+          "source_agent_id": "agent-integration",
+          "dispatched_at": 220577.5843292,
+          "completed_at": 220577.5850458,
+          "utterance_id": "utt-3bd65ba04500"
+        }
+      },
+      "dispatching_message_ids": []
+    },
+    "outgoing_batches": {
+      "out-8a92b82a42a9": {
+        "batch_id": "out-8a92b82a42a9",
+        "source_node_id": "requirements",
+        "source_agent_id": "agent-requirements",
+        "required_target_node_ids": [
+          "risk_scan",
+          "architecture",
+          "test_planner"
+        ],
+        "required_target_agent_ids": [
+          "agent-risk-scan",
+          "agent-architecture",
+          "agent-test-planner"
+        ],
+        "remaining_targets": [],
+        "status": "dispatched",
+        "created_at": 220577.5583019,
+        "staged_messages": {
+          "risk_scan": {
+            "target_node_id": "risk_scan",
+            "target_agent_id": "agent-risk-scan",
+            "body": {
+              "prompt": "Continue complex blueprint work from requirements to risk_scan."
+            },
+            "staged_at": 220577.5612878,
+            "overwrite_count": 0
+          },
+          "architecture": {
+            "target_node_id": "architecture",
+            "target_agent_id": "agent-architecture",
+            "body": {
+              "prompt": "Continue complex blueprint work from requirements to architecture."
+            },
+            "staged_at": 220577.5617277,
+            "overwrite_count": 0
+          },
+          "test_planner": {
+            "target_node_id": "test_planner",
+            "target_agent_id": "agent-test-planner",
+            "body": {
+              "prompt": "Continue complex blueprint work from requirements to test_planner."
+            },
+            "staged_at": 220577.5622245,
+            "overwrite_count": 0
+          }
+        },
+        "dispatched_message_ids": [
+          "msg-853b9c74e2b1",
+          "msg-1eb6a2e448a5",
+          "msg-329d3423648e"
+        ],
+        "reminder_count": 0
+      },
+      "out-4285762eb69f": {
+        "batch_id": "out-4285762eb69f",
+        "source_node_id": "risk_scan",
+        "source_agent_id": "agent-risk-scan",
+        "required_target_node_ids": [
+          "security_review"
+        ],
+        "required_target_agent_ids": [
+          "agent-security-review"
+        ],
+        "remaining_targets": [],
+        "status": "dispatched",
+        "created_at": 220577.5648706,
+        "staged_messages": {
+          "security_review": {
+            "target_node_id": "security_review",
+            "target_agent_id": "agent-security-review",
+            "body": {
+              "prompt": "Continue complex blueprint work from risk_scan to security_review."
+            },
+            "staged_at": 220577.5648884,
+            "overwrite_count": 0
+          }
+        },
+        "dispatched_message_ids": [
+          "msg-7946b697a109"
+        ],
+        "reminder_count": 0
+      },
+      "out-c0fee7457266": {
+        "batch_id": "out-c0fee7457266",
+        "source_node_id": "architecture",
+        "source_agent_id": "agent-architecture",
+        "required_target_node_ids": [
+          "backend_impl",
+          "frontend_impl"
+        ],
+        "required_target_agent_ids": [
+          "agent-backend-impl",
+          "agent-frontend-impl"
+        ],
+        "remaining_targets": [],
+        "status": "dispatched",
+        "created_at": 220577.5673808,
+        "staged_messages": {
+          "backend_impl": {
+            "target_node_id": "backend_impl",
+            "target_agent_id": "agent-backend-impl",
+            "body": {
+              "prompt": "Continue complex blueprint work from architecture to backend_impl."
+            },
+            "staged_at": 220577.5673963,
+            "overwrite_count": 0
+          },
+          "frontend_impl": {
+            "target_node_id": "frontend_impl",
+            "target_agent_id": "agent-frontend-impl",
+            "body": {
+              "prompt": "Continue complex blueprint work from architecture to frontend_impl."
+            },
+            "staged_at": 220577.5677848,
+            "overwrite_count": 0
+          }
+        },
+        "dispatched_message_ids": [
+          "msg-49fba163016c",
+          "msg-04a8f43a97f4"
+        ],
+        "reminder_count": 0
+      },
+      "out-969d0d564e86": {
+        "batch_id": "out-969d0d564e86",
+        "source_node_id": "test_planner",
+        "source_agent_id": "agent-test-planner",
+        "required_target_node_ids": [
+          "unit_tests",
+          "e2e_tests"
+        ],
+        "required_target_agent_ids": [
+          "agent-unit-tests",
+          "agent-e2e-tests"
+        ],
+        "remaining_targets": [],
+        "status": "dispatched",
+        "created_at": 220577.5698115,
+        "staged_messages": {
+          "unit_tests": {
+            "target_node_id": "unit_tests",
+            "target_agent_id": "agent-unit-tests",
+            "body": {
+              "prompt": "Continue complex blueprint work from test_planner to unit_tests."
+            },
+            "staged_at": 220577.5698219,
+            "overwrite_count": 0
+          },
+          "e2e_tests": {
+            "target_node_id": "e2e_tests",
+            "target_agent_id": "agent-e2e-tests",
+            "body": {
+              "prompt": "Continue complex blueprint work from test_planner to e2e_tests."
+            },
+            "staged_at": 220577.5701276,
+            "overwrite_count": 0
+          }
+        },
+        "dispatched_message_ids": [
+          "msg-22200aa57a4f",
+          "msg-1000ad938343"
+        ],
+        "reminder_count": 0
+      },
+      "out-d7a3d27b22b2": {
+        "batch_id": "out-d7a3d27b22b2",
+        "source_node_id": "review",
+        "source_agent_id": "agent-review",
+        "required_target_node_ids": [
+          "patch"
+        ],
+        "required_target_agent_ids": [
+          "agent-patch"
+        ],
+        "remaining_targets": [],
+        "status": "dispatched",
+        "created_at": 220577.5739537,
+        "staged_messages": {
+          "patch": {
+            "target_node_id": "patch",
+            "target_agent_id": "agent-patch",
+            "body": {
+              "prompt": "Continue complex blueprint work from review to patch."
+            },
+            "staged_at": 220577.573967,
+            "overwrite_count": 0
+          }
+        },
+        "dispatched_message_ids": [
+          "msg-dda9181e9b86"
+        ],
+        "reminder_count": 0
+      },
+      "out-84c493922030": {
+        "batch_id": "out-84c493922030",
+        "source_node_id": "integration",
+        "source_agent_id": "agent-integration",
+        "required_target_node_ids": [
+          "failure_analysis"
+        ],
+        "required_target_agent_ids": [
+          "agent-failure-analysis"
+        ],
+        "remaining_targets": [],
+        "status": "dispatched",
+        "created_at": 220577.5787873,
+        "staged_messages": {
+          "failure_analysis": {
+            "target_node_id": "failure_analysis",
+            "target_agent_id": "agent-failure-analysis",
+            "body": {
+              "prompt": "Continue complex blueprint work from integration to failure_analysis."
+            },
+            "staged_at": 220577.5788087,
+            "overwrite_count": 0
+          }
+        },
+        "dispatched_message_ids": [
+          "msg-44d84fe8e499"
+        ],
+        "reminder_count": 0
+      },
+      "out-fdb3285be3af": {
+        "batch_id": "out-fdb3285be3af",
+        "source_node_id": "failure_analysis",
+        "source_agent_id": "agent-failure-analysis",
+        "required_target_node_ids": [
+          "patch"
+        ],
+        "required_target_agent_ids": [
+          "agent-patch"
+        ],
+        "remaining_targets": [],
+        "status": "dispatched",
+        "created_at": 220577.5804791,
+        "staged_messages": {
+          "patch": {
+            "target_node_id": "patch",
+            "target_agent_id": "agent-patch",
+            "body": {
+              "prompt": "Continue complex blueprint work from failure_analysis to patch."
+            },
+            "staged_at": 220577.5805008,
+            "overwrite_count": 0
+          }
+        },
+        "dispatched_message_ids": [
+          "msg-eadc2d6eb1bd"
+        ],
+        "reminder_count": 0
+      },
+      "out-f4559fc5ddf7": {
+        "batch_id": "out-f4559fc5ddf7",
+        "source_node_id": "patch",
+        "source_agent_id": "agent-patch",
+        "required_target_node_ids": [
+          "integration"
+        ],
+        "required_target_agent_ids": [
+          "agent-integration"
+        ],
+        "remaining_targets": [],
+        "status": "dispatched",
+        "created_at": 220577.5819695,
+        "staged_messages": {
+          "integration": {
+            "target_node_id": "integration",
+            "target_agent_id": "agent-integration",
+            "body": {
+              "prompt": "Continue complex blueprint work from patch to integration."
+            },
+            "staged_at": 220577.5819829,
+            "overwrite_count": 0
+          }
+        },
+        "dispatched_message_ids": [
+          "msg-0c45a12af42a"
+        ],
+        "reminder_count": 0
+      },
+      "out-f87505cf1151": {
+        "batch_id": "out-f87505cf1151",
+        "source_node_id": "integration",
+        "source_agent_id": "agent-integration",
+        "required_target_node_ids": [
+          "summary"
+        ],
+        "required_target_agent_ids": [
+          "agent-summary"
+        ],
+        "remaining_targets": [],
+        "status": "dispatched",
+        "created_at": 220577.5836158,
+        "staged_messages": {
+          "summary": {
+            "target_node_id": "summary",
+            "target_agent_id": "agent-summary",
+            "body": {
+              "prompt": "Continue complex blueprint work from integration to summary."
+            },
+            "staged_at": 220577.5836301,
+            "overwrite_count": 0
+          }
+        },
+        "dispatched_message_ids": [
+          "msg-aa421ab64d39"
+        ],
+        "reminder_count": 0
+      }
+    },
+    "joins": {
+      "join-implementation-ready": {
+        "join_id": "join-implementation-ready",
+        "target_node_id": "review",
+        "required_source_node_ids": [
+          "backend_impl",
+          "frontend_impl"
+        ],
+        "policy": "wait-all",
+        "quorum": null,
+        "status": "ready",
+        "final_reason": "all_sources_submitted",
+        "missing_sources": [],
+        "contribution_count": 2,
+        "successful_count": 2,
+        "source_statuses": {
+          "backend_impl": "completed",
+          "frontend_impl": "completed"
+        },
+        "source_metadata": {},
+        "accepted_changesets": [
+          {
+            "changeset_id": "backend_impl-changeset"
+          },
+          {
+            "changeset_id": "frontend_impl-changeset"
+          }
+        ],
+        "conflicts": [],
+        "artifacts": [
+          {
+            "path": "backend/build.log"
+          },
+          {
+            "path": "frontend/build.log"
+          }
+        ],
+        "reports": [
+          {
+            "path": "backend/report.md"
+          },
+          {
+            "path": "frontend/report.md"
+          }
+        ],
+        "test_results": [],
+        "contributions": {
+          "backend_impl": {
+            "source_node_id": "backend_impl",
+            "status": "completed",
+            "result": {
+              "node_id": "backend_impl",
+              "status": "completed"
+            },
+            "accepted_changesets": [
+              {
+                "changeset_id": "backend_impl-changeset"
+              }
+            ],
+            "conflicts": [],
+            "artifacts": [
+              {
+                "path": "backend/build.log"
+              }
+            ],
+            "reports": [
+              {
+                "path": "backend/report.md"
+              }
+            ],
+            "test_results": [],
+            "metadata": {},
+            "submitted_at": 220577.5726552,
+            "overwrite_count": 0,
+            "source_agent_id": "agent-backend-impl"
+          },
+          "frontend_impl": {
+            "source_node_id": "frontend_impl",
+            "status": "completed",
+            "result": {
+              "node_id": "frontend_impl",
+              "status": "completed"
+            },
+            "accepted_changesets": [
+              {
+                "changeset_id": "frontend_impl-changeset"
+              }
+            ],
+            "conflicts": [],
+            "artifacts": [
+              {
+                "path": "frontend/build.log"
+              }
+            ],
+            "reports": [
+              {
+                "path": "frontend/report.md"
+              }
+            ],
+            "test_results": [],
+            "metadata": {},
+            "submitted_at": 220577.5727085,
+            "overwrite_count": 0,
+            "source_agent_id": "agent-frontend-impl"
+          }
+        },
+        "created_at": 220577.5725918,
+        "completed_at": 220577.5727173,
+        "aggregate_message_id": "join-msg-join-implementation-ready",
+        "timeout_sec": null
+      },
+      "join-test-ready": {
+        "join_id": "join-test-ready",
+        "target_node_id": "integration",
+        "required_source_node_ids": [
+          "unit_tests",
+          "e2e_tests"
+        ],
+        "policy": "wait-all",
+        "quorum": null,
+        "status": "ready",
+        "final_reason": "all_sources_submitted",
+        "missing_sources": [],
+        "contribution_count": 2,
+        "successful_count": 2,
+        "source_statuses": {
+          "unit_tests": "completed",
+          "e2e_tests": "completed"
+        },
+        "source_metadata": {},
+        "accepted_changesets": [],
+        "conflicts": [],
+        "artifacts": [
+          {
+            "path": "tests/unit.log"
+          },
+          {
+            "path": "tests/e2e.log"
+          }
+        ],
+        "reports": [],
+        "test_results": [
+          {
+            "suite": "unit",
+            "status": "passed"
+          },
+          {
+            "suite": "e2e",
+            "status": "passed"
+          }
+        ],
+        "contributions": {
+          "unit_tests": {
+            "source_node_id": "unit_tests",
+            "status": "completed",
+            "result": {
+              "node_id": "unit_tests",
+              "status": "completed"
+            },
+            "accepted_changesets": [],
+            "conflicts": [],
+            "artifacts": [
+              {
+                "path": "tests/unit.log"
+              }
+            ],
+            "reports": [],
+            "test_results": [
+              {
+                "suite": "unit",
+                "status": "passed"
+              }
+            ],
+            "metadata": {},
+            "submitted_at": 220577.577012,
+            "overwrite_count": 0,
+            "source_agent_id": "agent-unit-tests"
+          },
+          "e2e_tests": {
+            "source_node_id": "e2e_tests",
+            "status": "completed",
+            "result": {
+              "node_id": "e2e_tests",
+              "status": "completed"
+            },
+            "accepted_changesets": [],
+            "conflicts": [],
+            "artifacts": [
+              {
+                "path": "tests/e2e.log"
+              }
+            ],
+            "reports": [],
+            "test_results": [
+              {
+                "suite": "e2e",
+                "status": "passed"
+              }
+            ],
+            "metadata": {},
+            "submitted_at": 220577.5770478,
+            "overwrite_count": 0,
+            "source_agent_id": "agent-e2e-tests"
+          }
+        },
+        "created_at": 220577.5769632,
+        "completed_at": 220577.5770562,
+        "aggregate_message_id": "join-msg-join-test-ready",
+        "timeout_sec": null
+      }
+    },
+    "jobs": {},
+    "recent_events": [
+      {
+        "event_type": "NodeCompleted",
+        "node_id": "integration",
+        "agent_id": "agent-integration",
+        "status": "completed",
+        "payload": {
+          "result": {
+            "utterance_id": "utt-812b82a34dad",
+            "agent_id": "agent-integration",
+            "node_id": "integration",
+            "said": "agent-integration completed step 15: Continue complex blueprint work from patch to integration.",
+            "received_at": 220577.5831812,
+            "message_id": "msg-0c45a12af42a"
+          },
+          "text": "{\"utterance_id\": \"utt-812b82a34dad\", \"agent_id\": \"agent-integration\", \"node_id\": \"integration\", \"said\": \"agent-integration completed step 15: Continue complex blueprint work from patch to integration.\", \"received_at\": 220577.5831812, \"message_id\": \"msg-0c45a12af42a\"}"
+        }
+      },
+      {
+        "event_type": "AgentOutgoingBatchCreated",
+        "node_id": "integration",
+        "agent_id": "agent-integration",
+        "status": "staging",
+        "payload": {
+          "batch_id": "out-f87505cf1151",
+          "source_node_id": "integration",
+          "source_agent_id": "agent-integration",
+          "required_target_node_ids": [
+            "summary"
+          ],
+          "required_target_agent_ids": [
+            "agent-summary"
+          ],
+          "remaining_targets": [
+            "summary"
+          ],
+          "status": "staging",
+          "created_at": 220577.5836158,
+          "staged_messages": {},
+          "dispatched_message_ids": [],
+          "reminder_count": 0
+        }
+      },
+      {
+        "event_type": "AgentMessageStaged",
+        "node_id": "integration",
+        "agent_id": "agent-integration",
+        "status": "staged",
+        "payload": {
+          "batch_id": "out-f87505cf1151",
+          "target_node_id": "summary",
+          "target_agent_id": "agent-summary",
+          "overwritten": false,
+          "ready_to_dispatch": true,
+          "remaining_targets": []
+        }
+      },
+      {
+        "event_type": "AgentMessageQueued",
+        "node_id": "summary",
+        "agent_id": "agent-summary",
+        "status": "queued",
+        "payload": {
+          "message_id": "msg-aa421ab64d39",
+          "node_id": "summary",
+          "agent_id": "agent-summary",
+          "body": {
+            "prompt": "Continue complex blueprint work from integration to summary."
+          },
+          "status": "queued",
+          "created_at": 220577.5839404,
+          "source_node_id": "integration",
+          "source_agent_id": "agent-integration"
+        }
+      },
+      {
+        "event_type": "AgentOutgoingBatchDispatched",
+        "node_id": "integration",
+        "agent_id": "agent-integration",
+        "status": "dispatched",
+        "payload": {
+          "batch_id": "out-f87505cf1151",
+          "source_node_id": "integration",
+          "source_agent_id": "agent-integration",
+          "required_target_node_ids": [
+            "summary"
+          ],
+          "required_target_agent_ids": [
+            "agent-summary"
+          ],
+          "remaining_targets": [],
+          "status": "dispatched",
+          "created_at": 220577.5836158,
+          "staged_messages": {
+            "summary": {
+              "target_node_id": "summary",
+              "target_agent_id": "agent-summary",
+              "body": {
+                "prompt": "Continue complex blueprint work from integration to summary."
+              },
+              "staged_at": 220577.5836301,
+              "overwrite_count": 0
+            }
+          },
+          "dispatched_message_ids": [
+            "msg-aa421ab64d39"
+          ],
+          "reminder_count": 0
+        }
+      },
+      {
+        "event_type": "NodeQueued",
+        "node_id": "summary",
+        "agent_id": "agent-summary",
+        "status": "queued"
+      },
+      {
+        "event_type": "NodeRunning",
+        "node_id": "summary",
+        "agent_id": "agent-summary",
+        "status": "running"
+      },
+      {
+        "event_type": "AgentQueuedMessageDispatched",
+        "node_id": "summary",
+        "agent_id": "agent-summary",
+        "status": "dispatching",
+        "payload": {
+          "message_id": "msg-aa421ab64d39",
+          "node_id": "summary",
+          "agent_id": "agent-summary",
+          "body": {
+            "prompt": "Continue complex blueprint work from integration to summary."
+          },
+          "status": "dispatching",
+          "created_at": 220577.5839404,
+          "source_node_id": "integration",
+          "source_agent_id": "agent-integration",
+          "dispatched_at": 220577.5843292
+        }
+      },
+      {
+        "event_type": "AgentQueuedMessageCompleted",
+        "node_id": "summary",
+        "agent_id": "agent-summary",
+        "status": "completed",
+        "payload": {
+          "message_id": "msg-aa421ab64d39",
+          "node_id": "summary",
+          "agent_id": "agent-summary",
+          "body": {
+            "prompt": "Continue complex blueprint work from integration to summary."
+          },
+          "status": "completed",
+          "created_at": 220577.5839404,
+          "source_node_id": "integration",
+          "source_agent_id": "agent-integration",
+          "dispatched_at": 220577.5843292,
+          "completed_at": 220577.5850458,
+          "utterance_id": "utt-3bd65ba04500"
+        }
+      },
+      {
+        "event_type": "NodeCompleted",
+        "node_id": "summary",
+        "agent_id": "agent-summary",
+        "status": "completed",
+        "payload": {
+          "result": {
+            "utterance_id": "utt-3bd65ba04500",
+            "agent_id": "agent-summary",
+            "node_id": "summary",
+            "said": "agent-summary completed step 16: Continue complex blueprint work from integration to summary.",
+            "received_at": 220577.5846998,
+            "message_id": "msg-aa421ab64d39"
+          },
+          "text": "{\"utterance_id\": \"utt-3bd65ba04500\", \"agent_id\": \"agent-summary\", \"node_id\": \"summary\", \"said\": \"agent-summary completed step 16: Continue complex blueprint work from integration to summary.\", \"received_at\": 220577.5846998, \"message_id\": \"msg-aa421ab64d39\"}"
+        }
+      },
+      {
+        "event_type": "NodeQueued",
+        "node_id": "event_monitor",
+        "agent_id": "agent-event-monitor",
+        "status": "queued"
+      },
+      {
+        "event_type": "NodeRunning",
+        "node_id": "event_monitor",
+        "agent_id": "agent-event-monitor",
+        "status": "running"
+      },
+      {
+        "event_type": "NodeCompleted",
+        "node_id": "event_monitor",
+        "agent_id": "agent-event-monitor",
+        "status": "completed",
+        "payload": {
+          "result": {
+            "utterance_id": "utt-7655f15a7681",
+            "agent_id": "agent-event-monitor",
+            "node_id": "event_monitor",
+            "said": "agent-event-monitor completed step 17: Run the fixed complex blueprint test task from planning through archive.",
+            "received_at": 220577.5855672
+          },
+          "text": "{\"utterance_id\": \"utt-7655f15a7681\", \"agent_id\": \"agent-event-monitor\", \"node_id\": \"event_monitor\", \"said\": \"agent-event-monitor completed step 17: Run the fixed complex blueprint test task from planning through archive.\", \"received_at\": 220577.5855672}"
+        }
+      },
+      {
+        "event_type": "NodeQueued",
+        "node_id": "workspace_state",
+        "agent_id": "agent-workspace-state",
+        "status": "queued"
+      },
+      {
+        "event_type": "NodeRunning",
+        "node_id": "workspace_state",
+        "agent_id": "agent-workspace-state",
+        "status": "running"
+      },
+      {
+        "event_type": "NodeCompleted",
+        "node_id": "workspace_state",
+        "agent_id": "agent-workspace-state",
+        "status": "completed",
+        "payload": {
+          "result": {
+            "utterance_id": "utt-38d6202c0126",
+            "agent_id": "agent-workspace-state",
+            "node_id": "workspace_state",
+            "said": "agent-workspace-state completed step 18: Run the fixed complex blueprint test task from planning through archive.",
+            "received_at": 220577.5864227
+          },
+          "text": "{\"utterance_id\": \"utt-38d6202c0126\", \"agent_id\": \"agent-workspace-state\", \"node_id\": \"workspace_state\", \"said\": \"agent-workspace-state completed step 18: Run the fixed complex blueprint test task from planning through archive.\", \"received_at\": 220577.5864227}"
+        }
+      },
+      {
+        "event_type": "BlueprintCompleted",
+        "status": "completed",
+        "payload": {
+          "ok": true,
+          "status": "completed",
+          "executed_nodes": [
+            "requirements",
+            "risk_scan",
+            "security_review",
+            "architecture",
+            "test_planner",
+            "backend_impl",
+            "frontend_impl",
+            "review",
+            "patch",
+            "unit_tests",
+            "e2e_tests",
+            "integration",
+            "failure_analysis",
+            "patch",
+            "integration",
+            "summary",
+            "event_monitor",
+            "workspace_state"
+          ],
+          "route_history": [
+            {
+              "from": "risk_scan",
+              "to": "security_review",
+              "condition": "risk == high",
+              "event_type": "ConditionalRouteTaken"
+            },
+            {
+              "from": "review",
+              "to": "patch",
+              "condition": "review == failed",
+              "event_type": "ConditionalRouteTaken"
+            },
+            {
+              "from": "integration",
+              "to": "failure_analysis",
+              "condition": "integration == failed",
+              "attempt": 1,
+              "event_type": "RetryRouteTaken"
+            },
+            {
+              "from": "failure_analysis",
+              "to": "patch",
+              "condition": "retry_allowed",
+              "attempt": 1,
+              "event_type": "RetryRouteTaken"
+            }
+          ],
+          "integration_attempts": 2
+        }
+      },
+      {
+        "event_type": "FinalReportPublished",
+        "status": "success",
+        "payload": {
+          "path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\active\\run-complex-data\\shared\\reports\\final_report.json",
+          "final_status": "success"
+        }
+      },
+      {
+        "event_type": "RunArchiveIndexed",
+        "status": "completed",
+        "payload": {
+          "path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\archived\\run-complex-data"
+        }
+      },
+      {
+        "event_type": "RunEnded",
+        "status": "success",
+        "payload": {
+          "ok": true,
+          "action": "complete",
+          "run_status": "completed",
+          "reason": "complex blueprint completed",
+          "summary": {
+            "agent_states": {
+              "requirements": "idle",
+              "risk_scan": "idle",
+              "architecture": "idle",
+              "test_planner": "idle",
+              "backend_impl": "idle",
+              "frontend_impl": "idle",
+              "unit_tests": "idle",
+              "e2e_tests": "idle",
+              "security_review": "idle",
+              "review": "idle",
+              "patch": "idle",
+              "integration": "idle",
+              "failure_analysis": "idle",
+              "summary": "idle",
+              "event_monitor": "idle",
+              "workspace_state": "idle"
+            },
+            "pending_messages": [],
+            "failed_messages": [],
+            "failed_jobs": [],
+            "running_jobs": [],
+            "waiting_joins": [],
+            "timed_out_joins": [],
+            "conflicts": [],
+            "accepted_changesets": [
+              {
+                "changeset_id": "backend_impl-changeset"
+              },
+              {
+                "changeset_id": "frontend_impl-changeset"
+              }
+            ],
+            "completed_jobs": [],
+            "event_count": 150,
+            "final_report_path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\archived\\run-complex-data\\shared\\reports\\final_report.json",
+            "archive_path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\archived\\run-complex-data"
+          },
+          "archived": true,
+          "ended_at": 220577.5869155,
+          "final_status": "success"
+        }
+      }
+    ],
+    "workspace": {
+      "workspace_id": null,
+      "changesets": [],
+      "conflicts": [],
+      "artifacts": [],
+      "reports": [],
+      "jobs": {}
+    },
+    "organization": {
+      "graph": {
+        "nodes": [
+          "architecture",
+          "backend_impl",
+          "e2e_tests",
+          "end",
+          "event_monitor",
+          "failure_analysis",
+          "frontend_impl",
+          "integration",
+          "patch",
+          "requirements",
+          "review",
+          "risk_scan",
+          "security_review",
+          "start",
+          "summary",
+          "test_planner",
+          "unit_tests",
+          "workspace_state"
+        ],
+        "agent_nodes": [
+          "requirements",
+          "risk_scan",
+          "architecture",
+          "test_planner",
+          "backend_impl",
+          "frontend_impl",
+          "unit_tests",
+          "e2e_tests",
+          "security_review",
+          "review",
+          "patch",
+          "integration",
+          "failure_analysis",
+          "summary",
+          "event_monitor",
+          "workspace_state"
+        ],
+        "route_nodes": [],
+        "terminal_nodes": {
+          "start": "start",
+          "end": "end"
+        },
+        "edges": [
+          {
+            "from": "start",
+            "to": "requirements",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "requirements",
+            "to": "risk_scan",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "requirements",
+            "to": "architecture",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "requirements",
+            "to": "test_planner",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "architecture",
+            "to": "backend_impl",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "architecture",
+            "to": "frontend_impl",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "test_planner",
+            "to": "unit_tests",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "test_planner",
+            "to": "e2e_tests",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "risk_scan",
+            "to": "security_review",
+            "edge_type": "exec",
+            "output_port": "high_risk",
+            "input_port": null
+          },
+          {
+            "from": "risk_scan",
+            "to": "review",
+            "edge_type": "condition_low_medium",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "security_review",
+            "to": "review",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "backend_impl",
+            "to": "review",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "frontend_impl",
+            "to": "review",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "review",
+            "to": "patch",
+            "edge_type": "condition_review_failed",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "review",
+            "to": "integration",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "patch",
+            "to": "integration",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "unit_tests",
+            "to": "integration",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "e2e_tests",
+            "to": "integration",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "integration",
+            "to": "summary",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "summary",
+            "to": "end",
+            "edge_type": "exec",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "requirements",
+            "to": "event_monitor",
+            "edge_type": "side_channel",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "backend_impl",
+            "to": "workspace_state",
+            "edge_type": "side_channel",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "frontend_impl",
+            "to": "workspace_state",
+            "edge_type": "side_channel",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "unit_tests",
+            "to": "workspace_state",
+            "edge_type": "side_channel",
+            "output_port": null,
+            "input_port": null
+          },
+          {
+            "from": "e2e_tests",
+            "to": "workspace_state",
+            "edge_type": "side_channel",
+            "output_port": null,
+            "input_port": null
+          }
+        ]
+      },
+      "agent_connections": {
+        "requirements": [
+          "risk_scan",
+          "architecture",
+          "test_planner"
+        ],
+        "risk_scan": [
+          "security_review"
+        ],
+        "architecture": [
+          "backend_impl",
+          "frontend_impl"
+        ],
+        "test_planner": [
+          "unit_tests",
+          "e2e_tests"
+        ],
+        "backend_impl": [
+          "review"
+        ],
+        "frontend_impl": [
+          "review"
+        ],
+        "unit_tests": [
+          "integration"
+        ],
+        "e2e_tests": [
+          "integration"
+        ],
+        "security_review": [
+          "review"
+        ],
+        "review": [
+          "integration"
+        ],
+        "patch": [
+          "integration"
+        ],
+        "integration": [
+          "summary"
+        ],
+        "failure_analysis": [],
+        "summary": [],
+        "event_monitor": [],
+        "workspace_state": []
+      },
+      "agents": {
+        "requirements": {
+          "node_id": "requirements",
+          "agent_id": "agent-requirements",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [
+            "docs/**"
+          ],
+          "write_scope": [
+            "shared/reports/**"
+          ],
+          "artifact_scope": [
+            "shared/artifacts/**"
+          ],
+          "upstream_agents": [],
+          "downstream_agents": [
+            "risk_scan",
+            "architecture",
+            "test_planner"
+          ]
+        },
+        "risk_scan": {
+          "node_id": "risk_scan",
+          "agent_id": "agent-risk-scan",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "shared/reports/risk/**"
+          ],
+          "artifact_scope": [],
+          "upstream_agents": [
+            "requirements"
+          ],
+          "downstream_agents": [
+            "security_review"
+          ]
+        },
+        "architecture": {
+          "node_id": "architecture",
+          "agent_id": "agent-architecture",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "shared/reports/architecture/**"
+          ],
+          "artifact_scope": [],
+          "upstream_agents": [
+            "requirements"
+          ],
+          "downstream_agents": [
+            "backend_impl",
+            "frontend_impl"
+          ]
+        },
+        "test_planner": {
+          "node_id": "test_planner",
+          "agent_id": "agent-test-planner",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "shared/reports/testing/**"
+          ],
+          "artifact_scope": [],
+          "upstream_agents": [
+            "requirements"
+          ],
+          "downstream_agents": [
+            "unit_tests",
+            "e2e_tests"
+          ]
+        },
+        "backend_impl": {
+          "node_id": "backend_impl",
+          "agent_id": "agent-backend-impl",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "src/backend/**"
+          ],
+          "artifact_scope": [
+            "shared/artifacts/backend/**"
+          ],
+          "upstream_agents": [
+            "architecture"
+          ],
+          "downstream_agents": [
+            "review"
+          ]
+        },
+        "frontend_impl": {
+          "node_id": "frontend_impl",
+          "agent_id": "agent-frontend-impl",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "src/frontend/**"
+          ],
+          "artifact_scope": [
+            "shared/artifacts/frontend/**"
+          ],
+          "upstream_agents": [
+            "architecture"
+          ],
+          "downstream_agents": [
+            "review"
+          ]
+        },
+        "unit_tests": {
+          "node_id": "unit_tests",
+          "agent_id": "agent-unit-tests",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [],
+          "artifact_scope": [
+            "shared/artifacts/tests/unit/**"
+          ],
+          "upstream_agents": [
+            "test_planner"
+          ],
+          "downstream_agents": [
+            "integration"
+          ]
+        },
+        "e2e_tests": {
+          "node_id": "e2e_tests",
+          "agent_id": "agent-e2e-tests",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [],
+          "artifact_scope": [
+            "shared/artifacts/tests/e2e/**"
+          ],
+          "upstream_agents": [
+            "test_planner"
+          ],
+          "downstream_agents": [
+            "integration"
+          ]
+        },
+        "security_review": {
+          "node_id": "security_review",
+          "agent_id": "agent-security-review",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "shared/reports/security/**"
+          ],
+          "artifact_scope": [],
+          "upstream_agents": [
+            "risk_scan"
+          ],
+          "downstream_agents": [
+            "review"
+          ]
+        },
+        "review": {
+          "node_id": "review",
+          "agent_id": "agent-review",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "shared/reports/review/**"
+          ],
+          "artifact_scope": [],
+          "upstream_agents": [
+            "backend_impl",
+            "frontend_impl",
+            "security_review"
+          ],
+          "downstream_agents": [
+            "integration"
+          ]
+        },
+        "patch": {
+          "node_id": "patch",
+          "agent_id": "agent-patch",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "src/**"
+          ],
+          "artifact_scope": [
+            "shared/artifacts/patch/**"
+          ],
+          "upstream_agents": [],
+          "downstream_agents": [
+            "integration"
+          ]
+        },
+        "integration": {
+          "node_id": "integration",
+          "agent_id": "agent-integration",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [],
+          "artifact_scope": [
+            "shared/artifacts/integration/**"
+          ],
+          "upstream_agents": [
+            "unit_tests",
+            "e2e_tests",
+            "review",
+            "patch"
+          ],
+          "downstream_agents": [
+            "summary"
+          ]
+        },
+        "failure_analysis": {
+          "node_id": "failure_analysis",
+          "agent_id": "agent-failure-analysis",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "shared/reports/failures/**"
+          ],
+          "artifact_scope": [],
+          "upstream_agents": [],
+          "downstream_agents": []
+        },
+        "summary": {
+          "node_id": "summary",
+          "agent_id": "agent-summary",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "shared/reports/**"
+          ],
+          "artifact_scope": [],
+          "upstream_agents": [
+            "integration"
+          ],
+          "downstream_agents": []
+        },
+        "event_monitor": {
+          "node_id": "event_monitor",
+          "agent_id": "agent-event-monitor",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "shared/reports/events/**"
+          ],
+          "artifact_scope": [],
+          "upstream_agents": [],
+          "downstream_agents": []
+        },
+        "workspace_state": {
+          "node_id": "workspace_state",
+          "agent_id": "agent-workspace-state",
+          "cli_kind": "codemaker",
+          "execution_mode": "blocking",
+          "skill_selection": {
+            "mode": "none"
+          },
+          "skills": [],
+          "rule_paths": [],
+          "read_scope": [],
+          "write_scope": [
+            "shared/reports/workspace/**"
+          ],
+          "artifact_scope": [],
+          "upstream_agents": [],
+          "downstream_agents": []
+        }
+      },
+      "start_policy": {
+        "selected_by": "top_agent",
+        "framework_role": "validate_only",
+        "valid_start_nodes": [
+          "requirements",
+          "risk_scan",
+          "architecture",
+          "test_planner",
+          "backend_impl",
+          "frontend_impl",
+          "unit_tests",
+          "e2e_tests",
+          "security_review",
+          "review",
+          "patch",
+          "integration",
+          "failure_analysis",
+          "summary",
+          "event_monitor",
+          "workspace_state"
+        ]
+      }
+    }
+  }
+}

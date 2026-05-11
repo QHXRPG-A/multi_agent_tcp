@@ -1,0 +1,21 @@
+{
+  "output_dir": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest",
+  "archive_path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\archived\\run-complex-data",
+  "final_report_path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\archived\\run-complex-data\\shared\\reports\\final_report.json",
+  "message_journal_path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\archived\\run-complex-data\\shared\\logs\\message_journal.jsonl",
+  "archived_run_manifest_path": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\project\\.multi_agent_workspace\\runs\\archived\\run-complex-data\\run_manifest.json",
+  "files": {
+    "fixture": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\01_fixture.json",
+    "execute_request": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\02_execute_request.json",
+    "top_agent_start_plan": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\03_top_agent_start_plan.json",
+    "top_agent_queued_tasks": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\04_top_agent_queued_tasks.json",
+    "agent_io_chronological": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\05_agent_io_chronological.json",
+    "agent_io_by_agent": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\06_agent_io_by_agent.json",
+    "control_response": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\07_control_response.json",
+    "runtime_status": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\08_runtime_status.json",
+    "final_report_copy": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\09_final_report.json",
+    "message_journal_copy": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\10_message_journal.jsonl",
+    "message_journal_parsed": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\11_message_journal.parsed.json",
+    "archived_run_manifest_copy": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\docs\\blueprints\\runs\\complex_test_blueprint_latest\\12_archived_run_manifest.json"
+  }
+}

@@ -22,6 +22,7 @@ from .graph_runtime import (
     BlueprintTerminalNode,
     GraphDefinition,
     GraphEdge,
+    GraphExecutor,
     GraphRuntime,
     GuLiCodeTopAgentProfile,
     RouteNode,
@@ -197,43 +198,24 @@ def ordinary_agent_framework_context(
     node_id = str(source_node_id).strip()
     if node_id not in graph.agent_nodes:
         raise KeyError(f"unknown AgentNode: {node_id}")
-    organization = scoped_organization_view(graph, agent_id=node_id)
+    organization = graph.agent_organization_summary(agent_id=node_id)
+    agent_view = organization["agent"]
     downstream = list(graph.agent_connections().get(node_id, []))
     required_targets = list(batch.required_target_node_ids) if batch is not None else []
     remaining_targets = list(batch.remaining_targets) if batch is not None else []
+    message_envelope: Dict[str, Any] = {
+        "outgoing_batch_id": batch.batch_id if batch is not None else None,
+        "required_outgoing_targets": required_targets,
+    }
+    if batch is not None:
+        message_envelope["remaining_targets"] = remaining_targets
     return {
         "agent_node_id": node_id,
+        "agent_id": agent_view["agent_id"],
+        "upstream_agents": list(agent_view.get("upstream_agents", [])),
+        "downstream_agents": downstream,
         "organization": organization,
-        "message_envelope": {
-            "outgoing_batch_id": batch.batch_id if batch is not None else None,
-            "required_outgoing_targets": required_targets,
-            "remaining_targets": remaining_targets,
-            "reachable_downstream_targets": downstream,
-        },
-        "tools": {
-            "agent.dispatch": {
-                "description": "Stage or overwrite one message for a required downstream AgentNode in the current outgoing batch.",
-                "required_args": [
-                    "source_node_id",
-                    "target_node_id",
-                    "batch_id",
-                    "body",
-                ],
-                "constraints": [
-                    "target_node_id must be in message_envelope.required_outgoing_targets",
-                    "batch_id must match message_envelope.outgoing_batch_id",
-                    "empty body messages are valid and still fill the target",
-                    "all required targets must be filled before the framework queues downstream messages",
-                ],
-                "cli": "python -m multi_agent_tcp runtime agent-dispatch --source-node-id <self> --target-node-id <target> --batch-id <outgoing_batch_id> --body-json '{...}'",
-            }
-        },
-        "rules": [
-            "Do not send direct private messages to other AgentNodes.",
-            "Use agent.dispatch only for targets listed in required_outgoing_targets.",
-            "If remaining_targets is non-empty, continue staging messages for those targets.",
-            "Prefer shared reports, artifacts, or changeset references over raw logs.",
-        ],
+        "message_envelope": message_envelope,
     }
 
 
@@ -360,6 +342,21 @@ class GraphRuntimeControlPlane:
                 self.start_run(
                     TopAgentStartPlan.from_dict(dict(args["plan"])),
                     manifest_path=manifest_path,
+                )
+            )
+
+        if command == "run.execute_fixture":
+            manifest_path = (
+                Path(str(args["manifest_path"]))
+                if args.get("manifest_path") is not None
+                else None
+            )
+            return asyncio.run(
+                self.execute_fixture_to_archive(
+                    TopAgentStartPlan.from_dict(dict(args["plan"])),
+                    runtime_scenarios=dict(args.get("runtime_scenarios", {})),
+                    manifest_path=manifest_path,
+                    archive=bool(args.get("archive", True)),
                 )
             )
 
@@ -514,7 +511,7 @@ class GraphRuntimeControlPlane:
                     "user_goal": plan.user_goal,
                     "agent_description": plan.agent_descriptions[node_id],
                     "task": plan.tasks[node_id].to_dict(),
-                    "organization": scoped_organization_view(self.graph, agent_id=node_id),
+                    "organization": self.graph.agent_organization_summary(agent_id=node_id),
                     },
                     ordinary_agent_framework_context(
                         self.graph,
@@ -539,6 +536,33 @@ class GraphRuntimeControlPlane:
                 "validation": validation.to_dict(),
                 "queued_messages": queued,
                 "start_manifest": start_manifest,
+            },
+        ).to_dict()
+
+    async def execute_fixture_to_archive(
+        self,
+        plan: TopAgentStartPlan,
+        *,
+        runtime_scenarios: Optional[Dict[str, Any]] = None,
+        manifest_path: Optional[Path] = None,
+        archive: bool = True,
+    ) -> Dict[str, Any]:
+        start = await self.start_run(plan, manifest_path=manifest_path)
+        if not start.get("ok"):
+            return start
+        execution = await GraphExecutor(self.runtime).run_complex_blueprint_scenario(
+            self.graph,
+            runtime_scenarios=runtime_scenarios or {},
+            initial_prompt=plan.user_goal,
+        )
+        ended = self.runtime.end_run("complete", reason="complex blueprint completed", archive=archive)
+        return GraphControlResponse(
+            True,
+            {
+                "start": start,
+                "execution": execution,
+                "end": ended.to_dict(),
+                "status": self.runtime.status_snapshot(graph=self.graph),
             },
         ).to_dict()
 

@@ -241,6 +241,37 @@ python -m pytest test_graph_control.py test_agent_runtime.py test_workspace_api.
 
 ## 下一步短期任务
 
+### 2026-05-11 测试优先级补充
+
+本轮对话后，短期重心先放在测试覆盖和可重复启动验证上。
+
+1. 复杂蓝图测试样例：
+   - [DONE] 先生成一张覆盖多种连接情况的蓝图图示；
+   - [DONE] 本地保存中文 SVG：`docs/blueprints/complex_test_blueprint.svg`；
+   - [TODO] 将 SVG 对应结构整理成机器可读 blueprint fixture；
+   - [TODO] fixture 至少覆盖串行、一对多 fan-out、多对一 fan-in、条件分支、审查失败回流、集成失败回流、旁路事件、workspace 聚合和最终归档。
+
+2. 复杂蓝图运行时测试：
+   - [TODO] 覆盖 `GraphDefinition.agent_organization_view()` 对复杂图的组织视图输出；
+   - [TODO] 覆盖 `TopAgentStartPlan` 对复杂图 start nodes、agent descriptions、tasks 的校验；
+   - [TODO] 覆盖 `GraphRuntimeControlPlane` start/status/end 在复杂图上的表现；
+   - [TODO] 覆盖 outgoing batch 的 required targets、remaining targets、完整批次投递；
+   - [TODO] 覆盖 join barrier 的 wait-all / wait-any / quorum / timeout 至少一组组合场景；
+   - [TODO] 覆盖失败归因、补丁重试、重新投递测试/实现节点的闭环；
+   - [TODO] 覆盖 workspace changeset、artifact、report、test result 进入 join aggregate 和 final report。
+
+3. GuLiCode 顶层测试环境拉起：
+   - [DONE] 已验证 `OPENCODE_CONFIG_CONTENT` 能注册 `aiapi_world/gpt-5.5`；
+   - [DONE] 已验证 Electron dev 能按测试环境变量拉起 GuLiCode，并进入 sidecar ready / init done；
+   - [TODO] 把手动 smoke 流程沉淀成脚本或测试 helper；
+   - [TODO] smoke helper 应只在子进程环境中设置测试变量，完成后清理 `bun` / `electron` / `node` 子进程；
+   - [TODO] smoke helper 输出只报告 provider/model、ready 阶段和日志路径，不输出凭据。
+
+4. GuLiCode 启动规则来源：
+   - [DONE] 固定规则已写入 `knowledge_base/gulicode_desktop.md` 的 `测试环境顶层 GuLiCode 启动规则`；
+   - [DONE] `SKILL.md` Query Map 已指向该规则；
+   - [TODO] 后续所有 GuLiCode 测试启动优先读取该规则，不再临时猜测 provider/baseURL/model/variant。
+
 1. 暴露稳定组织架构接口：
    - [DONE] 将 `agent_organization_view()` 包装成 runtime/RPC/CLI 可调用接口；
    - [DONE] 顶层 Agent 可读取全图、Agent 列表、边、scope、agent_connections；
@@ -309,3 +340,21 @@ Completed:
 Still pending:
 
 - GuLiCode UI should expose utterances only as a top-agent/operator audit view, not as ordinary Agent message context.
+
+## 2026-05-11 prompt/context slimming update
+
+Completed:
+
+- Ordinary-Agent message context is now slimmer. Dynamic `framework_context` keeps `agent_node_id`, `agent_id`, upstream/downstream summaries, compact scoped organization, and the current message envelope.
+- Stable tool/rule instructions have moved to framework skill / startup context rather than being repeated in every `framework_context`.
+- `reachable_downstream_targets` was removed from the message envelope; use `downstream_agents` plus `required_outgoing_targets`.
+- Top-Agent context now uses compact `runtime_context()` and `agent_organization_summary()` instead of forwarding full launch configuration.
+- Agent launch materialization now emits `prompt_execution_context`, and Codex/CodeMaker adapters prefer it when formatting actual prompts.
+- Full `execution_context` remains available internally for runtime/adapter validation and debugging.
+
+Validation observed in repository:
+
+```text
+python -m pytest -q
+116 passed
+```

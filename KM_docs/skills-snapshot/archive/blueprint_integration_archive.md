@@ -207,7 +207,7 @@ multi_agent_tcp/
    - 节点端口类型
    - 媒体引用/大对象传输方式
    - 图执行与缓存
-# 2026-05-06 Archive Note — Blueprint Workspace API and shared read/write locks
+# 2026-05-06 Archive Note - Blueprint Workspace API and shared read/write locks
 
 ## Summary
 
@@ -235,6 +235,46 @@ multi_agent_tcp/
 
 - `multi_agent_tcp/workspace_manager.py`
 - `multi_agent_tcp/workspace_api.py`
+
+---
+
+# 2026-05-11 Archive Note - Prompt-facing context slimming for ordinary agents and top agent
+
+## Summary
+
+1. Split runtime launch context into internal and prompt-facing views:
+   - `execution_context` remains the full framework/internal launch record for adapters and runtime inspection;
+   - `prompt_execution_context` is the reduced subset that is merged into the actual CLI prompt.
+2. Reduced ordinary-Agent prompt injection:
+   - removed raw launch-path exposure such as `project_context`, `checkout_path`, `codex_home`, and other private directories from the prompt-facing view;
+   - kept only the minimal code-workspace and workspace-API guidance needed for execution;
+   - trimmed `framework_context` to the dynamic batch/organization fields needed for current message handling.
+3. Reduced top-Agent prompt-facing organization context:
+   - `GuLiCodeTopAgentProfile.organization_context()` now returns a compact runtime-facing top-agent view;
+   - the prompt-facing organization summary keeps governance-relevant graph and agent-scoping data without launch internals.
+4. Preserved internal diagnostics:
+   - the full execution context is still available to the runtime and adapters;
+   - tests continue to validate internal launch materialization and actual prompt-merging behavior.
+5. Added/updated adapter support:
+   - Codex and CodeMaker bridges now prefer `prompt_execution_context` when formatting prompts;
+   - both bridges fall back to the full `execution_context` if the reduced prompt view is absent.
+
+## Affected Code
+
+- `multi_agent_tcp/agent_launch_context.py`
+- `multi_agent_tcp/graph_control.py`
+- `multi_agent_tcp/graph_runtime.py`
+- `multi_agent_tcp/codex_bridge.py`
+- `multi_agent_tcp/codemaker_bridge.py`
+- `multi_agent_tcp/test_graph_control.py`
+- `multi_agent_tcp/test_agent_runtime.py`
+
+## Validation
+
+```text
+python -m pytest -q
+116 passed
+```
 - `multi_agent_tcp/ryven_blueprint.py`
 - `multi_agent_tcp/codemaker_bridge.py`
 - `multi_agent_tcp/codex_bridge.py`

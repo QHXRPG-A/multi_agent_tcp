@@ -1,0 +1,175 @@
+[
+  {
+    "message_id": "msg-1214c09648e1",
+    "node_id": "requirements",
+    "agent_id": "agent-requirements",
+    "body": {
+      "type": "top_agent_task",
+      "prompt": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+      "user_goal": "Run the fixed complex blueprint test task from planning through archive.",
+      "agent_description": "Breaks down the user goal and fans out required work.",
+      "task": {
+        "goal": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+        "context_refs": [],
+        "expected_output": "A complete outgoing batch for risk_scan, architecture, and test_planner.",
+        "acceptance": "Every required downstream target receives a framework-queued message and the message journal is persisted."
+      },
+      "organization": {
+        "scope": "agent",
+        "graph": {
+          "nodes": [
+            "architecture",
+            "requirements",
+            "risk_scan",
+            "test_planner"
+          ],
+          "agent_nodes": [
+            "requirements"
+          ],
+          "edges": [
+            {
+              "from": "requirements",
+              "to": "risk_scan",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "requirements",
+              "to": "architecture",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            },
+            {
+              "from": "requirements",
+              "to": "test_planner",
+              "edge_type": "exec",
+              "output_port": null,
+              "input_port": null
+            }
+          ]
+        },
+        "agent": {
+          "node_id": "requirements",
+          "agent_id": "agent-requirements",
+          "upstream_agents": [],
+          "downstream_agents": [
+            "risk_scan",
+            "architecture",
+            "test_planner"
+          ],
+          "read_scope": [
+            "docs/**"
+          ],
+          "write_scope": [
+            "shared/reports/**"
+          ],
+          "artifact_scope": [
+            "shared/artifacts/**"
+          ],
+          "skill_selection_mode": "none"
+        },
+        "agent_connections": {
+          "requirements": [
+            "risk_scan",
+            "architecture",
+            "test_planner"
+          ]
+        }
+      },
+      "context": {
+        "framework_context": {
+          "agent_node_id": "requirements",
+          "agent_id": "agent-requirements",
+          "upstream_agents": [],
+          "downstream_agents": [
+            "risk_scan",
+            "architecture",
+            "test_planner"
+          ],
+          "organization": {
+            "scope": "agent",
+            "graph": {
+              "nodes": [
+                "architecture",
+                "requirements",
+                "risk_scan",
+                "test_planner"
+              ],
+              "agent_nodes": [
+                "requirements"
+              ],
+              "edges": [
+                {
+                  "from": "requirements",
+                  "to": "risk_scan",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "requirements",
+                  "to": "architecture",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                },
+                {
+                  "from": "requirements",
+                  "to": "test_planner",
+                  "edge_type": "exec",
+                  "output_port": null,
+                  "input_port": null
+                }
+              ]
+            },
+            "agent": {
+              "node_id": "requirements",
+              "agent_id": "agent-requirements",
+              "upstream_agents": [],
+              "downstream_agents": [
+                "risk_scan",
+                "architecture",
+                "test_planner"
+              ],
+              "read_scope": [
+                "docs/**"
+              ],
+              "write_scope": [
+                "shared/reports/**"
+              ],
+              "artifact_scope": [
+                "shared/artifacts/**"
+              ],
+              "skill_selection_mode": "none"
+            },
+            "agent_connections": {
+              "requirements": [
+                "risk_scan",
+                "architecture",
+                "test_planner"
+              ]
+            }
+          },
+          "message_envelope": {
+            "outgoing_batch_id": "out-8a92b82a42a9",
+            "required_outgoing_targets": [
+              "risk_scan",
+              "architecture",
+              "test_planner"
+            ],
+            "remaining_targets": [
+              "risk_scan",
+              "architecture",
+              "test_planner"
+            ]
+          }
+        }
+      }
+    },
+    "status": "queued",
+    "created_at": 220577.5586966,
+    "source_agent_id": "gulicode"
+  }
+]

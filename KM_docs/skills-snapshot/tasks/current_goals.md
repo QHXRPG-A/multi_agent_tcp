@@ -1,6 +1,6 @@
 # Current Short-Term Goals
 
-Last cleaned: 2026-05-09
+Last cleaned: 2026-05-11
 
 ## Current Main Line
 
@@ -40,16 +40,55 @@ Primary design source:
 - Top Agent can inspect Agent utterance records through a dedicated `top_agent.utterances` / `runtime top-agent-utterances` interface.
 - Ordinary Agent baseline rule/skill now states that final CLI replies are not an Agent-to-Agent communication channel; durable information must go through framework APIs.
 - Private-Agent workspaces now use the `project_reference` three-zone model by default: project directory as code authority/final target, private checkout as on-demand workbench, temporary shared workspace as reports/artifacts/changeset-reference space.
+- Prompt-facing context has been slimmed: adapters prefer `prompt_execution_context`, ordinary Agents no longer receive raw launch paths such as `project_context`, `checkout_path`, or `codex_home` in the prompt, and top-Agent organization context uses a compact runtime view.
 
 ## Active Priorities
 
+Testing is now the immediate focus before further feature expansion. Use the 2026-05-11 testing notes below as the current execution bias.
+
 1. Wire the non-UI control plane into a real long-lived GuLiCode/top-Agent session.
 2. Keep ordinary-Agent communication and durable output restricted to framework interfaces: `agent.dispatch`, Workspace API, and join/task contribution APIs.
-3. Continue tightening AgentNode startup context so ordinary Agents see the correct baseline rule/skill/tool contract and no top-agent-only inspection APIs.
+3. Keep AgentNode startup context minimal and audit future additions so ordinary Agents keep seeing only the baseline rule/skill/tool contract and no top-agent-only inspection APIs.
 4. Continue hardening status explanation and event summaries for GuLiCode/top Agent and UI.
 5. Connect GuLiCode desktop UI to runtime/control-plane state without duplicating scheduling semantics.
 6. Keep workspace/archive behavior aligned with the `project_reference` three-zone model and framework-owned changeset, conflict, report, artifact, and reference records.
 7. Surface utterance records in future UI only as a top-agent/operator audit view, not as Agent-to-Agent message context.
+
+## 2026-05-11 Testing Focus
+
+Conversation-derived testing tasks:
+
+1. Maintain a complex blueprint test sample that covers serial dispatch, one-to-many fan-out, many-to-one fan-in joins, conditional routing, retry loops, side-channel event monitoring, workspace aggregation, and final archive.
+   - Current visual asset in the repo: `docs/blueprints/complex_test_blueprint.svg`.
+   - The SVG has Chinese visible labels and Chinese maintenance comments.
+   - Next: convert this structure into a machine-readable blueprint fixture JSON.
+
+2. Turn the complex blueprint sample into runtime coverage.
+   - Validate graph compilation and organization view.
+   - Validate top-agent start-plan generation and `GraphRuntimeControlPlane` start/status/end behavior.
+   - Validate fan-out outgoing batches and fan-in join aggregation.
+   - Validate condition branches for low/medium/high risk paths.
+   - Validate review failure and integration failure retry loops.
+   - Validate event/workspace side-channel records without making them scheduling dependencies.
+
+3. Use the fixed GuLiCode test-environment launch rule when testing top-level GuLiCode startup.
+   - Source of truth: `knowledge_base/gulicode_desktop.md`, section `测试环境顶层 GuLiCode 启动规则`.
+   - Provider/model: `aiapi_world/gpt-5.5`.
+   - Reasoning variant: `high`.
+   - Launch path: Electron dev via `GuLiCode/packages/desktop-electron`.
+   - First smoke check: `bun --cwd .\GuLiCode\packages\opencode src\index.ts models aiapi_world`.
+   - Then verify Electron logs reach `sidecar connection started` and `init step { phase: 'done' }`.
+
+4. Add an automated smoke script or test helper for GuLiCode launch verification.
+   - It should set test environment variables only for the child process.
+   - It should not write credentials into repo files or test logs.
+   - It should clean up `bun` / `electron` / `node` child processes after a launch-only verification.
+
+5. Keep validation output short and evidence-based.
+   - Report the exact command run.
+   - Report whether the provider appeared as `aiapi_world/gpt-5.5`.
+   - Report whether Electron main/preload/renderer and sidecar readiness were observed.
+   - Link logs when useful, but do not echo credentials.
 
 ## Deferred / Secondary Tracks
 
@@ -79,3 +118,16 @@ python -m pytest test_graph_control.py test_workspace_api.py test_workspace_mana
 ```
 
 Re-run tests after code changes, especially changes touching `graph_runtime.py`, `graph_control.py`, workspace APIs, or backend adapters.
+
+Most recent GuLiCode launch smoke observed on 2026-05-11:
+
+```text
+bun --cwd .\GuLiCode\packages\opencode src\index.ts models aiapi_world
+-> aiapi_world/gpt-5.5
+
+bun --cwd packages/desktop-electron dev
+-> electron main/preload built
+-> renderer dev server started
+-> sidecar connection started
+-> init step { phase: 'done' }
+```

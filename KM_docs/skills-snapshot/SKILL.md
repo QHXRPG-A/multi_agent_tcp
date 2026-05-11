@@ -99,9 +99,11 @@ Historical change records only. Do not use archive content as current behavior u
 ## Query Map
 
 - GuLiCode desktop startup, Electron/Tauri, desktop source layering: read `knowledge_base/gulicode_desktop.md`.
+- GuLiCode 测试环境顶层拉起、aiapi_world/gpt-5.5/provider/baseURL/reasoningEffort 规则: read `knowledge_base/gulicode_desktop.md`.
 - GuLiCode top Agent, organization view, top-agent profile, start plan, status explanation: read `多agents通信设计.md`, then `tasks/multi_agent_communication_tasks.md`.
 - Runtime start/status/end, organization, message batch, agent dispatch, join-create/join-contribute: read `knowledge_base/dispatch_workflows.md`.
 - Current architecture or component ownership: read `knowledge_base/core_architecture.md`.
+- `GraphDefinition.agent_cycle_groups()` (exec-edge SCCs, agent-only groups, cycles through `RouteNode`): read `knowledge_base/core_architecture.md` (section *GraphDefinition: agent cycle groups*).
 - Legacy `CodeMakerCluster`, `run_parallel`, `run_chain`, broker/TCP worker path: read `knowledge_base/cluster_api.md`.
 - Registry, skills, per-agent skill selection: read `knowledge_base/registry_and_skills.md`.
 - Workspace API, changesets, archive, private checkout, conflict flow: read `knowledge_base/core_architecture.md` and `tasks/multi_agent_communication_tasks.md`; use archive only for history.

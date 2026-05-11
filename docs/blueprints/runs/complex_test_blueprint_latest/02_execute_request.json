@@ -1,0 +1,119 @@
+{
+  "command": "run.execute_fixture",
+  "args": {
+    "plan": {
+      "user_goal": "Run the fixed complex blueprint test task from planning through archive.",
+      "agent_descriptions": {
+        "requirements": "Breaks down the user goal and fans out required work.",
+        "risk_scan": "Scans requirements and architecture for risk level.",
+        "architecture": "Creates implementation architecture and splits backend/frontend work.",
+        "test_planner": "Creates the unit and end-to-end testing strategy.",
+        "backend_impl": "Produces backend changes and artifacts.",
+        "frontend_impl": "Produces frontend changes and artifacts.",
+        "unit_tests": "Runs unit tests and publishes test results.",
+        "e2e_tests": "Runs end-to-end tests and publishes test results.",
+        "security_review": "Reviews high-risk paths before regular review.",
+        "review": "Aggregates implementation, risk, and test inputs for review.",
+        "patch": "Fixes review or integration failures and feeds retry work.",
+        "integration": "Validates integrated changes and decides success or failure attribution.",
+        "failure_analysis": "Classifies integration failure and produces retry guidance.",
+        "summary": "Builds the final report and archive summary.",
+        "event_monitor": "Collects side-channel runtime events.",
+        "workspace_state": "Collects side-channel workspace state."
+      },
+      "start_nodes": [
+        "requirements"
+      ],
+      "tasks": {
+        "requirements": {
+          "goal": "Analyze the user goal and dispatch risk, architecture, and test-planning tasks through framework messaging.",
+          "context_refs": [],
+          "expected_output": "A complete outgoing batch for risk_scan, architecture, and test_planner.",
+          "acceptance": "Every required downstream target receives a framework-queued message and the message journal is persisted."
+        }
+      },
+      "run_policy": {
+        "allow_parallel": true,
+        "persist_message_io": true,
+        "archive_on_complete": true
+      }
+    },
+    "runtime_scenarios": {
+      "decisions": {
+        "risk": "high",
+        "review": "failed_once",
+        "integration": "failed_once",
+        "max_integration_retries": 1
+      },
+      "joins": [
+        {
+          "join_id": "join-implementation-ready",
+          "policy": "wait-all",
+          "required_sources": [
+            "backend_impl",
+            "frontend_impl"
+          ],
+          "target": "review"
+        },
+        {
+          "join_id": "join-test-ready",
+          "policy": "wait-all",
+          "required_sources": [
+            "unit_tests",
+            "e2e_tests"
+          ],
+          "target": "integration"
+        },
+        {
+          "join_id": "join-review-and-tests",
+          "policy": "quorum",
+          "quorum": 2,
+          "required_sources": [
+            "review",
+            "unit_tests",
+            "e2e_tests"
+          ],
+          "target": "integration"
+        }
+      ],
+      "conditional_routes": [
+        {
+          "from": "risk_scan",
+          "condition": "risk == high",
+          "to": "security_review"
+        },
+        {
+          "from": "risk_scan",
+          "condition": "risk in ['low', 'medium']",
+          "to": "review"
+        },
+        {
+          "from": "review",
+          "condition": "review == failed",
+          "to": "patch"
+        }
+      ],
+      "retry_routes": [
+        {
+          "from": "integration",
+          "condition": "integration == failed",
+          "to": "failure_analysis"
+        },
+        {
+          "from": "failure_analysis",
+          "condition": "retry_allowed",
+          "to": "patch"
+        }
+      ],
+      "side_channels": [
+        "event_monitor",
+        "workspace_state"
+      ],
+      "persistence": {
+        "message_journal": "shared/logs/message_journal.jsonl",
+        "final_report": "shared/reports/final_report.json"
+      }
+    },
+    "archive": true
+  }
+}

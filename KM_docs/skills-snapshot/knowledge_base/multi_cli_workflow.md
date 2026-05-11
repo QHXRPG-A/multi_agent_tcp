@@ -210,3 +210,10 @@ The current blueprint runtime implementation has started enforcing the split bet
 This means the minimum closed loop should consider `shared/` the blackboard and outcome surface. Private agent directories are disposable runtime implementation details unless an agent explicitly publishes selected files into `shared/`.
 
 Follow-up adjustment: agents should not be taught physical shared workspace paths as the primary contract. The runtime now maintains `docs/workspace_api.md` and injects that API document when an AgentNode starts. Agents publish outputs through `python -m multi_agent_tcp.workspace_api` using logical areas (`code`, `artifacts`, `reports`). The command resolves the run context internally, writes through the workspace manager, and records lease/manifest events. Shared files use a per-path read/write lock: multiple readers can coexist, writers are exclusive, and writes are blocked while readers hold the same path. Joint edits can also use `read --json` plus `publish --expected-version N` to avoid stale overwrites. Current implementation is a local controlled CLI API; stronger enforcement still requires broker-side RPC/tooling plus filesystem sandboxing.
+
+## 2026-05-11 prompt-facing context note
+
+- The runtime now keeps a full internal `execution_context` and a smaller `prompt_execution_context`.
+- Codex and CodeMaker bridges should merge `prompt_execution_context` into the actual prompt when present.
+- The prompt-facing view should omit raw launch paths and private internals such as `project_context`, `checkout_path`, `codex_home`, real skill-space paths, tokens, and RPC internals.
+- Ordinary-Agent prompt context should stay limited to command contracts, scope summaries, and authorized skill/rule names and descriptions.

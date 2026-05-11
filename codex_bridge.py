@@ -182,6 +182,9 @@ def _parse_codex_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     execution_context = raw.get("execution_context")
     if execution_context is not None and not isinstance(execution_context, dict):
         raise ValueError("codex.execution_context must be an object when set")
+    prompt_execution_context = raw.get("prompt_execution_context")
+    if prompt_execution_context is not None and not isinstance(prompt_execution_context, dict):
+        raise ValueError("codex.prompt_execution_context must be an object when set")
 
     parsed = {
         "command": command,
@@ -205,6 +208,7 @@ def _parse_codex_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "codex_home": raw.get("codex_home"),
         "prompt_preamble": raw.get("prompt_preamble"),
         "execution_context": dict(execution_context or {}),
+        "prompt_execution_context": dict(prompt_execution_context or {}),
         "extra_env": extra_env_dict,
     }
     code_workspace = parsed["execution_context"].get("code_workspace")
@@ -245,7 +249,10 @@ def _merge_prompt(
     preamble = codex_cfg.get("prompt_preamble")
     if isinstance(preamble, str) and preamble.strip():
         parts.append(preamble.strip())
-    context_block = _format_execution_context(codex_cfg.get("execution_context", {}))
+    prompt_context = codex_cfg.get("prompt_execution_context")
+    if not prompt_context:
+        prompt_context = codex_cfg.get("execution_context", {})
+    context_block = _format_execution_context(prompt_context)
     if context_block:
         parts.append(context_block)
     parts.append(prompt)

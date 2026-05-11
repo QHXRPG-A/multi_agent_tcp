@@ -158,6 +158,13 @@
 7. 实现超级 agent 除 skill 分配外的下游 agent 配置能力。
 8. Ryven/editor 相关的 Run Blueprint、Start/End 最小链路、Inspector 和节点视觉改造延后到明确需要 visual editor 时。
 
+## 2026-05-11 `GraphDefinition.agent_cycle_groups()`（已落地）
+
+- 新增 `GraphDefinition.agent_cycle_groups()`：在仅 **`exec` 边** 的子图上做 SCC；若 SCC 为环（含多点 SCC 或带自环的单点），则输出该 SCC 内所有 **Agent** 的 `node_id`，格式为二维列表，例如 `[["a", "b", "c"], ["d", "e", "f"]]`；无环图返回 `[]`。
+- 环若经过 **`RouteNode`（或其它非 Agent 节点）** 仍可被识别，因为 SCC 在**全节点**上计算，返回时再筛成仅 agent id。
+- 代码：`graph_runtime.py`；测试：`test_agent_runtime.py`（含上述两例）；该文件 pytest 在合入时为 **64 passed**。
+- 后续可选（未做）：再包一层，同时输出「每个环对应的原始 SCC 节点全集」便于调试图结构。
+
 ## 依赖知识
 
 - [`../knowledge_base/multi_cli_workflow.md`](../knowledge_base/multi_cli_workflow.md)

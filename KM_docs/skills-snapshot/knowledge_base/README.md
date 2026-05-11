@@ -16,7 +16,7 @@ Historical TCP / CodeMaker / Ryven information may still be useful, but it is no
 
 ## Current Modules
 
-- `core_architecture.md`: current architecture, ownership boundaries, and how GuLiCode, runtime control, graph scheduling, workspace, events, and CLI backend adapters fit together.
+- `core_architecture.md`: current architecture, ownership boundaries, and how GuLiCode, runtime control, graph scheduling, workspace, events, and CLI backend adapters fit together. Includes **`GraphDefinition.agent_cycle_groups()`** (exec-edge SCCs, agent-only cycle groups).
 - `gulicode_desktop.md`: GuLiCode desktop source structure, Electron/Tauri startup, main/preload/renderer/app layering, and desktop integration path.
 - `dispatch_workflows.md`: current GraphRuntimeControlPlane CLI/RPC workflows plus legacy dispatch notes.
 - `registry_and_skills.md`: `agents_registry.json`, skill selection, skill injection, and registry workflow.

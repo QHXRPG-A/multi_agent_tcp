@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1080" viewBox="0 0 1800 1080" role="img" aria-labelledby="title desc">
+  <title id="title">Complex test blueprint</title>
+  <desc id="desc">Six-node execution graph matching the hand-drawn sketch: top-left to top-center and bottom-left, top-center to center, center to middle-right, middle-right loop to top-center and to bottom-right, and bidirectional bottom row.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#274554"/>
+    </marker>
+    <marker id="arrowBack" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6a7680"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-12%" width="125%" height="140%">
+      <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#20343e" flood-opacity="0.14"/>
+    </filter>
+    <style>
+      .bg { fill: #f4f1ea; }
+      .title { font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; font-size: 34px; font-weight: 800; fill: #20323b; }
+      .subtitle { font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; font-size: 18px; fill: #5a6670; }
+      .lane { fill: #ffffff; stroke: #d8d1c4; stroke-width: 2; }
+      .lane-title { font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; font-size: 20px; font-weight: 700; fill: #31424b; }
+      .edge { fill: none; stroke: #274554; stroke-width: 3.5; marker-end: url(#arrow); }
+      .edge-back { fill: none; stroke: #6a7680; stroke-width: 2.8; stroke-dasharray: 8 7; marker-end: url(#arrowBack); }
+      .node { filter: url(#shadow); }
+      .box { rx: 10; ry: 10; stroke-width: 2.5; }
+      .control { fill: #eaf4f6; stroke: #3d7d8a; }
+      .agent { fill: #fffaf1; stroke: #c08a24; }
+      .label { font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; font-size: 21px; font-weight: 700; fill: #1f3139; text-anchor: middle; }
+      .small { font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; font-size: 15px; fill: #54626b; text-anchor: middle; }
+      .note { font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; font-size: 15px; fill: #63707a; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1800" height="1080"/>
+  <text class="title" x="70" y="72">Complex test blueprint</text>
+  <text class="subtitle" x="70" y="104">Topology aligned with the sketch: six nodes, eight directed edges (including parallel bottom pair).</text>
+
+  <rect class="lane" x="45" y="140" width="1710" height="870" rx="12"/>
+  <text class="lane-title" x="75" y="176">Execution graph</text>
+
+  <!-- Top-left -->
+  <g class="node">
+    <rect class="box control" x="200" y="200" width="180" height="82"/>
+    <text class="label" x="290" y="233">Start</text>
+    <text class="small" x="290" y="257">requirements</text>
+  </g>
+
+  <!-- Top-center -->
+  <g class="node">
+    <rect class="box agent" x="720" y="200" width="180" height="82"/>
+    <text class="label" x="810" y="233">Requirements</text>
+    <text class="small" x="810" y="257">fan out</text>
+  </g>
+
+  <!-- Center (down-left of middle-right) -->
+  <g class="node">
+    <rect class="box agent" x="480" y="400" width="180" height="82"/>
+    <text class="label" x="570" y="433">Risk scan</text>
+    <text class="small" x="570" y="457">high risk path</text>
+  </g>
+
+  <!-- Middle-right -->
+  <g class="node">
+    <rect class="box agent" x="1120" y="340" width="180" height="82"/>
+    <text class="label" x="1210" y="373">Security review</text>
+    <text class="small" x="1210" y="397">conditional</text>
+  </g>
+
+  <!-- Bottom-left -->
+  <g class="node">
+    <rect class="box agent" x="200" y="700" width="180" height="82"/>
+    <text class="label" x="290" y="733">Review</text>
+    <text class="small" x="290" y="757">merge results</text>
+  </g>
+
+  <!-- Bottom-right -->
+  <g class="node">
+    <rect class="box agent" x="920" y="700" width="180" height="82"/>
+    <text class="label" x="1010" y="733">Integration</text>
+    <text class="small" x="1010" y="757">final validation</text>
+  </g>
+
+  <!-- 1: Top-left → Top-center -->
+  <path class="edge" d="M 380 241 L 720 241"/>
+  <!-- 2: Top-left → Bottom-left -->
+  <path class="edge" d="M 290 282 L 290 700"/>
+  <!-- 3: Top-center → Center (diagonal down-left) -->
+  <path class="edge" d="M 810 282 L 570 400"/>
+  <!-- 4: Center → Middle-right (diagonal up-right) -->
+  <path class="edge" d="M 660 441 L 1120 381"/>
+  <!-- 5: Middle-right → Top-center (triangular loop, up-left) -->
+  <path class="edge" d="M 1120 381 L 840 282"/>
+  <!-- 6: Middle-right → Bottom-right (diagonal down-left) -->
+  <path class="edge" d="M 1180 422 L 1010 700"/>
+  <!-- 7–8: Bottom-left ↔ Bottom-right (two parallel opposite arrows) -->
+  <path class="edge" d="M 380 725 L 920 725"/>
+  <path class="edge" d="M 920 755 L 380 755"/>
+</svg>

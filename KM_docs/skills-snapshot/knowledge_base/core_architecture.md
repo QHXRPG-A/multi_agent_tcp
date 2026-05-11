@@ -27,7 +27,7 @@ The old low-level TCP worker path remains valid as an execution backend. It is n
 | GuLiCode desktop | `GuLiCode/packages/desktop-electron`, `GuLiCode/packages/app` | User-facing desktop shell, top-agent UI, session/project surface, future blueprint workbench |
 | Runtime control plane | `graph_control.py`, `__main__.py` runtime commands | Stable non-UI interface for organization reads, top-agent context, run start/status/end, message batches, agent dispatch, joins |
 | Runtime scheduler | `graph_runtime.py` | Trusted scheduler for AgentNode queues, dispatch state, outgoing batches, join barriers, events, jobs, final status |
-| Graph model | `graph_runtime.py`, `ryven_blueprint.py` | AgentNode definitions, graph edges, organization view, runnable graph validation, graph scheduling |
+| Graph model | `graph_runtime.py`, `ryven_blueprint.py` | AgentNode definitions, graph edges, organization view, runnable graph validation, graph scheduling, exec-edge SCC cycle grouping for agents |
 | Workspace / archive | `workspace_manager.py`, `workspace_api.py`, `workspace_rpc.py` | Private checkout, scoped changesets, conflict detection, accepted changes, reports, artifacts, archive indexing |
 | Backend adapter | `cluster.py`, `client.py`, `broker.py`, `adapters.py`, `codex_bridge.py`, `codemaker_bridge.py` | Run concrete CLI workers when a scheduled AgentNode needs model work |
 | Registry / skills | `registry.py`, `skill_space.py`, `agents_registry.json` | Agent profiles, skill selection, skill catalog, per-agent skill views |
@@ -45,6 +45,8 @@ The old low-level TCP worker path remains valid as an execution backend. It is n
 - Worker process replies are not treated as framework facts. `GraphRuntime` extracts a framework-private minimal Agent utterance record (`who`, `said`, `received_at`, `task_id` / `message_id`) and discards raw adapter payloads for runtime semantics.
 - Top Agent may inspect Agent utterance records through the dedicated `top_agent.utterances` / `runtime top-agent-utterances` control-plane interface when its profile has the `utterances` permission.
 - Ordinary Agents do not receive utterance records or the utterance inspection interface through `framework_context`; downstream communication still requires `agent.dispatch`.
+- Prompt injection now distinguishes internal runtime context from prompt-facing context. `execution_context` remains the full adapter/runtime record; `prompt_execution_context` is the reduced view merged into CLI prompts. Ordinary Agents should not receive raw launch paths such as `project_context`, `checkout_path`, `codex_home`, real skill-space paths, tokens, or RPC internals in the prompt.
+- Top-agent organization context is prompt-facing and compact by default: it includes governance-relevant graph, agent, permission, rule, and skill data, not the full launch configuration.
 - UI should consume runtime/control-plane state rather than rebuilding scheduling semantics in the renderer.
 
 ## Backend Adapter Boundary
@@ -71,6 +73,20 @@ GraphRuntime
 - Runtime control commands: [`dispatch_workflows.md`](dispatch_workflows.md)
 - Backend compatibility: [`cluster_api.md`](cluster_api.md)
 - Registry and skills: [`registry_and_skills.md`](registry_and_skills.md)
+
+## GraphDefinition: agent cycle groups (`agent_cycle_groups`)
+
+`GraphDefinition.agent_cycle_groups()` returns `List[List[str]]`: each inner list is the **sorted** `node_id`s of `AgentNode`s that belong to one **cyclic** strongly connected component (SCC) of the graph when only **`exec` edges** are considered.
+
+- SCC is computed over **all** registered node ids (agents, `RouteNode`, `BlueprintTerminalNode`, etc.), so a cycle that **passes through a route or terminal node** is still detected; the public result **filters to agent ids only** (non-agent nodes in the component are omitted from the inner list, not split into a separate group).
+- Acyclic components and singleton SCCs without a self-loop produce **no** inner list.
+- Self-loop on an agent via a single `exec` edge is treated as cyclic and yields one one-element inner list.
+- Groups are sorted lexicographically by their tuple of agent ids for stable output.
+- Example shape: `[["a", "b", "c"], ["d", "e", "f"]]`.
+- Tests: `multi_agent_tcp/test_agent_runtime.py` (`test_graph_definition_agent_cycle_groups_detects_agent_cycles`, `test_graph_definition_agent_cycle_groups_ignores_acyclic_graphs`); full `test_agent_runtime.py` was at **64 passed** after this landed.
+- **Possible follow-up (not implemented):** a thin wrapper that also returns each SCC’s **full** node id set (including routes) for debugging or UI overlays.
+
+Implementation: `graph_runtime.py` (`GraphDefinition.agent_cycle_groups`).
 
 ## Deprecated Center Framing
 

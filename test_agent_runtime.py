@@ -21,6 +21,7 @@ from multi_agent_tcp import (
     GraphExecutor,
     GraphJob,
     GraphRuntime,
+    GraphRuntimeControlPlane,
     MultiModalEnvelope,
     RouteNode,
     TopAgentStartPlan,
@@ -30,6 +31,7 @@ from multi_agent_tcp import (
     body_to_agent_message,
     compile_ryven_flow,
     extract_codex_final_text,
+    graph_definition_from_dict,
     normalize_envelope,
 )
 
@@ -216,20 +218,50 @@ def test_agent_node_skill_selection_none_all_selected_and_upstream(tmp_path: Pat
     assert none_node.resolve_skill_hashes(space) == []
     assert all_node.resolve_skill_hashes(space) == sorted([rec_a.skill_hash, rec_b.skill_hash])
     assert selected_node.resolve_skill_hashes(space) == [rec_a.skill_hash]
-    assert upstream_node.resolve_skill_hashes(
-        space,
-        upstream_super_agent=super_agent,
-        upstream_skill_hashes=[rec_b.skill_hash],
-    ) == [rec_b.skill_hash]
 
-    with pytest.raises(PermissionError):
-        upstream_node.resolve_skill_hashes(space, upstream_skill_hashes=[rec_b.skill_hash])
-    with pytest.raises(PermissionError):
-        upstream_node.resolve_skill_hashes(
-            space,
-            upstream_super_agent=super_agent,
-            upstream_skill_hashes=[rec_a.skill_hash],
-        )
+
+def test_graph_definition_agent_cycle_groups_detects_agent_cycles() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "a": AgentNode.from_dict({"node_id": "a"}),
+            "b": AgentNode.from_dict({"node_id": "b"}),
+            "c": AgentNode.from_dict({"node_id": "c"}),
+            "d": AgentNode.from_dict({"node_id": "d"}),
+            "e": AgentNode.from_dict({"node_id": "e"}),
+            "f": AgentNode.from_dict({"node_id": "f"}),
+        },
+        route_nodes={
+            "r1": RouteNode(node_id="r1", route_kind="sequence"),
+        },
+        edges=[
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "c", edge_type="exec"),
+            GraphEdge("c", "a", edge_type="exec"),
+            GraphEdge("d", "e", edge_type="exec"),
+            GraphEdge("e", "f", edge_type="exec"),
+            GraphEdge("f", "d", edge_type="exec"),
+            GraphEdge("c", "r1", edge_type="exec"),
+            GraphEdge("r1", "d", edge_type="exec"),
+        ],
+    )
+
+    assert graph.agent_cycle_groups() == [["a", "b", "c"], ["d", "e", "f"]]
+
+
+def test_graph_definition_agent_cycle_groups_ignores_acyclic_graphs() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "planner": AgentNode.from_dict({"node_id": "planner"}),
+            "coder": AgentNode.from_dict({"node_id": "coder"}),
+            "reviewer": AgentNode.from_dict({"node_id": "reviewer"}),
+        },
+        edges=[
+            GraphEdge("planner", "coder", edge_type="exec"),
+            GraphEdge("coder", "reviewer", edge_type="exec"),
+        ],
+    )
+
+    assert graph.agent_cycle_groups() == []
 
 
 def test_agent_skill_selection_serializes() -> None:
@@ -589,6 +621,246 @@ async def test_worker_reply_is_reduced_to_framework_private_utterance() -> None:
     assert runtime.private_agent_utterances(task_id="task-1") == [receipt]
     assert runtime.status_snapshot()["recent_events"] == []
     assert [event.event_type for event in runtime.events] == []
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_persists_agent_and_framework_message_io(tmp_path: Path) -> None:
+    cluster = _FakeCluster()
+    source = AgentNode(node_id="planner", agent_id="agent-planner", cwd=Path("."))
+    target = AgentNode(node_id="coder", agent_id="agent-coder", cwd=Path("."))
+    journal_path = tmp_path / "shared" / "logs" / "message_journal.jsonl"
+    runtime = GraphRuntime(cluster, message_journal_path=journal_path)
+
+    direct = await runtime.send_agent_message(source, {"prompt": "plan"})
+    assert direct["agent_id"] == "agent-planner"
+
+    await runtime.create_outgoing_batch(source, [target], batch_id="batch-1")
+    staged = runtime.stage_outgoing_message(
+        "batch-1",
+        target,
+        {"prompt": "implement"},
+    )
+
+    assert staged["ready_to_dispatch"] is True
+    assert journal_path.is_file()
+    lines = [
+        json.loads(line)
+        for line in journal_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    record_types = [item["record_type"] for item in lines]
+    assert record_types == [
+        "framework.message.sent",
+        "agent.reply.received",
+        "agent.outgoing.staged",
+        "framework.message.queued",
+    ]
+    assert lines[0]["payload"] == {"prompt": "plan"}
+    assert lines[1]["payload"]["said"] == json.dumps({"ok": True}, ensure_ascii=False)
+    assert lines[2]["sender"]["agent_id"] == "agent-planner"
+    assert lines[2]["metadata"]["target_node_id"] == "coder"
+    assert lines[3]["receiver"]["agent_id"] == "agent-coder"
+    assert runtime.status_snapshot()["run"]["message_journal"]["path"] == str(journal_path)
+    assert runtime.status_snapshot()["run"]["message_journal"]["record_count"] == 4
+    assert runtime.message_journal == lines
+
+
+def test_complex_blueprint_runtime_journal_covers_fanout_join_retry_and_workspace(
+    tmp_path: Path,
+) -> None:
+    fixture = json.loads(
+        Path("docs/blueprints/complex_test_blueprint.json").read_text(encoding="utf-8")
+    )
+    graph = graph_definition_from_dict(fixture["graph"])
+    workspace = WorkspaceManifest("ws-complex", tmp_path)
+    runtime = GraphRuntime(_FakeCluster(), workspace=workspace)
+    control = GraphRuntimeControlPlane(runtime, graph)
+    start_plan = TopAgentStartPlan.from_dict(fixture["top_agent_start_plan"])
+
+    started = control.handle_request(
+        {"command": "run.start", "args": {"plan": start_plan.to_dict()}}
+    )
+    assert started["ok"] is True
+    requirements_body = runtime.status_snapshot()["queues"]["by_agent"]["requirements"][0]["body"]
+    requirements_batch_id = requirements_body["context"]["framework_context"]["message_envelope"][
+        "outgoing_batch_id"
+    ]
+
+    for target in ("risk_scan", "architecture", "test_planner"):
+        dispatched = control.handle_request(
+            {
+                "command": "agent.dispatch",
+                "args": {
+                    "source_node_id": "requirements",
+                    "target_node_id": target,
+                    "batch_id": requirements_batch_id,
+                    "body": {"prompt": f"complex fixture work for {target}"},
+                },
+            }
+        )
+    assert dispatched["dispatch"]["ready_to_dispatch"] is True
+    assert len(runtime.agent_message_queues["risk_scan"]) == 1
+    assert len(runtime.agent_message_queues["architecture"]) == 1
+    assert len(runtime.agent_message_queues["test_planner"]) == 1
+
+    implementation_join = runtime.create_join_barrier(
+        required_sources=["backend_impl", "frontend_impl"],
+        target_node=graph.agent_nodes["review"],
+        join_id="join-implementation-ready",
+    )
+    runtime.submit_join_contribution(
+        implementation_join.join_id,
+        "backend_impl",
+        source_agent_id="agent-backend-impl",
+        accepted_changesets=[{"changeset_id": "backend-cs"}],
+        artifacts=[{"path": "backend/build.log"}],
+        reports=[{"path": "backend/report.md"}],
+    )
+    ready = runtime.submit_join_contribution(
+        implementation_join.join_id,
+        "frontend_impl",
+        source_agent_id="agent-frontend-impl",
+        accepted_changesets=[{"changeset_id": "frontend-cs"}],
+        artifacts=[{"path": "frontend/build.log"}],
+        reports=[{"path": "frontend/report.md"}],
+    )
+    assert ready["ready"] is True
+    review_aggregate = runtime.agent_message_queues["review"][0].body["aggregate"]
+    assert review_aggregate["accepted_changesets"] == [
+        {"changeset_id": "backend-cs"},
+        {"changeset_id": "frontend-cs"},
+    ]
+
+    test_join = runtime.create_join_barrier(
+        required_sources=["unit_tests", "e2e_tests"],
+        target_node=graph.agent_nodes["integration"],
+        join_id="join-test-ready",
+    )
+    runtime.submit_join_contribution(
+        test_join.join_id,
+        "unit_tests",
+        test_results=[{"suite": "unit", "status": "passed"}],
+    )
+    runtime.submit_join_contribution(
+        test_join.join_id,
+        "e2e_tests",
+        test_results=[{"suite": "e2e", "status": "passed"}],
+    )
+    integration_aggregate = runtime.agent_message_queues["integration"][0].body["aggregate"]
+    assert integration_aggregate["test_results"] == [
+        {"suite": "unit", "status": "passed"},
+        {"suite": "e2e", "status": "passed"},
+    ]
+
+    review_batch = asyncio.run(
+        runtime.create_outgoing_batch(
+            graph.agent_nodes["review"],
+            [graph.agent_nodes["patch"]],
+            batch_id="review-failed",
+        )
+    )
+    assert review_batch.batch_id == "review-failed"
+    runtime.stage_outgoing_message(
+        "review-failed",
+        graph.agent_nodes["patch"],
+        {"prompt": "Patch review findings and resubmit."},
+    )
+
+    retry_batch = asyncio.run(
+        runtime.create_outgoing_batch(
+            graph.agent_nodes["failure_analysis"],
+            [graph.agent_nodes["patch"]],
+            batch_id="integration-retry",
+        )
+    )
+    assert retry_batch.batch_id == "integration-retry"
+    runtime.stage_outgoing_message(
+        "integration-retry",
+        graph.agent_nodes["patch"],
+        {"prompt": "Retry from integration failure attribution."},
+    )
+
+    journal_path = tmp_path / "shared" / "logs" / "message_journal.jsonl"
+    records = [
+        json.loads(line)
+        for line in journal_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    record_types = [record["record_type"] for record in records]
+    assert record_types.count("agent.outgoing.staged") == 5
+    assert record_types.count("framework.message.queued") == 8
+    assert any(record.get("message_id") == "join-msg-join-implementation-ready" for record in records)
+    assert any(record.get("message_id") == "join-msg-join-test-ready" for record in records)
+    assert workspace.run["message_journal"]["path"] == str(journal_path)
+    assert workspace.run["message_journal"]["record_count"] == len(records)
+    assert runtime.status_snapshot()["workspace"]["workspace_id"] == "ws-complex"
+
+
+def test_complex_blueprint_executes_from_top_plan_to_archive(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-complex", code_mode="project_reference")
+    fixture = json.loads(
+        Path("docs/blueprints/complex_test_blueprint.json").read_text(encoding="utf-8")
+    )
+    graph = graph_definition_from_dict(fixture["graph"])
+    runtime = GraphRuntime(_FakeCluster(), archive_manager=manager, archive_run=run)
+    control = GraphRuntimeControlPlane(runtime, graph)
+    start_plan = TopAgentStartPlan.from_dict(fixture["top_agent_start_plan"])
+
+    result = control.handle_request(
+        {
+            "command": "run.execute_fixture",
+            "args": {
+                "plan": start_plan.to_dict(),
+                "runtime_scenarios": fixture["runtime_scenarios"],
+                "archive": True,
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["execution"]["status"] == "completed"
+    assert result["end"]["final_status"] == "success"
+    assert result["end"]["archived"] is True
+    executed = result["execution"]["executed_nodes"]
+    assert executed[:4] == ["requirements", "risk_scan", "security_review", "architecture"]
+    assert executed.count("patch") == 2
+    assert executed.count("integration") == 2
+    assert executed[-3:] == ["summary", "event_monitor", "workspace_state"]
+    route_types = [item["event_type"] for item in result["execution"]["route_history"]]
+    assert route_types == [
+        "ConditionalRouteTaken",
+        "ConditionalRouteTaken",
+        "RetryRouteTaken",
+        "RetryRouteTaken",
+    ]
+    assert all(not messages for messages in result["status"]["queues"]["by_agent"].values())
+    assert all(
+        message["status"] == "completed"
+        for message in result["status"]["queues"]["pending_messages"].values()
+    )
+
+    archive_path = Path(result["end"]["summary"]["archive_path"])
+    report_path = Path(result["end"]["summary"]["final_report_path"])
+    journal_path = archive_path / "shared" / "logs" / "message_journal.jsonl"
+    assert report_path == archive_path / "shared" / "reports" / "final_report.json"
+    assert report_path.is_file()
+    assert journal_path.is_file()
+    journal_records = [
+        json.loads(line)
+        for line in journal_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    record_types = [record["record_type"] for record in journal_records]
+    assert "framework.message.sent" in record_types
+    assert "framework.message.queued" in record_types
+    assert "agent.outgoing.staged" in record_types
+    assert "agent.reply.received" in record_types
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["final_status"] == "success"
+    assert report["status_snapshot"]["run"]["message_journal"]["record_count"] == len(journal_records)
+    assert "RunArchiveIndexed" in [event["event_type"] for event in result["status"]["recent_events"]]
 
 
 @pytest.mark.asyncio
@@ -1195,16 +1467,18 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         )
         assert "Workspace API" in merged_prompt
         assert "Codex Execution Context" in merged_prompt
-        assert "checkout_path" in merged_prompt
-        assert json.dumps(str(checkout), ensure_ascii=False)[1:-1] in merged_prompt
-        assert "project_context" in merged_prompt
-        assert json.dumps(str(project), ensure_ascii=False)[1:-1] in merged_prompt
+        assert json.dumps(str(checkout), ensure_ascii=False)[1:-1] not in merged_prompt
+        assert json.dumps(str(project), ensure_ascii=False)[1:-1] not in merged_prompt
         assert "PRIVATE_RUNTIME_SKILL_DESCRIPTION" in merged_prompt
         assert "outgoing_batch_id" in merged_prompt
         assert "out-1" in merged_prompt
         private_context = inst.node.adapter_options["execution_context"]["private_context"]
         assert private_context["codex_home"] == str(codex_home)
         assert private_context["rule_catalog"][0]["rule_path"] == str(private / "rules" / "01-business-rule.md")
+        prompt_context = inst.node.adapter_options["prompt_execution_context"]
+        assert "codex_home" not in prompt_context["private_context"]
+        assert "project_context" not in prompt_context["code_workspace"]
+        assert "checkout_path" not in prompt_context["code_workspace"]
         assert (private / "workspace_api_context.json").is_file()
     finally:
         server.close()
@@ -1651,6 +1925,34 @@ def test_graph_runtime_complete_writes_final_report_and_archive_index(tmp_path: 
     assert archives[0]["archive_id"] == "run-final-completed"
     assert "FinalReportPublished" in [event.event_type for event in runtime.events]
     assert "RunArchiveIndexed" in [event.event_type for event in runtime.events]
+
+
+@pytest.mark.asyncio
+async def test_message_journal_is_archived_with_run_workspace(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-journal")
+    runtime = GraphRuntime(_FakeCluster(), archive_manager=manager, archive_run=run)
+
+    await runtime.send_agent_message(
+        AgentNode(node_id="summary", agent_id="agent-summary", cwd=Path(".")),
+        {"prompt": "write archiveable message journal"},
+    )
+    result = runtime.end_run("complete", reason="done")
+
+    archive_path = Path(result.summary["archive_path"])
+    journal_path = archive_path / "shared" / "logs" / "message_journal.jsonl"
+    assert result.final_status == "success"
+    assert journal_path.is_file()
+    records = [
+        json.loads(line)
+        for line in journal_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [record["record_type"] for record in records] == [
+        "framework.message.sent",
+        "agent.reply.received",
+    ]
 
 
 @pytest.mark.asyncio

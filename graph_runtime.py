@@ -195,6 +195,48 @@ class AgentUtterance:
 
 
 @dataclass
+class RuntimeMessageRecord:
+    """Durable audit record for framework/Agent message IO."""
+
+    record_id: str
+    record_type: str
+    sender: Dict[str, Any]
+    receiver: Dict[str, Any]
+    payload: Any = None
+    message_id: Optional[str] = None
+    batch_id: Optional[str] = None
+    join_id: Optional[str] = None
+    utterance_id: Optional[str] = None
+    status: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    recorded_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "record_id": self.record_id,
+            "record_type": self.record_type,
+            "sender": dict(self.sender),
+            "receiver": dict(self.receiver),
+            "recorded_at": self.recorded_at,
+        }
+        if self.payload is not None:
+            data["payload"] = self.payload
+        if self.message_id is not None:
+            data["message_id"] = self.message_id
+        if self.batch_id is not None:
+            data["batch_id"] = self.batch_id
+        if self.join_id is not None:
+            data["join_id"] = self.join_id
+        if self.utterance_id is not None:
+            data["utterance_id"] = self.utterance_id
+        if self.status is not None:
+            data["status"] = self.status
+        if self.metadata:
+            data["metadata"] = dict(self.metadata)
+        return data
+
+
+@dataclass
 class WorkspaceManifest:
     """Append-only manifest for graph jobs sharing a workspace."""
 
@@ -847,6 +889,16 @@ class GuLiCodeTopAgentProfile:
             encoding="utf-8",
         )
 
+    def runtime_context(self) -> Dict[str, Any]:
+        """Return the prompt-facing top-agent context without launch internals."""
+        return {
+            "agent_id": self.agent_id,
+            "display_name": self.display_name,
+            "allowed_run_permissions": list(self.allowed_run_permissions),
+            "rule": self.rule_text(),
+            "skill": self.skill_text(),
+        }
+
     def rule_text(self) -> str:
         if self.rule is not None:
             return self.rule
@@ -910,8 +962,8 @@ class GuLiCodeTopAgentProfile:
 
     def organization_context(self, graph: "GraphDefinition") -> Dict[str, Any]:
         return {
-            "top_agent": self.to_dict(),
-            "organization": graph.agent_organization_view(),
+            "top_agent": self.runtime_context(),
+            "organization": graph.agent_organization_summary(),
         }
 
     def validate_start_plan(
@@ -1389,6 +1441,7 @@ class GraphRuntime:
         private_context_rpc_server: Any = None,
         skill_space: Any = None,
         tick_interval_sec: float = 0.5,
+        message_journal_path: Optional[Path] = None,
     ) -> None:
         self.cluster = cluster
         self.workspace = workspace
@@ -1400,12 +1453,29 @@ class GraphRuntime:
         self.private_context_rpc_server = private_context_rpc_server
         self.skill_space = skill_space
         self.tick_interval_sec = float(tick_interval_sec)
+        if message_journal_path is not None:
+            self.message_journal_path: Optional[Path] = Path(message_journal_path).expanduser()
+        elif workspace is not None:
+            self.message_journal_path = (
+                workspace.workspace_root / "shared" / "logs" / "message_journal.jsonl"
+            )
+        elif archive_run is not None and getattr(archive_run, "shared_dir", None) is not None:
+            self.message_journal_path = (
+                Path(getattr(archive_run, "shared_dir")) / "logs" / "message_journal.jsonl"
+            )
+        elif archive_run is not None and getattr(archive_run, "path", None) is not None:
+            self.message_journal_path = (
+                Path(getattr(archive_run, "path")) / "shared" / "logs" / "message_journal.jsonl"
+            )
+        else:
+            self.message_journal_path = None
         self._instances: Dict[str, AgentInstance] = {}
         self._launch_nodes: Dict[str, AgentNode] = {}
         self._agent_message_queues: Dict[str, List[PendingAgentMessage]] = {}
         self._pending_messages: Dict[str, PendingAgentMessage] = {}
         self._agent_utterances: Dict[str, AgentUtterance] = {}
         self._utterances_by_task: Dict[str, List[str]] = {}
+        self._message_journal: List[RuntimeMessageRecord] = []
         self._outgoing_batches: Dict[str, OutgoingMessageBatch] = {}
         self._join_barriers: Dict[str, JoinBarrier] = {}
         self._join_target_nodes: Dict[str, AgentNode] = {}
@@ -1521,6 +1591,54 @@ class GraphRuntime:
     def run_manifest(self) -> Dict[str, Any]:
         return dict(self._run_manifest)
 
+    @property
+    def message_journal(self) -> List[Dict[str, Any]]:
+        return [record.to_dict() for record in self._message_journal]
+
+    def _message_journal_summary(self) -> Dict[str, Any]:
+        return {
+            "path": str(self.message_journal_path) if self.message_journal_path is not None else None,
+            "record_count": len(self._message_journal),
+        }
+
+    def _record_message_io(
+        self,
+        *,
+        record_type: str,
+        sender: Dict[str, Any],
+        receiver: Dict[str, Any],
+        payload: Any = None,
+        message_id: Optional[str] = None,
+        batch_id: Optional[str] = None,
+        join_id: Optional[str] = None,
+        utterance_id: Optional[str] = None,
+        status: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> RuntimeMessageRecord:
+        record = RuntimeMessageRecord(
+            record_id=f"msgio-{uuid.uuid4().hex[:12]}",
+            record_type=record_type,
+            sender=dict(sender),
+            receiver=dict(receiver),
+            payload=payload,
+            message_id=message_id,
+            batch_id=batch_id,
+            join_id=join_id,
+            utterance_id=utterance_id,
+            status=status,
+            metadata=dict(metadata or {}),
+        )
+        self._message_journal.append(record)
+        summary = self._message_journal_summary()
+        self._run_manifest["message_journal"] = summary
+        if self.workspace is not None:
+            self.workspace.run["message_journal"] = summary
+        if self.message_journal_path is not None:
+            self.message_journal_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.message_journal_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record.to_dict(), ensure_ascii=False, default=str) + "\n")
+        return record
+
     def _emit(self, event: GraphEvent) -> GraphEvent:
         self._events.append(event)
         return event
@@ -1568,6 +1686,16 @@ class GraphRuntime:
         self._agent_utterances[utterance.utterance_id] = utterance
         if task_id:
             self._utterances_by_task.setdefault(task_id, []).append(utterance.utterance_id)
+        self._record_message_io(
+            record_type="agent.reply.received",
+            sender={"type": "agent", "agent_id": agent_id, "node_id": node_id},
+            receiver={"type": "framework"},
+            payload=utterance.to_dict(),
+            message_id=message_id,
+            utterance_id=utterance.utterance_id,
+            status="received",
+            metadata={"task_id": task_id} if task_id is not None else {},
+        )
         return utterance
 
     def _task_id_from_body(self, body: Any, *, message_id: Optional[str]) -> Optional[str]:
@@ -2107,6 +2235,7 @@ class GraphRuntime:
                 "closed": self._closed,
                 "last_tick_at": self._last_tick_at,
                 "manifest": dict(self._run_manifest),
+                "message_journal": self._message_journal_summary(),
             },
             "agents": agents,
             "queues": {
@@ -2767,6 +2896,25 @@ class GraphRuntime:
                 },
             )
         )
+        self._record_message_io(
+            record_type="agent.outgoing.staged",
+            sender={
+                "type": "agent",
+                "agent_id": batch.source_agent_id,
+                "node_id": batch.source_node_id,
+            },
+            receiver={"type": "framework"},
+            payload=body,
+            batch_id=batch.batch_id,
+            status="staged",
+            metadata={
+                "target_node_id": target_node.node_id,
+                "target_agent_id": target_agent_id,
+                "overwritten": overwritten,
+                "ready_to_dispatch": ready,
+                "remaining_targets": list(remaining),
+            },
+        )
         if ready:
             dispatched = self.dispatch_outgoing_batch(batch.batch_id)
             remaining = dispatched["remaining_targets"]
@@ -2895,6 +3043,18 @@ class GraphRuntime:
         self._pending_messages[pending.message_id] = pending
         if inst is not None and inst.state == "idle":
             self._set_agent_state(inst, "queued")
+        self._record_message_io(
+            record_type="framework.message.queued",
+            sender={
+                "type": "agent" if source_agent_id else "framework",
+                "agent_id": source_agent_id,
+                "node_id": source_node_id,
+            },
+            receiver={"type": "agent", "agent_id": agent_id, "node_id": node.node_id},
+            payload=body,
+            message_id=pending.message_id,
+            status=pending.status,
+        )
         self._emit(
             GraphEvent(
                 "AgentMessageQueued",
@@ -2947,6 +3107,14 @@ class GraphRuntime:
     ) -> Dict[str, Any]:
         inst = await self.ensure_agent(node)
         inst.busy_count += 1
+        self._record_message_io(
+            record_type="framework.message.sent",
+            sender={"type": "framework"},
+            receiver={"type": "agent", "agent_id": inst.agent_id, "node_id": node.node_id},
+            payload=body,
+            message_id=message_id,
+            status="dispatching",
+        )
         self._set_agent_state(inst, "dispatching", message_id=message_id)
         try:
             self._set_agent_state(inst, "running", message_id=message_id)
@@ -2959,12 +3127,35 @@ class GraphRuntime:
             self._set_agent_state(inst, "processing_reply", message_id=message_id)
         except asyncio.TimeoutError:
             self._set_agent_state(inst, "timed_out", error="timeout", message_id=message_id)
+            self._record_message_io(
+                record_type="framework.message.failed",
+                sender={"type": "framework"},
+                receiver={"type": "agent", "agent_id": inst.agent_id, "node_id": node.node_id},
+                message_id=message_id,
+                status="timed_out",
+                metadata={"error": "timeout"},
+            )
             raise
         except asyncio.CancelledError:
             self._set_agent_state(inst, "cancelled", message_id=message_id)
+            self._record_message_io(
+                record_type="framework.message.failed",
+                sender={"type": "framework"},
+                receiver={"type": "agent", "agent_id": inst.agent_id, "node_id": node.node_id},
+                message_id=message_id,
+                status="cancelled",
+            )
             raise
         except Exception as exc:
             self._set_agent_state(inst, "failed", error=str(exc), message_id=message_id)
+            self._record_message_io(
+                record_type="framework.message.failed",
+                sender={"type": "framework"},
+                receiver={"type": "agent", "agent_id": inst.agent_id, "node_id": node.node_id},
+                message_id=message_id,
+                status="failed",
+                metadata={"error": str(exc)},
+            )
             raise
         finally:
             inst.busy_count = max(0, inst.busy_count - 1)
@@ -3364,6 +3555,77 @@ class GraphDefinition:
                 connections[edge.source].append(edge.target)
         return connections
 
+    def agent_cycle_groups(self) -> List[List[str]]:
+        """Return AgentNode groups that participate in exec-edge cycles.
+
+        The graph is analyzed as a whole, so cycles that pass through route
+        nodes or terminal nodes are still detected. Each returned inner list
+        contains the AgentNode ids that belong to one cyclic strongly
+        connected component.
+        """
+
+        node_ids = self._node_ids()
+        for edge in self.edges:
+            if edge.source not in node_ids:
+                raise ValueError(f"unknown edge source: {edge.source}")
+            if edge.target not in node_ids:
+                raise ValueError(f"unknown edge target: {edge.target}")
+
+        adjacency = self._adjacency(node_ids, exec_only=True)
+        reverse: Dict[str, List[str]] = {node_id: [] for node_id in node_ids}
+        for edge in self.edges:
+            if not edge.is_exec_edge:
+                continue
+            reverse[edge.target].append(edge.source)
+
+        visited: set[str] = set()
+        order: List[str] = []
+
+        def visit_forward(node_id: str) -> None:
+            visited.add(node_id)
+            for target in adjacency[node_id]:
+                if target not in visited:
+                    visit_forward(target)
+            order.append(node_id)
+
+        for node_id in node_ids:
+            if node_id not in visited:
+                visit_forward(node_id)
+
+        visited.clear()
+        groups: List[List[str]] = []
+
+        def visit_reverse(node_id: str, component: List[str]) -> None:
+            visited.add(node_id)
+            component.append(node_id)
+            for source in reverse[node_id]:
+                if source not in visited:
+                    visit_reverse(source, component)
+
+        for node_id in reversed(order):
+            if node_id in visited:
+                continue
+            component: List[str] = []
+            visit_reverse(node_id, component)
+            if not component:
+                continue
+            cyclic = len(component) > 1 or any(
+                edge.source == node_id and edge.target == node_id and edge.is_exec_edge
+                for edge in self.edges
+            )
+            if not cyclic:
+                continue
+            agent_ids = sorted(
+                node_id
+                for node_id in component
+                if node_id in self.agent_nodes
+            )
+            if agent_ids:
+                groups.append(agent_ids)
+
+        groups.sort(key=tuple)
+        return groups
+
     def agent_organization_view(self) -> Dict[str, Any]:
         """Return a framework-readable organization view for agents and UI."""
         connections = self.agent_connections()
@@ -3415,6 +3677,60 @@ class GraphDefinition:
                 "selected_by": "top_agent",
                 "framework_role": "validate_only",
                 "valid_start_nodes": list(self.agent_nodes),
+            },
+        }
+
+    def agent_organization_summary(self, *, agent_id: Optional[str] = None) -> Dict[str, Any]:
+        """Return a compact organization view for prompt injection."""
+        full = self.agent_organization_view()
+        if agent_id is None:
+            return {
+                "scope": "top_agent",
+                "graph": full["graph"],
+                "agent_connections": full["agent_connections"],
+                "agents": {
+                    node_id: {
+                        "node_id": agent["node_id"],
+                        "agent_id": agent["agent_id"],
+                        "upstream_agents": list(agent["upstream_agents"]),
+                        "downstream_agents": list(agent["downstream_agents"]),
+                        "read_scope": list(agent["read_scope"]),
+                        "write_scope": list(agent["write_scope"]),
+                        "artifact_scope": list(agent["artifact_scope"]),
+                        "skill_selection_mode": agent["skill_selection"].get("mode"),
+                    }
+                    for node_id, agent in full["agents"].items()
+                },
+                "start_policy": full["start_policy"],
+            }
+
+        if agent_id not in full["agents"]:
+            raise KeyError(f"unknown AgentNode: {agent_id}")
+        agent = full["agents"][agent_id]
+        related = set(agent.get("upstream_agents", [])) | set(agent.get("downstream_agents", [])) | {agent_id}
+        return {
+            "scope": "agent",
+            "graph": {
+                "nodes": sorted(related),
+                "agent_nodes": [agent_id],
+                "edges": [
+                    edge
+                    for edge in full["graph"]["edges"]
+                    if edge["from"] in related and edge["to"] in related
+                ],
+            },
+            "agent": {
+                "node_id": agent["node_id"],
+                "agent_id": agent["agent_id"],
+                "upstream_agents": list(agent["upstream_agents"]),
+                "downstream_agents": list(agent["downstream_agents"]),
+                "read_scope": list(agent["read_scope"]),
+                "write_scope": list(agent["write_scope"]),
+                "artifact_scope": list(agent["artifact_scope"]),
+                "skill_selection_mode": agent["skill_selection"].get("mode"),
+            },
+            "agent_connections": {
+                agent_id: list(full["agent_connections"].get(agent_id, [])),
             },
         }
 
@@ -3563,6 +3879,324 @@ class GraphExecutor:
             if edge.edge_type == "data":
                 inputs.setdefault(edge.target, []).append(edge)
         return inputs
+
+    def _emit_executor_event(
+        self,
+        event: GraphEvent,
+        event_callback: Optional[Callable[[GraphEvent], None]],
+    ) -> None:
+        self.runtime._emit(event)
+        if event_callback is not None:
+            event_callback(event)
+
+    def _first_queued_message_id(self, node_id: str) -> Optional[str]:
+        queue = self.runtime.agent_message_queues.get(node_id, [])
+        if not queue:
+            return None
+        return queue[0].message_id
+
+    def _staging_batch_for_source(self, source_node_id: str) -> Optional[OutgoingMessageBatch]:
+        for batch in self.runtime.outgoing_batches.values():
+            if batch.source_node_id == source_node_id and batch.status == "staging":
+                return batch
+        return None
+
+    async def _execute_agent_node(
+        self,
+        node: AgentNode,
+        *,
+        prompt: Optional[str] = None,
+        event_callback: Optional[Callable[[GraphEvent], None]] = None,
+    ) -> Dict[str, Any]:
+        self._emit_executor_event(
+            GraphEvent(
+                "NodeQueued",
+                node_id=node.node_id,
+                agent_id=node.runtime_agent_id,
+                status="queued",
+            ),
+            event_callback,
+        )
+        self._emit_executor_event(
+            GraphEvent(
+                "NodeRunning",
+                node_id=node.node_id,
+                agent_id=node.runtime_agent_id,
+                status="running",
+            ),
+            event_callback,
+        )
+        queued_message_id = self._first_queued_message_id(node.node_id)
+        if queued_message_id is not None:
+            pending = await self.runtime.dispatch_queued_message_now(queued_message_id)
+            reply = dict(pending.receipt or {})
+        else:
+            reply = await self.runtime.send_agent_message(
+                node,
+                {"prompt": prompt or node.prompt or f"Run AgentNode {node.node_id}."},
+            )
+        self._emit_executor_event(
+            GraphEvent(
+                "NodeCompleted",
+                node_id=node.node_id,
+                agent_id=node.runtime_agent_id,
+                status="completed",
+                payload={"result": reply, "text": self._reply_text(reply)},
+            ),
+            event_callback,
+        )
+        return reply
+
+    async def _stage_and_queue_targets(
+        self,
+        graph: GraphDefinition,
+        source_node_id: str,
+        target_node_ids: Sequence[str],
+    ) -> Dict[str, Any]:
+        targets = [graph.agent_nodes[node_id] for node_id in target_node_ids]
+        batch = self._staging_batch_for_source(source_node_id)
+        if batch is None:
+            batch = await self.runtime.create_outgoing_batch(
+                graph.agent_nodes[source_node_id],
+                targets,
+            )
+        result: Dict[str, Any] = {
+            "batch_id": batch.batch_id,
+            "ready_to_dispatch": batch.ready_to_dispatch,
+            "remaining_targets": batch.remaining_targets,
+        }
+        for target in targets:
+            if target.node_id in batch.staged_messages:
+                continue
+            result = self.runtime.stage_outgoing_message(
+                batch.batch_id,
+                target,
+                {
+                    "prompt": (
+                        f"Continue complex blueprint work from {source_node_id} "
+                        f"to {target.node_id}."
+                    )
+                },
+            )
+        return result
+
+    def _scenario_decisions(self, runtime_scenarios: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        scenarios = runtime_scenarios or {}
+        decisions = dict(scenarios.get("decisions", {}))
+        decisions.setdefault("risk", "high")
+        decisions.setdefault("review", "failed_once")
+        decisions.setdefault("integration", "failed_once")
+        decisions.setdefault("max_integration_retries", 1)
+        return decisions
+
+    def _join_spec_by_id(
+        self,
+        runtime_scenarios: Optional[Dict[str, Any]],
+        join_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        for spec in (runtime_scenarios or {}).get("joins", []):
+            if str(spec.get("join_id")) == join_id:
+                return dict(spec)
+        return None
+
+    def _contribution_for_source(self, source_node_id: str) -> Dict[str, Any]:
+        if source_node_id.endswith("_impl"):
+            prefix = source_node_id.replace("_impl", "")
+            return {
+                "accepted_changesets": [{"changeset_id": f"{source_node_id}-changeset"}],
+                "artifacts": [{"path": f"{prefix}/build.log"}],
+                "reports": [{"path": f"{prefix}/report.md"}],
+            }
+        if source_node_id.endswith("_tests"):
+            suite = source_node_id.replace("_tests", "")
+            return {
+                "test_results": [{"suite": suite, "status": "passed"}],
+                "artifacts": [{"path": f"tests/{suite}.log"}],
+            }
+        return {"reports": [{"path": f"{source_node_id}/report.md"}]}
+
+    def _submit_fixture_join(
+        self,
+        graph: GraphDefinition,
+        runtime_scenarios: Optional[Dict[str, Any]],
+        join_id: str,
+    ) -> Dict[str, Any]:
+        spec = self._join_spec_by_id(runtime_scenarios, join_id)
+        if spec is None:
+            raise KeyError(f"complex blueprint fixture is missing join spec: {join_id}")
+        target_id = str(spec["target"])
+        barrier = self.runtime.create_join_barrier(
+            required_sources=[str(item) for item in spec.get("required_sources", [])],
+            target_node=graph.agent_nodes[target_id],
+            policy=str(spec.get("policy", "wait-all")),
+            quorum=(int(spec["quorum"]) if spec.get("quorum") is not None else None),
+            join_id=join_id,
+        )
+        result: Dict[str, Any] = {}
+        for source_id in barrier.required_source_node_ids:
+            source_node = graph.agent_nodes[source_id]
+            result = self.runtime.submit_join_contribution(
+                join_id,
+                source_id,
+                source_agent_id=source_node.runtime_agent_id,
+                result={"node_id": source_id, "status": "completed"},
+                **self._contribution_for_source(source_id),
+            )
+        return result
+
+    async def run_complex_blueprint_scenario(
+        self,
+        graph: GraphDefinition,
+        *,
+        runtime_scenarios: Optional[Dict[str, Any]] = None,
+        initial_prompt: str = "",
+        event_callback: Optional[Callable[[GraphEvent], None]] = None,
+    ) -> Dict[str, Any]:
+        """Execute the fixed complex blueprint fixture through runtime APIs.
+
+        This is the product-shaped smoke path for the current complex fixture:
+        top-agent start queues are consumed, fan-out uses outgoing batches,
+        fan-in uses join barriers, condition/retry routes are driven by the
+        fixture scenario, side-channel nodes run without blocking the main
+        path, and all message IO flows through the runtime journal.
+        """
+
+        graph.validate_runnable()
+        await self.runtime.prestart_agents(list(graph.agent_nodes.values()))
+        decisions = self._scenario_decisions(runtime_scenarios)
+        executed: List[str] = []
+        route_history: List[Dict[str, Any]] = []
+
+        async def run_node(node_id: str, *, prompt: Optional[str] = None) -> Dict[str, Any]:
+            reply = await self._execute_agent_node(
+                graph.agent_nodes[node_id],
+                prompt=prompt or initial_prompt,
+                event_callback=event_callback,
+            )
+            executed.append(node_id)
+            return reply
+
+        def emit_route(
+            event_type: str,
+            source: str,
+            target: str,
+            *,
+            condition: str,
+            attempt: Optional[int] = None,
+        ) -> None:
+            payload: Dict[str, Any] = {
+                "from": source,
+                "to": target,
+                "condition": condition,
+            }
+            if attempt is not None:
+                payload["attempt"] = attempt
+            route_history.append(dict(payload, event_type=event_type))
+            self._emit_executor_event(
+                GraphEvent(event_type, node_id=target, status="taken", payload=payload),
+                event_callback,
+            )
+
+        self._emit_executor_event(GraphEvent("BlueprintStarted", status="running"), event_callback)
+        try:
+            await run_node("requirements", prompt=initial_prompt)
+            await self._stage_and_queue_targets(
+                graph,
+                "requirements",
+                ["risk_scan", "architecture", "test_planner"],
+            )
+
+            await run_node("risk_scan")
+            if str(decisions.get("risk")).lower() == "high":
+                emit_route("ConditionalRouteTaken", "risk_scan", "security_review", condition="risk == high")
+                await self._stage_and_queue_targets(graph, "risk_scan", ["security_review"])
+                await run_node("security_review")
+            else:
+                emit_route("ConditionalRouteTaken", "risk_scan", "review", condition="risk in ['low', 'medium']")
+
+            await run_node("architecture")
+            await self._stage_and_queue_targets(
+                graph,
+                "architecture",
+                ["backend_impl", "frontend_impl"],
+            )
+            await run_node("test_planner")
+            await self._stage_and_queue_targets(
+                graph,
+                "test_planner",
+                ["unit_tests", "e2e_tests"],
+            )
+
+            await run_node("backend_impl")
+            await run_node("frontend_impl")
+            self._submit_fixture_join(graph, runtime_scenarios, "join-implementation-ready")
+            await run_node("review")
+
+            if str(decisions.get("review")).lower() in {"failed", "failed_once"}:
+                emit_route("ConditionalRouteTaken", "review", "patch", condition="review == failed")
+                await self._stage_and_queue_targets(graph, "review", ["patch"])
+                await run_node("patch")
+
+            await run_node("unit_tests")
+            await run_node("e2e_tests")
+            self._submit_fixture_join(graph, runtime_scenarios, "join-test-ready")
+
+            integration_attempts = 0
+            await run_node("integration")
+            integration_attempts += 1
+            if (
+                str(decisions.get("integration")).lower() in {"failed", "failed_once"}
+                and integration_attempts <= int(decisions.get("max_integration_retries", 1))
+            ):
+                emit_route(
+                    "RetryRouteTaken",
+                    "integration",
+                    "failure_analysis",
+                    condition="integration == failed",
+                    attempt=integration_attempts,
+                )
+                await self._stage_and_queue_targets(graph, "integration", ["failure_analysis"])
+                await run_node("failure_analysis")
+                emit_route(
+                    "RetryRouteTaken",
+                    "failure_analysis",
+                    "patch",
+                    condition="retry_allowed",
+                    attempt=integration_attempts,
+                )
+                await self._stage_and_queue_targets(graph, "failure_analysis", ["patch"])
+                await run_node("patch")
+                await self._stage_and_queue_targets(graph, "patch", ["integration"])
+                await run_node("integration")
+                integration_attempts += 1
+
+            await self._stage_and_queue_targets(graph, "integration", ["summary"])
+            await run_node("summary")
+
+            for side_node_id in (runtime_scenarios or {}).get("side_channels", []):
+                side_id = str(side_node_id)
+                if side_id in graph.agent_nodes and side_id not in executed:
+                    await run_node(side_id)
+
+        except asyncio.CancelledError:
+            self._emit_executor_event(GraphEvent("BlueprintCancelled", status="cancelled"), event_callback)
+            raise
+        except Exception as exc:
+            self._emit_executor_event(
+                GraphEvent("BlueprintFailed", status="failed", payload={"error": str(exc)}),
+                event_callback,
+            )
+            raise
+
+        result = {
+            "ok": True,
+            "status": "completed",
+            "executed_nodes": list(executed),
+            "route_history": route_history,
+            "integration_attempts": integration_attempts,
+        }
+        self._emit_executor_event(GraphEvent("BlueprintCompleted", status="completed", payload=result), event_callback)
+        return result
 
     async def run_blueprint(
         self,
