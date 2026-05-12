@@ -356,6 +356,30 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
         )
         assert agent_context["context"]["message_envelope"]["outgoing_batch_id"] == coder_batch_id
 
+        noop_batch = control.handle_request(
+            {
+                "command": "message.create_batch",
+                "args": {
+                    "source_node_id": "planner",
+                    "required_target_node_ids": ["coder"],
+                    "batch_id": "noop-1",
+                },
+            }
+        )
+        noop = control.handle_request(
+            {
+                "command": "agent.dispatch",
+                "args": {
+                    "source_node_id": "planner",
+                    "target_node_id": "coder",
+                    "body": 0,
+                    "batch_id": noop_batch["batch"]["batch_id"],
+                },
+            }
+        )
+        assert noop["dispatch"]["no_op"] is True
+        assert runtime.outgoing_batches["noop-1"].no_op_target_node_ids == ["coder"]
+
         join = control.handle_request(
             {
                 "command": "join.create",
@@ -395,161 +419,100 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
         server.close()
 
 
-def test_control_plane_ring_context_uses_dynamic_reachability() -> None:
+def test_control_plane_reports_cycle_groups_as_observation_only() -> None:
     graph = GraphDefinition(
         agent_nodes={
-            "e": AgentNode(node_id="e"),
             "a": AgentNode(node_id="a"),
             "b": AgentNode(node_id="b"),
             "c": AgentNode(node_id="c"),
-            "d": AgentNode(node_id="d"),
-            "external-b": AgentNode(node_id="external-b"),
             "external-c": AgentNode(node_id="external-c"),
         },
         edges=[
-            GraphEdge("e", "a", edge_type="exec"),
             GraphEdge("a", "b", edge_type="exec"),
             GraphEdge("b", "c", edge_type="exec"),
-            GraphEdge("c", "d", edge_type="exec"),
-            GraphEdge("d", "e", edge_type="exec"),
-            GraphEdge("b", "external-b", edge_type="exec"),
+            GraphEdge("c", "a", edge_type="exec"),
             GraphEdge("c", "external-c", edge_type="exec"),
         ],
     )
     runtime = GraphRuntime(_FakeCluster())
-    plan = graph.plan_ring_session(["e", "a", "b", "c", "d"], start_node_id="e", session_id="ring-ctx")
-    runtime.register_ring_session(plan)
     control = GraphRuntimeControlPlane(runtime, graph)
 
-    b_context = control.handle_request(
-        {
-            "command": "agent.context",
-            "args": {"source_node_id": "b", "ring_session_id": "ring-ctx"},
-        }
-    )["context"]
     c_context = control.handle_request(
         {
             "command": "agent.context",
-            "args": {"source_node_id": "c", "ring_session_id": "ring-ctx"},
+            "args": {"source_node_id": "c"},
         }
     )["context"]
-    d_context = control.handle_request(
-        {
-            "command": "agent.context",
-            "args": {
-                "source_node_id": "d",
-                "ring_session_id": "ring-ctx",
-                "ring_phase": "final",
-            },
-        }
-    )["context"]
+    org = control.handle_request({"command": "organization.read", "args": {}})["organization"]
 
-    assert b_context["downstream_agents"] == ["c", "external-b"]
-    assert c_context["downstream_agents"] == ["d"]
-    assert d_context["downstream_agents"] == ["external-c"]
-    assert c_context["ring_session"]["auditor_node_id"] == "d"
+    assert org["cycle_groups"] == [["a", "b", "c"]]
+    assert c_context["downstream_agents"] == ["a", "external-c"]
+    assert c_context["organization"]["cycle_groups"] == [["a", "b", "c"]]
+    assert "ring_session" not in c_context
 
 
-def test_control_plane_registers_ring_session_from_entries() -> None:
+def test_control_plane_prunes_exhausted_ring_targets_from_agent_context() -> None:
     graph = GraphDefinition(
         agent_nodes={
             "a": AgentNode(node_id="a"),
             "b": AgentNode(node_id="b"),
-            "c": AgentNode(node_id="c"),
-            "d": AgentNode(node_id="d"),
         },
         edges=[
             GraphEdge("a", "b", edge_type="exec"),
-            GraphEdge("b", "c", edge_type="exec"),
-            GraphEdge("c", "d", edge_type="exec"),
-            GraphEdge("d", "a", edge_type="exec"),
+            GraphEdge("b", "a", edge_type="exec"),
         ],
     )
     runtime = GraphRuntime(_FakeCluster())
     control = GraphRuntimeControlPlane(runtime, graph)
 
-    registered = control.handle_request(
-        {
-            "command": "ring.register",
-            "args": {
-                "cycle_node_ids": ["a", "b", "c", "d"],
-                "start_node_id": "a",
-                "session_id": "ring-control",
-                "entry_messages": [
-                    {"target_node_id": "c", "body": {"prompt": "later"}},
-                    {"target_node_id": "b", "body": {"prompt": "earlier"}},
-                ],
-            },
-        }
-    )
-
-    assert registered["ok"] is True
-    assert registered["ring_session"]["plan"]["start_node_id"] == "b"
-    assert registered["ring_session"]["entry_messages"]["c"][0]["body"] == {"prompt": "later"}
-    assert runtime.ring_sessions["ring-control"].plan.auditor_node_id == "a"
-
-
-def test_control_plane_ring_final_dispatch_is_idempotent() -> None:
-    graph = GraphDefinition(
-        agent_nodes={
-            "e": AgentNode(node_id="e"),
-            "a": AgentNode(node_id="a"),
-            "b": AgentNode(node_id="b"),
-            "c": AgentNode(node_id="c"),
-            "d": AgentNode(node_id="d"),
-            "external-c": AgentNode(node_id="external-c"),
-        },
-        edges=[
-            GraphEdge("e", "a", edge_type="exec"),
-            GraphEdge("a", "b", edge_type="exec"),
-            GraphEdge("b", "c", edge_type="exec"),
-            GraphEdge("c", "d", edge_type="exec"),
-            GraphEdge("d", "e", edge_type="exec"),
-            GraphEdge("c", "external-c", edge_type="exec"),
-        ],
-    )
-    runtime = GraphRuntime(_FakeCluster())
-    plan = graph.plan_ring_session(["e", "a", "b", "c", "d"], start_node_id="e", session_id="ring-final")
-    runtime.register_ring_session(plan)
-    control = GraphRuntimeControlPlane(runtime, graph)
-
-    batch = control.handle_request(
+    a_batch = control.handle_request(
         {
             "command": "message.create_batch",
             "args": {
-                "source_node_id": "d",
-                "ring_session_id": "ring-final",
-                "ring_phase": "final",
-                "is_ring_final_output": True,
+                "source_node_id": "a",
+                "required_target_node_ids": ["b"],
+                "batch_id": "a-to-b",
             },
         }
     )
-    dispatched = control.handle_request(
+    control.handle_request(
         {
             "command": "agent.dispatch",
             "args": {
-                "source_node_id": "d",
-                "target_node_id": "external-c",
-                "batch_id": batch["batch"]["batch_id"],
-                "body": {"prompt": "final"},
-                "ring_session_id": "ring-final",
-                "ring_phase": "final",
-                "is_ring_final_output": True,
+                "source_node_id": "a",
+                "target_node_id": "b",
+                "batch_id": a_batch["batch"]["batch_id"],
+                "body": {"prompt": "start ring"},
             },
         }
     )
 
-    assert dispatched["ok"] is True
-    assert runtime.ring_sessions["ring-final"].final_output_dispatched is True
-    with pytest.raises(RuntimeError, match="already dispatched"):
+    b_context_before_close = runtime.status_snapshot()["queues"]["by_agent"]["b"][0]["body"]["context"]["framework_context"]
+    assert b_context_before_close["downstream_agents"] == ["a"]
+
+    b_batch_id = b_context_before_close["message_envelope"]["outgoing_batch_id"]
+    control.handle_request(
+        {
+            "command": "agent.dispatch",
+            "args": {
+                "source_node_id": "b",
+                "target_node_id": "a",
+                "batch_id": b_batch_id,
+                "body": {"prompt": "close ring"},
+            },
+        }
+    )
+
+    a_context_after_close = runtime.status_snapshot()["queues"]["by_agent"]["a"][0]["body"]["context"]["framework_context"]
+    assert a_context_after_close["downstream_agents"] == []
+    assert a_context_after_close["ring_circulation_counts"] == {"ring1": 0}
+    with pytest.raises(ValueError, match="not reachable"):
         control.handle_request(
             {
                 "command": "message.create_batch",
                 "args": {
-                    "source_node_id": "d",
-                    "ring_session_id": "ring-final",
-                    "ring_phase": "final",
-                    "is_ring_final_output": True,
+                    "source_node_id": "a",
+                    "required_target_node_ids": ["b"],
                 },
             }
         )

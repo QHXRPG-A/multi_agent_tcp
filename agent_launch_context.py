@@ -79,8 +79,10 @@ def framework_agent_rules() -> str:
             "- Communicate with other AgentNodes through framework messages and shared references, not by copying project source trees into shared space.",
             "- Your natural-language worker reply is a framework-private utterance record; it is not delivered to other AgentNodes.",
             "- To provide information to another AgentNode, use the injected `agent.dispatch` interface for the current batch.",
+            "- Sending an empty string `\"\"` or numeric `0` through `agent.dispatch` means this target has no task and should not receive a downstream message.",
             "- To provide durable results to the framework, use Workspace API submit/publish or an assigned structured framework tool.",
             "- Do not request or depend on top-agent-only utterance inspection APIs.",
+            "- Framework rules and skills are materialized once when your private worker context is prepared; per-message updates arrive only through `framework_context`.",
             "- Use only skills and rules exposed in your private CODEX_HOME/cwd context.",
         ]
     )
@@ -97,6 +99,7 @@ def framework_agent_skill() -> str:
             "",
             "Use the injected `framework_context` for your current message envelope, "
             "including `outgoing_batch_id`, required downstream targets, and `agent.dispatch` usage.",
+            "The framework runtime skill is stable for the worker context; per-message state changes are provided through `framework_context`.",
             "",
             "Your final CLI reply is only a minimal framework-private utterance record "
             "containing who spoke, what was said, time, and task/message identity. "
@@ -114,6 +117,7 @@ def framework_agent_skill() -> str:
             "--source-node-id <self> --target-node-id <target> --batch-id <outgoing_batch_id> "
             "--body-json '{...}'`. The target must be listed in the current message's "
             "`framework_context.message_envelope.required_outgoing_targets`.",
+            "If a target has no work, dispatch `\"\"` or `0` for that target; the framework records it as no-op and does not queue a downstream task.",
         ]
     )
 

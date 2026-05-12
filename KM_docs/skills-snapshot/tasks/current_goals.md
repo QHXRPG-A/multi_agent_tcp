@@ -37,6 +37,7 @@ Primary design source:
 - Sequential DAG runner with automatic multi-input fan-in.
 - Final report generation and archive indexing on completion.
 - RingSession / 环状结构 single-pass runtime, with dynamic reachable targets, entry-message merging, auditor gating, and idempotent final output.
+- Current Agent ring circulation limits over ordinary dispatch: concrete rings start at two mutual Agents, each ring defaults to `max_circulations = 1`, participating Agents track `{ring1: x, ring2: y}`, nested/overlapping/shared-edge rings keep independent counters, and exhausted ring edges are removed from active downstream dispatch.
 - Worker replies are reduced to framework-private utterance receipts instead of raw runtime facts.
 - Top Agent can inspect Agent utterance records through a dedicated `top_agent.utterances` / `runtime top-agent-utterances` interface.
 - Ordinary Agent baseline rule/skill now states that final CLI replies are not an Agent-to-Agent communication channel; durable information must go through framework APIs.
@@ -45,20 +46,17 @@ Primary design source:
 
 ## Active Priorities
 
-Nested/branching ring support is now the immediate highest-priority runtime task. Use the 2026-05-11 testing notes below after the ring recursion/folding path is scoped.
+Ring circulation limits are now implemented in the ordinary dispatch path. The next work should harden configurability, status visibility, and GuLiCode integration instead of restoring the old ring-session scheduler.
 
-1. Implement recursive ring handling for nested rings and branching/shared-node rings.
-   - Detect nested or overlapping cyclic structures instead of assuming one simple directed cycle.
-   - Fold each inner ring into a ring-class Agent for the outer ring view.
-   - Define parent/child ring-session lifecycle, entry-message routing, final-output handoff, idempotency, timeout, and failure propagation.
-   - Keep the current simple single-pass ring behavior as the base case.
-2. Wire the non-UI control plane into a real long-lived GuLiCode/top-Agent session.
-3. Keep ordinary-Agent communication and durable output restricted to framework interfaces: `agent.dispatch`, Workspace API, and join/task contribution APIs.
-4. Keep AgentNode startup context minimal and audit future additions so ordinary Agents keep seeing only the baseline rule/skill/tool contract and no top-agent-only inspection APIs.
-5. Continue hardening status explanation and event summaries for GuLiCode/top Agent and UI.
-6. Connect GuLiCode desktop UI to runtime/control-plane state without duplicating scheduling semantics.
-7. Keep workspace/archive behavior aligned with the `project_reference` three-zone model and framework-owned changeset, conflict, report, artifact, and reference records.
-8. Surface utterance records in future UI only as a top-agent/operator audit view, not as Agent-to-Agent message context.
+1. Wire the non-UI control plane into a real long-lived GuLiCode/top-Agent session.
+2. Expose ring circulation status in GuLiCode/UI views without duplicating runtime scheduling semantics.
+3. Add user-facing configuration for per-ring `max_circulations`; runtime default is currently `1`.
+4. Keep ordinary-Agent communication and durable output restricted to framework interfaces: `agent.dispatch`, Workspace API, and join/task contribution APIs.
+5. Keep AgentNode startup context minimal and audit future additions so ordinary Agents keep seeing only the baseline rule/skill/tool contract and no top-agent-only inspection APIs.
+6. Continue hardening status explanation and event summaries for GuLiCode/top Agent and UI, including ring exhaustion events.
+7. Connect GuLiCode desktop UI to runtime/control-plane state without duplicating scheduling semantics.
+8. Keep workspace/archive behavior aligned with the `project_reference` three-zone model and framework-owned changeset, conflict, report, artifact, and reference records.
+9. Surface utterance records in future UI only as a top-agent/operator audit view, not as Agent-to-Agent message context.
 
 ## 2026-05-11 Testing Focus
 
@@ -96,9 +94,10 @@ Conversation-derived testing tasks:
    - Report whether Electron main/preload/renderer and sidecar readiness were observed.
    - Link logs when useful, but do not echo credentials.
 
-6. Keep the ring-session / 环状结构 path in the runtime regression suite.
-   - Preserve coverage for entry merging, queue gating, auditor final-output idempotency, and single-pass dynamic reachability.
-   - Keep `knowledge_base/ring_structure_solution.md` as the canonical current spec instead of restating the whole protocol elsewhere.
+6. Keep the ring / 环状结构 path in the runtime regression suite.
+   - Preserve coverage for concrete ring detection, two-Agent minimum rings, independent overlapping-ring counters, default circulation limit of `1`, exhausted-edge pruning, and no-op dispatch behavior.
+   - Keep historical single-pass ring-session coverage only as archive/reference unless that scheduler is explicitly revived.
+   - Keep `knowledge_base/ring_structure_solution.md` aligned with the current bounded ordinary-dispatch semantics.
 
 ## Deferred / Secondary Tracks
 
@@ -123,8 +122,8 @@ The TCP worker path remains as backend compatibility. New docs should say `CLIWo
 Most recent project validation observed during cleanup/update:
 
 ```text
-python -m pytest test_graph_control.py test_workspace_api.py test_workspace_manager.py test_agent_runtime.py -q
-98 passed
+python -m pytest test_agent_runtime.py test_graph_control.py -q
+78 passed
 ```
 
 Re-run tests after code changes, especially changes touching `graph_runtime.py`, `graph_control.py`, workspace APIs, or backend adapters.

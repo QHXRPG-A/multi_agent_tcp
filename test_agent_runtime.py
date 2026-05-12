@@ -24,7 +24,6 @@ from multi_agent_tcp import (
     GraphRuntimeControlPlane,
     MultiModalEnvelope,
     RouteNode,
-    RingSessionEntry,
     TopAgentStartPlan,
     WorkspaceManifest,
     WorkerConfig,
@@ -265,230 +264,137 @@ def test_graph_definition_agent_cycle_groups_ignores_acyclic_graphs() -> None:
     assert graph.agent_cycle_groups() == []
 
 
-def test_graph_definition_plan_ring_session_builds_dynamic_reachability_view() -> None:
+def test_graph_definition_agent_rings_start_at_two_agent_mutual_edges() -> None:
     graph = GraphDefinition(
         agent_nodes={
-            "e": AgentNode.from_dict({"node_id": "e"}),
             "a": AgentNode.from_dict({"node_id": "a"}),
             "b": AgentNode.from_dict({"node_id": "b"}),
             "c": AgentNode.from_dict({"node_id": "c"}),
-            "d": AgentNode.from_dict({"node_id": "d"}),
-            "external-b": AgentNode.from_dict({"node_id": "external-b"}),
-            "external-c": AgentNode.from_dict({"node_id": "external-c"}),
         },
         edges=[
-            GraphEdge("e", "a", edge_type="exec"),
+            GraphEdge("a", "a", edge_type="exec"),
             GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "a", edge_type="exec"),
             GraphEdge("b", "c", edge_type="exec"),
-            GraphEdge("c", "d", edge_type="exec"),
-            GraphEdge("d", "e", edge_type="exec"),
-            GraphEdge("b", "external-b", edge_type="exec"),
-            GraphEdge("c", "external-c", edge_type="exec"),
         ],
     )
 
-    plan = graph.plan_ring_session(
-        ["e", "a", "b", "c", "d"],
-        start_node_id="e",
-        entry_node_ids=["e", "a"],
+    assert graph.agent_cycle_groups() == [["a", "b"]]
+    assert graph.agent_rings()[0].to_dict()["closing_edge"] == {"from": "b", "to": "a"}
+
+
+@pytest.mark.asyncio
+async def test_cycle_groups_are_observational_and_do_not_change_dispatch() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "a": AgentNode.from_dict({"node_id": "a"}),
+            "b": AgentNode.from_dict({"node_id": "b"}),
+            "c": AgentNode.from_dict({"node_id": "c"}),
+            "external-c": AgentNode.from_dict({"node_id": "external-c"}),
+        },
+        edges=[
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "c", edge_type="exec"),
+            GraphEdge("c", "a", edge_type="exec"),
+            GraphEdge("c", "external-c", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    await runtime.prestart_agents(list(graph.agent_nodes.values()))
+
+    assert graph.agent_cycle_groups() == [["a", "b", "c"]]
+    batch = await runtime.create_outgoing_batch_from_graph(
+        graph,
+        "c",
+        required_target_node_ids=["a", "external-c"],
+    )
+    runtime.stage_outgoing_message(batch.batch_id, graph.agent_nodes["a"], {"prompt": "cycle"})
+    result = runtime.stage_outgoing_message(
+        batch.batch_id,
+        graph.agent_nodes["external-c"],
+        {"prompt": "external"},
     )
 
-    assert plan.start_node_id == "e"
-    assert plan.auditor_node_id == "d"
-    assert plan.reachable_targets("e", phase="ring") == ["a"]
-    assert plan.reachable_targets("e", phase="post_internal") == []
-    assert plan.reachable_targets("e", phase="final") == []
-    assert plan.reachable_targets("a", phase="ring") == ["b"]
-    assert plan.reachable_targets("b", phase="ring") == ["c"]
-    assert plan.reachable_targets("b", phase="post_internal") == ["external-b"]
-    assert plan.reachable_targets("c", phase="ring") == ["d"]
-    assert plan.reachable_targets("c", phase="post_internal") == []
-    assert plan.reachable_targets("d", phase="final") == ["external-c"]
+    assert result["ready_to_dispatch"] is True
+    assert len(runtime.agent_message_queues["a"]) == 1
+    assert len(runtime.agent_message_queues["external-c"]) == 1
+    assert runtime.status_snapshot(graph=graph)["organization"]["cycle_groups"] == [["a", "b", "c"]]
+    assert "ring_sessions" not in runtime.status_snapshot()
 
-    merged = plan.merged_input_for(
+
+@pytest.mark.asyncio
+async def test_graph_runtime_enforces_independent_overlapping_ring_circulations() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "a": AgentNode.from_dict({"node_id": "a"}),
+            "b": AgentNode.from_dict({"node_id": "b"}),
+            "c": AgentNode.from_dict({"node_id": "c"}),
+        },
+        edges=[
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "a", edge_type="exec"),
+            GraphEdge("b", "c", edge_type="exec"),
+            GraphEdge("c", "a", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    await runtime.prestart_agents(list(graph.agent_nodes.values()))
+
+    assert graph.agent_cycle_groups() == [["a", "b"], ["a", "b", "c"]]
+    assert runtime.active_agent_connections(graph, "a") == ["b"]
+
+    first = await runtime.create_outgoing_batch_from_graph(
+        graph,
         "a",
-        from_previous={"from": "e"},
-        entry_messages=[
-            {"source_node_id": "external", "body": {"prompt": "direct entry"}, "ordinal": 0},
-        ],
+        required_target_node_ids=["b"],
+        batch_id="a-to-b-1",
     )
-    assert merged["type"] == "ring_node_input"
-    assert merged["ring_session_id"] == plan.session_id
-    assert merged["node_id"] == "a"
-    assert merged["from_previous"] == {"from": "e"}
-    assert merged["entry_messages"][0]["target_node_id"] == "a"
-    assert merged["entry_messages"][0]["body"] == {"prompt": "direct entry"}
-
-    auto_plan = graph.plan_ring_session_from_entries(
-        ["e", "a", "b", "c", "d"],
-        [
-            {"target_node_id": "c", "body": "later"},
-            {"target_node_id": "a", "body": "earlier"},
-        ],
-        fallback_start_node_id="e",
-        session_id="ring-auto",
-    )
-    assert auto_plan.start_node_id == "a"
-    assert auto_plan.auditor_node_id == "e"
-
-
-@pytest.mark.asyncio
-async def test_graph_executor_runs_single_pass_ring_session_and_merges_entries() -> None:
-    graph = GraphDefinition(
-        agent_nodes={
-            "e": AgentNode.from_dict({"node_id": "e", "prompt": "run e"}),
-            "a": AgentNode.from_dict({"node_id": "a", "prompt": "run a"}),
-            "b": AgentNode.from_dict({"node_id": "b", "prompt": "run b"}),
-            "c": AgentNode.from_dict({"node_id": "c", "prompt": "run c"}),
-            "d": AgentNode.from_dict({"node_id": "d", "prompt": "run d"}),
-            "external-b": AgentNode.from_dict({"node_id": "external-b"}),
-            "external-c": AgentNode.from_dict({"node_id": "external-c"}),
-        },
-        edges=[
-            GraphEdge("e", "a", edge_type="exec"),
-            GraphEdge("a", "b", edge_type="exec"),
-            GraphEdge("b", "c", edge_type="exec"),
-            GraphEdge("c", "d", edge_type="exec"),
-            GraphEdge("d", "e", edge_type="exec"),
-            GraphEdge("b", "external-b", edge_type="exec"),
-            GraphEdge("c", "external-c", edge_type="exec"),
-        ],
-    )
-    runtime = GraphRuntime(_FakeCluster())
-    executor = GraphExecutor(runtime)
-
-    result = await executor.run_ring_session(
+    runtime.stage_outgoing_message(first.batch_id, graph.agent_nodes["b"], {"prompt": "a to b"})
+    small_close = await runtime.create_outgoing_batch_from_graph(
         graph,
-        ["e", "a", "b", "c", "d"],
-        start_node_id="e",
-        session_id="ring-1",
-        entry_messages=[
-            RingSessionEntry(target_node_id="e", body={"prompt": "entry-e"}),
-            RingSessionEntry(target_node_id="a", body={"prompt": "entry-a"}),
-        ],
+        "b",
+        required_target_node_ids=["a"],
+        batch_id="b-to-a",
     )
+    runtime.stage_outgoing_message(small_close.batch_id, graph.agent_nodes["a"], {"prompt": "b to a"})
 
-    assert result["ok"] is True
-    assert result["status"] == "completed"
-    assert result["executed_nodes"] == ["e", "a", "b", "c", "d"]
-    assert result["auditor_node_id"] == "d"
-    assert runtime.ring_sessions["ring-1"].final_output_dispatched is True
-    assert runtime.outgoing_batches[result["final_output_batch_id"]].required_target_node_ids == [
-        "external-c"
-    ]
-    assert runtime.agent_message_queues["external-c"][0].body["type"] == "ring_final_output"
+    counts = runtime.agent_ring_status(graph)["counts_by_agent"]
+    assert counts["a"] == {"ring1": 0, "ring2": 1}
+    assert runtime.active_agent_connections(graph, "a") == ["b"]
 
-    sent = runtime.cluster.sent
-    assert [worker_id for worker_id, _body, _timeout in sent[:5]] == ["e", "a", "b", "c", "d"]
-    assert sent[0][1]["entry_messages"][0]["body"] == {"prompt": "entry-e"}
-    assert sent[1][1]["entry_messages"][0]["body"] == {"prompt": "entry-a"}
-    assert sent[1][1]["from_previous"]["node_id"] == "e"
-    assert sent[3][1]["context"]["framework_context"]["downstream_agents"] == ["d"]
-    assert sent[4][1]["context"]["framework_context"]["downstream_agents"] == []
-    event_types = [event.event_type for event in runtime.events]
-    assert "RingSessionRegistered" in event_types
-    assert "RingSessionCompleted" in event_types
-
-
-@pytest.mark.asyncio
-async def test_ring_final_output_is_idempotent_and_waits_for_auditor_queue() -> None:
-    graph = GraphDefinition(
-        agent_nodes={
-            "e": AgentNode.from_dict({"node_id": "e"}),
-            "a": AgentNode.from_dict({"node_id": "a"}),
-            "b": AgentNode.from_dict({"node_id": "b"}),
-            "c": AgentNode.from_dict({"node_id": "c"}),
-            "d": AgentNode.from_dict({"node_id": "d"}),
-            "external-c": AgentNode.from_dict({"node_id": "external-c"}),
-        },
-        edges=[
-            GraphEdge("e", "a", edge_type="exec"),
-            GraphEdge("a", "b", edge_type="exec"),
-            GraphEdge("b", "c", edge_type="exec"),
-            GraphEdge("c", "d", edge_type="exec"),
-            GraphEdge("d", "e", edge_type="exec"),
-            GraphEdge("c", "external-c", edge_type="exec"),
-        ],
-    )
-    plan = graph.plan_ring_session(["e", "a", "b", "c", "d"], start_node_id="e", session_id="ring-2")
-    runtime = GraphRuntime(_FakeCluster())
-    runtime.register_ring_session(plan)
-    await runtime.prestart_agents(list(graph.agent_nodes.values()))
-    runtime.queue_agent_message(graph.agent_nodes["d"], {"prompt": "pending auditor"}, ring_session_id="ring-2")
-
-    with pytest.raises(RuntimeError, match="queued messages"):
-        await runtime.create_outgoing_batch_from_graph(
-            graph,
-            "d",
-            ring_session_id="ring-2",
-            ring_phase="final",
-            is_ring_final_output=True,
-        )
-
-    pending = runtime.agent_message_queues["d"][0]
-    runtime._agent_message_queues["d"] = []
-    pending.status = "cancelled"
-    batch = await runtime.create_outgoing_batch_from_graph(
+    second = await runtime.create_outgoing_batch_from_graph(
         graph,
-        "d",
-        ring_session_id="ring-2",
-        ring_phase="final",
-        is_ring_final_output=True,
+        "a",
+        required_target_node_ids=["b"],
+        batch_id="a-to-b-2",
     )
-    runtime.stage_outgoing_message(batch.batch_id, graph.agent_nodes["external-c"], {"prompt": "final"})
-
-    assert runtime.ring_sessions["ring-2"].final_output_dispatched is True
-    with pytest.raises(RuntimeError, match="already dispatched"):
-        await runtime.create_outgoing_batch_from_graph(
-            graph,
-            "d",
-            ring_session_id="ring-2",
-            ring_phase="final",
-            is_ring_final_output=True,
-        )
-
-
-@pytest.mark.asyncio
-async def test_ring_dispatch_merges_entry_messages_for_downstream_node() -> None:
-    graph = GraphDefinition(
-        agent_nodes={
-            "b": AgentNode.from_dict({"node_id": "b"}),
-            "c": AgentNode.from_dict({"node_id": "c"}),
-            "d": AgentNode.from_dict({"node_id": "d"}),
-            "a": AgentNode.from_dict({"node_id": "a"}),
-        },
-        edges=[
-            GraphEdge("b", "c", edge_type="exec"),
-            GraphEdge("c", "d", edge_type="exec"),
-            GraphEdge("d", "a", edge_type="exec"),
-            GraphEdge("a", "b", edge_type="exec"),
-        ],
-    )
-    plan = graph.plan_ring_session(["a", "b", "c", "d"], start_node_id="b", session_id="ring-merge")
-    runtime = GraphRuntime(_FakeCluster())
-    runtime.register_ring_session(
-        plan,
-        entry_messages=[
-            RingSessionEntry(target_node_id="b", body={"prompt": "from e"}),
-            RingSessionEntry(target_node_id="c", body={"prompt": "from f"}),
-        ],
-    )
-    await runtime.prestart_agents(list(graph.agent_nodes.values()))
-
-    batch = await runtime.create_outgoing_batch_from_graph(
+    runtime.stage_outgoing_message(second.batch_id, graph.agent_nodes["b"], {"prompt": "a to b again"})
+    b_to_c = await runtime.create_outgoing_batch_from_graph(
         graph,
         "b",
         required_target_node_ids=["c"],
-        ring_session_id="ring-merge",
-        ring_phase="execution",
+        batch_id="b-to-c",
     )
-    runtime.stage_outgoing_message(batch.batch_id, graph.agent_nodes["c"], {"prompt": "infob"})
+    runtime.stage_outgoing_message(b_to_c.batch_id, graph.agent_nodes["c"], {"prompt": "b to c"})
+    big_close = await runtime.create_outgoing_batch_from_graph(
+        graph,
+        "c",
+        required_target_node_ids=["a"],
+        batch_id="c-to-a",
+    )
+    runtime.stage_outgoing_message(big_close.batch_id, graph.agent_nodes["a"], {"prompt": "c to a"})
 
-    queued = runtime.agent_message_queues["c"][0]
-    assert queued.body["type"] == "ring_node_input"
-    assert queued.body["from_previous"] == {"prompt": "infob"}
-    assert queued.body["entry_messages"][0]["body"] == {"prompt": "from f"}
-    assert queued.ring_session_id == "ring-merge"
+    assert runtime.agent_ring_status(graph)["counts_by_agent"]["a"] == {
+        "ring1": 0,
+        "ring2": 0,
+    }
+    assert runtime.active_agent_connections(graph, "a") == []
+    with pytest.raises(ValueError, match="not reachable"):
+        await runtime.create_outgoing_batch_from_graph(
+            graph,
+            "a",
+            required_target_node_ids=["b"],
+        )
 
 
 def test_agent_skill_selection_serializes() -> None:
@@ -1172,6 +1078,37 @@ async def test_graph_runtime_stages_outgoing_messages_until_all_targets_are_read
         "AgentMessageQueued",
         "AgentOutgoingBatchDispatched",
     ]
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_empty_string_or_zero_marks_target_no_op_without_queueing() -> None:
+    source = AgentNode(node_id="agent-a", agent_id="worker-a", cwd=Path("."))
+    target_b = AgentNode(node_id="agent-b", agent_id="worker-b", cwd=Path("."))
+    target_c = AgentNode(node_id="agent-c", agent_id="worker-c", cwd=Path("."))
+    runtime = GraphRuntime(_FakeCluster())
+
+    await runtime.create_outgoing_batch(source, [target_b, target_c], batch_id="batch-1")
+    first = runtime.stage_outgoing_message("batch-1", target_b, "")
+    final = runtime.stage_outgoing_message("batch-1", target_c, 0)
+
+    assert first["no_op"] is True
+    assert final["ready_to_dispatch"] is True
+    assert runtime.outgoing_batches["batch-1"].status == "dispatched"
+    assert runtime.outgoing_batches["batch-1"].no_op_target_node_ids == ["agent-b", "agent-c"]
+    assert runtime.outgoing_batches["batch-1"].dispatched_message_ids == []
+    assert runtime.agent_message_queues["agent-b"] == []
+    assert runtime.agent_message_queues["agent-c"] == []
+    assert [
+        event.event_type for event in runtime.events
+        if event.event_type in {"AgentOutgoingTargetNoOp", "AgentMessageQueued"}
+    ] == ["AgentOutgoingTargetNoOp", "AgentOutgoingTargetNoOp"]
+
+    await runtime.create_outgoing_batch(source, [target_b], batch_id="batch-2")
+    false_payload = runtime.stage_outgoing_message("batch-2", target_b, False)
+
+    assert false_payload["no_op"] is False
+    assert runtime.outgoing_batches["batch-2"].no_op_target_node_ids == []
+    assert len(runtime.agent_message_queues["agent-b"]) == 1
 
 
 @pytest.mark.asyncio

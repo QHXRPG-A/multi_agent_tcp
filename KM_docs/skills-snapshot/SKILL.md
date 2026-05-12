@@ -70,7 +70,7 @@ Stable current knowledge. Prefer these files for implementation decisions:
 - [`knowledge_base/core_architecture.md`](knowledge_base/core_architecture.md): current architecture centered on GuLiCode, `GraphRuntimeControlPlane`, `GraphRuntime`, workspace/events, and CLI backend adapters.
 - [`knowledge_base/gulicode_desktop.md`](knowledge_base/gulicode_desktop.md): GuLiCode desktop source structure, Electron/Tauri launch paths, main/preload/renderer/app layering, and desktop integration guidance.
 - [`knowledge_base/dispatch_workflows.md`](knowledge_base/dispatch_workflows.md): runtime control-plane CLI/RPC workflows, legacy dispatch notes, and thin-client boundaries.
-- [`knowledge_base/ring_structure_solution.md`](knowledge_base/ring_structure_solution.md): ring / 环状结构 / 环审核官 / ring session engineering spec.
+- [`knowledge_base/ring_structure_solution.md`](knowledge_base/ring_structure_solution.md): current cycle-structure closure: cycles are observable SCC groups only; runtime uses normal dispatch and join semantics.
 - [`knowledge_base/cluster_api.md`](knowledge_base/cluster_api.md): legacy `CodeMakerCluster` compatibility and preferred `CLIWorkerBackend` terminology.
 - [`knowledge_base/registry_and_skills.md`](knowledge_base/registry_and_skills.md): registry, skill selection, and catalog injection.
 - [`knowledge_base/runtime_notes.md`](knowledge_base/runtime_notes.md): encoding, logs, process cleanup, retry, and CLI runtime pitfalls.
@@ -96,6 +96,8 @@ Historical change records only. Do not use archive content as current behavior u
 - [`archive/agents_architecture_archive.md`](archive/agents_architecture_archive.md)
 - [`archive/blueprint_integration_archive.md`](archive/blueprint_integration_archive.md)
 - [`archive/gulicode_runtime_baseline_archive.md`](archive/gulicode_runtime_baseline_archive.md)
+- [`archive/ring_runtime_closure_archive.md`](archive/ring_runtime_closure_archive.md)
+- [`archive/ring_session_runtime_archive.md`](archive/ring_session_runtime_archive.md)
 
 ## Query Map
 
@@ -105,7 +107,7 @@ Historical change records only. Do not use archive content as current behavior u
 - Runtime start/status/end, organization, message batch, agent dispatch, join-create/join-contribute: read `knowledge_base/dispatch_workflows.md`.
 - Current architecture or component ownership: read `knowledge_base/core_architecture.md`.
 - `GraphDefinition.agent_cycle_groups()` (exec-edge SCCs, agent-only groups, cycles through `RouteNode`): read `knowledge_base/core_architecture.md` (section *GraphDefinition: agent cycle groups*).
-- Ring session / 环状结构 / 环审核官 / dynamic reachable nodes: read `knowledge_base/ring_structure_solution.md`, then `knowledge_base/core_architecture.md` and `knowledge_base/dispatch_workflows.md`.
+- Cycle / 环状结构 handling: read `knowledge_base/ring_structure_solution.md`, then `knowledge_base/core_architecture.md` and `knowledge_base/dispatch_workflows.md`. Cycle detection is observability only, not a scheduling entry point.
 - Legacy `CodeMakerCluster`, `run_parallel`, `run_chain`, broker/TCP worker path: read `knowledge_base/cluster_api.md`.
 - Registry, skills, per-agent skill selection: read `knowledge_base/registry_and_skills.md`.
 - Workspace API, changesets, archive, private checkout, conflict flow: read `knowledge_base/core_architecture.md` and `tasks/multi_agent_communication_tasks.md`; use archive only for history.
