@@ -1,7 +1,8 @@
 import windowState from "electron-window-state"
-import { app, BrowserWindow, net, nativeImage, nativeTheme, protocol } from "electron"
+import { app, BrowserWindow, net, nativeImage, nativeTheme, protocol, screen } from "electron"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
+import log from "electron-log/main.js"
 import type { TitlebarTheme } from "../preload/types"
 
 const root = dirname(fileURLToPath(import.meta.url))
@@ -22,12 +23,42 @@ protocol.registerSchemesAsPrivileged([
 
 let backgroundColor: string | undefined
 
+type ManagedWindowState = ReturnType<typeof windowState>
+
 export function setBackgroundColor(color: string) {
   backgroundColor = color
 }
 
 export function getBackgroundColor(): string | undefined {
   return backgroundColor
+}
+
+function overlapSize(startA: number, sizeA: number, startB: number, sizeB: number) {
+  const endA = startA + sizeA
+  const endB = startB + sizeB
+  return Math.max(0, Math.min(endA, endB) - Math.max(startA, startB))
+}
+
+function isWindowStateVisible(state: ManagedWindowState) {
+  if (typeof state.x !== "number" || typeof state.y !== "number") return true
+
+  return screen.getAllDisplays().some((display) => {
+    const visibleWidth = overlapSize(state.x, state.width, display.workArea.x, display.workArea.width)
+    const visibleHeight = overlapSize(state.y, state.height, display.workArea.y, display.workArea.height)
+    return visibleWidth >= 120 && visibleHeight >= 120
+  })
+}
+
+function ensureWindowStateVisible(state: ManagedWindowState) {
+  if (isWindowStateVisible(state)) {
+    return
+  }
+
+  const workArea = screen.getPrimaryDisplay().workArea
+  state.width = Math.min(state.width, workArea.width)
+  state.height = Math.min(state.height, workArea.height)
+  state.x = Math.round(workArea.x + (workArea.width - state.width) / 2)
+  state.y = Math.round(workArea.y + (workArea.height - state.height) / 2)
 }
 
 function iconsDir() {
@@ -37,6 +68,58 @@ function iconsDir() {
 function iconPath() {
   const ext = process.platform === "win32" ? "ico" : "png"
   return join(iconsDir(), `icon.${ext}`)
+}
+
+function readWindowIcon() {
+  const path = iconPath()
+  const icon = nativeImage.createFromPath(path)
+  if (icon.isEmpty()) {
+    log.warn("window icon asset unavailable", {
+      path,
+      packaged: app.isPackaged,
+    })
+    return null
+  }
+  return icon
+}
+
+function applyWindowsTaskbarDetails(win: BrowserWindow, appId?: string) {
+  if (process.platform !== "win32") return
+  const iconPathValue = iconPath()
+  const icon = readWindowIcon()
+
+  if (icon) {
+    try {
+      win.setIcon(icon)
+    } catch (error) {
+      log.warn("failed to set window icon", {
+        path: iconPathValue,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  if (!appId) return
+
+  try {
+    win.setAppDetails(
+      icon
+        ? {
+            appId,
+            appIconPath: iconPathValue,
+            appIconIndex: 0,
+          }
+        : {
+            appId,
+          },
+    )
+  } catch (error) {
+    log.warn("failed to set app details", {
+      appId,
+      path: iconPathValue,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }
 
 function tone() {
@@ -63,13 +146,15 @@ export function setDockIcon() {
   if (!icon.isEmpty()) app.dock?.setIcon(icon)
 }
 
-export function createMainWindow() {
+export function createMainWindow(appId?: string) {
   const state = windowState({
     defaultWidth: 1280,
     defaultHeight: 800,
   })
+  ensureWindowStateVisible(state)
 
   const mode = tone()
+  const windowIcon = readWindowIcon() ?? undefined
   const win = new BrowserWindow({
     x: state.x,
     y: state.y,
@@ -77,7 +162,7 @@ export function createMainWindow() {
     height: state.height,
     show: false,
     title: "GuLiCode",
-    icon: iconPath(),
+    icon: windowIcon,
     backgroundColor,
     ...(process.platform === "darwin"
       ? {
@@ -99,6 +184,7 @@ export function createMainWindow() {
       sandbox: true,
     },
   })
+  applyWindowsTaskbarDetails(win, appId)
 
   win.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
     const { requestHeaders } = details
@@ -112,6 +198,17 @@ export function createMainWindow() {
     upsertKeyValue(responseHeaders, "Access-Control-Allow-Headers", ["*"])
     callback({ responseHeaders })
   })
+  win.webContents.on("did-fail-load", (_event, code, description, validatedURL, isMainFrame) => {
+    log.error("main window webContents: did-fail-load", {
+      code,
+      description,
+      validatedURL,
+      isMainFrame,
+    })
+  })
+  win.webContents.on("render-process-gone", (_event, details) => {
+    log.error("main window webContents: render-process-gone", details)
+  })
 
   state.manage(win)
   loadWindow(win, "index.html")
@@ -120,19 +217,25 @@ export function createMainWindow() {
   win.once("ready-to-show", () => {
     win.show()
   })
+  globalThis.setTimeout(() => {
+    if (win.isDestroyed() || win.isVisible()) return
+    log.warn("main window fallback show after timeout")
+    win.show()
+  }, 3000)
 
   return win
 }
 
-export function createLoadingWindow() {
+export function createLoadingWindow(appId?: string) {
   const mode = tone()
+  const windowIcon = readWindowIcon() ?? undefined
   const win = new BrowserWindow({
     width: 640,
     height: 480,
     resizable: false,
     center: true,
     show: true,
-    icon: iconPath(),
+    icon: windowIcon,
     backgroundColor,
     ...(process.platform === "darwin" ? { titleBarStyle: "hidden" as const } : {}),
     ...(process.platform === "win32"
@@ -149,6 +252,7 @@ export function createLoadingWindow() {
       sandbox: true,
     },
   })
+  applyWindowsTaskbarDetails(win, appId)
 
   loadWindow(win, "loading.html")
 

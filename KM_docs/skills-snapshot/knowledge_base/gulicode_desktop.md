@@ -10,6 +10,8 @@ This document records the current effective knowledge for the local
   `GuLiCode/packages/desktop-electron/`.
 - `GuLiCode/packages/desktop/` (Tauri) still exists, but it is currently a
   secondary path and requires Rust/Cargo.
+- For productization, branding, blueprint entry embedding, and icon/taskbar
+  rules, pair this file with [`guli_desktop_ui.md`](guli_desktop_ui.md).
 
 ## Current local roots
 
@@ -26,6 +28,8 @@ Preferred entrypoints on this machine:
 
 - Windows double-click:
   `F:\src\Package\Script\Python\multi_agent_tcp\start-gulicode-desktop.cmd`
+- Windows packaged smoke:
+  `F:\src\Package\Script\Python\multi_agent_tcp\start-gulicode-desktop.cmd --packaged`
 - Cross-platform terminal:
 
 ```powershell
@@ -57,7 +61,10 @@ It:
 - kills stale `GuLiCode`-scoped `electron` / `bun` processes unless
   `--no-clean` is passed
 - launches `bun node_modules/electron-vite/bin/electron-vite.js dev` inside
-  `packages/desktop-electron`
+  `packages/desktop-electron` in dev mode
+- or, in packaged mode, runs `electron-builder --win --dir`, writes output to
+  `packages/desktop-electron/dist/packaged-launch/current`, and patches the
+  final `GuLiCode Dev.exe` icon with `rcedit`
 - tees stdout and stderr to
   `GuLiCode\logs\gulicode-desktop-direct.log`
 
@@ -71,6 +78,11 @@ Successful startup should produce all or most of these markers:
 - `starting electron app...`
 - `init step { phase: 'done' }`
 - `server ready { url: 'http://127.0.0.1:<port>' }`
+
+Packaged startup should additionally converge to:
+
+- `GuLiCode/packages/desktop-electron/dist/packaged-launch/current/win-unpacked/GuLiCode Dev.exe`
+- Electron main log line `main window created`
 
 ### Direct fallback
 
@@ -98,6 +110,15 @@ packages/desktop
 packages/app
   -> Solid app UI, routes, layout, session, project, provider,
      terminal, file tree, and other shared application surfaces
+```
+
+Desktop/UI productization files worth checking in the same round:
+
+```text
+packages/app/src/components/session/session-header.tsx
+packages/app/src/components/session/session-new-view.tsx
+packages/ui/src/components/icon.tsx
+scripts/dev-desktop.ts
 ```
 
 When deciding where to edit:
@@ -138,6 +159,8 @@ Current important behaviors:
 - the Electron "sidecar" is not an external `opencode-cli.exe`; the main
   process imports the local bundled server through `virtual:opencode-server`
 - renderer runs sandboxed; native capabilities must go through preload and IPC
+- packaged app identity on Windows depends on both runtime icon loading and the
+  final packaged `exe` resource icon
 
 ## Tauri status
 
@@ -173,6 +196,9 @@ packages/app
      changesets, conflicts, artifacts, and reports
 ```
 
+The current UI/product direction is to land this work inside GuLiCode-owned
+desktop surfaces, not by reviving a separate legacy visual-editor product line.
+
 Do not place real blueprint product logic in
 `packages/desktop-electron/src/renderer/index.tsx`; that file is only the
 desktop shell bootstrap.
@@ -182,6 +208,7 @@ desktop shell bootstrap.
 When the user asks to start or verify GuLiCode on this machine:
 
 - default to `start-gulicode-desktop.cmd` or `bun run desktop`
+- use `start-gulicode-desktop.cmd --packaged` for packaged-smoke and taskbar/icon verification
 - do not default to Tauri
 - verify success from the launcher log markers above
 - prefer current local code and launcher behavior over older removed startup

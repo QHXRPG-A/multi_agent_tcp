@@ -198,7 +198,8 @@ async function initialize() {
   if (needsMigration) {
     const show = await Promise.race([loadingTask.then(() => false), delay(1_000).then(() => true)])
     if (show) {
-      overlay = createLoadingWindow()
+      overlay = createLoadingWindow(appId)
+      logger.log("loading window created")
       await delay(1_000)
     }
   }
@@ -207,10 +208,25 @@ async function initialize() {
   setInitStep({ phase: "done" })
 
   if (overlay) {
-    await loadingComplete.promise
+    logger.log("waiting for loading window acknowledgement")
+    const loadingClosedCleanly = await Promise.race([
+      loadingComplete.promise.then(() => true),
+      delay(1500).then(() => false),
+    ])
+
+    if (!loadingClosedCleanly) {
+      logger.warn("loading window did not acknowledge completion before timeout")
+    }
   }
 
-  mainWindow = createMainWindow()
+  logger.log("creating main window")
+  try {
+    mainWindow = createMainWindow(appId)
+    logger.log("main window created")
+  } catch (error) {
+    logger.error("main window creation failed", error)
+    throw error
+  }
   wireMenu()
 
   overlay?.close()

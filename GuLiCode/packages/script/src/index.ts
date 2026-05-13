@@ -23,11 +23,21 @@ const env = {
   OPENCODE_VERSION: process.env["OPENCODE_VERSION"],
   OPENCODE_RELEASE: process.env["OPENCODE_RELEASE"],
 }
+
+async function resolveGitChannel() {
+  try {
+    const branch = await $`git branch --show-current`.text().then((x) => x.trim())
+    return branch || "dev"
+  } catch {
+    return "dev"
+  }
+}
+
 const CHANNEL = await (async () => {
   if (env.OPENCODE_CHANNEL) return env.OPENCODE_CHANNEL
   if (env.OPENCODE_BUMP) return "latest"
   if (env.OPENCODE_VERSION && !env.OPENCODE_VERSION.startsWith("0.0.0-")) return "latest"
-  return await $`git branch --show-current`.text().then((x) => x.trim())
+  return await resolveGitChannel()
 })()
 const IS_PREVIEW = CHANNEL !== "latest"
 

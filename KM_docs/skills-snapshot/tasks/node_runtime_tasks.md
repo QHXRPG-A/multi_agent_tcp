@@ -196,7 +196,7 @@ Follow-up:
 ## 渚濊禆鐭ヨ瘑
 
 - [`../knowledge_base/multi_cli_workflow.md`](../knowledge_base/multi_cli_workflow.md)
-- [`../knowledge_base/agent_node_ryven_integration.md`](../knowledge_base/agent_node_ryven_integration.md)
+- [`../knowledge_base/guli_desktop_ui.md`](../knowledge_base/guli_desktop_ui.md)
 - [`../knowledge_base/core_architecture.md`](../knowledge_base/core_architecture.md)
 - [`../knowledge_base/cluster_api.md`](../knowledge_base/cluster_api.md)
 

@@ -8,6 +8,8 @@ import type { Configuration } from "electron-builder"
 const execFileAsync = promisify(execFile)
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const signScript = path.join(rootDir, "script", "sign-windows.ps1")
+const outputDir = process.env.GULICODE_ELECTRON_OUTPUT_DIR || "dist"
+const shouldSignWindows = process.platform === "win32" && process.env.GITHUB_ACTIONS === "true"
 
 async function signWindows(configuration: { path: string }) {
   if (process.platform !== "win32") return
@@ -29,11 +31,15 @@ const channel = (() => {
 const getBase = (): Configuration => ({
   artifactName: "opencode-electron-${os}-${arch}.${ext}",
   directories: {
-    output: "dist",
+    output: outputDir,
     buildResources: "resources",
   },
   files: ["out/**/*", "resources/**/*"],
   extraResources: [
+    {
+      from: "resources/icons",
+      to: "icons",
+    },
     {
       from: "native/",
       to: "native/",
@@ -59,9 +65,13 @@ const getBase = (): Configuration => ({
   },
   win: {
     icon: `resources/icons/icon.ico`,
-    signtoolOptions: {
-      sign: signWindows,
-    },
+    ...(shouldSignWindows
+      ? {
+          signtoolOptions: {
+            sign: signWindows,
+          },
+        }
+      : {}),
     target: ["nsis"],
   },
   nsis: {

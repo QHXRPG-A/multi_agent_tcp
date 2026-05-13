@@ -11,13 +11,14 @@
 当前优先级：
 
 1. `current_goals.md`：当前短期目标总览，优先读。
-2. `multi_agent_communication_tasks.md`：GuLiCode 顶层 Agent、GraphRuntimeControlPlane、GraphRuntime 调度权、消息批次、fan-in/join、workspace/events 主线。
-3. `node_runtime_tasks.md`：节点运行时和图调度任务。只按 GraphRuntime / control plane 主线理解，旧 Ryven 最小闭环内容仅作历史背景。
-4. `multi_cli_adapter_tasks.md`：CLIWorkerBackend / Codex / CodeMaker adapter 任务。它是后端适配层，不是产品主架构。
-5. `vendor_ryven_tasks.md`：Ryven / visual editor 延后轨道。除非用户明确要求 Ryven/editor，否则不要作为当前优先级。
+2. `guli_desktop_ui_tasks.md`：Guli 桌面端 UI 产品化、蓝图入口嵌入、品牌与图标一致性、桌面壳层硬化。
+3. `multi_agent_communication_tasks.md`：GuLiCode 顶层 Agent、GraphRuntimeControlPlane、GraphRuntime 调度权、消息批次、fan-in/join、workspace/events 主线。
+4. `node_runtime_tasks.md`：节点运行时和图调度任务。只按 GraphRuntime / control plane 主线理解。
+5. `multi_cli_adapter_tasks.md`：CLIWorkerBackend / Codex / CodeMaker adapter 任务。它是后端适配层，不是产品主架构。
 
 维护规则：
 
-- 新增任务先落到 `current_goals.md` 或 `multi_agent_communication_tasks.md`，再按需要拆到其它文件。
-- 写新任务时使用 `GuLiCode`、`GraphRuntimeControlPlane`、`GraphRuntime`、`CLIWorkerBackend` 等当前术语。
-- `CodeMakerCluster`、`show-registry/dispatch`、Ryven `Start -> AgentNode -> End` 只作为兼容或历史内容出现。
+- 新增任务先落到 `current_goals.md` 或 `guli_desktop_ui_tasks.md` / `multi_agent_communication_tasks.md`，再按需要拆到其它文件。
+- 写新任务时使用 `GuLiCode`、`Guli`、`GraphRuntimeControlPlane`、`GraphRuntime`、`CLIWorkerBackend` 等当前术语。
+- `CodeMakerCluster`、`show-registry/dispatch` 只作为兼容或历史内容出现。
+- 旧 Ryven/editor UI 轨道已不在当前短期任务列表中；若要重启，必须由用户显式提出。

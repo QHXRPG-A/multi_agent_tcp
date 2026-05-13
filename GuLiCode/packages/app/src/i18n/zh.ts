@@ -544,6 +544,8 @@ export const dict = {
   "session.header.open.ariaLabel": "在 {{app}} 中打开",
   "session.header.open.menu": "打开选项",
   "session.header.open.copyPath": "复制路径",
+  "session.header.blueprint": "蓝图",
+  "session.header.blueprint.unavailable": "蓝图入口已经放上去了，但打开逻辑还没接。",
 
   "status.popover.trigger": "状态",
   "status.popover.ariaLabel": "服务器配置",

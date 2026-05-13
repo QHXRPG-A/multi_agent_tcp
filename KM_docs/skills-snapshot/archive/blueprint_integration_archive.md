@@ -82,9 +82,9 @@ python -m pytest test_workspace_api.py test_workspace_manager.py test_agent_runt
 - `multi_agent_tcp/graph_runtime.py`
 - `multi_agent_tcp/ryven_blueprint_nodes/nodes.py`
 - `multi_agent_tcp/test_agent_runtime.py`
-- `knowledge_base/agent_node_ryven_integration.md`
+- legacy Ryven node/UI notes now live only in git history; the active skill snapshot no longer keeps a dedicated long-term knowledge file for this track
 - `tasks/node_runtime_tasks.md`
-- `tasks/vendor_ryven_tasks.md`
+- legacy Ryven/editor short-term tasks were removed from the active skill snapshot on 2026-05-13
 
 #### 验证
 - `python -m pytest -q test_agent_runtime.py test_registry_skill_selection.py test_skill_space.py test_workspace_manager.py`：`42 passed`
@@ -100,7 +100,7 @@ python -m pytest test_workspace_api.py test_workspace_manager.py test_agent_runt
 3. 新增 `ryven_blueprint.py` hook：自动为每个 flow 补 Start/End，过滤节点库隐藏项，并在 UI 删除路径、`RemoveComponents_Command` 和 core `Flow.remove_node()` 层保护 Start/End 不被删除。
 4. `graph_runtime.GraphDefinition` 新增 `BlueprintTerminalNode`、`terminal_nodes` 与 `validate_runnable()`，后端可表达“恰好一个 start、恰好一个 end、DAG、且 start 到 end 有有向路径”的 runnable blueprint 约束。
 5. 结论更新：原始 `GraphDefinition` 数据结构不完整支持 Start/End 机制；新增 terminal node 语义和 runnable 校验后可以支持。
-6. 针对本轮变更补充长期知识文档 `knowledge_base/agent_node_ryven_integration.md`，记录 Ryven 节点包、flow 生命周期、删除保护、序列化和 GUI/no-gui 验证注意事项。
+6. 当时针对该轮变更曾补充一份 Ryven 节点/UI 长期知识文档，用于记录节点包、flow 生命周期、删除保护、序列化和 GUI/no-gui 验证注意事项；该文档已于 2026-05-13 从当前 active skill snapshot 退役。
 
 #### 涉及
 - `multi_agent_tcp/ryven_blueprint_nodes/nodes.py`
@@ -108,7 +108,7 @@ python -m pytest test_workspace_api.py test_workspace_manager.py test_agent_runt
 - `multi_agent_tcp/ryven_blueprint.py`
 - `multi_agent_tcp/ryven_launcher.py`
 - `multi_agent_tcp/graph_runtime.py`
-- `knowledge_base/agent_node_ryven_integration.md`
+- historical Ryven node/UI notes (retired from the active skill snapshot on 2026-05-13)
 
 #### 验证
 - `python -m pytest D:\agents\multi_agent_tcp\test_agent_runtime.py`：`24 passed`

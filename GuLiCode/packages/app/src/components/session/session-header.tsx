@@ -269,6 +269,14 @@ export function SessionHeader() {
       .catch((err: unknown) => showRequestError(language, err))
   }
 
+  const openBlueprint = () => {
+    showToast({
+      icon: "blueprint",
+      title: language.t("session.header.blueprint"),
+      description: language.t("session.header.blueprint.unavailable"),
+    })
+  }
+
   const [centerMount, setCenterMount] = createSignal<HTMLElement | null>(null)
   const [rightMount, setRightMount] = createSignal<HTMLElement | null>(null)
   onMount(() => {
@@ -426,6 +434,19 @@ export function SessionHeader() {
                 </div>
               </Show>
               <div class="flex items-center gap-1">
+                <Tooltip placement="bottom" value={language.t("session.header.blueprint")}>
+                  <Button
+                    variant="ghost"
+                    class="titlebar-icon h-6 px-2 gap-1.5 box-border shrink-0"
+                    onClick={openBlueprint}
+                    aria-label={language.t("session.header.blueprint")}
+                  >
+                    <Icon size="small" name="blueprint" />
+                    <span class="hidden xl:inline text-12-medium text-text-strong">
+                      {language.t("session.header.blueprint")}
+                    </span>
+                  </Button>
+                </Tooltip>
                 <Show when={status()}>
                   <Tooltip placement="bottom" value={language.t("status.popover.trigger")}>
                     <StatusPopover />

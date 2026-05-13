@@ -315,12 +315,12 @@ python -m pytest test_graph_control.py test_agent_runtime.py test_workspace_api.
 
 阶段性落地记录追加到：
 
-- `archive/blueprint_integration_archive.md`
+- `archive/guli_desktop_ui_archive.md`
 
 稳定长期知识后续再沉淀到：
 
 - `knowledge_base/multi_cli_workflow.md`
-- `knowledge_base/agent_node_ryven_integration.md`
+- `knowledge_base/guli_desktop_ui.md`
 
 ---
 
