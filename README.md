@@ -46,7 +46,7 @@ More focused diagrams live in [`docs/diagrams/multi_agents_communication/`](docs
 - `merge3` Python package is recommended for Dulwich-powered three-way text merges in the workspace changeset flow (`python -m pip install merge3`).
 - At least one supported agent CLI on `PATH`. Currently:
   - `codemaker` (non-interactive `codemaker run` with `--format json`) — fully supported via `codemaker_bridge.py`.
-  - Other CLIs: planned, see `ROADMAP.md`.
+  - Other CLIs require future adapter work in this repository.
 - Run with the **parent** of this folder on `PYTHONPATH`, or from a project that already imports `multi_agent_tcp` as a package.
 
 Example from `Package/Script/Python` (one level above this directory):
@@ -68,8 +68,7 @@ See [`examples/HOWTO.txt`](examples/HOWTO.txt) for low-level setup and [`GUIDE_F
 | File | Purpose |
 |------|---------|
 | [`GUIDE_FOR_AGENTS.md`](GUIDE_FOR_AGENTS.md) | Standard two-step workflow for any agent CLI / script that wants to dispatch sub-tasks to peer agents. **Replaces** the legacy `GUIDE_FOR_CODEMAKER.md`. |
-| [`ROADMAP.md`](ROADMAP.md) | Design philosophy, current capabilities, planned milestones (CLI Adapter, multi-modal, DAG, etc.). |
 | [`examples/HOWTO.txt`](examples/HOWTO.txt) | Low-level: `broker` / `agent` / `spawn` / orchestrate recipes / library API. |
-| [`KM_docs/`](KM_docs/) | Design notes (multi-CLI brainstorm, vendored Ryven editor analysis, etc.). |
+| [`KM_docs/skills-snapshot/`](KM_docs/skills-snapshot/) | Backup copy of the local `multi-agent-tcp` Codex skill snapshot. |
 | [`codemaker_cli.md`](codemaker_cli.md) | (Local-only, gitignored) CodeMaker CLI reference notes. |
 

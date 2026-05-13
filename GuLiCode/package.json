@@ -12,7 +12,8 @@
   "scripts": {
     "dev": "bun run dev:web",
     "dev:cli": "bun run --cwd packages/opencode --conditions=browser src/index.ts",
-    "dev:desktop": "bun --cwd packages/desktop-electron dev",
+    "dev:desktop": "bun ./scripts/dev-desktop.ts",
+    "desktop": "bun ./scripts/dev-desktop.ts",
     "dev:web": "bun --cwd packages/app dev",
     "dev:console": "bun run --cwd packages/console/app dev",
     "dev:console:unix": "ulimit -n 10240 2>/dev/null; bun run --cwd packages/console/app dev",

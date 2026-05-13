@@ -36,10 +36,10 @@ Rules of interpretation:
 Common repository root:
 
 ```text
-D:\agents\multi_agent_tcp
+F:\src\Package\Script\Python\multi_agent_tcp
 ```
 
-Historical paths such as `F:\src\Package\Script\Python\multi_agent_tcp` or `F:\src\ryven_demo` may appear in archives. Do not use them as current defaults unless the user's machine actually has that path.
+Historical paths such as `D:\agents\multi_agent_tcp` or `F:\src\ryven_demo` may appear in archives. Do not use them as current defaults unless the user's machine actually has that path.
 
 ## Document Layout
 
@@ -68,7 +68,7 @@ Read first when the user asks about:
 Stable current knowledge. Prefer these files for implementation decisions:
 
 - [`knowledge_base/core_architecture.md`](knowledge_base/core_architecture.md): current architecture centered on GuLiCode, `GraphRuntimeControlPlane`, `GraphRuntime`, workspace/events, and CLI backend adapters.
-- [`knowledge_base/gulicode_desktop.md`](knowledge_base/gulicode_desktop.md): GuLiCode desktop source structure, Electron/Tauri launch paths, main/preload/renderer/app layering, and desktop integration guidance.
+- [`knowledge_base/gulicode_desktop.md`](knowledge_base/gulicode_desktop.md): GuLiCode desktop source structure, one-click startup (`start-gulicode-desktop.cmd`, `bun run desktop`), Electron/Tauri launch paths, main/preload/renderer/app layering, and desktop integration guidance.
 - [`knowledge_base/dispatch_workflows.md`](knowledge_base/dispatch_workflows.md): runtime control-plane CLI/RPC workflows, legacy dispatch notes, and thin-client boundaries.
 - [`knowledge_base/ring_structure_solution.md`](knowledge_base/ring_structure_solution.md): current cycle-structure closure: cycles are observable SCC groups only; runtime uses normal dispatch and join semantics.
 - [`knowledge_base/cluster_api.md`](knowledge_base/cluster_api.md): legacy `CodeMakerCluster` compatibility and preferred `CLIWorkerBackend` terminology.
@@ -101,6 +101,8 @@ Historical change records only. Do not use archive content as current behavior u
 
 ## Query Map
 
+- GuLiCode desktop startup, one-click launcher, Electron/Tauri entrypoints, startup log verification, and direct Electron fallback: read `knowledge_base/gulicode_desktop.md`.
+- GuLiCode desktop test bring-up rules, launcher verification, and local environment handling: read `knowledge_base/gulicode_desktop.md`.
 - GuLiCode desktop startup, Electron/Tauri, desktop source layering: read `knowledge_base/gulicode_desktop.md`.
 - GuLiCode 测试环境顶层拉起、aiapi_world/gpt-5.5/provider/baseURL/reasoningEffort 规则: read `knowledge_base/gulicode_desktop.md`.
 - GuLiCode top Agent, organization view, top-agent profile, start plan, status explanation: read `多agents通信设计.md`, then `tasks/multi_agent_communication_tasks.md`.
@@ -123,9 +125,10 @@ Historical change records only. Do not use archive content as current behavior u
 - Do not present Ryven Start/End minimum loop as the current product priority unless the user explicitly asks for Ryven/editor work.
 - When documenting backend execution, prefer `CLIWorkerBackend`; mention `CodeMakerCluster` only as a compatibility alias.
 - When documenting user-facing orchestration, prefer GuLiCode top Agent and framework-owned runtime APIs.
+- When startup notes disagree, prefer `start-gulicode-desktop.cmd`, `start-gulicode-desktop.sh`, `bun run desktop`, and `GuLiCode/scripts/dev-desktop.ts` over older raw `bun --cwd packages/desktop-electron dev` notes.
 - When copying from `KM_docs/skills-snapshot`, re-check whether imported content reintroduces old center framing before considering the skill clean.
 
 ## Repository Link
 
 - GitHub: <https://github.com/QHXRPG-A/multi_agent_tcp>
-- Current common local root: `D:\agents\multi_agent_tcp`
+- Current common local root: `F:\src\Package\Script\Python\multi_agent_tcp`
