@@ -29,6 +29,10 @@ const api: ElectronAPI = {
   storeClear: (name) => ipcRenderer.invoke("store-clear", name),
   storeKeys: (name) => ipcRenderer.invoke("store-keys", name),
   storeLength: (name) => ipcRenderer.invoke("store-length", name),
+  blueprintListDirectories: (dir) => ipcRenderer.invoke("blueprint-list-directories", dir),
+  blueprintListSkills: (dir) => ipcRenderer.invoke("blueprint-list-skills", dir),
+  blueprintListRules: (dir) => ipcRenderer.invoke("blueprint-list-rules", dir),
+  blueprintListModels: (cliKind) => ipcRenderer.invoke("blueprint-list-models", cliKind),
 
   getWindowCount: () => ipcRenderer.invoke("get-window-count"),
   onSqliteMigrationProgress: (cb) => {

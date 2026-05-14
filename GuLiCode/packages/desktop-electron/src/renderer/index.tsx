@@ -109,7 +109,7 @@ const createPlatform = (): Platform => {
     version: pkg.version,
 
     async openDirectoryPickerDialog(opts) {
-      const defaultPath = await wslHome()
+      const defaultPath = opts?.defaultPath ?? (await wslHome())
       const result = await window.api.openDirectoryPicker({
         multiple: opts?.multiple ?? false,
         title: opts?.title ?? t("desktop.dialog.chooseFolder"),
@@ -135,6 +135,14 @@ const createPlatform = (): Platform => {
       })
       return handleWslPicker(result)
     },
+
+    listBlueprintDirectories: (dir: string) => window.api.blueprintListDirectories(dir),
+
+    listBlueprintSkills: (dir: string) => window.api.blueprintListSkills(dir),
+
+    listBlueprintRules: (dir: string) => window.api.blueprintListRules(dir),
+
+    listBlueprintModels: (cliKind: string) => window.api.blueprintListModels(cliKind),
 
     openLink(url: string) {
       window.api.openLink(url)

@@ -401,14 +401,15 @@ export default function Page() {
   const isDesktop = createMediaQuery("(min-width: 768px)")
   const size = createSizing()
   const desktopReviewOpen = createMemo(() => isDesktop() && view().reviewPanel.opened())
+  const desktopBlueprintOpen = createMemo(() => isDesktop() && view().blueprintPanel.opened())
   const desktopFileTreeOpen = createMemo(() => isDesktop() && layout.fileTree.opened())
-  const desktopSidePanelOpen = createMemo(() => desktopReviewOpen() || desktopFileTreeOpen())
+  const desktopSidePanelOpen = createMemo(() => desktopReviewOpen() || desktopBlueprintOpen() || desktopFileTreeOpen())
   const sessionPanelWidth = createMemo(() => {
     if (!desktopSidePanelOpen()) return "100%"
-    if (desktopReviewOpen()) return `${layout.session.width()}px`
+    if (desktopReviewOpen() || desktopBlueprintOpen()) return `${layout.session.width()}px`
     return `calc(100% - ${layout.fileTree.width()}px)`
   })
-  const centered = createMemo(() => isDesktop() && !desktopReviewOpen())
+  const centered = createMemo(() => isDesktop() && !desktopReviewOpen() && !desktopBlueprintOpen())
 
   function normalizeTab(tab: string) {
     if (!tab.startsWith("file://")) return tab
@@ -1935,7 +1936,7 @@ export default function Page() {
             }}
           />
 
-          <Show when={desktopReviewOpen()}>
+          <Show when={desktopReviewOpen() || desktopBlueprintOpen()}>
             <div onPointerDown={() => size.start()}>
               <ResizeHandle
                 direction="horizontal"

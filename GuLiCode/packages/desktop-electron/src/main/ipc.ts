@@ -10,6 +10,12 @@ import type {
   WindowConfig,
   WslConfig,
 } from "../preload/types"
+import {
+  listBlueprintDirectories,
+  listBlueprintModels,
+  listBlueprintRules,
+  listBlueprintSkills,
+} from "./blueprint-catalog"
 import { getStore } from "./store"
 import { setTitlebar } from "./windows"
 
@@ -92,6 +98,10 @@ export function registerIpcHandlers(deps: Deps) {
     const store = getStore(name)
     return Object.keys(store.store).length
   })
+  ipcMain.handle("blueprint-list-directories", (_event: IpcMainInvokeEvent, dir: string) => listBlueprintDirectories(dir))
+  ipcMain.handle("blueprint-list-skills", (_event: IpcMainInvokeEvent, dir: string) => listBlueprintSkills(dir))
+  ipcMain.handle("blueprint-list-rules", (_event: IpcMainInvokeEvent, dir: string) => listBlueprintRules(dir))
+  ipcMain.handle("blueprint-list-models", (_event: IpcMainInvokeEvent, cliKind: string) => listBlueprintModels(cliKind))
 
   ipcMain.handle(
     "open-directory-picker",

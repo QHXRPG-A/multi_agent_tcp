@@ -4,10 +4,16 @@ import type { Accessor } from "solid-js"
 import { ServerConnection } from "./server"
 
 type PickerPaths = string | string[] | null
-type OpenDirectoryPickerOptions = { title?: string; multiple?: boolean }
+type OpenDirectoryPickerOptions = { title?: string; multiple?: boolean; defaultPath?: string }
 type OpenFilePickerOptions = { title?: string; multiple?: boolean; accept?: string[]; extensions?: string[] }
 type SaveFilePickerOptions = { title?: string; defaultPath?: string }
 type UpdateInfo = { updateAvailable: boolean; version?: string }
+
+export type BlueprintCatalogItem = {
+  value: string
+  label: string
+  description?: string
+}
 
 export type Platform = {
   /** Platform discriminator */
@@ -45,6 +51,18 @@ export type Platform = {
 
   /** Save file picker dialog (Tauri only) */
   saveFilePickerDialog?(opts?: SaveFilePickerOptions): Promise<string | null>
+
+  /** Blueprint directory candidates (desktop only) */
+  listBlueprintDirectories?(dir: string): Promise<BlueprintCatalogItem[]>
+
+  /** Blueprint skill candidates from a skill directory (desktop only) */
+  listBlueprintSkills?(dir: string): Promise<BlueprintCatalogItem[]>
+
+  /** Blueprint rule candidates from a rule directory (desktop only) */
+  listBlueprintRules?(dir: string): Promise<BlueprintCatalogItem[]>
+
+  /** Blueprint model candidates for the selected CLI adapter (desktop only) */
+  listBlueprintModels?(cliKind: string): Promise<string[]>
 
   /** Storage mechanism, defaults to localStorage */
   storage?: (name?: string) => SyncStorage | AsyncStorage

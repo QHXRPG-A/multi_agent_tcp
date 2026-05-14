@@ -270,11 +270,7 @@ export function SessionHeader() {
   }
 
   const openBlueprint = () => {
-    showToast({
-      icon: "blueprint",
-      title: language.t("session.header.blueprint"),
-      description: language.t("session.header.blueprint.unavailable"),
-    })
+    view().blueprintPanel.toggle()
   }
 
   const [centerMount, setCenterMount] = createSignal<HTMLElement | null>(null)
@@ -438,10 +434,22 @@ export function SessionHeader() {
                   <Button
                     variant="ghost"
                     class="titlebar-icon h-6 px-2 gap-1.5 box-border shrink-0"
+                    classList={{
+                      "bg-surface-raised-base-active": view().blueprintPanel.opened(),
+                    }}
                     onClick={openBlueprint}
                     aria-label={language.t("session.header.blueprint")}
+                    aria-expanded={view().blueprintPanel.opened()}
+                    aria-controls="blueprint-panel"
                   >
-                    <Icon size="small" name="blueprint" />
+                    <Icon
+                      size="small"
+                      name="blueprint"
+                      classList={{
+                        "text-icon-strong": view().blueprintPanel.opened(),
+                        "text-icon-weak": !view().blueprintPanel.opened(),
+                      }}
+                    />
                     <span class="hidden xl:inline text-12-medium text-text-strong">
                       {language.t("session.header.blueprint")}
                     </span>

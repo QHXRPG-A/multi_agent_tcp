@@ -244,6 +244,9 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
           diffStyle: "split" as ReviewDiffStyle,
           panelOpened: true,
         },
+        blueprint: {
+          panelOpened: false,
+        },
         fileTree: {
           opened: false,
           width: DEFAULT_FILE_TREE_WIDTH,
@@ -640,6 +643,30 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
           setStore("review", "diffStyle", diffStyle)
         },
       },
+      blueprint: {
+        opened: createMemo(() => store.blueprint?.panelOpened ?? false),
+        open() {
+          if (!store.blueprint) {
+            setStore("blueprint", { panelOpened: true })
+            return
+          }
+          setStore("blueprint", "panelOpened", true)
+        },
+        close() {
+          if (!store.blueprint) {
+            setStore("blueprint", { panelOpened: false })
+            return
+          }
+          setStore("blueprint", "panelOpened", false)
+        },
+        toggle() {
+          if (!store.blueprint) {
+            setStore("blueprint", { panelOpened: true })
+            return
+          }
+          setStore("blueprint", "panelOpened", (x) => !x)
+        },
+      },
       fileTree: {
         opened: createMemo(() => store.fileTree?.opened ?? true),
         width: createMemo(() => store.fileTree?.width ?? DEFAULT_FILE_TREE_WIDTH),
@@ -750,6 +777,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         const s = createMemo(() => store.sessionView[key()] ?? { scroll: {} })
         const terminalOpened = createMemo(() => store.terminal?.opened ?? false)
         const reviewPanelOpened = createMemo(() => store.review?.panelOpened ?? true)
+        const blueprintPanelOpened = createMemo(() => store.blueprint?.panelOpened ?? false)
 
         function setTerminalOpened(next: boolean) {
           const current = store.terminal
@@ -773,6 +801,18 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
           const value = current.panelOpened ?? true
           if (value === next) return
           setStore("review", "panelOpened", next)
+        }
+
+        function setBlueprintPanelOpened(next: boolean) {
+          const current = store.blueprint
+          if (!current) {
+            setStore("blueprint", { panelOpened: next })
+            return
+          }
+
+          const value = current.panelOpened ?? false
+          if (value === next) return
+          setStore("blueprint", "panelOpened", next)
         }
 
         return {
@@ -804,6 +844,18 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
             },
             toggle() {
               setReviewPanelOpened(!reviewPanelOpened())
+            },
+          },
+          blueprintPanel: {
+            opened: blueprintPanelOpened,
+            open() {
+              setBlueprintPanelOpened(true)
+            },
+            close() {
+              setBlueprintPanelOpened(false)
+            },
+            toggle() {
+              setBlueprintPanelOpened(!blueprintPanelOpened())
             },
           },
           review: {

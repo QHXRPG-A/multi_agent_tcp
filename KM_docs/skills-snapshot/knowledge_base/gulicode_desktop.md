@@ -162,6 +162,108 @@ Current important behaviors:
 - packaged app identity on Windows depends on both runtime icon loading and the
   final packaged `exe` resource icon
 
+### Windows packaging and icon flow
+
+Use this when the user asks for a Windows package or installer, not just the
+unpacked smoke launched by `start-gulicode-desktop.cmd --packaged`.
+
+Baseline build:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
+bun run build
+bun run package:win
+```
+
+Known local packaging pitfall:
+
+- A normal `bun run package:win` can fail while electron-builder extracts
+  `winCodeSign-2.6.0.7z`.
+- The failure is Windows symlink privilege during extraction of bundled
+  `darwin/10.12/lib/libcrypto.dylib` and `libssl.dylib`, not a GuLiCode app
+  build failure.
+- If that happens, do not change renderer/app code. Use the local workaround
+  below or rerun from a Windows session with Developer Mode/elevated symlink
+  privileges.
+
+Local workaround used successfully on 2026-05-14:
+
+1. Create a temporary `electron-builder.local.config.ts` in
+   `GuLiCode/packages/desktop-electron`.
+2. Import the base `electron-builder.config`.
+3. Override `win.signAndEditExecutable` to `false`.
+4. Add an `afterPack` hook that runs cached `rcedit-x64.exe` with
+   `--set-icon resources/icons/icon.ico` against the final exe.
+5. Run electron-builder with the temporary config, then delete the temporary
+   config so it is not committed as product configuration.
+
+Temporary config shape:
+
+```ts
+import { execFile } from "node:child_process"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
+import { promisify } from "node:util"
+import base from "./electron-builder.config"
+
+const execFileAsync = promisify(execFile)
+const packageDir = path.dirname(fileURLToPath(import.meta.url))
+
+export default {
+  ...base,
+  win: { ...(base.win ?? {}), signAndEditExecutable: false },
+  async afterPack(context: any) {
+    if (context.electronPlatformName !== "win32") return
+    const rceditDir = process.env.ELECTRON_BUILDER_RCEDIT_PATH
+    if (!rceditDir) throw new Error("ELECTRON_BUILDER_RCEDIT_PATH is required")
+    const executable = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.exe`)
+    const icon = path.join(packageDir, "resources", "icons", "icon.ico")
+    await execFileAsync(path.join(rceditDir, "rcedit-x64.exe"), [executable, "--set-icon", icon])
+  },
+}
+```
+
+PowerShell runner:
+
+```powershell
+$rceditDir = (Get-ChildItem $env:LOCALAPPDATA\electron-builder\Cache\winCodeSign -Directory |
+  Where-Object {
+    (Test-Path (Join-Path $_.FullName 'rcedit-x64.exe')) -and
+    (Test-Path (Join-Path $_.FullName 'rcedit-ia32.exe'))
+  } | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+
+$env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
+$env:ELECTRON_BUILDER_RCEDIT_PATH = $rceditDir
+bunx electron-builder --win --config electron-builder.local.config.ts
+```
+
+Successful 2026-05-14 outputs:
+
+```text
+GuLiCode/packages/desktop-electron/dist/opencode-electron-win-x64.exe
+GuLiCode/packages/desktop-electron/dist/opencode-electron-win-x64.exe.blockmap
+GuLiCode/packages/desktop-electron/dist/win-unpacked/GuLiCode Dev.exe
+```
+
+Observed successful artifact times on 2026-05-14:
+
+```text
+dist/opencode-electron-win-x64.exe             18:13:35, 149.29 MB
+dist/opencode-electron-win-x64.exe.blockmap    18:13:37, 0.16 MB
+dist/win-unpacked/GuLiCode Dev.exe             18:13:03, 212.66 MB
+```
+
+If electron-builder fails before packaging with access denied while removing
+`dist/win-unpacked/d3dcompiler_47.dll`, the old unpacked app is probably still
+running from the output directory. Close or kill only those
+`GuLiCode Dev.exe` processes whose executable path is under
+`GuLiCode/packages/desktop-electron/dist/win-unpacked`, then rerun the same
+workaround command. This is separate from the `winCodeSign` symlink issue.
+
+If `dist/win-unpacked/GuLiCode Dev.exe` shows the wrong icon, patch the exe
+directly with the same cached `rcedit-x64.exe --set-icon resources/icons/icon.ico`
+and regenerate the installer with the `afterPack` hook.
+
 ## Tauri status
 
 Tauri remains secondary on this machine:

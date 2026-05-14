@@ -19,6 +19,12 @@ export type WindowConfig = {
   updaterEnabled: boolean
 }
 
+export type BlueprintCatalogItem = {
+  value: string
+  label: string
+  description?: string
+}
+
 export type ElectronAPI = {
   killSidecar: () => Promise<void>
   installCli: () => Promise<string>
@@ -41,6 +47,10 @@ export type ElectronAPI = {
   storeClear: (name: string) => Promise<void>
   storeKeys: (name: string) => Promise<string[]>
   storeLength: (name: string) => Promise<number>
+  blueprintListDirectories: (dir: string) => Promise<BlueprintCatalogItem[]>
+  blueprintListSkills: (dir: string) => Promise<BlueprintCatalogItem[]>
+  blueprintListRules: (dir: string) => Promise<BlueprintCatalogItem[]>
+  blueprintListModels: (cliKind: string) => Promise<string[]>
 
   getWindowCount: () => Promise<number>
   onSqliteMigrationProgress: (cb: (progress: SqliteMigrationProgress) => void) => () => void
