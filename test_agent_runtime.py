@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import sys
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,7 @@ from multi_agent_tcp import (
     AgentNode,
     AgentSkillSelection,
     BlueprintTerminalNode,
+    CLIWorkerBackend,
     CodexAdapter,
     CodeMakerAdapter,
     GuLiCodeTopAgentProfile,
@@ -41,10 +45,64 @@ from multi_agent_tcp.codemaker_bridge import _merge_prompt as _merge_codemaker_p
 from multi_agent_tcp.codemaker_bridge import load_codemaker_runtime
 from multi_agent_tcp.codex_bridge import _merge_prompt as _merge_codex_prompt
 from multi_agent_tcp.codex_bridge import load_codex_runtime
+from multi_agent_tcp.agent_launch_context import initialize_private_codex_home
 from multi_agent_tcp.ryven_blueprint import _apply_run_workspace_to_node
 from multi_agent_tcp.workspace_api import CONTEXT_ENV as WORKSPACE_API_CONTEXT_ENV
 from multi_agent_tcp.workspace_api import main as workspace_api_main
 from multi_agent_tcp.workspace_manager import DulwichWorkspaceManager
+
+
+def _codex_real_flow_config_overrides() -> list[str]:
+    overrides = [
+        'approval_policy="never"',
+        'shell_environment_policy.inherit="all"',
+    ]
+    if sys.platform == "win32":
+        overrides.append('windows.sandbox="unelevated"')
+    return overrides
+
+
+def _codex_command_executions(codex_result: dict[str, Any]) -> list[str]:
+    commands: list[str] = []
+    for event in codex_result.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "command_execution":
+            continue
+        command = item.get("command")
+        if isinstance(command, str):
+            commands.append(command)
+    return commands
+
+
+def _assert_codex_ran_workspace_api_commands(
+    codex_result: dict[str, Any],
+    expected: list[str],
+) -> None:
+    commands = _codex_command_executions(codex_result)
+    combined = "\n".join(commands)
+    missing = [item for item in expected if item not in combined]
+    assert not missing, {
+        "missing": missing,
+        "commands": commands,
+        "stdout": codex_result.get("stdout", ""),
+        "stderr": codex_result.get("stderr", ""),
+    }
+
+
+def _workspace_api_audit_commands(run: Any) -> list[str]:
+    manifest_path = run.shared_dir / "manifest.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    writes = data.get("writes", [])
+    assert isinstance(writes, list)
+    return [
+        str(item.get("command"))
+        for item in writes
+        if isinstance(item, dict) and item.get("event_type") == "workspace_api_call"
+    ]
 
 
 def test_body_to_agent_message_preserves_prompt_context_and_attachments() -> None:
@@ -66,6 +124,27 @@ def test_body_to_agent_message_uses_whole_dict_when_prompt_missing() -> None:
 
     assert message.prompt == '{"task": "summarize", "id": 1}'
     assert message.context is None
+
+
+def test_initialize_private_codex_home_seeds_runtime_state_only(tmp_path: Path) -> None:
+    source = tmp_path / "source-codex-home"
+    source.mkdir()
+    (source / "config.toml").write_text('model = "gpt-5.5"\n', encoding="utf-8")
+    (source / "auth.json").write_text('{"auth_mode":"api"}\n', encoding="utf-8")
+    (source / "models_cache.json").write_text('{"models":[]}\n', encoding="utf-8")
+    user_skill = source / "skills" / "user-skill"
+    user_skill.mkdir(parents=True)
+    (user_skill / "SKILL.md").write_text("# user skill\n", encoding="utf-8")
+    (source / "sessions").mkdir()
+
+    private = tmp_path / "private-codex-home"
+    initialize_private_codex_home(private, source_codex_home=source)
+
+    assert (private / "config.toml").read_text(encoding="utf-8") == 'model = "gpt-5.5"\n'
+    assert (private / "auth.json").read_text(encoding="utf-8") == '{"auth_mode":"api"}\n'
+    assert (private / "models_cache.json").read_text(encoding="utf-8") == '{"models":[]}\n'
+    assert not (private / "skills" / "user-skill").exists()
+    assert not (private / "sessions").exists()
 
 
 def test_worker_config_serializes_adapter_fields() -> None:
@@ -533,6 +612,33 @@ class _FakeCluster:
         return {"type": "message", "from": worker_id, "body": {"ok": True}}
 
 
+class _FailingThenOkCluster(_FakeCluster):
+    async def run_single(
+        self,
+        worker_id: str,
+        body: Any,
+        *,
+        timeout_sec: float = 600.0,
+        _skip_skill_inject: bool = False,
+    ) -> dict[str, Any]:
+        self.sent.append((worker_id, body, timeout_sec))
+        if len(self.sent) > 1:
+            return {"type": "message", "from": worker_id, "body": {"ok": True, "recovered": True}}
+        return {
+            "type": "message",
+            "from": worker_id,
+            "body": {
+                "ok": False,
+                "codex": {
+                    "returncode": 1,
+                    "stderr": "stream disconnected before response.completed",
+                    "final_text": "",
+                    "timeout": False,
+                },
+            },
+        }
+
+
 class _RouteCluster(_FakeCluster):
     def __init__(self) -> None:
         super().__init__()
@@ -729,6 +835,28 @@ async def test_graph_runtime_queues_messages_until_agent_is_idle() -> None:
     assert "running" in states
     assert "waiting_for_reply" in states
     assert "processing_reply" in states
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_keeps_agent_idle_after_worker_ok_false() -> None:
+    cluster = _FailingThenOkCluster()
+    node = AgentNode(node_id="node-a", cwd=Path("."), timeout_sec=42.0)
+    runtime = GraphRuntime(cluster)
+
+    with pytest.raises(RuntimeError, match="stream disconnected"):
+        await runtime.send_agent_message(node, {"prompt": "next"})
+
+    inst = runtime.instances["node-a"]
+    assert inst.state == "idle"
+    assert "stream disconnected" in (inst.last_error or "")
+
+    recovered = await runtime.send_agent_message(node, {"prompt": "retry"})
+    assert recovered["said"] == json.dumps({"ok": True, "recovered": True}, ensure_ascii=False)
+    assert runtime.instances["node-a"].state == "idle"
+    assert cluster.sent == [
+        ("node-a", {"prompt": "next"}, 42.0),
+        ("node-a", {"prompt": "retry"}, 42.0),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1437,6 +1565,36 @@ async def test_nonblocking_agent_job_records_events_and_manifest(tmp_path: Path)
     assert cluster.sent == [("node-a", {"prompt": "background"}, 1800.0)]
 
 
+@pytest.mark.asyncio
+async def test_nonblocking_agent_job_fails_on_worker_ok_false(tmp_path: Path) -> None:
+    cluster = _FailingThenOkCluster()
+    workspace = WorkspaceManifest("ws-1", tmp_path)
+    node = AgentNode(
+        node_id="node-a",
+        cwd=tmp_path,
+        execution_mode="nonblocking",
+        workspace_id="ws-1",
+        workspace_root=tmp_path,
+        write_scope=["changes"],
+    )
+
+    runtime = GraphRuntime(cluster, workspace=workspace)
+    job = await runtime.submit_agent_job(node, {"prompt": "background"}, job_id="job-1")
+
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if job.status == "failed":
+            break
+
+    assert job.status == "failed"
+    assert "stream disconnected" in workspace.jobs["job-1"]["error"]
+    assert [event.event_type for event in runtime.events] == [
+        "TaskStarted",
+        "TaskProgress",
+        "TaskFailed",
+    ]
+
+
 def test_workspace_manifest_rejects_scope_escape(tmp_path: Path) -> None:
     manifest = WorkspaceManifest("ws-1", tmp_path)
 
@@ -1646,6 +1804,585 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert (private / "workspace_api_context.json").is_file()
     finally:
         server.close()
+
+
+@pytest.mark.asyncio
+async def test_real_codex_cli_framework_private_checkout_submit_and_archive_flow(
+    unused_tcp_port: int,
+) -> None:
+    codex = shutil.which("codex")
+    if codex is None:
+        pytest.skip("codex CLI is not installed on PATH")
+
+    repo_tmp = (
+        Path(__file__).resolve().parent
+        / ".pytest_tmp"
+        / f"real_codex_flow_{unused_tcp_port}"
+    )
+    if repo_tmp.exists():
+        shutil.rmtree(repo_tmp, ignore_errors=True)
+    project = repo_tmp / "p"
+    server = None
+    cluster = None
+    try:
+        probe = project / "src" / "framework_probe.txt"
+        probe.parent.mkdir(parents=True)
+        probe.write_text("base framework probe\n", encoding="utf-8")
+        rule = project / "rules" / "framework-flow-rule.md"
+        rule.parent.mkdir(parents=True)
+        rule.write_text(
+            "# Framework Flow Rule\n\n"
+            "You must prove the private checkout workflow by writing "
+            "REAL_CODEX_FRAMEWORK_FLOW_RULE_SEEN into the probe file and report.\n",
+            encoding="utf-8",
+        )
+
+        source_skill = repo_tmp / "source-skills" / "framework-flow-skill"
+        source_skill.mkdir(parents=True)
+        (source_skill / "SKILL.md").write_text(
+            "---\n"
+            "name: framework-flow-skill\n"
+            "description: REAL_CODEX_FRAMEWORK_FLOW_SKILL_DESCRIPTION\n"
+            "---\n"
+            "# Framework Flow Skill\n\n"
+            "When validating this flow, include REAL_CODEX_FRAMEWORK_FLOW_SKILL_SEEN "
+            "in the submitted file and report.\n",
+            encoding="utf-8",
+        )
+        skill_space = SkillSpace.open_or_init(repo_tmp / "skill-space")
+        rec = skill_space.add_skill_copy(source_skill)
+
+        manager = DulwichWorkspaceManager.open_or_init(project, workspace_root=repo_tmp / "w")
+        run = manager.create_run(
+            run_id="run-codex-flow",
+            code_mode="project_reference",
+        )
+        original_submit_checkout = manager.submit_checkout
+        submit_saw_project_base = False
+
+        def guarded_submit_checkout(run_arg: Any, checkout_arg: Any, **kwargs: Any) -> Any:
+            nonlocal submit_saw_project_base
+            assert probe.read_text(encoding="utf-8") == "base framework probe\n"
+            submit_saw_project_base = True
+            return original_submit_checkout(run_arg, checkout_arg, **kwargs)
+
+        manager.submit_checkout = guarded_submit_checkout  # type: ignore[method-assign]
+        server = WorkspaceRPCServer(manager, run)
+        server.start()
+
+        codex_config_overrides = _codex_real_flow_config_overrides()
+        node = AgentNode(
+            node_id="codex-node",
+            agent_id="agent-codex",
+            cli_kind="codex",
+            command=codex,
+            cwd=project,
+            timeout_sec=420.0,
+            write_scope=["src/framework_probe.txt"],
+            skill_selection={"mode": "selected", "skill_hashes": [rec.skill_hash]},
+            rule_paths=[str(rule)],
+            adapter_options={
+                "model": "gpt-5.5",
+                "timeout_sec": 360.0,
+                "disable_features": ["plugins", "shell_snapshot"],
+                "config_overrides": codex_config_overrides,
+                "extra_args": ["--full-auto"],
+            },
+        )
+        cluster = await CLIWorkerBackend.create(
+            [
+                WorkerConfig(
+                    "bootstrap-real-codex",
+                    cwd=project,
+                    timeout_sec=30.0,
+                    command=codex,
+                    cli_kind="codex",
+                    adapter_options={
+                        "model": "gpt-5.5",
+                        "sandbox": "workspace-write",
+                        "skip_git_repo_check": True,
+                        "disable_features": ["plugins", "shell_snapshot"],
+                        "config_overrides": codex_config_overrides,
+                        "extra_args": ["--full-auto"],
+                    },
+                )
+            ],
+            port=unused_tcp_port,
+        )
+        runtime = GraphRuntime(
+            cluster,
+            enforce_private_agent_context=True,
+            private_context_manager=manager,
+            private_context_run=run,
+            private_context_rpc_server=server,
+            skill_space=skill_space,
+            archive_manager=manager,
+            archive_run=run,
+        )
+
+        marker = "REAL_CODEX_FRAMEWORK_FLOW_SUCCESS"
+        inst = await runtime.ensure_agent(node)
+        prompt = (
+            "You are running as a real Codex CLI worker inside the framework private "
+            "AgentNode context. Complete this exact flow and do not edit the project "
+            "directory directly.\n\n"
+            "1. Read AGENTS.md and the Codex Execution Context catalog. Confirm the "
+            "injected skill catalog includes framework-agent-runtime and "
+            "framework-flow-skill, and the rule catalog includes Framework Flow Rule. "
+            "Do not open individual SKILL.md or rule files with shell commands; the "
+            "catalog is the required injected context for this test.\n"
+            "2. Run: python -m multi_agent_tcp.workspace_api checkout --path "
+            "src/framework_probe.txt\n"
+            "3. Modify only src/framework_probe.txt in your current private checkout. "
+            f"Keep the base line and add exactly these lines: {marker}, "
+            "REAL_CODEX_FRAMEWORK_FLOW_RULE_SEEN, "
+            "REAL_CODEX_FRAMEWORK_FLOW_SKILL_SEEN.\n"
+            "4. Run: python -m multi_agent_tcp.workspace_api status\n"
+            "5. Run: python -m multi_agent_tcp.workspace_api diff\n"
+            "6. Run: python -m multi_agent_tcp.workspace_api submit --task-id "
+            "real-codex-framework-flow --summary \"real codex framework flow\"\n"
+            "7. Run: python -m multi_agent_tcp.workspace_api publish --area reports "
+            "--path codex-framework-flow.md --text \"REAL_CODEX_FRAMEWORK_FLOW_SUCCESS "
+            "REAL_CODEX_FRAMEWORK_FLOW_RULE_SEEN REAL_CODEX_FRAMEWORK_FLOW_SKILL_SEEN "
+            "changeset submitted accepted\"\n\n"
+            f"Final answer must include: {marker} REAL_CODEX_CONTEXT_OK "
+            "framework-agent-runtime framework-flow-skill Framework Flow Rule "
+            "changeset submitted accepted."
+        )
+
+        raw_reply = await cluster.run_single(
+            inst.agent_id,
+            {"prompt": prompt},
+            timeout_sec=420.0,
+            _skip_skill_inject=True,
+        )
+        body = raw_reply["body"]
+        assert body["ok"] is True, body.get("codex")
+        codex_result = body["codex"]
+        assert codex_result["returncode"] == 0
+        _assert_codex_ran_workspace_api_commands(
+            codex_result,
+            [
+                "multi_agent_tcp.workspace_api checkout",
+                "src/framework_probe.txt",
+                "multi_agent_tcp.workspace_api status",
+                "multi_agent_tcp.workspace_api diff",
+                "multi_agent_tcp.workspace_api submit",
+                "real-codex-framework-flow",
+                "multi_agent_tcp.workspace_api publish",
+                "codex-framework-flow.md",
+            ],
+        )
+        final_text = codex_result.get("final_text") or codex_result.get("last_message") or ""
+        assert marker in final_text
+        assert "REAL_CODEX_CONTEXT_OK" in final_text
+        assert "framework-agent-runtime" in final_text
+        assert "framework-flow-skill" in final_text
+        assert "changeset submitted accepted" in final_text
+        utterance = runtime._record_agent_utterance(
+            node_id=node.node_id,
+            agent_id=inst.agent_id,
+            reply=raw_reply,
+            task_id="real-codex-framework-flow",
+        )
+        assert marker in utterance.said
+
+        private = manager.agent_workspace_dir(run, "agent-codex")
+        checkout = private / "checkout"
+        codex_home = private / "codex_home"
+        assert (checkout / "AGENTS.md").is_file()
+        assert (codex_home / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
+        assert list((codex_home / "skills").glob(f"{rec.skill_hash}-framework-flow-skill/SKILL.md"))
+        assert (private / "rules" / "01-framework-flow-rule.md").is_file()
+
+        audit_commands = _workspace_api_audit_commands(run)
+        audit_index = 0
+        for expected in ["checkout", "status", "diff", "submit", "publish"]:
+            while audit_index < len(audit_commands) and audit_commands[audit_index] != expected:
+                audit_index += 1
+            assert audit_index < len(audit_commands), {
+                "missing": expected,
+                "audit_commands": audit_commands,
+            }
+            audit_index += 1
+        assert audit_commands.count("submit") == 1
+        assert submit_saw_project_base is True
+
+        assert (project / "src" / "framework_probe.txt").read_text(encoding="utf-8").count(marker) == 1
+        assert "REAL_CODEX_FRAMEWORK_FLOW_RULE_SEEN" in probe.read_text(encoding="utf-8")
+        assert "REAL_CODEX_FRAMEWORK_FLOW_SKILL_SEEN" in probe.read_text(encoding="utf-8")
+        assert not (run.integration_dir / "src" / "framework_probe.txt").exists()
+
+        changesets = sorted((run.path / "changesets").glob("cs-*"), key=lambda p: p.stat().st_mtime)
+        assert changesets
+        accepted_submit = json.loads(
+            (changesets[-1] / "submit_result.json").read_text(encoding="utf-8")
+        )
+        assert accepted_submit["ok"] is True
+        assert accepted_submit["status"] == "accepted"
+        assert accepted_submit["merged_files"] == ["src/framework_probe.txt"]
+        assert accepted_submit["changeset_id"]
+
+        report = run.shared_reports_dir / "codex-framework-flow.md"
+        assert report.is_file()
+        report_text = report.read_text(encoding="utf-8")
+        assert marker in report_text
+        assert "REAL_CODEX_FRAMEWORK_FLOW_RULE_SEEN" in report_text
+        assert "REAL_CODEX_FRAMEWORK_FLOW_SKILL_SEEN" in report_text
+        assert "changeset submitted" in report_text
+
+        end = runtime.end_run("complete", reason="real codex framework flow verified", archive=True)
+        assert end.final_status == "success"
+        archive_path = Path(end.summary["archive_path"])
+        assert archive_path.is_dir()
+        assert (manager.workspace_root / "shared" / "archives" / "run-codex-flow-completed.zip").is_file()
+        assert (
+            archive_path / "shared" / "reports" / "codex-framework-flow.md"
+        ).read_text(encoding="utf-8") == report_text
+        assert (archive_path / "changesets" / accepted_submit["changeset_id"] / "submit_result.json").is_file()
+        assert not (archive_path / "agents" / "agent-codex" / "private").exists()
+        assert not (archive_path / "agents" / "agent-codex" / "private" / "checkout").exists()
+
+        with zipfile.ZipFile(
+            manager.workspace_root / "shared" / "archives" / "run-codex-flow-completed.zip"
+        ) as zf:
+            assert "reports/codex-framework-flow.md" in zf.namelist()
+    finally:
+        if cluster is not None:
+            await cluster.stop()
+        if server is not None:
+            server.close()
+        shutil.rmtree(repo_tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_real_codex_cli_framework_blocks_direct_project_and_shared_writes(
+    unused_tcp_port: int,
+) -> None:
+    codex = shutil.which("codex")
+    if codex is None:
+        pytest.skip("codex CLI is not installed on PATH")
+
+    repo_tmp = (
+        Path(__file__).resolve().parent
+        / ".pytest_tmp"
+        / f"real_codex_direct_write_{unused_tcp_port}"
+    )
+    if repo_tmp.exists():
+        shutil.rmtree(repo_tmp, ignore_errors=True)
+    project = repo_tmp / "p"
+    server = None
+    cluster = None
+    try:
+        probe = project / "src" / "direct_write_probe.txt"
+        probe.parent.mkdir(parents=True)
+        probe.write_text("base direct write probe\n", encoding="utf-8")
+
+        manager = DulwichWorkspaceManager.open_or_init(project, workspace_root=repo_tmp / "w")
+        run = manager.create_run(
+            run_id="run-codex-direct-write",
+            code_mode="project_reference",
+        )
+        server = WorkspaceRPCServer(manager, run)
+        server.start()
+
+        codex_config_overrides = _codex_real_flow_config_overrides()
+        node = AgentNode(
+            node_id="codex-direct-write-node",
+            agent_id="agent-codex-direct-write",
+            cli_kind="codex",
+            command=codex,
+            cwd=project,
+            timeout_sec=300.0,
+            write_scope=["src/direct_write_probe.txt"],
+            adapter_options={
+                "model": "gpt-5.5",
+                "timeout_sec": 240.0,
+                "disable_features": ["plugins", "shell_snapshot"],
+                "config_overrides": codex_config_overrides,
+                "extra_args": ["--full-auto"],
+            },
+        )
+        cluster = await CLIWorkerBackend.create(
+            [
+                WorkerConfig(
+                    "bootstrap-real-codex-direct-write",
+                    cwd=project,
+                    timeout_sec=30.0,
+                    command=codex,
+                    cli_kind="codex",
+                    adapter_options={
+                        "model": "gpt-5.5",
+                        "sandbox": "workspace-write",
+                        "skip_git_repo_check": True,
+                        "disable_features": ["plugins", "shell_snapshot"],
+                        "config_overrides": codex_config_overrides,
+                        "extra_args": ["--full-auto"],
+                    },
+                )
+            ],
+            port=unused_tcp_port,
+        )
+        runtime = GraphRuntime(
+            cluster,
+            enforce_private_agent_context=True,
+            private_context_manager=manager,
+            private_context_run=run,
+            private_context_rpc_server=server,
+            archive_manager=manager,
+            archive_run=run,
+        )
+
+        inst = await runtime.ensure_agent(node)
+        private = manager.agent_workspace_dir(run, "agent-codex-direct-write")
+        checkout = private / "checkout"
+        shared_direct = run.shared_reports_dir / "direct-write-forbidden.md"
+        prompt = (
+            "This is a negative boundary test. Do not use workspace_api. "
+            "Run shell commands that intentionally attempt to write "
+            "REAL_CODEX_DIRECT_WRITE_FORBIDDEN to both absolute paths below. "
+            "Catch and print errors so the turn can finish even when writes are "
+            "blocked.\n\n"
+            f"Project file path: {probe}\n"
+            f"Temporary shared report path: {shared_direct}\n\n"
+            "After those two direct write attempts, write "
+            "REAL_CODEX_PRIVATE_WRITE_ALLOWED into private-direct-ok.txt in your "
+            "current cwd to prove the private checkout is still writable. Final "
+            "answer must include REAL_CODEX_DIRECT_WRITE_BLOCKED."
+        )
+
+        raw_reply = await cluster.run_single(
+            inst.agent_id,
+            {"prompt": prompt},
+            timeout_sec=300.0,
+            _skip_skill_inject=True,
+        )
+        body = raw_reply["body"]
+        assert body["ok"] is True, body.get("codex")
+        codex_result = body["codex"]
+        assert codex_result["returncode"] == 0
+        commands = _codex_command_executions(codex_result)
+        assert commands, codex_result
+        command_output = "\n".join(
+            str(item.get("item", {}).get("aggregated_output", ""))
+            for item in codex_result.get("events") or []
+            if isinstance(item, dict)
+        )
+        blocked_markers = command_output.count("DIRECT_WRITE_BLOCKED") + command_output.count(
+            "WRITE_BLOCKED_OR_FAILED"
+        )
+        denied = (
+            "Access to the path" in command_output
+            or "访问被拒绝" in command_output
+            or "denied" in command_output.lower()
+        )
+        assert blocked_markers >= 2 or denied, command_output
+        final_text = codex_result.get("final_text") or codex_result.get("last_message") or ""
+        assert "REAL_CODEX_DIRECT_WRITE_BLOCKED" in final_text
+
+        assert probe.read_text(encoding="utf-8") == "base direct write probe\n"
+        assert not shared_direct.exists()
+        assert (checkout / "private-direct-ok.txt").read_text(
+            encoding="utf-8-sig"
+        ).strip() == "REAL_CODEX_PRIVATE_WRITE_ALLOWED"
+        assert _workspace_api_audit_commands(run) == []
+    finally:
+        if cluster is not None:
+            await cluster.stop()
+        if server is not None:
+            server.close()
+        shutil.rmtree(repo_tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_real_codex_cli_framework_recovers_from_blocked_direct_write(
+    unused_tcp_port: int,
+) -> None:
+    codex = shutil.which("codex")
+    if codex is None:
+        pytest.skip("codex CLI is not installed on PATH")
+
+    repo_tmp = (
+        Path(__file__).resolve().parent
+        / ".pytest_tmp"
+        / f"real_codex_blocked_recovery_{unused_tcp_port}"
+    )
+    if repo_tmp.exists():
+        shutil.rmtree(repo_tmp, ignore_errors=True)
+    project = repo_tmp / "p"
+    server = None
+    cluster = None
+    try:
+        probe = project / "src" / "blocked_recovery_probe.txt"
+        probe.parent.mkdir(parents=True)
+        probe.write_text("base blocked recovery probe\n", encoding="utf-8")
+
+        manager = DulwichWorkspaceManager.open_or_init(project, workspace_root=repo_tmp / "w")
+        run = manager.create_run(
+            run_id="run-codex-blocked-recovery",
+            code_mode="project_reference",
+        )
+        original_submit_checkout = manager.submit_checkout
+        submit_saw_project_base = False
+
+        def guarded_submit_checkout(run_arg: Any, checkout_arg: Any, **kwargs: Any) -> Any:
+            nonlocal submit_saw_project_base
+            assert probe.read_text(encoding="utf-8") == "base blocked recovery probe\n"
+            submit_saw_project_base = True
+            return original_submit_checkout(run_arg, checkout_arg, **kwargs)
+
+        manager.submit_checkout = guarded_submit_checkout  # type: ignore[method-assign]
+        server = WorkspaceRPCServer(manager, run)
+        server.start()
+
+        codex_config_overrides = _codex_real_flow_config_overrides()
+        node = AgentNode(
+            node_id="codex-blocked-recovery-node",
+            agent_id="agent-codex-blocked-recovery",
+            cli_kind="codex",
+            command=codex,
+            cwd=project,
+            timeout_sec=360.0,
+            write_scope=["src/blocked_recovery_probe.txt"],
+            adapter_options={
+                "model": "gpt-5.5",
+                "timeout_sec": 300.0,
+                "disable_features": ["plugins", "shell_snapshot"],
+                "config_overrides": codex_config_overrides,
+                "extra_args": ["--full-auto"],
+            },
+        )
+        cluster = await CLIWorkerBackend.create(
+            [
+                WorkerConfig(
+                    "bootstrap-real-codex-blocked-recovery",
+                    cwd=project,
+                    timeout_sec=30.0,
+                    command=codex,
+                    cli_kind="codex",
+                    adapter_options={
+                        "model": "gpt-5.5",
+                        "sandbox": "workspace-write",
+                        "skip_git_repo_check": True,
+                        "disable_features": ["plugins", "shell_snapshot"],
+                        "config_overrides": codex_config_overrides,
+                        "extra_args": ["--full-auto"],
+                    },
+                )
+            ],
+            port=unused_tcp_port,
+        )
+        runtime = GraphRuntime(
+            cluster,
+            enforce_private_agent_context=True,
+            private_context_manager=manager,
+            private_context_run=run,
+            private_context_rpc_server=server,
+            archive_manager=manager,
+            archive_run=run,
+        )
+
+        marker = "REAL_CODEX_BLOCKED_WRITE_RECOVERED"
+        inst = await runtime.ensure_agent(node)
+        prompt = (
+            "This test checks recovery after boundary enforcement. First, run a "
+            "shell command that intentionally tries to append "
+            f"{marker} to this absolute project file path without workspace_api: "
+            f"{probe}. Catch and print the error, then continue the same task.\n\n"
+            "After the direct write is blocked, recover by running exactly this "
+            "framework flow:\n"
+            "1. python -m multi_agent_tcp.workspace_api checkout --path "
+            "src/blocked_recovery_probe.txt\n"
+            "2. Modify only src/blocked_recovery_probe.txt in the current private "
+            f"checkout. Keep the base line and add {marker}.\n"
+            "3. python -m multi_agent_tcp.workspace_api status\n"
+            "4. python -m multi_agent_tcp.workspace_api diff\n"
+            "5. python -m multi_agent_tcp.workspace_api submit --task-id "
+            "real-codex-blocked-recovery --summary \"blocked write recovered via workspace api\"\n"
+            "6. python -m multi_agent_tcp.workspace_api publish --area reports "
+            "--path codex-blocked-recovery.md --text "
+            f"\"{marker} blocked direct write recovered via workspace api changeset accepted\"\n\n"
+            f"Final answer must include {marker} DIRECT_WRITE_BLOCKED_THEN_RECOVERED "
+            "changeset accepted."
+        )
+
+        raw_reply = await cluster.run_single(
+            inst.agent_id,
+            {"prompt": prompt},
+            timeout_sec=360.0,
+            _skip_skill_inject=True,
+        )
+        body = raw_reply["body"]
+        assert body["ok"] is True, body.get("codex")
+        codex_result = body["codex"]
+        assert codex_result["returncode"] == 0
+        _assert_codex_ran_workspace_api_commands(
+            codex_result,
+            [
+                "multi_agent_tcp.workspace_api checkout",
+                "src/blocked_recovery_probe.txt",
+                "multi_agent_tcp.workspace_api status",
+                "multi_agent_tcp.workspace_api diff",
+                "multi_agent_tcp.workspace_api submit",
+                "real-codex-blocked-recovery",
+                "multi_agent_tcp.workspace_api publish",
+                "codex-blocked-recovery.md",
+            ],
+        )
+        command_output = "\n".join(
+            str(item.get("item", {}).get("aggregated_output", ""))
+            for item in codex_result.get("events") or []
+            if isinstance(item, dict)
+        )
+        assert (
+            "Access to the path" in command_output
+            or "denied" in command_output.lower()
+            or "DIRECT_WRITE_BLOCKED" in command_output
+            or "WRITE_BLOCKED" in command_output
+        ), command_output
+        final_text = codex_result.get("final_text") or codex_result.get("last_message") or ""
+        assert marker in final_text
+        assert "DIRECT_WRITE_BLOCKED_THEN_RECOVERED" in final_text
+        assert "changeset accepted" in final_text
+
+        assert submit_saw_project_base is True
+        project_text = probe.read_text(encoding="utf-8")
+        assert project_text.count(marker) == 1
+        assert project_text.startswith("base blocked recovery probe\n")
+        assert not (run.integration_dir / "src" / "blocked_recovery_probe.txt").exists()
+        assert (run.shared_reports_dir / "codex-blocked-recovery.md").is_file()
+        report = (run.shared_reports_dir / "codex-blocked-recovery.md").read_text(
+            encoding="utf-8"
+        )
+        assert marker in report
+        assert "changeset accepted" in report
+
+        audit_commands = _workspace_api_audit_commands(run)
+        audit_index = 0
+        for expected in ["checkout", "status", "diff", "submit", "publish"]:
+            while audit_index < len(audit_commands) and audit_commands[audit_index] != expected:
+                audit_index += 1
+            assert audit_index < len(audit_commands), {
+                "missing": expected,
+                "audit_commands": audit_commands,
+            }
+            audit_index += 1
+        assert audit_commands.count("submit") == 1
+
+        changesets = sorted((run.path / "changesets").glob("cs-*"), key=lambda p: p.stat().st_mtime)
+        assert changesets
+        submit_result = json.loads(
+            (changesets[-1] / "submit_result.json").read_text(encoding="utf-8")
+        )
+        assert submit_result["ok"] is True
+        assert submit_result["status"] == "accepted"
+        assert submit_result["merged_files"] == ["src/blocked_recovery_probe.txt"]
+    finally:
+        if cluster is not None:
+            await cluster.stop()
+        if server is not None:
+            server.close()
+        shutil.rmtree(repo_tmp, ignore_errors=True)
 
 
 @pytest.mark.asyncio

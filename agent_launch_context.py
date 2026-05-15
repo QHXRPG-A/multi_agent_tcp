@@ -16,11 +16,51 @@ from .workspace_rpc import WorkspaceRPCServer
 
 
 WORKSPACE_API_CONTEXT_ENV = "MULTI_AGENT_WORKSPACE_CONTEXT"
+CODEX_RUNTIME_STATE_FILES = ("config.toml", "auth.json", "models_cache.json")
 
 
 def _write_text_no_bom(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _default_user_codex_home() -> Path:
+    raw = os.environ.get("CODEX_HOME")
+    if raw and raw.strip():
+        return Path(raw).expanduser()
+    return Path.home() / ".codex"
+
+
+def initialize_private_codex_home(
+    codex_home: Path,
+    *,
+    source_codex_home: Optional[Path] = None,
+) -> None:
+    """Seed a private Codex home with runtime auth/config, not user skills."""
+
+    codex_home.mkdir(parents=True, exist_ok=True)
+    source = (source_codex_home or _default_user_codex_home()).expanduser()
+    try:
+        source = source.resolve()
+        target = codex_home.resolve()
+    except OSError:
+        source = source.absolute()
+        target = codex_home.absolute()
+    if source == target:
+        return
+
+    copied_config = False
+    for name in CODEX_RUNTIME_STATE_FILES:
+        src = source / name
+        if not src.is_file():
+            continue
+        dst = codex_home / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        copied_config = copied_config or name == "config.toml"
+
+    if not copied_config and not (codex_home / "config.toml").exists():
+        _write_text_no_bom(codex_home / "config.toml", "")
 
 
 def _safe_skill_dir_name(raw: str) -> str:
@@ -76,6 +116,7 @@ def framework_agent_rules() -> str:
             "- Fetch or checkout only task-relevant code into your private checkout before editing.",
             "- Submit code changes from the private checkout through `python -m multi_agent_tcp.workspace_api submit`.",
             "- Publish reports, artifacts, summaries, file/version references, and changeset ids through the Workspace API.",
+            "- If a direct project/shared write is denied by the sandbox, treat that as boundary enforcement and continue through checkout/submit/publish instead of stopping.",
             "- Communicate with other AgentNodes through framework messages and shared references, not by copying project source trees into shared space.",
             "- Your natural-language worker reply is a framework-private utterance record; it is not delivered to other AgentNodes.",
             "- To provide information to another AgentNode, use the injected `agent.dispatch` interface for the current batch.",
@@ -109,6 +150,8 @@ def framework_agent_skill() -> str:
             "fetching only task-relevant project files with `python -m multi_agent_tcp.workspace_api checkout --path ...` or `--scope-path ...`, "
             "inspect with `python -m multi_agent_tcp.workspace_api status` or `diff`, "
             "then submit through `python -m multi_agent_tcp.workspace_api submit`.",
+            "If a direct write outside the private checkout is denied by sandbox policy, "
+            "recover by using the Workspace API flow rather than treating the denial as completed work.",
             "",
             "For reports and artifacts, publish through `python -m multi_agent_tcp.workspace_api` "
             "as shared run context. Use summaries, file paths, versions, and changeset ids when another AgentNode needs code context.",
@@ -327,8 +370,7 @@ def materialize_private_agent_context(
     private_dir = manager.agent_workspace_dir(run, node.runtime_agent_id)
     checkout = manager.checkout_agent(run, node.runtime_agent_id, write_scope=node.write_scope)
     codex_home = private_dir / "codex_home"
-    codex_home.mkdir(parents=True, exist_ok=True)
-    _write_text_no_bom(codex_home / "config.toml", "")
+    initialize_private_codex_home(codex_home)
 
     skill_catalog = materialize_codex_skill_selection(
         node,

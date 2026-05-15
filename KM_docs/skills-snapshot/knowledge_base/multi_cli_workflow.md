@@ -217,3 +217,47 @@ Follow-up adjustment: agents should not be taught physical shared workspace path
 - Codex and CodeMaker bridges should merge `prompt_execution_context` into the actual prompt when present.
 - The prompt-facing view should omit raw launch paths and private internals such as `project_context`, `checkout_path`, `codex_home`, real skill-space paths, tokens, and RPC internals.
 - Ordinary-Agent prompt context should stay limited to command contracts, scope summaries, and authorized skill/rule names and descriptions.
+
+## 2026-05-15 real Codex private-context baseline note
+
+- Strict private Codex AgentNode context is now wired through `GraphRuntime`:
+  the agent cwd is the private checkout and private `CODEX_HOME` lives under
+  the agent private run directory.
+- Private `CODEX_HOME` is not empty. It is seeded with Codex runtime state
+  files (`config.toml`, `auth.json`, `models_cache.json`) from the user's
+  Codex home, then framework/business skills are materialized into that private
+  home. This keeps real Codex runnable while preserving authorized skill/rule
+  isolation.
+- The verified real flow is project-reference checkout -> private edit ->
+  Workspace API `status`/`diff` -> `submit` accepted into the project
+  directory -> `publish` report -> archive.
+- The baseline supervision is command/API-level, not only final-state based:
+  Codex JSONL must include `command_execution` entries for the Workspace API
+  commands, `WorkspaceRPCServer` records `workspace_api_call` manifest entries,
+  and the test checks that the project file is still base content immediately
+  before framework `submit` writes the accepted changeset.
+- Direct project/shared filesystem writes are also covered negatively by
+  `test_real_codex_cli_framework_blocks_direct_project_and_shared_writes`:
+  real Codex is asked to write the physical project file and temporary shared
+  report path without `workspace_api`; those writes are denied while a private
+  checkout control write succeeds.
+- Recovery from a blocked direct write is covered by
+  `test_real_codex_cli_framework_recovers_from_blocked_direct_write`: real
+  Codex first hits sandbox denial on a direct project write, then continues the
+  same turn through checkout/status/diff/submit/publish. The project file is
+  still base content immediately before Workspace API submit applies the
+  accepted changeset.
+- Codex/model stream disconnects are task failures, not silent success:
+  worker replies with `body.ok == false` now fail the current GraphRuntime
+  message/job (blocking nodes raise and return the AgentInstance to `idle`;
+  nonblocking jobs emit `TaskFailed`).
+  Sandbox-denied shell writes can still be handled inside a successful Codex
+  turn, so being "blocked" by filesystem policy does not automatically mean
+  the agent goes offline.
+- Workspace checkout refresh must be safe when called from inside the checkout
+  cwd. The manager now clears directory contents instead of deleting the cwd
+  directory itself.
+- Current baseline test:
+  `test_agent_runtime.py::test_real_codex_cli_framework_private_checkout_submit_and_archive_flow`.
+  It uses real `codex exec`, real broker/worker subprocesses, and no fake
+  Codex gate.

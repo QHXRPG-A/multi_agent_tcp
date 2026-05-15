@@ -139,6 +139,26 @@ class WorkspaceRPCServer:
         except KeyError as exc:
             raise PermissionError("invalid workspace RPC token") from exc
 
+    def _record_api_call(self, agent_id: str, command: str, args: Dict[str, Any]) -> None:
+        payload: Dict[str, Any] = {
+            "workspace_event": "WorkspaceAPICalled",
+            "agent_id": agent_id,
+            "command": command,
+        }
+        if command == "checkout":
+            payload["checkout_paths"] = [str(item) for item in args.get("checkout_paths", args.get("paths", []))]
+            payload["write_scope"] = [str(item) for item in args.get("write_scope", [])]
+            payload["mode"] = str(args.get("mode", "full"))
+        elif command in {"status", "diff", "submit", "sync", "list-archives", "extract-archive"}:
+            for key in ("path", "summary", "task_id", "archive_id"):
+                if key in args:
+                    payload[key] = args[key]
+        elif command in {"publish", "publish-file", "read", "list"}:
+            for key in ("area", "path", "expected_version"):
+                if key in args:
+                    payload[key] = args[key]
+        self.manager._record_shared_manifest(self.run, "workspace_api_call", payload)
+
     def handle_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         token = payload.get("token")
         agent_id = self._resolve_agent(token if isinstance(token, str) else None)
@@ -146,6 +166,7 @@ class WorkspaceRPCServer:
         args = payload.get("args", {})
         if not isinstance(args, dict):
             raise ValueError("args must be a JSON object")
+        self._record_api_call(agent_id, command, args)
 
         owner = str(args.get("owner") or agent_id)
 

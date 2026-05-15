@@ -43,6 +43,81 @@ F:\src\Package\Script\Python\multi_agent_tcp
 
 Historical paths such as `D:\agents\multi_agent_tcp` or `F:\src\ryven_demo` may appear in archives. Do not use them as current defaults unless the user's machine actually has that path.
 
+## Fast Handoff - 2026-05-15 Real Codex Framework Flow Baseline
+
+When the next task touches Codex AgentNode private context, Workspace API,
+or framework-owned checkout/submit/archive behavior, start from this state:
+
+1. The real Codex framework-flow baseline is now covered by
+   `test_agent_runtime.py::test_real_codex_cli_framework_private_checkout_submit_and_archive_flow`.
+   It uses real `CLIWorkerBackend.create(...)`, broker/worker subprocesses,
+   `GraphRuntime(enforce_private_agent_context=True)`, `WorkspaceRPCServer`,
+   and real `codex exec`; there is no fake Codex and no `RUN_REAL_CODEX`
+   environment gate. If `codex` is absent, it skips like the existing smoke
+   tests.
+2. The framework path now seeds private `CODEX_HOME` with only Codex runtime
+   state files (`config.toml`, `auth.json`, `models_cache.json`) while
+   re-materializing authorized framework/business skills into the private
+   home. Do not go back to an empty private `config.toml`; real `codex exec`
+   can fail before tool execution when auth/provider config is missing.
+3. `workspace_api checkout --path ...` is expected to work when launched from
+   inside the agent private checkout. `workspace_manager._copy_project_tree`
+   and checkout refresh paths preserve the checkout directory itself and clear
+   contents, avoiding Windows cwd deletion failures (`WinError 32`).
+4. `WorkspaceRPCServer` now records each Workspace API request as a
+   `workspace_api_call` manifest entry with `workspace_event =
+   "WorkspaceAPICalled"`. The real Codex baseline also asserts Codex JSONL
+   `command_execution` entries for checkout/status/diff/submit/publish and
+   guards that the project file is still unchanged immediately before
+   framework `submit`; this closes the old gap where a direct project write
+   could look like a valid accepted changeset after the fact.
+5. Direct-write negative coverage exists in
+   `test_real_codex_cli_framework_blocks_direct_project_and_shared_writes`.
+   It exposes the physical project file and temporary shared report path to
+   real Codex and asks for direct shell writes without `workspace_api`; the
+   writes are blocked by the Codex `workspace-write` sandbox, while a private
+   checkout write still succeeds.
+6. Blocked-write recovery coverage exists in
+   `test_real_codex_cli_framework_recovers_from_blocked_direct_write`. It asks
+   real Codex to try a direct project write, observes the sandbox block, and
+   then complete the same turn through checkout/status/diff/submit/publish.
+   The submit-time guard verifies the project file is still base content until
+   Workspace API submit applies the accepted changeset.
+7. Broker and worker subprocesses receive the package parent on `PYTHONPATH`,
+   so spawned `python -m multi_agent_tcp.workspace_api ...` commands work when
+   tests or runtime start from the package directory.
+8. Codex timeout diagnostics now preserve JSONL events, partial stdout/stderr,
+   elapsed time, and last-message/final-text extraction, which is important
+   when real CLI behavior changes.
+9. Worker replies with `body.ok == false` now fail the current GraphRuntime
+   message/job, not the reusable agent binding. Blocking AgentNode messages
+   raise, record `framework.message.failed`, leave `last_error`, and return
+   the AgentInstance to `idle` so a later message can retry or continue.
+   Nonblocking jobs emit `TaskFailed`. This covers Codex/model stream failures
+   such as `stream disconnected before response.completed`. A sandbox-denied
+   shell write is different: if Codex catches the denial, recovers through
+   Workspace API, and exits with `ok == true`, the task continues.
+10. On Windows, the real integration test overrides Codex to
+   `windows.sandbox="unelevated"` to avoid the elevated sandbox helper
+   intermittently hanging or failing under multiple tool launches.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp
+pytest -q test_agent_runtime.py::test_real_codex_cli_framework_private_checkout_submit_and_archive_flow -vv
+pytest -q test_agent_runtime.py::test_real_codex_cli_framework_blocks_direct_project_and_shared_writes -vv
+pytest -q test_agent_runtime.py::test_real_codex_cli_framework_recovers_from_blocked_direct_write -vv
+pytest -q test_workspace_api.py::test_workspace_api_rpc_checkout_submit test_agent_runtime.py::test_real_codex_cli_framework_private_checkout_submit_and_archive_flow -vv
+pytest -q test_agent_runtime.py::test_graph_runtime_keeps_agent_idle_after_worker_ok_false test_agent_runtime.py::test_nonblocking_agent_job_fails_on_worker_ok_false -vv
+pytest -q test_agent_runtime.py::test_initialize_private_codex_home_seeds_runtime_state_only test_agent_runtime.py::test_graph_runtime_private_context_materializes_codex_skill_and_rules test_workspace_manager.py::test_checkout_refresh_works_when_process_cwd_is_checkout_dir test_workspace_manager.py::test_checkout_refresh_preserves_framework_agents_md test_workspace_manager.py::test_project_reference_checkout_fetches_specific_paths_and_submits_to_project -vv
+python -m py_compile agent_launch_context.py workspace_manager.py cluster.py codex_bridge.py workspace_rpc.py graph_runtime.py test_agent_runtime.py test_workspace_api.py test_workspace_manager.py
+```
+
+Real Codex tests depend on the external Codex/model stream. If a combined run
+fails with `stream disconnected before response.completed`, rerun the single
+target before treating it as a framework regression.
+
 ## Fast Handoff - 2026-05-14 Blueprint UI + Config Boundary
 
 When the next task is blueprint UI or GuLiCode desktop bring-up, start here:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from multi_agent_tcp import DulwichWorkspaceManager, describe_dulwich_backend
@@ -123,6 +124,42 @@ def test_project_reference_checkout_fetches_specific_paths_and_submits_to_projec
     assert result.merged_files == ["src/a.txt"]
     assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "changed\n"
     assert not (run.integration_dir / "src" / "a.txt").exists()
+
+
+def test_checkout_refresh_preserves_framework_agents_md(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-framework-file-refresh", code_mode="project_reference")
+
+    checkout = manager.checkout_agent(run, "agent-a", write_scope=["src/a.txt"])
+    _write(checkout.checkout_dir / "AGENTS.md", "framework rules\n")
+    _write(checkout.base_dir / "AGENTS.md", "framework rules\n")
+
+    refreshed = manager.checkout_agent(run, "agent-a", checkout_paths=["src/a.txt"])
+
+    assert (refreshed.checkout_dir / "AGENTS.md").read_text(encoding="utf-8") == "framework rules\n"
+    assert (refreshed.base_dir / "AGENTS.md").read_text(encoding="utf-8") == "framework rules\n"
+    assert manager.status_checkout(run, refreshed) == []
+
+
+def test_checkout_refresh_works_when_process_cwd_is_checkout_dir(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-refresh-from-cwd", code_mode="project_reference")
+    checkout = manager.checkout_agent(run, "agent-a", write_scope=["src/a.txt"])
+    _write(checkout.checkout_dir / "AGENTS.md", "framework rules\n")
+    _write(checkout.base_dir / "AGENTS.md", "framework rules\n")
+
+    old_cwd = Path.cwd()
+    try:
+        os.chdir(checkout.checkout_dir)
+        refreshed = manager.checkout_agent(run, "agent-a", checkout_paths=["src/a.txt"])
+    finally:
+        os.chdir(old_cwd)
+
+    assert (refreshed.checkout_dir / "src" / "a.txt").read_text(encoding="utf-8") == "base\n"
+    assert (refreshed.checkout_dir / "AGENTS.md").read_text(encoding="utf-8") == "framework rules\n"
+    assert manager.status_checkout(run, refreshed) == []
 
 
 def test_project_reference_empty_scope_checkout_stays_empty_and_rejects_changes(tmp_path: Path) -> None:

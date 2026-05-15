@@ -342,6 +342,17 @@ def test_workspace_api_rpc_checkout_submit(
         assert submit["ok"] is True
         assert submit["merged_files"] == ["src/a.txt"]
         assert (run.integration_dir / "src" / "a.txt").read_text(encoding="utf-8") == "rpc changed\n"
+        manifest = json.loads((run.shared_dir / "manifest.json").read_text(encoding="utf-8"))
+        api_calls = [
+            item
+            for item in manifest["writes"]
+            if item.get("event_type") == "workspace_api_call"
+        ]
+        assert [item["command"] for item in api_calls] == ["checkout", "submit"]
+        assert api_calls[0]["workspace_event"] == "WorkspaceAPICalled"
+        assert api_calls[0]["agent_id"] == "agent-a"
+        assert api_calls[0]["write_scope"] == ["src/**"]
+        assert api_calls[1]["task_id"] is None
     finally:
         server.close()
 

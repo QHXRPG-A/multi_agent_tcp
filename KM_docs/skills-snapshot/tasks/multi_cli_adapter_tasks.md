@@ -91,3 +91,90 @@
 - [`../knowledge_base/multi_cli_workflow.md`](../knowledge_base/multi_cli_workflow.md)
 - [`../knowledge_base/registry_and_skills.md`](../knowledge_base/registry_and_skills.md)
 - [`../knowledge_base/runtime_notes.md`](../knowledge_base/runtime_notes.md)
+
+---
+
+## 2026-05-15 Status Update - Real Codex Framework Flow
+
+The Codex AgentNode private-context baseline is now landed and verified through
+a real framework run. This changes the status of the older "temporary
+`CODEX_HOME` isolation" and "real broker + worker + run_single smoke" items:
+they are no longer first-enablement work.
+
+Completed:
+
+1. Real `cli_kind="codex"` framework-flow integration:
+   - real `CLIWorkerBackend.create(...)`;
+   - real broker and worker subprocesses;
+   - real `GraphRuntime(enforce_private_agent_context=True)`;
+   - real `WorkspaceRPCServer`;
+   - real `codex exec`;
+   - no fake Codex and no `RUN_REAL_CODEX` gate.
+2. Private Codex home lifecycle:
+   - private `CODEX_HOME` is bound to the agent private run directory;
+   - only Codex runtime state files are seeded from the user home:
+     `config.toml`, `auth.json`, `models_cache.json`;
+   - framework and authorized business skills are re-materialized into the
+     private home;
+   - user skills, sessions, logs, and plugin caches are not treated as
+     authorized business context.
+3. Project-reference workspace flow:
+   - Codex checks out `src/framework_probe.txt` from project into private
+     checkout;
+   - edits only the private checkout;
+   - runs `workspace_api status` and `diff`;
+   - submits a changeset accepted into the project directory;
+   - publishes a report into `shared/reports`;
+   - `runtime.end_run(..., archive=True)` preserves the shared report and
+     changeset record while excluding private scratch.
+4. Command/API-level supervision:
+   - `WorkspaceRPCServer` records `workspace_api_call` manifest entries for
+     checkout/status/diff/submit/publish and other Workspace API commands;
+   - the real Codex test asserts Codex JSONL `command_execution` entries for
+     checkout/status/diff/submit/publish;
+   - the real Codex test guards framework `submit` so the project file must
+     still be the original base content immediately before submit applies the
+     accepted changeset. This verifies the observed project mutation comes from
+     Workspace API submit rather than a direct project-directory write.
+5. Direct-write negative coverage:
+   - `test_real_codex_cli_framework_blocks_direct_project_and_shared_writes`
+     launches real Codex in the framework private context;
+   - the prompt intentionally exposes the physical project file and temporary
+     shared report path and asks Codex to write them directly without
+     `workspace_api`;
+   - the direct writes are denied by Codex `workspace-write`, the private
+     checkout remains writable, the project file stays at its base content, no
+     shared report appears, and no Workspace API audit call is recorded.
+6. Blocked-write recovery coverage:
+   - `test_real_codex_cli_framework_recovers_from_blocked_direct_write`
+     launches real Codex in the same private AgentNode path;
+   - the prompt intentionally attempts a direct project write first, catches
+     the sandbox denial, and then continues in the same turn through
+     checkout/status/diff/submit/publish;
+   - the submit guard verifies the project file is still base content until
+     Workspace API submit applies the accepted changeset.
+7. Worker failure propagation:
+   - GraphRuntime now treats explicit worker replies with `body.ok == false`
+     as current message/job failure instead of ordinary agent utterances;
+   - blocking AgentNode messages raise, record `framework.message.failed`, keep
+     `last_error`, and return the AgentInstance to `idle` so it remains
+     reusable for retry/continuation;
+   - nonblocking AgentNode jobs emit `TaskFailed`;
+   - sandbox-denied direct filesystem writes do not necessarily fail the task
+     if Codex catches the denial, recovers through Workspace API/private
+     checkout, and exits successfully.
+8. Windows checkout refresh hardening:
+   - checkout refresh no longer deletes the checkout directory itself when it
+     may be the current working directory;
+   - this fixes `WinError 32` when `workspace_api checkout --path ...` is run
+     from inside the private checkout.
+
+Remaining adapter work:
+
+1. Harden the private Codex home policy further if Codex adds new required
+   runtime state files.
+2. Add registry/UI examples for `cli_kind=codex` around this real baseline.
+3. Decide whether Codex session resume/persistent semantics are needed beyond
+   current per-message `codex exec`.
+4. Keep Claude and other CLI adapters as separate future probes; do not infer
+   their sandbox/auth/session behavior from Codex.

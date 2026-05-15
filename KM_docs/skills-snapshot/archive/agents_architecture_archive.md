@@ -950,3 +950,195 @@ python -m pytest test_workspace_manager.py test_workspace_api.py test_graph_cont
 2. New private-Agent runtime creation uses `project_reference`, but older manually supplied `private_context_run` values keep their configured mode.
 3. Temporary shared workspace should not be described as a source-code integration area in new docs. It is now collaboration records plus archives: reports, artifacts, manifest events, changeset references, conflict records, and file/version summaries.
 4. The next cleanup target is to reduce remaining references to `integration_dir` / `shared_code` in status and legacy job docs by routing them through the code-source/code-target abstraction.
+
+
+---
+
+### 2026-05-15 - Real Codex framework private checkout/submit/archive flow
+
+#### Summary
+
+This round added and verified the first real `codex exec` integration baseline
+for a framework-managed Codex AgentNode. The tested path is the actual runtime
+stack:
+
+```text
+GraphRuntime(enforce_private_agent_context=True)
+  -> CLIWorkerBackend
+  -> broker + worker subprocesses
+  -> CodexAdapter / codex_bridge
+  -> real codex exec
+  -> WorkspaceRPCServer / workspace_api
+  -> private checkout -> submit changeset -> shared report -> archive
+```
+
+There is no fake Codex and no `RUN_REAL_CODEX` gate. If `codex` is missing on
+PATH, the test skips in the same style as existing smoke tests.
+
+#### Landed
+
+1. Added `test_real_codex_cli_framework_private_checkout_submit_and_archive_flow`
+   in `test_agent_runtime.py`.
+   - Uses real `CLIWorkerBackend.create(...)`;
+   - uses real broker and worker subprocesses;
+   - uses `GraphRuntime(enforce_private_agent_context=True)`;
+   - uses `WorkspaceRPCServer`;
+   - runs real `codex exec`;
+   - creates a `project_reference` run so accepted submit writes to the
+     project directory, not `run.integration_dir`;
+   - verifies private `AGENTS.md`, framework skill, business skill, copied
+     rule, project file mutation, accepted changeset, shared report, and
+     archive contents;
+   - asserts Codex JSONL `command_execution` entries for
+     checkout/status/diff/submit/publish;
+   - guards framework `submit` so the project file must still contain the
+     original base content immediately before submit applies the accepted
+     changeset.
+2. Fixed private Codex home initialization in `agent_launch_context.py`.
+   - Empty private `CODEX_HOME/config.toml` made real Codex fail before
+     reliable tool execution because provider/auth config was missing.
+   - The framework now seeds only Codex runtime state files from the user home:
+     `config.toml`, `auth.json`, `models_cache.json`.
+   - Authorized framework/business skills are still re-materialized into the
+     private `CODEX_HOME`; user skills, sessions, logs, and plugin caches are
+     not treated as authorized business context.
+3. Fixed checkout refresh from inside the checkout directory in
+   `workspace_manager.py`.
+   - `workspace_api checkout --path ...` is normally run from the agent private
+     checkout cwd.
+   - On Windows, deleting the checkout directory while the shell process cwd is
+     inside it fails with `WinError 32` and can leave an empty checkout.
+   - `_copy_project_tree` and checkout/sync refresh paths now preserve the
+     directory itself and clear contents before copying.
+   - Framework-injected `AGENTS.md` is preserved into both checkout and base
+     snapshots so it does not appear as an agent change.
+4. Fixed subprocess import environment in `cluster.py`.
+   - Broker and worker subprocesses now receive the package parent on
+     `PYTHONPATH`.
+   - This keeps spawned `python -m multi_agent_tcp.workspace_api ...` commands
+     working when tests or runtime start from the package directory.
+5. Improved Codex timeout diagnostics in `codex_bridge.py`.
+   - Timeout now preserves partial stdout/stderr, parsed JSONL events, elapsed
+     time, last message, and best-effort final text.
+   - This was essential to diagnose real Codex hangs and Workspace API
+     failures instead of returning an empty timeout result.
+6. Added `.pytest_tmp/` to `.gitignore` because the real integration test uses
+   a repo-local temp root to avoid Windows temp/sandbox path surprises.
+7. Added Workspace API call auditing in `workspace_rpc.py`.
+   - Each RPC-backed Workspace API request is recorded in the shared manifest
+     as `event_type = "workspace_api_call"` and `workspace_event =
+     "WorkspaceAPICalled"`.
+   - The audit records the agent id, command, and safe provenance fields such
+     as checkout paths, write scope, task id, and publish area/path.
+   - `test_workspace_api_rpc_checkout_submit` now locks the audit shape.
+8. Added direct-write negative coverage in `test_agent_runtime.py`.
+   - `test_real_codex_cli_framework_blocks_direct_project_and_shared_writes`
+     launches real Codex through the same private AgentNode path.
+   - The prompt intentionally exposes the physical project file and temporary
+     shared report path, asks for direct shell writes without `workspace_api`,
+     and then writes a control file inside the private checkout.
+   - The expected result is: project and shared direct writes are denied,
+     private checkout write succeeds, the project file remains base content,
+     the shared report file does not appear, and the Workspace API audit log is
+     empty.
+9. Added blocked-write recovery coverage in `test_agent_runtime.py`.
+   - `test_real_codex_cli_framework_recovers_from_blocked_direct_write`
+     launches real Codex through the same private AgentNode path.
+   - The prompt intentionally attempts a direct project write first, catches
+     the sandbox denial, and then continues in the same turn through
+     checkout/status/diff/submit/publish.
+   - The expected result is: the direct write is blocked, the later Workspace
+     API submit is accepted, the project file receives the marker exactly once,
+     the report is published, and the submit-time guard verifies the project
+     file remained base content until the framework applied the changeset.
+10. Added GraphRuntime worker-failure propagation.
+   - Explicit worker replies with `body.ok == false` are now treated as failed
+     current messages/jobs, not successful framework-private utterances.
+   - Blocking AgentNode messages raise, record `framework.message.failed`,
+     keep `last_error`, and return the AgentInstance to `idle` so it remains
+     reusable for retry/continuation.
+   - Nonblocking AgentNode jobs emit `TaskFailed`.
+   - Tests: `test_graph_runtime_keeps_agent_idle_after_worker_ok_false` and
+     `test_nonblocking_agent_job_fails_on_worker_ok_false`.
+
+#### Important Findings
+
+1. A completely empty private `CODEX_HOME` is not enough for real Codex on this
+   machine. It can start a thread and then fail before useful tool execution.
+   Seeding runtime config/auth fixes this while preserving skill/rule
+   isolation.
+2. The default user Codex config on this machine included
+   `windows.sandbox = "elevated"`. The real integration test overrides this to
+   `windows.sandbox="unelevated"` because the elevated Windows sandbox helper
+   can intermittently hang or fail when multiple tool commands are launched.
+3. The real framework flow exposed a genuine Workspace API bug: checkout
+   refresh was deleting the cwd. The fix belongs in `workspace_manager.py`, not
+   in the test prompt.
+4. Merely observing an accepted changeset and a changed project file is not
+   enough to prove agent behavior. The baseline now combines Codex command
+   events, Workspace RPC audit entries, and a submit-time guard against early
+   project mutation.
+5. Direct filesystem prevention is provided by the Codex `workspace-write`
+   sandbox rooted at the private checkout. The framework also rejects unsafe
+   launch options such as `danger-full-access` and `--add-dir` overlapping the
+   read-only project context, but the sandbox is the layer that blocks raw
+   shell writes to project/shared paths in the real Codex negative test.
+6. A Codex/model stream disconnect does not by itself mean the worker process
+   disappeared; the adapter normally returns a message with `body.ok == false`.
+   The runtime now treats that as current task/message failure while keeping
+   the AgentInstance reusable. A sandbox denial inside a shell command is
+   different: if Codex handles it, recovers through Workspace API/private
+   checkout, and exits successfully, the task can continue in the same turn.
+
+#### Affected Code
+
+- `.gitignore`
+- `agent_launch_context.py`
+- `cluster.py`
+- `codex_bridge.py`
+- `workspace_manager.py`
+- `workspace_rpc.py`
+- `test_agent_runtime.py`
+- `test_workspace_api.py`
+- `test_workspace_manager.py`
+
+#### Validation
+
+```text
+python -m py_compile agent_launch_context.py workspace_manager.py cluster.py codex_bridge.py workspace_rpc.py graph_runtime.py test_agent_runtime.py test_workspace_api.py test_workspace_manager.py
+
+pytest -q test_agent_runtime.py::test_real_codex_cli_framework_private_checkout_submit_and_archive_flow -vv
+1 passed
+
+pytest -q test_agent_runtime.py::test_real_codex_cli_framework_blocks_direct_project_and_shared_writes -vv
+1 passed
+
+pytest -q test_agent_runtime.py::test_real_codex_cli_framework_recovers_from_blocked_direct_write -vv
+1 passed
+
+pytest -q test_workspace_api.py::test_workspace_api_rpc_checkout_submit test_agent_runtime.py::test_real_codex_cli_framework_private_checkout_submit_and_archive_flow -vv
+2 passed
+
+pytest -q test_agent_runtime.py::test_graph_runtime_keeps_agent_idle_after_worker_ok_false test_agent_runtime.py::test_nonblocking_agent_job_fails_on_worker_ok_false -vv
+2 passed
+
+pytest -q test_agent_runtime.py::test_initialize_private_codex_home_seeds_runtime_state_only test_agent_runtime.py::test_graph_runtime_private_context_materializes_codex_skill_and_rules test_workspace_manager.py::test_checkout_refresh_works_when_process_cwd_is_checkout_dir test_workspace_manager.py::test_checkout_refresh_preserves_framework_agents_md test_workspace_manager.py::test_project_reference_checkout_fetches_specific_paths_and_submits_to_project -vv
+5 passed
+```
+
+Note: real Codex tests depend on the external Codex/model stream. A combined
+run of multiple real Codex tests can fail with `stream disconnected before
+response.completed`; rerun the single target to distinguish service flake from
+framework regression.
+
+#### Current Boundaries
+
+1. The real Codex framework flow is now a baseline integration test. Do not
+   replace it with fake Codex or an environment-gated smoke unless the user
+   explicitly asks for a cheaper optional path in addition to the real test.
+2. Private `CODEX_HOME` isolation means authorized skills/rules are isolated;
+   runtime auth/provider config still has to be present for Codex to run.
+3. Private agent scratch remains excluded from archive. Durable output must go
+   through Workspace API `submit`, `publish`, or `publish-file`.
+4. The temporary shared workspace remains report/artifact/reference space, not
+   the project code target in `project_reference` mode.

@@ -191,10 +191,8 @@ def _copy_project_tree(
                 ignored.add(name)
         return ignored
 
-    if dst.exists():
-        shutil.rmtree(dst)
+    _clear_directory_contents(dst)
     if scopes:
-        dst.mkdir(parents=True, exist_ok=True)
         for rel, path in _relative_files(
             src,
             excluded_roots=excluded,
@@ -206,7 +204,23 @@ def _copy_project_tree(
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, target)
         return
-    shutil.copytree(src, dst, ignore=ignore)
+    for item in src.iterdir():
+        if item.name in ignore(str(src), [item.name]):
+            continue
+        target = dst / item.name
+        if item.is_dir() and not item.is_symlink():
+            shutil.copytree(item, target, ignore=ignore)
+        else:
+            shutil.copy2(item, target)
+
+
+def _clear_directory_contents(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    for child in list(path.iterdir()):
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
 
 
 def _scope_allows(path: str, scopes: Sequence[str]) -> bool:
@@ -797,6 +811,23 @@ class DulwichWorkspaceManager:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
 
+    def _capture_checkout_framework_files(self, checkout_dir: Path) -> Dict[str, str]:
+        files: Dict[str, str] = {}
+        for name in ("AGENTS.md",):
+            path = checkout_dir / name
+            if path.is_file():
+                files[name] = path.read_text(encoding="utf-8")
+        return files
+
+    def _write_checkout_framework_files(
+        self,
+        checkout: AgentCheckout,
+        files: Dict[str, str],
+    ) -> None:
+        for name, text in files.items():
+            _write_text(checkout.checkout_dir / name, text)
+            _write_text(checkout.base_dir / name, text)
+
     def checkout_agent(
         self,
         run: RunWorkspace,
@@ -823,13 +854,10 @@ class DulwichWorkspaceManager:
             ]
         )
         source = self._run_code_source(run)
+        framework_files = self._capture_checkout_framework_files(checkout_dir)
         if self._run_code_mode(run) == "project_reference" and not scopes:
-            if checkout_dir.exists():
-                shutil.rmtree(checkout_dir)
-            if checkout_base_dir.exists():
-                shutil.rmtree(checkout_base_dir)
-            checkout_dir.mkdir(parents=True, exist_ok=True)
-            checkout_base_dir.mkdir(parents=True, exist_ok=True)
+            _clear_directory_contents(checkout_dir)
+            _clear_directory_contents(checkout_base_dir)
         else:
             _copy_project_tree(source, checkout_dir, include_scopes=scopes)
             _copy_project_tree(source, checkout_base_dir, include_scopes=scopes)
@@ -846,6 +874,7 @@ class DulwichWorkspaceManager:
             base_ref=base_ref,
             write_scope=scopes,
         )
+        self._write_checkout_framework_files(checkout, framework_files)
         data = checkout.to_dict()
         data["created_at"] = _utc_now()
         _write_json(private / "checkout.json", data)
@@ -1015,24 +1044,17 @@ class DulwichWorkspaceManager:
     def sync_checkout(self, run: RunWorkspace, checkout: AgentCheckout) -> AgentCheckout:
         """Refresh a checkout from the latest integration state."""
         if checkout.checkout_dir.exists():
-            shutil.rmtree(checkout.checkout_dir)
-        if checkout.base_dir.exists():
-            shutil.rmtree(checkout.base_dir)
+            framework_files = self._capture_checkout_framework_files(checkout.checkout_dir)
+        else:
+            framework_files = {}
         source = self._run_code_source(run)
-        framework_files: Dict[str, str] = {}
-        for name in ("AGENTS.md",):
-            existing = checkout.checkout_dir / name
-            if existing.is_file():
-                framework_files[name] = existing.read_text(encoding="utf-8")
         if self._run_code_mode(run) == "project_reference" and not checkout.write_scope:
-            checkout.checkout_dir.mkdir(parents=True, exist_ok=True)
-            checkout.base_dir.mkdir(parents=True, exist_ok=True)
+            _clear_directory_contents(checkout.checkout_dir)
+            _clear_directory_contents(checkout.base_dir)
         else:
             _copy_project_tree(source, checkout.checkout_dir, include_scopes=checkout.write_scope)
             _copy_project_tree(source, checkout.base_dir, include_scopes=checkout.write_scope)
-        for name, text in framework_files.items():
-            _write_text(checkout.checkout_dir / name, text)
-            _write_text(checkout.base_dir / name, text)
+        self._write_checkout_framework_files(checkout, framework_files)
         checkout.base_ref = f"int-{uuid.uuid4().hex[:12]}"
         data = checkout.to_dict()
         data["synced_at"] = _utc_now()

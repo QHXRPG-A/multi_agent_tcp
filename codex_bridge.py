@@ -477,28 +477,57 @@ async def codex_run(
     )
     timeout = codex_cfg.get("timeout_sec")
 
+    communicate = asyncio.create_task(proc.communicate(text.encode("utf-8")))
     try:
-        out_b, err_b = await asyncio.wait_for(
-            proc.communicate(text.encode("utf-8")),
-            timeout=timeout,
-        ) if timeout else await proc.communicate(text.encode("utf-8"))
+        out_b, err_b = (
+            await asyncio.wait_for(asyncio.shield(communicate), timeout=timeout)
+            if timeout
+            else await communicate
+        )
     except asyncio.TimeoutError:
         log.warning("[codex] TIMEOUT after %ss killing pid=%s tree", timeout, proc.pid)
         await async_kill_process_tree(proc.pid, timeout=10.0)
+        out_b = b""
+        err_b = b""
+        try:
+            out_b, err_b = await asyncio.wait_for(communicate, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            communicate.cancel()
+            try:
+                await communicate
+            except (asyncio.CancelledError, ProcessLookupError):
+                pass
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             pass
         if last_message_path:
             try:
+                last_message = (
+                    last_message_path.read_text(encoding="utf-8").strip()
+                    if last_message_path.is_file()
+                    else ""
+                )
                 last_message_path.unlink(missing_ok=True)
             except OSError:
-                pass
+                last_message = ""
+        else:
+            last_message = ""
+        stdout = out_b.decode("utf-8", errors="replace")
+        stderr = err_b.decode("utf-8", errors="replace")
         return {
             "returncode": -9,
-            "stdout": "",
-            "stderr": f"codex exec timeout after {timeout}s",
+            "stdout": stdout,
+            "stderr": "\n".join(
+                part
+                for part in (stderr, f"codex exec timeout after {timeout}s")
+                if part
+            ),
             "timeout": True,
+            "elapsed_sec": time.monotonic() - t0,
+            "last_message": last_message,
+            "final_text": last_message or extract_codex_final_text(stdout),
+            "events": _parse_jsonl(stdout),
         }
 
     rc = proc.returncode if proc.returncode is not None else -1

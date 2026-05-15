@@ -64,6 +64,39 @@ def is_dispatch_no_op_body(body: Any) -> bool:
     return body == "" or (type(body) is int and body == 0)
 
 
+def _reply_failure_reason(reply: Any) -> Optional[str]:
+    """Return a concise failure reason when a worker reply is explicitly failed."""
+    if not isinstance(reply, dict):
+        return None
+    if reply.get("type") == "error":
+        return str(reply.get("error") or reply.get("message") or "worker returned error")
+    body = reply.get("body")
+    if not isinstance(body, dict):
+        return None
+    if body.get("ok") is not False:
+        return None
+    for key in ("error", "message"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("codex", "codemaker"):
+        payload = body.get(key)
+        if not isinstance(payload, dict):
+            continue
+        for nested_key in ("stderr", "final_text", "last_message", "stdout"):
+            value = payload.get(nested_key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        if payload.get("timeout"):
+            return f"{key} timed out"
+        return f"{key} returned non-zero exit status"
+    return "worker returned ok=false"
+
+
+class AgentMessageFailed(RuntimeError):
+    """A worker handled the message but reported this turn as failed."""
+
+
 def generate_agent_node_id() -> str:
     """Generate a framework-owned AgentNode id."""
     return f"agent-node-{uuid.uuid4().hex[:12]}"
@@ -3465,6 +3498,9 @@ class GraphRuntime:
                 body,
                 timeout_sec=timeout_sec if timeout_sec is not None else node.timeout_sec,
             )
+            failure_reason = _reply_failure_reason(reply)
+            if failure_reason is not None:
+                raise AgentMessageFailed(f"agent reply failed: {failure_reason}")
             self._set_agent_state(inst, "processing_reply", message_id=message_id)
         except asyncio.TimeoutError:
             self._set_agent_state(inst, "timed_out", error="timeout", message_id=message_id)
@@ -3485,6 +3521,17 @@ class GraphRuntime:
                 receiver={"type": "agent", "agent_id": inst.agent_id, "node_id": node.node_id},
                 message_id=message_id,
                 status="cancelled",
+            )
+            raise
+        except AgentMessageFailed as exc:
+            self._set_agent_state(inst, "idle", error=str(exc), message_id=message_id)
+            self._record_message_io(
+                record_type="framework.message.failed",
+                sender={"type": "framework"},
+                receiver={"type": "agent", "agent_id": inst.agent_id, "node_id": node.node_id},
+                message_id=message_id,
+                status="failed",
+                metadata={"error": str(exc)},
             )
             raise
         except Exception as exc:

@@ -50,6 +50,10 @@ log = logging.getLogger(__name__)
 _IS_WIN = sys.platform == "win32"
 
 
+def _package_parent_path() -> str:
+    return str(Path(__file__).resolve().parent.parent)
+
+
 # ---------------------------------------------------------------------------
 # Public dataclass
 # ---------------------------------------------------------------------------
@@ -679,6 +683,13 @@ class CLIWorkerBackend:
 
         py = sys.executable
         env = {**os.environ, "PYTHONUTF8": "1"}
+        package_parent = _package_parent_path()
+        existing_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            f"{package_parent}{os.pathsep}{existing_pythonpath}"
+            if existing_pythonpath
+            else package_parent
+        )
         extra_v = ["-v"] if self._verbose else []
 
         broker_cfg_path = work / f"broker_{self._port}.json"
@@ -752,6 +763,13 @@ class CLIWorkerBackend:
             "agent", "--config", str(cfg_path),
         ]
         env = {**os.environ, "PYTHONUTF8": "1"}
+        package_parent = _package_parent_path()
+        existing_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            f"{package_parent}{os.pathsep}{existing_pythonpath}"
+            if existing_pythonpath
+            else package_parent
+        )
         env.update(worker.extra_env or {})
         self._agent_procs.append(
             _spawn(acmd, f"AGENT {worker.agent_id}", verbose=self._verbose, env=env)
