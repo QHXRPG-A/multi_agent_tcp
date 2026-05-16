@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs"
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs"
 import { homedir, platform } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -14,6 +14,9 @@ const DESKTOP_ICON_ICO = join(PKG_DESKTOP, "resources", "icons", "icon.ico")
 const ELECTRON_VITE_BIN = join(PKG_DESKTOP, "node_modules", "electron-vite", "bin", "electron-vite.js")
 const ELECTRON_BUILDER_BIN = join(PKG_DESKTOP, "node_modules", "electron-builder", "cli.js")
 const OPENCODE_NODE_BUNDLE = join(PKG_OPENCODE, "dist", "node", "node.js")
+const OPENCODE_NODE_DIST = join(PKG_OPENCODE, "dist", "node")
+const OPENCODE_MIGRATION_DIR = join(PKG_OPENCODE, "migration")
+const DESKTOP_OUT_MIGRATION_DIR = join(PKG_DESKTOP, "out", "migration")
 const LOG_DIR = join(ROOT, "logs")
 const LOG_FILE = join(LOG_DIR, "gulicode-desktop-direct.log")
 
@@ -193,18 +196,63 @@ function ensureDeps(bun: string) {
 
 function ensureOpencodeBundle(bun: string) {
   if (existsSync(OPENCODE_NODE_BUNDLE)) {
+    ensureOpencodeRuntimeAssets()
     return
   }
 
   const buildScript = join(PKG_OPENCODE, "script", "build-node.ts")
-  if (!existsSync(buildScript)) {
-    warn(`opencode node bundle build script not found: ${buildScript}`)
-    warn("If the Electron main process later fails to resolve virtual:opencode-server, restore that script first.")
+  if (existsSync(buildScript)) {
+    log("building packages/opencode/dist/node/node.js ...")
+    runChecked(bun, ["script/build-node.ts"], PKG_OPENCODE, "opencode build-node.ts")
+    ensureOpencodeRuntimeAssets()
     return
   }
 
-  log("building packages/opencode/dist/node/node.js ...")
-  runChecked(bun, ["script/build-node.ts"], PKG_OPENCODE, "opencode build-node.ts")
+  warn(`opencode node bundle build script not found: ${buildScript}`)
+  log("building packages/opencode/dist/node/node.js from src/node.ts ...")
+  rmSync(OPENCODE_NODE_DIST, { recursive: true, force: true })
+  mkdirSync(OPENCODE_NODE_DIST, { recursive: true })
+  runChecked(
+    bun,
+    [
+      "build",
+      "./src/node.ts",
+      "--target=node",
+      "--format=esm",
+      "--outdir",
+      "./dist/node",
+      "--entry-naming",
+      "node.js",
+      "--external",
+      "node-gyp",
+      "--external",
+      "jsonc-parser",
+    ],
+    PKG_OPENCODE,
+    "opencode src/node.ts bundle",
+  )
+  ensureOpencodeRuntimeAssets()
+}
+
+function ensureOpencodeRuntimeAssets() {
+  if (!existsSync(OPENCODE_NODE_DIST)) return
+
+  writeFileSync(join(OPENCODE_NODE_DIST, "models-snapshot.js"), "export const snapshot = {}\n")
+
+  const webUiStubDir = join(OPENCODE_NODE_DIST, "node_modules", "opencode-web-ui.gen.ts")
+  mkdirSync(webUiStubDir, { recursive: true })
+  writeFileSync(
+    join(webUiStubDir, "package.json"),
+    JSON.stringify({ name: "opencode-web-ui.gen.ts", type: "module", main: "./index.js" }, null, 2),
+  )
+  writeFileSync(join(webUiStubDir, "index.js"), "export default {}\n")
+}
+
+function copyOpencodeRuntimeAssetsToDesktopOut() {
+  if (existsSync(OPENCODE_MIGRATION_DIR)) {
+    rmSync(DESKTOP_OUT_MIGRATION_DIR, { recursive: true, force: true })
+    cpSync(OPENCODE_MIGRATION_DIR, DESKTOP_OUT_MIGRATION_DIR, { recursive: true })
+  }
 }
 
 interface ProcInfo {
@@ -466,6 +514,13 @@ function runDevMode(bun: string) {
   })
 
   teePipe(child, logFd)
+
+  child.stdout?.on("data", (chunk: Buffer | string) => {
+    const text = String(chunk)
+    if (text.includes("electron preload scripts built successfully")) {
+      copyOpencodeRuntimeAssetsToDesktopOut()
+    }
+  })
 
   const shutdown = (signal: NodeJS.Signals) => {
     log(`received ${signal}, shutting down ...`)

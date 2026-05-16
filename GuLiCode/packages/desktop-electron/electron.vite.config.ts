@@ -10,6 +10,8 @@ const channel = (() => {
 })()
 
 const OPENCODE_SERVER_DIST = "../opencode/dist/node"
+const OPENCODE_MIGRATION_DIR = "../opencode/migration"
+const DESKTOP_OUT_MIGRATION_DIR = "./out/migration"
 
 const nodePtyPkg = `@lydell/node-pty-${process.platform}-${process.arch}`
 
@@ -46,6 +48,8 @@ export default defineConfig({
             if (!l.endsWith(".wasm")) continue
             await fs.writeFile(`./out/main/chunks/${l}`, await fs.readFile(`${OPENCODE_SERVER_DIST}/${l}`))
           }
+          await fs.rm(DESKTOP_OUT_MIGRATION_DIR, { recursive: true, force: true })
+          await fs.cp(OPENCODE_MIGRATION_DIR, DESKTOP_OUT_MIGRATION_DIR, { recursive: true })
         },
       },
     ],
