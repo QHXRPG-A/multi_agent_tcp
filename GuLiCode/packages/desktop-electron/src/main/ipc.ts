@@ -16,6 +16,7 @@ import {
   listBlueprintRules,
   listBlueprintSkills,
 } from "./blueprint-catalog"
+import type { BlueprintDocument, BlueprintRunEndAction, BlueprintRuntime } from "./blueprint-runtime"
 import { getStore } from "./store"
 import { setTitlebar } from "./windows"
 
@@ -44,6 +45,7 @@ type Deps = {
   checkUpdate: () => Promise<{ updateAvailable: boolean; version?: string }>
   installUpdate: () => Promise<void> | void
   setBackgroundColor: (color: string) => void
+  blueprintRuntime: BlueprintRuntime
 }
 
 export function registerIpcHandlers(deps: Deps) {
@@ -102,6 +104,39 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("blueprint-list-skills", (_event: IpcMainInvokeEvent, dir: string) => listBlueprintSkills(dir))
   ipcMain.handle("blueprint-list-rules", (_event: IpcMainInvokeEvent, dir: string) => listBlueprintRules(dir))
   ipcMain.handle("blueprint-list-models", (_event: IpcMainInvokeEvent, cliKind: string) => listBlueprintModels(cliKind))
+  ipcMain.handle("blueprint-list", (_event: IpcMainInvokeEvent, projectDir: string) =>
+    deps.blueprintRuntime.list(projectDir),
+  )
+  ipcMain.handle("blueprint-open", (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string) =>
+    deps.blueprintRuntime.open(projectDir, blueprintId),
+  )
+  ipcMain.handle("blueprint-save", (_event: IpcMainInvokeEvent, projectDir: string, document: BlueprintDocument) =>
+    deps.blueprintRuntime.save(projectDir, document),
+  )
+  ipcMain.handle(
+    "blueprint-validate",
+    (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string, document?: BlueprintDocument) =>
+      deps.blueprintRuntime.validate(projectDir, blueprintId, document),
+  )
+  ipcMain.handle(
+    "blueprint-list-runs",
+    (_event: IpcMainInvokeEvent, projectDir?: string, blueprintId?: string) =>
+      deps.blueprintRuntime.listRuns(projectDir, blueprintId),
+  )
+  ipcMain.handle(
+    "blueprint-start",
+    (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string, plan: Record<string, unknown>) =>
+      deps.blueprintRuntime.start(projectDir, blueprintId, plan),
+  )
+  ipcMain.handle("blueprint-status", (_event: IpcMainInvokeEvent, runId: string) => deps.blueprintRuntime.status(runId))
+  ipcMain.handle(
+    "blueprint-end",
+    (_event: IpcMainInvokeEvent, runId: string, action: BlueprintRunEndAction, reason?: string) =>
+      deps.blueprintRuntime.end(runId, action, reason),
+  )
+  ipcMain.handle("blueprint-recent-events", (_event: IpcMainInvokeEvent, runId: string, limit?: number) =>
+    deps.blueprintRuntime.recentEvents(runId, limit),
+  )
 
   ipcMain.handle(
     "open-directory-picker",

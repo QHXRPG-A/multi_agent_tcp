@@ -1,6 +1,6 @@
 # Current Short-Term Goals
 
-Last cleaned: 2026-05-14
+Last cleaned: 2026-05-17
 
 ## Current Main Line
 
@@ -73,6 +73,39 @@ This round has already established the first usable desktop/UI baseline:
   or parsing `codex debug models` JSON.
 - `adapter_options` remains visible only as an advanced JSON field for
   low-level CLI adapter fallback parameters.
+- Blueprint 1-3 API bridge is now implemented:
+  `BlueprintDocument v1`, project JSON persistence at
+  `.multi_agent_workspace/blueprints/default.json`, Python
+  `desktop_blueprint_service.py`, Electron `blueprint-runtime.ts`,
+  preload/IPC/platform methods, and blueprint panel migration from
+  `blueprint-draft.v1` into project JSON.
+- `blueprint.list/open/save/validate` are implemented end to end. Validation
+  uses `graph_definition_from_dict(...).validate_runnable()`.
+- Blueprint Runtime middle layer v1 is now implemented in the Python desktop
+  service. `blueprint.start/status/end/recentEvents` are backed by a
+  service-owned live run registry, `GraphRuntimeControlPlane`, `GraphRuntime`,
+  complete `TopAgentStartPlan` validation, bounded recent events, and terminal
+  run handling. This v1 intentionally uses `DesktopBlueprintNoopBackend`: it
+  queues start-node work and exposes lifecycle/status projections without
+  starting broker/CLI workers or running an automatic tick loop.
+- Blueprint UI runtime status projection is now implemented. The app derives
+  a deterministic `createBlueprintStartPlan(draft)` from the blueprint graph,
+  including all AgentNode descriptions, start-terminal traversal through
+  RouteNodes, start-node-only tasks, and the fixed
+  `blueprint-ui-derived` run policy.
+- The Python/Electron runtime bridge now exposes `blueprint.listRuns`; status
+  responses include `runtime.explain_status(graph=graph)` as `explanation`;
+  `blueprint.start` has a status-only `executionMode` guard and rejects `live`
+  until the second execution-coupling phase.
+- The blueprint panel now saves the project blueprint before Start, starts the
+  `default` runtime run with the derived plan, retains `runId`, polls
+  `blueprint.status` and `blueprint.recentEvents(runId, 50)`, and stops
+  automatic polling when the run is completed, cancelled, failed, or paused.
+- The Runtime side panel now projects Overview, Agents, Queues, Events, and
+  Workspace data directly from `status_snapshot` and `explain_status`,
+  including runs, agents, queues, outgoing batches, joins, jobs, workspace
+  counters, and recent events. The renderer still does not own scheduler,
+  queue, fan-in, workspace/archive, or worker lifecycle semantics.
 - The latest packaged smoke output was regenerated at `GuLiCode/packages/desktop-electron/dist/packaged-launch/current/win-unpacked/GuLiCode Dev.exe` on 2026-05-14 after the resizable blueprint divider change.
 - Full Windows installer packaging has a documented local workaround for
   electron-builder `winCodeSign` symlink extraction failures: temporary local
@@ -96,6 +129,9 @@ Start from these source files:
 - `GuLiCode/packages/app/src/context/platform.tsx`
 - `GuLiCode/packages/desktop-electron/src/main/blueprint-catalog.ts`
 - `GuLiCode/packages/desktop-electron/src/main/blueprint-catalog.test.ts`
+- `GuLiCode/packages/desktop-electron/src/main/blueprint-runtime.ts`
+- `GuLiCode/packages/desktop-electron/src/main/blueprint-runtime.test.ts`
+- `GuLiCode/packages/desktop-electron/src/main/ipc-blueprint-runtime.test.ts`
 - `GuLiCode/packages/desktop-electron/src/main/ipc.ts`
 - `GuLiCode/packages/desktop-electron/src/preload/index.ts`
 - `GuLiCode/packages/desktop-electron/src/preload/types.ts`
@@ -106,11 +142,21 @@ Start from these source files:
 - `GuLiCode/packages/app/src/i18n/en.ts`
 - `GuLiCode/packages/app/src/i18n/zh.ts`
 - `GuLiCode/packages/app/src/i18n/zht.ts`
+- `desktop_blueprint_service.py`
+- `test_desktop_blueprint_service.py`
+- `__main__.py`
+- `__init__.py`
 
 Before changing behavior, run:
 
 ```powershell
-cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+cd D:\agent\multi_agent_tcp
+pytest -q test_desktop_blueprint_service.py test_graph_control.py
+python -m py_compile desktop_blueprint_service.py __main__.py __init__.py
+```
+
+```powershell
+cd D:\agent\multi_agent_tcp\GuLiCode\packages\app
 bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts
 bun run build
 ```
@@ -118,8 +164,8 @@ bun run build
 If touching Electron catalog/model IPC or packaged desktop identity, also run:
 
 ```powershell
-cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
-bun test ./src/main/blueprint-catalog.test.ts
+cd D:\agent\multi_agent_tcp\GuLiCode\packages\desktop-electron
+bun test ./src/main/blueprint-runtime.test.ts ./src/main/ipc-blueprint-runtime.test.ts ./src/main/blueprint-catalog.test.ts
 bun run build
 ```
 
@@ -128,10 +174,22 @@ by existing `src/custom-elements.d.ts` content (`../../ui/src/custom-elements.d.
 
 ## Active Priorities
 
-1. Bind the blueprint draft UI to `GraphRuntimeControlPlane` and `GraphRuntime` without moving scheduler semantics into the renderer.
-2. Decide durable blueprint persistence ownership: local draft, project JSON, workspace records, and migration from `Persist.workspace(projectDir, "blueprint-draft.v1")`.
-3. Extend the existing Electron/preload catalog bridge into the Python/runtime bridge needed for graph load/save and runtime start/status/end.
-4. Project runtime/control-plane status into GuLiCode UI: runs, agents, outgoing batches, joins, workspace changes, artifacts, reports, and top-agent explanations.
+2026-05-17 update: the UI/runtime status projection is complete. The top
+priority is now a manual packaged/UI smoke of that projection, then planning
+the second execution-coupling phase.
+
+1. Manual-smoke the runtime projection in GuLiCode: Start saves before start,
+   `runId` is retained, status/events poll, Runtime Overview/Agents/Queues/
+   Events/Workspace render non-empty and empty states correctly, Refresh works,
+   and Complete/Pause/Cancel update terminal or paused runs.
+2. Keep runtime semantics in Python. The renderer must not reimplement graph
+   scheduling, fan-in, queue processing, workspace/archive behavior, or
+   top-agent governance.
+3. Add top-agent/operator audit surfaces such as utterance history only in
+   top-level UI views, not as ordinary-Agent message context.
+4. Plan the next runtime execution depth after status projection is stable:
+   automatic tick loop, real `CLIWorkerBackend` startup, and live worker
+   execution.
 5. Frontend smoke the current blueprint interaction and config pass: common config panel, skill/rule multi-selects, CLI/model dropdown refresh, right-click canvas pan, right-click node menu, double-click inspector, add-node click/drop, port drag connection, grid snapping, inspector collapse, and keyboard delete.
 6. Frontend visual-smoke the current blueprint style pass: dark inspector
    surface, light labels, tip buttons, select menu colors, `非阻塞`
@@ -141,9 +199,8 @@ by existing `src/custom-elements.d.ts` content (`../../ui/src/custom-elements.d.
    exe icons, avoid temporary config drift, and kill only old packaged
    `GuLiCode Dev.exe` instances when the output directory is locked.
 8. Continue brand unification across desktop window title, taskbar identity, packaged icons, empty states, and any remaining user-visible `OpenCode` wording.
-9. Expose top-agent/operator audit surfaces only in top-level UI views, not as ordinary-Agent message context.
-10. Keep workspace/archive behavior aligned with framework-owned changeset, conflict, report, artifact, and reference records.
-11. Keep Tauri secondary on this machine; Electron remains the default bring-up and verification path.
+9. Keep workspace/archive behavior aligned with framework-owned changeset, conflict, report, artifact, and reference records.
+10. Keep Tauri secondary on this machine; Electron remains the default bring-up and verification path.
 
 ## 2026-05-14 Testing Focus
 
@@ -205,6 +262,18 @@ by existing `src/custom-elements.d.ts` content (`../../ui/src/custom-elements.d.
 4. Runtime/UI contract smoke:
    - Keep the rule that renderer surfaces consume runtime/control-plane state instead of rebuilding graph scheduling locally.
    - Keep durable Agent outputs flowing through framework APIs: `agent.dispatch`, Workspace API, `join.contribute`, and later structured task APIs.
+   - Verify Start saves the current project blueprint before calling
+     `blueprint.start`.
+   - Verify the returned `runId` is retained and the Runtime panel projects
+     Overview, Agents, Queues, Events, and Workspace from runtime status.
+   - Verify status and recent events refresh every 2 seconds for active runs.
+   - Verify Refresh still works after polling stops.
+   - Verify Complete, Pause, and Cancel call `blueprint.end` and refresh
+     status immediately.
+   - Verify terminal or paused runs stop automatic polling but remain queryable.
+   - After this status projection smoke is stable, plan service-owned
+     automatic tick loop, real `CLIWorkerBackend` startup,
+     `executionMode=live`, and live worker execution.
 
 ## Deferred / Secondary Tracks
 
@@ -250,4 +319,18 @@ F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
 -> if old dist/win-unpacked/GuLiCode Dev.exe processes are still running, builder can fail removing d3dcompiler_47.dll; close/kill those old output-dir instances and rerun
 -> produced dist/opencode-electron-win-x64.exe, dist/opencode-electron-win-x64.exe.blockmap, and dist/win-unpacked/GuLiCode Dev.exe with the corrected icon
 -> 2026-05-14 successful artifact timestamps: installer 18:13:35, blockmap 18:13:37, win-unpacked exe 18:13:03
+
+Additional 2026-05-17 checks:
+
+D:\agent\multi_agent_tcp
+-> pytest -q test_desktop_blueprint_service.py test_graph_control.py passes: 17 passed
+-> python -m py_compile desktop_blueprint_service.py __main__.py __init__.py passes
+
+D:\agent\multi_agent_tcp\GuLiCode\packages\app
+-> bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts passes: 18 pass
+-> bun run build passes with existing Vite warnings only
+
+D:\agent\multi_agent_tcp\GuLiCode\packages\desktop-electron
+-> bun test ./src/main/blueprint-runtime.test.ts ./src/main/ipc-blueprint-runtime.test.ts ./src/main/blueprint-catalog.test.ts passes: 9 pass
+-> bun run build passes with existing Vite warnings only
 ```

@@ -15,6 +15,29 @@ export type BlueprintCatalogItem = {
   description?: string
 }
 
+export type BlueprintDocument = {
+  schema_version: 1
+  id: string
+  name: string
+  graph: Record<string, unknown>
+  ui: Record<string, unknown>
+}
+
+export type BlueprintSummary = {
+  id: string
+  name: string
+  path: string
+  updated_at: number
+}
+
+export type BlueprintValidationResult = {
+  ok: boolean
+  errors: string[]
+  warnings: string[]
+}
+
+export type BlueprintRunEndAction = "complete" | "cancel" | "fail" | "pause"
+
 export type Platform = {
   /** Platform discriminator */
   platform: "web" | "desktop"
@@ -63,6 +86,33 @@ export type Platform = {
 
   /** Blueprint model candidates for the selected CLI adapter (desktop only) */
   listBlueprintModels?(cliKind: string): Promise<string[]>
+
+  /** Project blueprint document list (desktop only) */
+  listBlueprints?(projectDir: string): Promise<BlueprintSummary[]>
+
+  /** Open one project blueprint document (desktop only) */
+  openBlueprint?(projectDir: string, blueprintId: string): Promise<BlueprintDocument>
+
+  /** Save one project blueprint document (desktop only) */
+  saveBlueprint?(projectDir: string, document: BlueprintDocument): Promise<BlueprintDocument>
+
+  /** Validate one project blueprint document against runtime graph rules (desktop only) */
+  validateBlueprint?(projectDir: string, blueprintId: string, document?: BlueprintDocument): Promise<BlueprintValidationResult>
+
+  /** List live blueprint runs owned by the desktop runtime service (desktop only) */
+  listBlueprintRuns?(projectDir?: string, blueprintId?: string): Promise<Record<string, unknown>[]>
+
+  /** Reserved runtime API for the next status UI pass (desktop only) */
+  startBlueprintRun?(projectDir: string, blueprintId: string, plan: Record<string, unknown>): Promise<Record<string, unknown>>
+
+  /** Reserved runtime API for the next status UI pass (desktop only) */
+  blueprintRunStatus?(runId: string): Promise<Record<string, unknown>>
+
+  /** Reserved runtime API for the next status UI pass (desktop only) */
+  endBlueprintRun?(runId: string, action: BlueprintRunEndAction, reason?: string): Promise<Record<string, unknown>>
+
+  /** Reserved runtime API for the next status UI pass (desktop only) */
+  blueprintRecentEvents?(runId: string, limit?: number): Promise<Record<string, unknown>>
 
   /** Storage mechanism, defaults to localStorage */
   storage?: (name?: string) => SyncStorage | AsyncStorage

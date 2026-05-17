@@ -6,7 +6,7 @@ import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Popover } from "@opencode-ai/ui/popover"
 import { TextField, type TextFieldProps } from "@opencode-ai/ui/text-field"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount, splitProps, type JSX } from "solid-js"
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount, splitProps, untrack, type JSX } from "solid-js"
 import { createStore, reconcile, type SetStoreFunction } from "solid-js/store"
 import { useLanguage } from "@/context/language"
 import { Persist, persisted } from "@/utils/persist"
@@ -19,6 +19,9 @@ import {
   addEdge,
   addNode,
   CLI_KIND_OPTIONS,
+  DEFAULT_BLUEPRINT_ID,
+  DEFAULT_BLUEPRINT_NAME,
+  createBlueprintStartPlan,
   createDefaultBlueprintDraft,
   defaultCommandForCliKind,
   defaultModelForCliKind,
@@ -37,6 +40,8 @@ import {
   setInspector,
   setSelection,
   snapPosition,
+  fromBlueprintDocument,
+  toBlueprintDocument,
   toRuntimeGraphDraft,
   updateEdge,
   type BlueprintAddNodeKind,
@@ -49,7 +54,7 @@ import {
   type BlueprintRouteNode,
   type BlueprintTerminalKind,
 } from "@/pages/session/blueprint-model"
-import { usePlatform, type BlueprintCatalogItem } from "@/context/platform"
+import { usePlatform, type BlueprintCatalogItem, type BlueprintRunEndAction } from "@/context/platform"
 
 const NODE_WIDTH = 172
 const NODE_HEIGHT = 72
@@ -171,6 +176,28 @@ export type ModelCatalogState = {
   models: string[]
   loading: boolean
   error?: string
+}
+
+type PersistenceState = {
+  loaded: boolean
+  loading: boolean
+  saving: boolean
+  source: "local" | "project"
+  error?: string
+}
+
+type RuntimePanelMode = "runtime" | "inspector"
+
+type BlueprintRuntimeState = {
+  runId?: string
+  runs: Record<string, unknown>[]
+  status?: Record<string, unknown>
+  explanation?: Record<string, unknown>
+  events: Record<string, unknown>[]
+  loading: boolean
+  action?: string
+  error?: string
+  lastUpdatedAt?: number
 }
 
 const INSPECTOR_TIPS = {
@@ -362,7 +389,21 @@ export function BlueprintSidePanel() {
     models: [],
     loading: false,
   })
+  const [persistence, setPersistence] = createSignal<PersistenceState>({
+    loaded: false,
+    loading: false,
+    saving: false,
+    source: "local",
+  })
+  const [runtime, setRuntime] = createSignal<BlueprintRuntimeState>({
+    runs: [],
+    events: [],
+    loading: false,
+  })
+  const [panelMode, setPanelMode] = createSignal<RuntimePanelMode>("runtime")
   let canvasRef: HTMLDivElement | undefined
+  let saveTimer: ReturnType<typeof setTimeout> | undefined
+  let applyingRemote = false
 
   const addOptions = createMemo(() => [
     {
@@ -454,6 +495,36 @@ export function BlueprintSidePanel() {
     setDraft(reconcile(next))
   }
 
+  const persistProjectDraft = async (next: BlueprintDraft) => {
+    if (!platform.saveBlueprint) return
+    await platform.saveBlueprint(projectDirectory, toBlueprintDocument(next, DEFAULT_BLUEPRINT_ID, DEFAULT_BLUEPRINT_NAME))
+  }
+
+  const saveProjectDraft = async (next: BlueprintDraft) => {
+    if (!platform.saveBlueprint) return
+    setPersistence((current) => ({ ...current, saving: true, error: undefined }))
+    try {
+      await persistProjectDraft(next)
+      setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+    } catch (error) {
+      setPersistence((current) => ({
+        ...current,
+        saving: false,
+        source: current.source,
+        error: readableError(error),
+      }))
+    }
+  }
+
+  const scheduleProjectSave = () => {
+    const current = untrack(persistence)
+    if (applyingRemote || !current.loaded || !platform.saveBlueprint) return
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(() => {
+      void saveProjectDraft(draft)
+    }, 450)
+  }
+
   const listSkills = async (skillDir: string) => {
     if (!skillDir) return [] as BlueprintCatalogItem[]
     const items = await platform.listBlueprintSkills?.(skillDir)
@@ -486,6 +557,56 @@ export function BlueprintSidePanel() {
     onCleanup(() => {
       cancelled = true
     })
+  })
+
+  createEffect(() => {
+    if (!draftReady()) return
+    if (persistence().loaded || persistence().loading) return
+    if (!platform.openBlueprint || !platform.saveBlueprint) {
+      setPersistence({ loaded: true, loading: false, saving: false, source: "local" })
+      return
+    }
+    setPersistence({ loaded: false, loading: true, saving: false, source: "local" })
+    void (async () => {
+      try {
+        const document = await platform.openBlueprint(projectDirectory, DEFAULT_BLUEPRINT_ID)
+        applyingRemote = true
+        replaceDraft(fromBlueprintDocument(document, projectDirectory))
+        queueMicrotask(() => {
+          applyingRemote = false
+        })
+        setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+      } catch (error) {
+        const code = typeof error === "object" && error !== null ? (error as { code?: string }).code : undefined
+        if (code === "NOT_FOUND" || readableError(error).includes("NOT_FOUND")) {
+          await saveProjectDraft(draft)
+          return
+        }
+        setPersistence({
+          loaded: true,
+          loading: false,
+          saving: false,
+          source: "local",
+          error: readableError(error),
+        })
+      }
+    })()
+  })
+
+  createEffect(() => {
+    draft.schema_version
+    draft.config.project_workdir
+    draft.config.skill_dir
+    draft.config.rule_dir
+    JSON.stringify(draft.graph)
+    JSON.stringify(draft.layout)
+    JSON.stringify(draft.selection)
+    JSON.stringify(draft.inspector)
+    scheduleProjectSave()
+  })
+
+  onCleanup(() => {
+    if (saveTimer) clearTimeout(saveTimer)
   })
 
   async function refreshModelCatalog(cliKind: string) {
@@ -530,20 +651,143 @@ export function BlueprintSidePanel() {
     if (!valid) replaceDraft(setInspector(draft, undefined))
   })
 
+  createEffect(() => {
+    if (!persistence().loaded || !platform.listBlueprintRuns || runtime().runId || runtime().runs.length) return
+    let cancelled = false
+    void platform
+      .listBlueprintRuns(projectDirectory, DEFAULT_BLUEPRINT_ID)
+      .then((runs) => {
+        if (cancelled) return
+        const latest = runs[0]
+        const runId = typeof latest?.runId === "string" ? latest.runId : undefined
+        setRuntime((current) => ({ ...current, runs, runId: current.runId ?? runId }))
+        if (runId) void refreshBlueprintRuntime(runId)
+      })
+      .catch((error) => {
+        if (!cancelled) setRuntime((current) => ({ ...current, error: readableError(error) }))
+      })
+    onCleanup(() => {
+      cancelled = true
+    })
+  })
+
+  createEffect(() => {
+    const runId = runtime().runId
+    const status = runtimeStatus(runtime().status)
+    if (!runId || isTerminalRuntimeStatus(status)) return
+    const interval = setInterval(() => {
+      void refreshBlueprintRuntime(runId, { quiet: true })
+    }, 2000)
+    onCleanup(() => clearInterval(interval))
+  })
+
+  async function refreshBlueprintRuntime(runId = runtime().runId, opts: { quiet?: boolean } = {}) {
+    if (!runId || !platform.blueprintRunStatus) return
+    if (!opts.quiet) setRuntime((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      const [statusResponse, eventsResponse] = await Promise.all([
+        platform.blueprintRunStatus(runId),
+        platform.blueprintRecentEvents?.(runId, 50),
+      ])
+      setRuntime((current) => ({
+        ...current,
+        runId,
+        status: asRecord(statusResponse.status),
+        explanation: asRecord(statusResponse.explanation),
+        events: arrayOfRecords(eventsResponse?.events),
+        loading: false,
+        error: undefined,
+        lastUpdatedAt: Date.now(),
+      }))
+    } catch (error) {
+      setRuntime((current) => ({
+        ...current,
+        loading: false,
+        error: readableError(error),
+      }))
+    }
+  }
+
+  async function startBlueprintRuntime() {
+    if (!platform.saveBlueprint || !platform.startBlueprintRun) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
+      return
+    }
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+    }
+    setPanelMode("runtime")
+    setPersistence((current) => ({ ...current, saving: true, error: undefined }))
+    setRuntime((current) => ({ ...current, loading: true, action: "start", error: undefined }))
+    try {
+      await persistProjectDraft(draft)
+      setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+      const started = await platform.startBlueprintRun(
+        projectDirectory,
+        DEFAULT_BLUEPRINT_ID,
+        createBlueprintStartPlan(draft),
+      )
+      const runId = typeof started.runId === "string" ? started.runId : undefined
+      setRuntime((current) => ({
+        ...current,
+        runId,
+        status: asRecord(started.status),
+        events: arrayOfRecords(asRecord(started.status)?.recent_events),
+        loading: false,
+        action: undefined,
+        error: undefined,
+        lastUpdatedAt: Date.now(),
+      }))
+      if (platform.listBlueprintRuns) {
+        const runs = await platform.listBlueprintRuns(projectDirectory, DEFAULT_BLUEPRINT_ID)
+        setRuntime((current) => ({ ...current, runs }))
+      }
+      if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
+    } catch (error) {
+      const message = readableError(error)
+      setPersistence((current) => ({ ...current, saving: false, error: message }))
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
+    }
+  }
+
+  async function endBlueprintRuntime(action: BlueprintRunEndAction) {
+    const runId = runtime().runId
+    if (!runId || !platform.endBlueprintRun) return
+    setRuntime((current) => ({ ...current, loading: true, action, error: undefined }))
+    try {
+      const ended = await platform.endBlueprintRun(runId, action, `blueprint UI ${action}`)
+      setRuntime((current) => ({
+        ...current,
+        status: asRecord(ended.status),
+        events: arrayOfRecords(asRecord(ended.status)?.recent_events),
+        loading: false,
+        action: undefined,
+        lastUpdatedAt: Date.now(),
+      }))
+      void refreshBlueprintRuntime(runId, { quiet: true })
+    } catch (error) {
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: readableError(error) }))
+    }
+  }
+
   const selectNode = (id: string) => {
     replaceDraft(setSelection(draft, { type: "node", id }))
   }
 
   const inspectNode = (id: string) => {
     replaceDraft(setInspector(setSelection(draft, { type: "node", id }), { type: "node", id }))
+    setPanelMode("inspector")
   }
 
   const inspectEdge = (id: string) => {
     replaceDraft(setInspector(setSelection(draft, { type: "edge", id }), { type: "edge", id }))
+    setPanelMode("inspector")
   }
 
   const closeInspector = () => {
     replaceDraft(setInspector(draft, undefined))
+    setPanelMode("runtime")
   }
 
   const worldPointFromClient = (clientX: number, clientY: number) => {
@@ -839,6 +1083,15 @@ export function BlueprintSidePanel() {
           <Show when={!draftReady()}>
             <div class="text-11-regular text-text-weaker">{language.t("common.loading")}</div>
           </Show>
+          <Show when={persistence().loading || persistence().saving || persistence().error}>
+            <div class="max-w-80 truncate text-11-regular text-text-weaker">
+              {persistence().loading
+                ? language.t("common.loading")
+                : persistence().saving
+                  ? language.t("common.save")
+                  : persistence().error}
+            </div>
+          </Show>
         </div>
         <Tooltip placement="bottom" value={language.t("common.close")}>
           <IconButton
@@ -887,6 +1140,37 @@ export function BlueprintSidePanel() {
           </DropdownMenu>
         </div>
         <div class="flex shrink-0 items-center gap-1">
+          <Tooltip placement="bottom" value={language.t("blueprint.runtime.start")}>
+            <Button
+              size="small"
+              variant="ghost"
+              icon="terminal"
+              class="h-7 px-2"
+              disabled={runtime().loading || !persistence().loaded}
+              onClick={() => void startBlueprintRuntime()}
+            >
+              <span class="hidden lg:inline">{language.t("blueprint.runtime.start")}</span>
+            </Button>
+          </Tooltip>
+          <Tooltip placement="bottom" value={language.t("blueprint.runtime.refresh")}>
+            <IconButton
+              icon="reset"
+              variant="ghost"
+              class="h-7 w-7"
+              disabled={!runtime().runId || runtime().loading}
+              onClick={() => void refreshBlueprintRuntime()}
+              aria-label={language.t("blueprint.runtime.refresh")}
+            />
+          </Tooltip>
+          <Tooltip placement="bottom" value={language.t("blueprint.runtime.panel")}>
+            <IconButton
+              icon="status"
+              variant={panelMode() === "runtime" ? "secondary" : "ghost"}
+              class="h-7 w-7"
+              onClick={() => setPanelMode("runtime")}
+              aria-label={language.t("blueprint.runtime.panel")}
+            />
+          </Tooltip>
           <div class="hidden xl:block text-11-regular text-text-weaker">
             {runtimeGraph().edges.length} {language.t("blueprint.graph.edges")}
           </div>
@@ -1037,30 +1321,272 @@ export function BlueprintSidePanel() {
           </div>
         </div>
 
-        <Show when={inspectorOpen()}>
+        <Show when={panelMode() === "runtime" || inspectorOpen()}>
           <div
-            class="w-[300px] max-w-[40%] min-w-[252px] shrink-0 border-l border-[rgba(103,232,249,0.16)] bg-[#071019] shadow-[-20px_0_48px_rgba(0,0,0,0.42)]"
+            class="w-[340px] max-w-[44%] min-w-[282px] shrink-0 border-l border-[rgba(103,232,249,0.16)] bg-[#071019] shadow-[-20px_0_48px_rgba(0,0,0,0.42)]"
             style={BLUEPRINT_INSPECTOR_THEME}
           >
-            <BlueprintInspector
-              draft={draft}
-              selectedAgent={inspectedAgent()}
-              selectedRoute={inspectedRoute()}
-              selectedTerminal={inspectedTerminal()}
-              selectedNodeId={draft.inspector?.type === "node" ? draft.inspector.id : undefined}
-              selectedEdge={inspectedEdge()}
-              closeInspector={closeInspector}
-              setDraft={replaceDraft}
-              setStore={setDraft}
-              config={currentConfig()}
-              catalog={catalog()}
-              modelCatalog={modelCatalog()}
-              refreshModelCatalog={refreshModelCatalog}
-            />
+            <Switch>
+              <Match when={panelMode() === "runtime"}>
+                <BlueprintRuntimePanel
+                  state={runtime()}
+                  onStart={() => void startBlueprintRuntime()}
+                  onRefresh={() => void refreshBlueprintRuntime()}
+                  onEnd={(action) => void endBlueprintRuntime(action)}
+                />
+              </Match>
+              <Match when={inspectorOpen()}>
+                <BlueprintInspector
+                  draft={draft}
+                  selectedAgent={inspectedAgent()}
+                  selectedRoute={inspectedRoute()}
+                  selectedTerminal={inspectedTerminal()}
+                  selectedNodeId={draft.inspector?.type === "node" ? draft.inspector.id : undefined}
+                  selectedEdge={inspectedEdge()}
+                  closeInspector={closeInspector}
+                  setDraft={replaceDraft}
+                  setStore={setDraft}
+                  config={currentConfig()}
+                  catalog={catalog()}
+                  modelCatalog={modelCatalog()}
+                  refreshModelCatalog={refreshModelCatalog}
+                />
+              </Match>
+            </Switch>
           </div>
         </Show>
       </div>
     </div>
+  )
+}
+
+function BlueprintRuntimePanel(props: {
+  state: BlueprintRuntimeState
+  onStart: () => void
+  onRefresh: () => void
+  onEnd: (action: BlueprintRunEndAction) => void
+}) {
+  const language = useLanguage()
+  const status = createMemo(() => asRecord(props.state.status))
+  const run = createMemo(() => asRecord(status()?.run))
+  const agents = createMemo(() => recordEntries(asRecord(status()?.agents)))
+  const queues = createMemo(() => asRecord(status()?.queues))
+  const pendingMessages = createMemo(() => recordEntries(asRecord(queues()?.pending_messages)))
+  const queueByAgent = createMemo(() => recordEntries(asRecord(queues()?.by_agent)))
+  const outgoing = createMemo(() => recordEntries(asRecord(status()?.outgoing_batches)))
+  const joins = createMemo(() => recordEntries(asRecord(status()?.joins)))
+  const jobs = createMemo(() => recordEntries(asRecord(status()?.jobs)))
+  const workspace = createMemo(() => asRecord(status()?.workspace))
+  const explanation = createMemo(() => asRecord(props.state.explanation))
+  const summary = createMemo(() => asRecord(explanation()?.summary))
+  const runStatus = createMemo(() => runtimeStatus(props.state.status) || "idle")
+  const terminal = createMemo(() => isTerminalRuntimeStatus(runStatus()))
+
+  return (
+    <div class="size-full min-h-0 flex flex-col bg-[#071019] text-[#d6e9f5]">
+      <div class="h-10 shrink-0 flex items-center justify-between border-b border-[rgba(103,232,249,0.14)] bg-[#0b1522] px-3">
+        <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.runtime.panel")}</div>
+        <div class="flex shrink-0 items-center gap-1">
+          <IconButton
+            icon="terminal"
+            variant="ghost"
+            class="h-6 w-6 text-[#f8fdff]"
+            disabled={props.state.loading}
+            onClick={props.onStart}
+            aria-label={language.t("blueprint.runtime.start")}
+          />
+          <IconButton
+            icon="reset"
+            variant="ghost"
+            class="h-6 w-6 text-[#f8fdff]"
+            disabled={!props.state.runId || props.state.loading}
+            onClick={props.onRefresh}
+            aria-label={language.t("blueprint.runtime.refresh")}
+          />
+        </div>
+      </div>
+      <div class="flex-1 min-h-0 overflow-y-auto p-3">
+        <div class="flex flex-col gap-3">
+          <div class="rounded-md border border-[rgba(103,232,249,0.18)] bg-[#06101a] p-3">
+            <div class="flex min-w-0 items-center justify-between gap-2">
+              <div class="min-w-0">
+                <div class="truncate text-12-medium text-[#f8fdff]">{props.state.runId ?? language.t("blueprint.runtime.noRun")}</div>
+                <div class="mt-0.5 truncate text-11-regular text-[#95afc4]">
+                  {language.t("blueprint.runtime.status")}: {runStatus()}
+                </div>
+              </div>
+              <div
+                class="shrink-0 rounded-sm border px-2 py-1 text-10-medium uppercase"
+                classList={{
+                  "border-[rgba(45,212,191,0.42)] text-[#5eead4]": runStatus() === "running",
+                  "border-[rgba(250,204,21,0.42)] text-[#fde68a]": runStatus() === "paused",
+                  "border-[rgba(248,113,113,0.42)] text-[#fecaca]": runStatus() === "failed" || runStatus() === "cancelled",
+                  "border-[rgba(103,232,249,0.34)] text-[#67e8f9]": !["running", "paused", "failed", "cancelled"].includes(runStatus()),
+                }}
+              >
+                {runStatus()}
+              </div>
+            </div>
+            <Show when={props.state.error}>
+              {(error) => <div class="mt-2 rounded-sm bg-[rgba(248,113,113,0.12)] px-2 py-1 text-11-regular text-[#fecaca]">{error()}</div>}
+            </Show>
+            <Show when={props.state.lastUpdatedAt}>
+              {(lastUpdatedAt) => (
+                <div class="mt-2 text-10-regular text-[#95afc4]">
+                  {language.t("blueprint.runtime.updated")}: {formatRuntimeTime(lastUpdatedAt())}
+                </div>
+              )}
+            </Show>
+            <div class="mt-3 grid grid-cols-4 gap-1">
+              <RuntimeActionButton label={language.t("blueprint.runtime.complete")} disabled={!props.state.runId || props.state.loading} onClick={() => props.onEnd("complete")} />
+              <RuntimeActionButton label={language.t("blueprint.runtime.pause")} disabled={!props.state.runId || props.state.loading || terminal()} onClick={() => props.onEnd("pause")} />
+              <RuntimeActionButton label={language.t("blueprint.runtime.cancel")} disabled={!props.state.runId || props.state.loading || terminal()} onClick={() => props.onEnd("cancel")} />
+              <RuntimeActionButton label={language.t("blueprint.runtime.fail")} disabled={!props.state.runId || props.state.loading || terminal()} onClick={() => props.onEnd("fail")} />
+            </div>
+          </div>
+
+          <RuntimeSection title={language.t("blueprint.runtime.overview")}>
+            <div class="grid grid-cols-3 gap-2">
+              <RuntimeMetric label={language.t("blueprint.runtime.agents")} value={agents().length} />
+              <RuntimeMetric label={language.t("blueprint.runtime.pending")} value={pendingMessages().length} />
+              <RuntimeMetric label={language.t("blueprint.runtime.events")} value={props.state.events.length} />
+              <RuntimeMetric label={language.t("blueprint.runtime.outgoing")} value={outgoing().length} />
+              <RuntimeMetric label={language.t("blueprint.runtime.joins")} value={joins().length} />
+              <RuntimeMetric label={language.t("blueprint.runtime.jobs")} value={jobs().length} />
+            </div>
+            <Show when={summary()}>
+              {(value) => <RuntimeJsonPreview value={value()} />}
+            </Show>
+          </RuntimeSection>
+
+          <RuntimeSection title={language.t("blueprint.runtime.agents")}>
+            <RuntimeEmpty when={agents().length === 0} />
+            <For each={agents()}>
+              {([id, agent]) => (
+                <RuntimeRow
+                  title={id}
+                  meta={`${String(agent.state ?? "unknown")} · ${language.t("blueprint.runtime.queue")}: ${String(agent.queue_size ?? 0)}`}
+                  detail={String(agent.last_error ?? agent.agent_id ?? "")}
+                />
+              )}
+            </For>
+          </RuntimeSection>
+
+          <RuntimeSection title={language.t("blueprint.runtime.queues")}>
+            <RuntimeEmpty when={pendingMessages().length === 0 && queueByAgent().length === 0} />
+            <For each={queueByAgent()}>
+              {([id, messages]) => (
+                <RuntimeRow title={id} meta={`${arrayOfRecords(messages).length} ${language.t("blueprint.runtime.messages")}`} />
+              )}
+            </For>
+            <For each={pendingMessages()}>
+              {([id, message]) => <RuntimeRow title={id} meta={String(message.status ?? "")} detail={String(message.node_id ?? "")} />}
+            </For>
+          </RuntimeSection>
+
+          <RuntimeSection title={language.t("blueprint.runtime.outgoing")}>
+            <RuntimeEmpty when={outgoing().length === 0 && joins().length === 0 && jobs().length === 0} />
+            <For each={outgoing()}>
+              {([id, batch]) => <RuntimeRow title={id} meta={String(batch.status ?? "")} detail={String(batch.source_node_id ?? "")} />}
+            </For>
+            <For each={joins()}>
+              {([id, join]) => <RuntimeRow title={id} meta={String(join.status ?? "")} detail={String(join.target_node_id ?? "")} />}
+            </For>
+            <For each={jobs()}>
+              {([id, job]) => <RuntimeRow title={id} meta={String(job.status ?? "")} detail={String(job.node_id ?? "")} />}
+            </For>
+          </RuntimeSection>
+
+          <RuntimeSection title={language.t("blueprint.runtime.workspace")}>
+            <div class="grid grid-cols-3 gap-2">
+              <RuntimeMetric label={language.t("blueprint.runtime.changes")} value={arrayOfRecords(workspace()?.changesets).length} />
+              <RuntimeMetric label={language.t("blueprint.runtime.artifacts")} value={arrayOfRecords(workspace()?.artifacts).length} />
+              <RuntimeMetric label={language.t("blueprint.runtime.reports")} value={arrayOfRecords(workspace()?.reports).length} />
+            </div>
+            <RuntimeJsonPreview value={workspace() ?? {}} />
+          </RuntimeSection>
+
+          <RuntimeSection title={language.t("blueprint.runtime.events")}>
+            <RuntimeEmpty when={props.state.events.length === 0} />
+            <For each={props.state.events}>
+              {(event) => (
+                <RuntimeRow
+                  title={String(event.type ?? event.record_type ?? "event")}
+                  meta={String(event.status ?? "")}
+                  detail={String(event.message ?? event.event ?? event.node_id ?? "")}
+                />
+              )}
+            </For>
+          </RuntimeSection>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function RuntimeActionButton(props: { label: string; disabled: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      disabled={props.disabled}
+      class="h-7 min-w-0 rounded-sm border border-[rgba(103,232,249,0.22)] px-1 text-10-medium text-[#d6e9f5] transition-colors hover:border-[#67e8f9] disabled:cursor-not-allowed disabled:opacity-45"
+      onClick={props.onClick}
+    >
+      <span class="block truncate">{props.label}</span>
+    </button>
+  )
+}
+
+function RuntimeSection(props: { title: string; children: JSX.Element }) {
+  return (
+    <section class="rounded-md border border-[rgba(103,232,249,0.14)] bg-[#08131f] p-3">
+      <div class="mb-2 text-11-medium uppercase text-[#67e8f9]">{props.title}</div>
+      <div class="flex flex-col gap-2">{props.children}</div>
+    </section>
+  )
+}
+
+function RuntimeMetric(props: { label: string; value: string | number }) {
+  return (
+    <div class="min-w-0 rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] p-2">
+      <div class="truncate text-10-regular text-[#95afc4]">{props.label}</div>
+      <div class="mt-0.5 truncate text-14-medium text-[#f8fdff]">{props.value}</div>
+    </div>
+  )
+}
+
+function RuntimeRow(props: { title: string; meta?: string; detail?: string }) {
+  return (
+    <div class="min-w-0 rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] px-2 py-1.5">
+      <div class="flex min-w-0 items-center justify-between gap-2">
+        <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{props.title}</div>
+        <Show when={props.meta}>
+          {(meta) => <div class="shrink-0 truncate text-10-regular text-[#95afc4]">{meta()}</div>}
+        </Show>
+      </div>
+      <Show when={props.detail}>
+        {(detail) => <div class="mt-0.5 truncate text-11-regular text-[#95afc4]">{detail()}</div>}
+      </Show>
+    </div>
+  )
+}
+
+function RuntimeEmpty(props: { when: boolean }) {
+  const language = useLanguage()
+  return (
+    <Show when={props.when}>
+      <div class="rounded-sm border border-dashed border-[rgba(103,232,249,0.16)] px-2 py-3 text-center text-11-regular text-[#95afc4]">
+        {language.t("blueprint.runtime.empty")}
+      </div>
+    </Show>
+  )
+}
+
+function RuntimeJsonPreview(props: { value: Record<string, unknown> }) {
+  return (
+    <pre class="max-h-40 overflow-auto rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] p-2 text-10-regular leading-4 text-[#b8cede]">
+      {JSON.stringify(props.value, null, 2)}
+    </pre>
   )
 }
 
@@ -1865,6 +2391,32 @@ function modelOptions(modelCatalog: ModelCatalogState, currentModel?: string): A
 function readableError(error: unknown) {
   if (error instanceof Error) return error.message
   return String(error)
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
+}
+
+function recordEntries(value: Record<string, unknown> | undefined): Array<[string, Record<string, unknown>]> {
+  return Object.entries(value ?? {}).map(([key, entry]) => [key, asRecord(entry) ?? { value: entry }])
+}
+
+function arrayOfRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map((entry) => asRecord(entry) ?? { value: entry }) : []
+}
+
+function runtimeStatus(status: unknown) {
+  const snapshot = asRecord(status)
+  const run = asRecord(snapshot?.run)
+  return typeof run?.status === "string" ? run.status : undefined
+}
+
+function isTerminalRuntimeStatus(status: string | undefined) {
+  return status === "completed" || status === "cancelled" || status === "failed" || status === "paused"
+}
+
+function formatRuntimeTime(value: number) {
+  return new Date(value).toLocaleTimeString()
 }
 
 function edgePath(draft: BlueprintDraft, edge: BlueprintEdge) {

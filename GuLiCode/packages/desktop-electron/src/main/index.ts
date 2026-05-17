@@ -41,6 +41,7 @@ import { registerIpcHandlers, sendDeepLinks, sendMenuCommand, sendSqliteMigratio
 import { initLogging } from "./logging"
 import { parseMarkdown } from "./markdown"
 import { createMenu } from "./menu"
+import { BlueprintRuntime } from "./blueprint-runtime"
 import { getDefaultServerUrl, getWslConfig, setDefaultServerUrl, setWslConfig, spawnLocalServer } from "./server"
 import {
   createLoadingWindow,
@@ -63,6 +64,7 @@ const pendingDeepLinks: string[] = []
 
 const serverReady = defer<ServerReadyData>()
 const logger = initLogging()
+const blueprintRuntime = new BlueprintRuntime()
 
 logger.log("app starting", {
   version: app.getVersion(),
@@ -97,15 +99,18 @@ function setupApp() {
 
   app.on("before-quit", () => {
     killSidecar()
+    blueprintRuntime.close()
   })
 
   app.on("will-quit", () => {
     killSidecar()
+    blueprintRuntime.close()
   })
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
       killSidecar()
+      blueprintRuntime.close()
       app.exit(0)
     })
   }
@@ -242,6 +247,7 @@ function wireMenu() {
     reload: () => mainWindow?.reload(),
     relaunch: () => {
       killSidecar()
+      blueprintRuntime.close()
       app.relaunch()
       app.exit(0)
     },
@@ -280,6 +286,7 @@ registerIpcHandlers({
   checkUpdate: async () => checkUpdate(),
   installUpdate: async () => installUpdate(),
   setBackgroundColor: (color) => setBackgroundColor(color),
+  blueprintRuntime,
 })
 
 function killSidecar() {
@@ -394,6 +401,7 @@ async function checkUpdate() {
 async function installUpdate() {
   if (!updateReady) return
   killSidecar()
+  blueprintRuntime.close()
   autoUpdater.quitAndInstall()
 }
 

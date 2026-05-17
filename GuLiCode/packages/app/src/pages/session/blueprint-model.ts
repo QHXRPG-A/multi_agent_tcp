@@ -1,6 +1,8 @@
 export const GRID_SIZE = 24
 export const DEFAULT_OUTPUT_PORT = "out"
 export const DEFAULT_INPUT_PORT = "in"
+export const DEFAULT_BLUEPRINT_ID = "default"
+export const DEFAULT_BLUEPRINT_NAME = "Default Blueprint"
 
 export type BlueprintExecutionMode = "blocking" | "nonblocking"
 export type BlueprintTerminalKind = "start" | "end"
@@ -122,6 +124,41 @@ export type RuntimeGraphDraft = {
     output_port?: string
     input_port?: string
   }>
+}
+
+export type BlueprintDocument = {
+  schema_version: 1
+  id: string
+  name: string
+  graph: RuntimeGraphDraft
+  ui: {
+    config: BlueprintConfig
+    nodes: Record<string, BlueprintNodeLayout>
+    viewport: BlueprintViewport
+    selection?: BlueprintSelection
+    inspector?: BlueprintInspectable
+  }
+}
+
+export type BlueprintStartPlan = {
+  user_goal: string
+  agent_descriptions: Record<string, string>
+  start_nodes: string[]
+  tasks: Record<
+    string,
+    {
+      goal: string
+      context_refs: string[]
+      expected_output: string
+      acceptance: string
+      downstream_collaboration?: string
+      metadata?: Record<string, unknown>
+    }
+  >
+  run_policy: {
+    allow_parallel: boolean
+    source: "blueprint-ui-derived"
+  }
 }
 
 const DEFAULT_VIEWPORT: BlueprintViewport = {
@@ -251,6 +288,73 @@ export function cloneBlueprintDraft(draft: BlueprintDraft): BlueprintDraft {
     selection: draft.selection ? { ...draft.selection } : undefined,
     inspector: draft.inspector ? { ...draft.inspector } : undefined,
   }
+}
+
+export function toBlueprintDocument(
+  draft: BlueprintDraft,
+  id = DEFAULT_BLUEPRINT_ID,
+  name = DEFAULT_BLUEPRINT_NAME,
+): BlueprintDocument {
+  return {
+    schema_version: 1,
+    id,
+    name,
+    graph: toRuntimeGraphDraft(draft),
+    ui: {
+      config: normalizeBlueprintConfig(draft.config),
+      nodes: Object.fromEntries(Object.entries(draft.layout.nodes).map(([nodeId, layout]) => [nodeId, { ...layout }])),
+      viewport: { ...draft.layout.viewport },
+      selection: draft.selection ? { ...draft.selection } : undefined,
+      inspector: draft.inspector ? { ...draft.inspector } : undefined,
+    },
+  }
+}
+
+export function fromBlueprintDocument(
+  document: Partial<BlueprintDocument>,
+  projectWorkdir = DEFAULT_PROJECT_WORKDIR,
+): BlueprintDraft {
+  const fallback = createDefaultBlueprintDraft(projectWorkdir)
+  const graph = document.graph ?? fallback.graph
+  const ui = document.ui ?? {}
+  return cloneBlueprintDraft({
+    schema_version: 1,
+    config: normalizeBlueprintConfig(ui.config ?? fallback.config),
+    graph: {
+      terminal_nodes: { ...(graph.terminal_nodes ?? fallback.graph.terminal_nodes) },
+      route_nodes: Object.fromEntries(
+        Object.entries(graph.route_nodes ?? {}).map(([id, node]) => [id, normalizeRouteNode(id, node)]),
+      ),
+      agent_nodes: Object.fromEntries(
+        Object.entries(graph.agent_nodes ?? fallback.graph.agent_nodes).map(([id, node]) => [
+          id,
+          normalizeAgentNode(id, node),
+        ]),
+      ),
+      edges: (graph.edges ?? fallback.graph.edges).map((edge) => ({
+        id: edgeId(
+          edge.from,
+          edge.to,
+          edge.edge_type || "exec",
+          edge.output_port ?? DEFAULT_OUTPUT_PORT,
+          edge.input_port ?? DEFAULT_INPUT_PORT,
+        ),
+        from: edge.from,
+        to: edge.to,
+        edge_type: edge.edge_type || "exec",
+        output_port: edge.output_port ?? DEFAULT_OUTPUT_PORT,
+        input_port: edge.input_port ?? DEFAULT_INPUT_PORT,
+      })),
+    },
+    layout: {
+      nodes: Object.fromEntries(
+        Object.entries(ui.nodes ?? fallback.layout.nodes).map(([nodeId, layout]) => [nodeId, { ...layout }]),
+      ),
+      viewport: { ...(ui.viewport ?? fallback.layout.viewport) },
+    },
+    selection: ui.selection ? { ...ui.selection } : undefined,
+    inspector: ui.inspector ? { ...ui.inspector } : undefined,
+  })
 }
 
 export function createEdge(
@@ -579,6 +683,83 @@ export function toRuntimeGraphDraft(draft: BlueprintDraft): RuntimeGraphDraft {
       return out
     }),
   }
+}
+
+export function createBlueprintStartPlan(draft: BlueprintDraft): BlueprintStartPlan {
+  const agentNodes = Object.entries(draft.graph.agent_nodes)
+  const startNodes = deriveStartAgentNodes(draft)
+  const agent_descriptions = Object.fromEntries(
+    agentNodes.map(([id, node]) => [id, node.prompt.trim() || `AgentNode ${id}`]),
+  )
+  const tasks = Object.fromEntries(
+    startNodes.map((nodeId) => {
+      const node = draft.graph.agent_nodes[nodeId]
+      const goal = node?.prompt.trim() || `Run AgentNode ${nodeId}.`
+      return [
+        nodeId,
+        {
+          goal,
+          context_refs: [],
+          expected_output: `Complete the assigned work for AgentNode ${nodeId} and report the result through the framework runtime.`,
+          acceptance: `AgentNode ${nodeId} has a clear result recorded in runtime status, reports, artifacts, or queued downstream work.`,
+          metadata: {
+            source: "blueprint-ui-derived",
+            node_id: nodeId,
+          },
+        },
+      ]
+    }),
+  )
+
+  return {
+    user_goal: "Run the current GuLiCode blueprint.",
+    agent_descriptions,
+    start_nodes: startNodes,
+    tasks,
+    run_policy: {
+      allow_parallel: true,
+      source: "blueprint-ui-derived",
+    },
+  }
+}
+
+function deriveStartAgentNodes(draft: BlueprintDraft): string[] {
+  const agentIds = new Set(Object.keys(draft.graph.agent_nodes))
+  const routeIds = new Set(Object.keys(draft.graph.route_nodes ?? {}))
+  const terminalIds = new Set(Object.keys(draft.graph.terminal_nodes))
+  const startTerminalIds = Object.entries(draft.graph.terminal_nodes)
+    .filter(([, kind]) => kind === "start")
+    .map(([id]) => id)
+  const result: string[] = []
+  const added = new Set<string>()
+
+  for (const startId of startTerminalIds) {
+    const queued = outgoingExecTargets(draft, startId)
+    const visited = new Set<string>([startId])
+    while (queued.length) {
+      const nodeId = queued.shift()
+      if (!nodeId || visited.has(nodeId)) continue
+      visited.add(nodeId)
+      if (agentIds.has(nodeId)) {
+        if (!added.has(nodeId)) {
+          result.push(nodeId)
+          added.add(nodeId)
+        }
+        continue
+      }
+      if (routeIds.has(nodeId) || terminalIds.has(nodeId)) {
+        queued.push(...outgoingExecTargets(draft, nodeId))
+      }
+    }
+  }
+
+  return result
+}
+
+function outgoingExecTargets(draft: BlueprintDraft, nodeId: string): string[] {
+  return draft.graph.edges
+    .filter((edge) => edge.from === nodeId && (edge.edge_type || "exec") === "exec")
+    .map((edge) => edge.to)
 }
 
 function createAgentNode(input: {

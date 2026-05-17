@@ -33,6 +33,16 @@ const api: ElectronAPI = {
   blueprintListSkills: (dir) => ipcRenderer.invoke("blueprint-list-skills", dir),
   blueprintListRules: (dir) => ipcRenderer.invoke("blueprint-list-rules", dir),
   blueprintListModels: (cliKind) => ipcRenderer.invoke("blueprint-list-models", cliKind),
+  blueprintList: (projectDir) => ipcRenderer.invoke("blueprint-list", projectDir),
+  blueprintOpen: (projectDir, blueprintId) => ipcRenderer.invoke("blueprint-open", projectDir, blueprintId),
+  blueprintSave: (projectDir, document) => ipcRenderer.invoke("blueprint-save", projectDir, document),
+  blueprintValidate: (projectDir, blueprintId, document) =>
+    ipcRenderer.invoke("blueprint-validate", projectDir, blueprintId, document),
+  blueprintListRuns: (projectDir, blueprintId) => ipcRenderer.invoke("blueprint-list-runs", projectDir, blueprintId),
+  blueprintStart: (projectDir, blueprintId, plan) => ipcRenderer.invoke("blueprint-start", projectDir, blueprintId, plan),
+  blueprintStatus: (runId) => ipcRenderer.invoke("blueprint-status", runId),
+  blueprintEnd: (runId, action, reason) => ipcRenderer.invoke("blueprint-end", runId, action, reason),
+  blueprintRecentEvents: (runId, limit) => ipcRenderer.invoke("blueprint-recent-events", runId, limit),
 
   getWindowCount: () => ipcRenderer.invoke("get-window-count"),
   onSqliteMigrationProgress: (cb) => {

@@ -25,6 +25,29 @@ export type BlueprintCatalogItem = {
   description?: string
 }
 
+export type BlueprintDocument = {
+  schema_version: 1
+  id: string
+  name: string
+  graph: Record<string, unknown>
+  ui: Record<string, unknown>
+}
+
+export type BlueprintSummary = {
+  id: string
+  name: string
+  path: string
+  updated_at: number
+}
+
+export type BlueprintValidationResult = {
+  ok: boolean
+  errors: string[]
+  warnings: string[]
+}
+
+export type BlueprintRunEndAction = "complete" | "cancel" | "fail" | "pause"
+
 export type ElectronAPI = {
   killSidecar: () => Promise<void>
   installCli: () => Promise<string>
@@ -51,6 +74,19 @@ export type ElectronAPI = {
   blueprintListSkills: (dir: string) => Promise<BlueprintCatalogItem[]>
   blueprintListRules: (dir: string) => Promise<BlueprintCatalogItem[]>
   blueprintListModels: (cliKind: string) => Promise<string[]>
+  blueprintList: (projectDir: string) => Promise<BlueprintSummary[]>
+  blueprintOpen: (projectDir: string, blueprintId: string) => Promise<BlueprintDocument>
+  blueprintSave: (projectDir: string, document: BlueprintDocument) => Promise<BlueprintDocument>
+  blueprintValidate: (
+    projectDir: string,
+    blueprintId: string,
+    document?: BlueprintDocument,
+  ) => Promise<BlueprintValidationResult>
+  blueprintListRuns: (projectDir?: string, blueprintId?: string) => Promise<Record<string, unknown>[]>
+  blueprintStart: (projectDir: string, blueprintId: string, plan: Record<string, unknown>) => Promise<Record<string, unknown>>
+  blueprintStatus: (runId: string) => Promise<Record<string, unknown>>
+  blueprintEnd: (runId: string, action: BlueprintRunEndAction, reason?: string) => Promise<Record<string, unknown>>
+  blueprintRecentEvents: (runId: string, limit?: number) => Promise<Record<string, unknown>>
 
   getWindowCount: () => Promise<number>
   onSqliteMigrationProgress: (cb: (progress: SqliteMigrationProgress) => void) => () => void

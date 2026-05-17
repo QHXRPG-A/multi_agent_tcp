@@ -144,6 +144,26 @@ const createPlatform = (): Platform => {
 
     listBlueprintModels: (cliKind: string) => window.api.blueprintListModels(cliKind),
 
+    listBlueprints: (projectDir: string) => window.api.blueprintList(projectDir),
+
+    openBlueprint: (projectDir: string, blueprintId: string) => window.api.blueprintOpen(projectDir, blueprintId),
+
+    saveBlueprint: (projectDir: string, document) => window.api.blueprintSave(projectDir, document),
+
+    validateBlueprint: (projectDir: string, blueprintId: string, document) =>
+      window.api.blueprintValidate(projectDir, blueprintId, document),
+
+    listBlueprintRuns: (projectDir?: string, blueprintId?: string) => window.api.blueprintListRuns(projectDir, blueprintId),
+
+    startBlueprintRun: (projectDir: string, blueprintId: string, plan) =>
+      window.api.blueprintStart(projectDir, blueprintId, plan),
+
+    blueprintRunStatus: (runId: string) => window.api.blueprintStatus(runId),
+
+    endBlueprintRun: (runId, action, reason) => window.api.blueprintEnd(runId, action, reason),
+
+    blueprintRecentEvents: (runId, limit) => window.api.blueprintRecentEvents(runId, limit),
+
     openLink(url: string) {
       window.api.openLink(url)
     },

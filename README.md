@@ -49,6 +49,14 @@ More focused diagrams live in [`docs/diagrams/multi_agents_communication/`](docs
   - Other CLIs require future adapter work in this repository.
 - Run with the **parent** of this folder on `PYTHONPATH`, or from a project that already imports `multi_agent_tcp` as a package.
 
+For a durable command on PATH, install this checkout in editable mode:
+
+```bash
+python -m pip install -e .
+multi-agent-tcp doctor --json
+multi-agent-tcp show-registry
+```
+
 Example from `Package/Script/Python` (one level above this directory):
 
 ```bash

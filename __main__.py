@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import secrets
 import subprocess
 import sys
@@ -36,6 +37,7 @@ from urllib import request as urlrequest
 from .broker import Broker
 from .client import AgentTCPClient
 from .adapters import CLIAdapter, adapter_from_agent_config, body_to_agent_message
+from . import __version__
 from .log_setup import setup_logging
 from ._proc_utils import terminate_and_wait
 
@@ -485,6 +487,74 @@ def _write_result(result: Any, output: Optional[Path]) -> None:
             sys.stdout.buffer.write(text.encode("utf-8", errors="replace"))
             sys.stdout.buffer.write(b"\n")
             sys.stdout.buffer.flush()
+
+
+def _cmd_doctor(args: argparse.Namespace) -> None:
+    from .registry import AgentsRegistry
+
+    package_root = Path(__file__).resolve().parent
+    registry_path = package_root / "agents_registry.json"
+    skill_list_dir = package_root / "skill_list"
+    command_path = shutil.which("multi-agent-tcp") or shutil.which("multi_agent_tcp")
+
+    registry: Dict[str, Any] = {
+        "path": str(registry_path),
+        "exists": registry_path.exists(),
+        "loadable": False,
+        "agent_count": 0,
+        "skill_list_dir": str(skill_list_dir),
+    }
+    try:
+        reg = AgentsRegistry.load()
+        registry["loadable"] = True
+        registry["agent_count"] = len(reg.list_agents())
+        registry["skill_list_dir"] = str(reg.skill_list_dir)
+    except Exception as exc:  # noqa: BLE001 - doctor should surface setup errors
+        registry["error"] = str(exc)
+
+    result = {
+        "ok": bool(registry["loadable"]),
+        "tool": "multi-agent-tcp",
+        "version": __version__,
+        "command": {
+            "name": "multi-agent-tcp",
+            "path": command_path,
+            "on_path": command_path is not None,
+        },
+        "python": {
+            "executable": sys.executable,
+            "version": sys.version.split()[0],
+        },
+        "cwd": str(Path.cwd()),
+        "package_root": str(package_root),
+        "registry": registry,
+        "checks": {
+            "codex": shutil.which("codex") is not None,
+            "codemaker": shutil.which("codemaker") is not None,
+        },
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    print(f"multi-agent-tcp {result['version']}")
+    print(f"command: {command_path or '(not on PATH)'}")
+    print(f"python: {result['python']['version']}")
+    print(f"registry: {registry['path']} ({'loadable' if registry['loadable'] else 'broken'})")
+    if registry.get("error"):
+        print(f"registry error: {registry['error']}")
+    print(f"codex: {'yes' if result['checks']['codex'] else 'no'}")
+    print(f"codemaker: {'yes' if result['checks']['codemaker'] else 'no'}")
+
+
+def _cmd_rpc(args: argparse.Namespace) -> None:
+    payload = _read_json_arg(path=args.args_file, inline=args.args_json)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise SystemExit("--args-file/--args-json must decode to a JSON object")
+    result = _runtime_rpc_request(args.rpc_url, args.token, args.command, payload)
+    _write_result(result, args.output)
 
 
 # ---------------------------------------------------------------------------
@@ -1003,8 +1073,19 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         description="CodeMaker CLI multi-worker orchestration framework",
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"multi-agent-tcp {__version__}",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="diagnose installed CLI, Python, registry, and worker CLI availability",
+    )
+    p_doctor.add_argument("--json", action="store_true", help="emit machine-readable JSON")
 
     # -- low-level -----------------------------------------------------------
     p_broker = sub.add_parser("broker", help="run message broker")
@@ -1034,6 +1115,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     sub.add_parser("registry-ui", help="open the graphical agents registry editor")
     p_ryven = sub.add_parser("ryven", help="launch the vendored Ryven node editor")
     p_ryven.add_argument("ryven_args", nargs=argparse.REMAINDER, help="arguments forwarded to Ryven")
+    p_desktop_blueprint = sub.add_parser(
+        "desktop-blueprint-service",
+        help="run the GuLiCode desktop blueprint HTTP service",
+    )
+    p_desktop_blueprint.add_argument("--host", default="127.0.0.1")
+    p_desktop_blueprint.add_argument("--port", type=int, default=0)
+    p_desktop_blueprint.add_argument("--token")
 
     # -- show-registry / dispatch (recommended LLM flow) ---------------------
     p_sr = sub.add_parser(
@@ -1176,6 +1264,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     contrib_g = p_join_contribute.add_mutually_exclusive_group(required=True)
     contrib_g.add_argument("--contribution", type=Path, help="JSON contribution file")
     contrib_g.add_argument("--contribution-json", help="inline JSON contribution")
+
+    p_rpc = sub.add_parser(
+        "rpc",
+        help="raw GraphRuntime RPC request escape hatch",
+    )
+    p_rpc.add_argument("--rpc-url", required=True, help="live GraphRuntime RPC URL")
+    p_rpc.add_argument("--token", required=True, help="GraphRuntime RPC token")
+    p_rpc.add_argument("--command", required=True, help="control-plane command name")
+    rpc_args_g = p_rpc.add_mutually_exclusive_group()
+    rpc_args_g.add_argument("--args-file", type=Path, help="JSON object argument file")
+    rpc_args_g.add_argument("--args-json", help="inline JSON object arguments")
+    p_rpc.add_argument("-o", "--output", type=Path, help="write JSON to file")
 
     p_disp = sub.add_parser(
         "dispatch",
@@ -1330,6 +1430,18 @@ def main(argv: Optional[List[str]] = None) -> None:
         _run_ryven(args.ryven_args)
         return
 
+    if args.cmd == "desktop-blueprint-service":
+        from .desktop_blueprint_service import serve_forever as _serve_desktop_blueprint
+        service_args = ["--host", args.host, "--port", str(args.port)]
+        if args.token:
+            service_args.extend(["--token", args.token])
+        _serve_desktop_blueprint(service_args)
+        return
+
+    if args.cmd == "doctor":
+        _cmd_doctor(args)
+        return
+
     if args.cmd == "show-registry":
         _cmd_show_registry(args)
         return
@@ -1345,6 +1457,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.cmd == "runtime":
         try:
             _cmd_runtime(args)
+        except (ValueError, KeyError, OSError) as e:
+            print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False, indent=2))
+            sys.exit(1)
+        return
+
+    if args.cmd == "rpc":
+        try:
+            _cmd_rpc(args)
         except (ValueError, KeyError, OSError) as e:
             print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False, indent=2))
             sys.exit(1)

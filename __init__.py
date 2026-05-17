@@ -77,6 +77,12 @@ from .graph_control import (
     ordinary_agent_framework_context,
     scoped_organization_view,
 )
+from .desktop_blueprint_service import (
+    DEFAULT_BLUEPRINT_ID,
+    DEFAULT_BLUEPRINT_NAME,
+    DesktopBlueprintHTTPServer,
+    DesktopBlueprintService,
+)
 from .workspace_manager import (
     AgentCheckout,
     ChangesetSubmitResult,
@@ -158,6 +164,10 @@ __all__ = (
     "load_top_agent_profile",
     "ordinary_agent_framework_context",
     "scoped_organization_view",
+    "DEFAULT_BLUEPRINT_ID",
+    "DEFAULT_BLUEPRINT_NAME",
+    "DesktopBlueprintHTTPServer",
+    "DesktopBlueprintService",
     "DulwichWorkspaceManager",
     "ProjectWorkspace",
     "RunWorkspace",

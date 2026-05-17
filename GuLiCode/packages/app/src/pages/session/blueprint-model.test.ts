@@ -5,12 +5,15 @@ import {
   addNode,
   addRouteNode,
   CLI_KIND_OPTIONS,
+  createBlueprintStartPlan,
   createDefaultBlueprintDraft,
+  fromBlueprintDocument,
   DEFAULT_SKILL_DIR,
   deleteNode,
   parseScopeText,
   setInspector,
   snapPosition,
+  toBlueprintDocument,
   toRuntimeGraphDraft,
   updateAgentNode,
 } from "./blueprint-model"
@@ -172,7 +175,76 @@ describe("blueprint draft model", () => {
     expect("id" in graph.edges[0]).toBe(false)
   })
 
+  test("round-trips project blueprint documents with runtime graph and UI state", () => {
+    const draft = addAgentNode(createDefaultBlueprintDraft("F:\\repo\\game"), {
+      node_id: "extra",
+      position: { x: 250, y: 121 },
+    })
+    const document = toBlueprintDocument(draft)
+    const restored = fromBlueprintDocument(document, "F:\\repo\\game")
+
+    expect(document).toMatchObject({
+      schema_version: 1,
+      id: "default",
+      name: "Default Blueprint",
+      graph: {
+        terminal_nodes: { start: "start", end: "end" },
+      },
+      ui: {
+        config: {
+          project_workdir: "F:\\repo\\game",
+          skill_dir: DEFAULT_SKILL_DIR,
+          rule_dir: "",
+        },
+      },
+    })
+    expect(document.graph.edges[0]).not.toHaveProperty("id")
+    expect(restored.graph.agent_nodes.extra.node_id).toBe("extra")
+    expect(restored.layout.nodes.extra).toEqual({ x: 240, y: 120 })
+    expect(toRuntimeGraphDraft(restored).agent_nodes.planner.cwd).toBe("F:\\repo\\game")
+  })
+
   test("keeps supported CLI kinds explicit for inspector dropdowns", () => {
     expect(CLI_KIND_OPTIONS).toEqual(["codemaker", "codex"])
+  })
+
+  test("derives a complete start plan from the default blueprint", () => {
+    const plan = createBlueprintStartPlan(createDefaultBlueprintDraft())
+
+    expect(plan.agent_descriptions).toMatchObject({
+      planner: "Break down the user goal and dispatch implementation work.",
+      coder: "Implement the requested changes.",
+      review: "Review implementation output and identify required fixes.",
+      summary: "Summarize the run and prepare final records.",
+    })
+    expect(plan.start_nodes).toEqual(["planner"])
+    expect(Object.keys(plan.tasks)).toEqual(["planner"])
+    expect(plan.tasks.planner.goal).toContain("Break down")
+    expect(plan.tasks.planner.expected_output).toContain("AgentNode planner")
+    expect(plan.tasks.planner.acceptance).toContain("AgentNode planner")
+    expect(plan.run_policy).toEqual({ allow_parallel: true, source: "blueprint-ui-derived" })
+  })
+
+  test("derives start nodes through route nodes and multiple start terminals", () => {
+    let draft = createDefaultBlueprintDraft()
+    draft = addRouteNode(draft, "parallel", { node_id: "fanout" })
+    draft = addAgentNode(draft, { node_id: "research" })
+    draft = addNode(draft, { kind: "start", node_id: "start-extra" })
+    draft.graph.edges = []
+    draft = addEdge(draft, "start", "fanout")
+    draft = addEdge(draft, "fanout", "planner")
+    draft = addEdge(draft, "fanout", "coder")
+    draft = addEdge(draft, "start-extra", "research")
+
+    expect(createBlueprintStartPlan(draft).start_nodes).toEqual(["planner", "coder", "research"])
+  })
+
+  test("start plan has no tasks when no start terminal reaches an agent", () => {
+    const draft = createDefaultBlueprintDraft()
+    draft.graph.edges = []
+
+    const plan = createBlueprintStartPlan(draft)
+    expect(plan.start_nodes).toEqual([])
+    expect(plan.tasks).toEqual({})
   })
 })

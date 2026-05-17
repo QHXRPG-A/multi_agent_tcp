@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-agent-tcp"
+version = "0.5.0"
+description = "Composable CLI and Python runtime for multi-agent TCP orchestration."
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+multi-agent-tcp = "multi_agent_tcp.__main__:main"
+multi_agent_tcp = "multi_agent_tcp.__main__:main"
+
+[tool.setuptools]
+packages = ["multi_agent_tcp"]
+package-dir = { "multi_agent_tcp" = "." }
