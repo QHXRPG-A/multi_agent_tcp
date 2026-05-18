@@ -83,10 +83,24 @@ export type ElectronAPI = {
     document?: BlueprintDocument,
   ) => Promise<BlueprintValidationResult>
   blueprintListRuns: (projectDir?: string, blueprintId?: string) => Promise<Record<string, unknown>[]>
-  blueprintStart: (projectDir: string, blueprintId: string, plan: Record<string, unknown>) => Promise<Record<string, unknown>>
+  blueprintStart: (
+    projectDir: string,
+    blueprintId: string,
+    plan: Record<string, unknown>,
+    executionMode?: "status" | "live",
+  ) => Promise<Record<string, unknown>>
   blueprintStatus: (runId: string) => Promise<Record<string, unknown>>
   blueprintEnd: (runId: string, action: BlueprintRunEndAction, reason?: string) => Promise<Record<string, unknown>>
   blueprintRecentEvents: (runId: string, limit?: number) => Promise<Record<string, unknown>>
+  blueprintAgentInfo: (runId: string | undefined, nodeId: string) => Promise<Record<string, unknown>>
+  blueprintQueueAgentMessage: (
+    runId: string,
+    nodeId: string,
+    text: string,
+    mode: "default" | "top",
+  ) => Promise<Record<string, unknown>>
+  blueprintAgentStreamToken: (runId: string, cursor?: number) => Promise<Record<string, unknown>>
+  blueprintSaveAgentPanelTest: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
 
   getWindowCount: () => Promise<number>
   onSqliteMigrationProgress: (cb: (progress: SqliteMigrationProgress) => void) => () => void

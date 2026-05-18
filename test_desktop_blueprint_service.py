@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import inspect
 from pathlib import Path
 from urllib import request
 
@@ -10,6 +12,8 @@ from multi_agent_tcp.desktop_blueprint_service import (
     DesktopBlueprintNoopBackend,
     DesktopBlueprintService,
 )
+from multi_agent_tcp.codex_bridge import codex_jsonl_event_to_agent_stream_events
+from multi_agent_tcp.client import AgentTCPClient
 
 
 def _document() -> dict:
@@ -222,6 +226,49 @@ def test_blueprint_service_starts_tracks_events_and_ends_run(tmp_path: Path) -> 
     assert terminal_status["explanation"]["pending"]["queued_messages"] == 0
 
 
+def test_blueprint_service_agent_info_projects_message_audit_for_node(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+    project = tmp_path / "project"
+    project.mkdir()
+    service.save_blueprint(project, _document())
+    started = service.handle_request(
+        {
+            "command": "blueprint.start",
+            "args": {"projectDir": str(project), "blueprintId": "default", "plan": _plan()},
+        }
+    )
+    run = service._runs[started["runId"]]
+    run.runtime._record_message_io(
+        record_type="agent.outgoing.staged",
+        sender={"type": "agent", "agent_id": "agent-planner", "node_id": "planner"},
+        receiver={"type": "framework"},
+        payload={"prompt": "handoff to reviewer"},
+        batch_id="out-1",
+        status="staged",
+        metadata={"target_node_id": "reviewer", "target_agent_id": "agent-reviewer"},
+    )
+
+    info = service.handle_request(
+        {"command": "blueprint.agentInfo", "args": {"runId": started["runId"], "nodeId": "planner"}}
+    )
+
+    assert info["messageJournal"][-1] == {
+        "id": info["messageJournal"][-1]["id"],
+        "recordType": "agent.outgoing.staged",
+        "time": info["messageJournal"][-1]["time"],
+        "from": "planner",
+        "to": "framework",
+        "status": "staged",
+        "summary": "handoff to reviewer",
+        "batchId": "out-1",
+        "targetNodeId": "reviewer",
+        "targetAgentId": "agent-reviewer",
+    }
+    assert info["frameworkApiCalls"][-1]["api"] == "agent.dispatch"
+    assert info["frameworkApiCalls"][-1]["summary"] == "handoff to reviewer"
+    assert info["frameworkApiCalls"][-1]["batchId"] == "out-1"
+
+
 def test_blueprint_service_start_rejects_invalid_graph_and_plan(tmp_path: Path) -> None:
     service = DesktopBlueprintService()
     project = tmp_path / "project"
@@ -326,14 +373,150 @@ def test_blueprint_service_rejects_unknown_run_and_bad_end_action(tmp_path: Path
                     "projectDir": str(project),
                     "blueprintId": "default",
                     "plan": _plan(),
-                    "executionMode": "live",
+                    "executionMode": "preview",
                 },
             }
         )
     except BlueprintServiceError as exc:
         assert exc.code == "UNSUPPORTED_EXECUTION_MODE"
     else:  # pragma: no cover
-        raise AssertionError("live execution mode should not be enabled in status-only v1")
+        raise AssertionError("unsupported execution mode should fail")
+
+
+def test_blueprint_service_live_mode_starts_tick_and_streams_agent_events(tmp_path: Path, monkeypatch) -> None:
+    class FakeLiveBackend:
+        instances = []
+
+        def __init__(self, workers) -> None:
+            self.workers = workers
+            self.worker_configs = {}
+            self.stopped = False
+            FakeLiveBackend.instances.append(self)
+
+        @classmethod
+        async def create(cls, workers, *, port=9140, verbose=False, allow_empty=False):
+            return cls(workers)
+
+        async def ensure_worker(self, worker) -> None:
+            self.worker_configs[str(worker.agent_id)] = worker
+
+        async def run_single(self, worker_id, body, *, timeout_sec=600.0, _skip_skill_inject=False, meta=None, stream_callback=None):
+            if stream_callback is not None:
+                result = stream_callback(
+                    {
+                        **dict((meta or {}).get("framework_stream") or {}),
+                        "kind": "part.delta",
+                        "part_id": "fake",
+                        "part_type": "text",
+                        "field": "text",
+                        "delta": "streamed",
+                        "text": "streamed",
+                    }
+                )
+                if inspect.isawaitable(result):
+                    await result
+            return {"type": "message", "body": {"ok": True, "text": "done"}}
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr("multi_agent_tcp.desktop_blueprint_service.CLIWorkerBackend", FakeLiveBackend)
+    service = DesktopBlueprintService()
+    project = tmp_path / "project"
+    project.mkdir()
+    service.save_blueprint(project, _document())
+
+    started = service.handle_request(
+        {
+            "command": "blueprint.start",
+            "args": {
+                "projectDir": str(project),
+                "blueprintId": "default",
+                "plan": _plan(),
+                "executionMode": "live",
+            },
+        }
+    )
+    assert started["run"]["executionMode"] == "live"
+    service._async_loop.run(asyncio.sleep(0.2))
+
+    info = service.handle_request(
+        {"command": "blueprint.agentInfo", "args": {"runId": started["runId"], "nodeId": "planner"}}
+    )
+    assert info["runtime"]["state"] in {"idle", "queued", "waiting_for_reply", "processing_reply"}
+    assert any(event.get("kind") == "part.delta" for event in info["streamEvents"])
+
+    queued = service.handle_request(
+        {
+            "command": "blueprint.queueAgentMessage",
+            "args": {"runId": started["runId"], "nodeId": "planner", "text": "urgent", "mode": "top"},
+        }
+    )
+    assert queued["result"]["queue_mode"] == "top"
+
+    ended = service.handle_request(
+        {"command": "blueprint.end", "args": {"runId": started["runId"], "action": "cancel"}}
+    )
+    assert ended["status"]["run"]["final_status"] == "cancelled"
+    assert FakeLiveBackend.instances[-1].stopped is True
+    service.close()
+
+
+def test_codex_jsonl_event_to_agent_stream_events_maps_public_parts() -> None:
+    events = codex_jsonl_event_to_agent_stream_events(
+        {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "hello"}},
+        stream_context={"run_id": "run-1", "node_id": "planner", "agent_id": "agent-planner", "message_id": "msg-1"},
+    )
+
+    assert events == [
+        {
+            "kind": "part.delta",
+            "run_id": "run-1",
+            "node_id": "planner",
+            "agent_id": "agent-planner",
+            "message_id": "msg-1",
+            "raw": {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "hello"}},
+            "part_id": "item_1",
+            "part_type": "text",
+            "field": "text",
+            "delta": "hello",
+            "text": "hello",
+            "status": "completed",
+        }
+    ]
+
+
+def test_agent_tcp_client_stream_messages_do_not_satisfy_final_reply() -> None:
+    async def scenario() -> None:
+        client = AgentTCPClient("orchestrator", "127.0.0.1", 0)
+        events = []
+        await client._recv_queue.put(
+            {
+                "type": "message",
+                "from": "agent-planner",
+                "body": {"type": "agent.stream", "event": {"kind": "part.delta", "delta": "hello"}},
+            }
+        )
+        await client._recv_queue.put(
+            {
+                "type": "message",
+                "from": "agent-planner",
+                "body": {"ok": True, "text": "final"},
+            }
+        )
+
+        async def stream_callback(event: dict) -> None:
+            events.append(event)
+
+        reply = await client.wait_for_message(
+            expect_from="agent-planner",
+            timeout_sec=1,
+            stream_callback=stream_callback,
+        )
+        assert reply["body"]["text"] == "final"
+        assert events == [{"kind": "part.delta", "delta": "hello"}]
+
+    asyncio.run(scenario())
 
 
 def test_blueprint_http_server_returns_error_details(tmp_path: Path) -> None:

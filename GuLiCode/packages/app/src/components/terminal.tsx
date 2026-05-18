@@ -591,7 +591,15 @@ export const Terminal = (props: TerminalProps) => {
         socket.addEventListener("close", handleClose)
       }
 
-      open()
+      const connect = async () => {
+        if (await gone()) {
+          fail(new Error(language.t("terminal.connectionLost.description")))
+          return
+        }
+        open()
+      }
+
+      void connect()
     }
 
     void run().catch((err) => {

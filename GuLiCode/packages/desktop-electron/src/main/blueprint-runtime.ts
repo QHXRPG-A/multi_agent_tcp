@@ -52,8 +52,8 @@ export class BlueprintRuntime {
     return this.request("blueprint.listRuns", { projectDir, blueprintId }).then((result) => result.runs)
   }
 
-  start(projectDir: string, blueprintId: string, plan: Record<string, unknown>) {
-    return this.request("blueprint.start", { projectDir, blueprintId, plan })
+  start(projectDir: string, blueprintId: string, plan: Record<string, unknown>, executionMode: "status" | "live" = "status") {
+    return this.request("blueprint.start", { projectDir, blueprintId, plan, executionMode })
   }
 
   status(runId: string) {
@@ -66,6 +66,20 @@ export class BlueprintRuntime {
 
   recentEvents(runId: string, limit?: number) {
     return this.request("blueprint.recentEvents", { runId, limit })
+  }
+
+  agentInfo(runId: string | undefined, nodeId: string) {
+    return this.request("blueprint.agentInfo", { runId, nodeId })
+  }
+
+  queueAgentMessage(runId: string, nodeId: string, text: string, mode: "default" | "top") {
+    return this.request("blueprint.queueAgentMessage", { runId, nodeId, text, mode })
+  }
+
+  agentStreamToken(runId: string, cursor?: number) {
+    return this.ensureReady().then((ready) =>
+      this.request("blueprint.agentStreamToken", { runId, cursor, baseUrl: ready.url }),
+    )
   }
 
   close() {

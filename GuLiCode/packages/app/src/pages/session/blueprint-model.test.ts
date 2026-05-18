@@ -4,11 +4,13 @@ import {
   addEdge,
   addNode,
   addRouteNode,
+  addTestAgentNode,
   CLI_KIND_OPTIONS,
   createBlueprintStartPlan,
   createDefaultBlueprintDraft,
   fromBlueprintDocument,
   DEFAULT_SKILL_DIR,
+  TEST_AGENT_NODE_FLAG,
   deleteNode,
   parseScopeText,
   setInspector,
@@ -69,6 +71,34 @@ describe("blueprint draft model", () => {
     expect(draft.layout.nodes["coder-1"]).toEqual({ x: 0, y: 24 })
     expect(draft.selection).toEqual({ type: "node", id: "coder-1" })
     expect(draft.inspector).toEqual({ type: "node", id: "coder-1" })
+  })
+
+  test("adds test agent nodes as a Codex panel-inspection preset", () => {
+    const draft = addTestAgentNode(createDefaultBlueprintDraft(), {
+      position: { x: 10, y: 20 },
+    })
+
+    expect(draft.graph.agent_nodes["test-agent"]).toMatchObject({
+      node_id: "test-agent",
+      agent_id: "agent-test-agent",
+      cli_kind: "codex",
+      model: "gpt-5.4",
+      command: "codex",
+      timeout_sec: 60,
+      adapter_options: { [TEST_AGENT_NODE_FLAG]: true, skip_git_repo_check: true },
+    })
+    expect(draft.layout.nodes["test-agent"]).toEqual({ x: 0, y: 24 })
+    expect(draft.selection).toEqual({ type: "node", id: "test-agent" })
+    expect(draft.inspector).toEqual({ type: "node", id: "test-agent" })
+
+    const viaGenericAdd = addNode(draft, { kind: "test-agent" })
+    expect(viaGenericAdd.graph.agent_nodes["test-agent-1"]?.adapter_options[TEST_AGENT_NODE_FLAG]).toBe(true)
+
+    const legacyTestAgent = addTestAgentNode(createDefaultBlueprintDraft())
+    const legacyNode = legacyTestAgent.graph.agent_nodes["test-agent"]
+    if (legacyNode) delete legacyNode.adapter_options.skip_git_repo_check
+    const runtime = toRuntimeGraphDraft(legacyTestAgent)
+    expect(runtime.agent_nodes["test-agent"]?.adapter_options.skip_git_repo_check).toBe(true)
   })
 
   test("adds route and terminal nodes", () => {

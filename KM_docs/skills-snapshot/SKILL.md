@@ -34,6 +34,11 @@ Rules of interpretation:
 - Treat low-level TCP workers as a backend adapter path, not the product architecture center.
 - Treat `CodeMakerCluster` as a backward-compatible alias for the old cluster facade. New writing should prefer `CLIWorkerBackend`.
 - Treat the old Ryven/editor UI line as retired from this active skill snapshot. Only revisit it if the user explicitly revives that track.
+- Current adapter priority is Codex-first. For Agent information panel streaming
+  and live blueprint smoke, focus on `cli_kind=codex`, `CodexAdapter`, and the
+  Codex JSONL -> `AgentStreamEvent` path. Do not spend new effort on CodeMaker
+  streaming unless the user explicitly re-opens that track; treat CodeMaker as
+  compatibility/fallback.
 
 Common repository root:
 
@@ -43,157 +48,82 @@ F:\src\Package\Script\Python\multi_agent_tcp
 
 Historical paths such as `D:\agents\multi_agent_tcp` or `F:\src\ryven_demo` may appear in archives. Do not use them as current defaults unless the user's machine actually has that path.
 
-## Fast Handoff - 2026-05-17 Blueprint UI Runtime Status Projection
+## Fast Handoff - 2026-05-18 Blueprint Agent Panel + Debug Baseline
 
-The Blueprint UI status projection layer has landed. GuLiCode now couples the
-blueprint side panel to the runtime/control-plane lifecycle without starting
-real CLI workers.
+When the next task is GuLiCode blueprint UI or desktop debug startup, start
+from this state:
 
-Completed in the current workspace:
+1. The Agent information panel no longer opens by hover. It opens by left
+   mouse long-press on Agent nodes with an `800ms` circular progress ring, or
+   through the Agent node right-click menu item `信息面板` / `Info panel`.
+2. Long-press cancels when pointer movement reaches `8px`; `pointercancel`,
+   canvas click, port interactions, and connection drag clear pending
+   long-press state.
+3. Agent information panels are movable and resizable. Drag the title area to
+   move; drag the bottom-right handle to resize. Default size is `374 x 410`,
+   minimum size is `320 x 300`. Opening still tries to place the panel in view,
+   but drag updates are no longer clamped, so panels can be moved partly out of
+   the canvas. Panel body text is selectable and the body scrolls with wheel.
+4. Existing panel behavior remains: close, pin, multiple pinned panels,
+   non-pinned outside-click close, stream transcript, `default/top` sends, and
+   read-only static display when no live run exists.
+5. The Add Node menu includes a Test Agent preset for Agent information panel
+   smoke/debug work. The special test-only right-click `Start test` action was
+   removed; test nodes now use the normal blueprint runtime start path.
+6. Test Agent panels persist a realtime JSON v2 snapshot and show its path in
+   the panel. Use the single fixed file
+   `%APPDATA%\ai.opencode.desktop.dev\logs\agent-info-panel-tests\agent-panel-test.json`.
+   Desktop startup and `blueprint-start` clear the directory; later panel
+   persists overwrite the same file and remove obsolete timestamped snapshots.
+   The v2 payload keeps only `agentReplies`, `userMessages`, and
+   `frameworkMessages`; it does not write raw `node`, `panel`, `runtime`, or
+   `streamEvents` objects.
+7. Panel-sent user messages are recorded in `payload.userMessages` with
+   `runtimeMessageId`, lifecycle status (`queued`, `sent`, `dispatching`,
+   `running`, `succeeded`, `failed`), timestamps, and error text when present.
+   `sent` only means IPC queue acceptance; final success/failure comes from
+   stream events or recent runtime events.
+8. Test Codex nodes set/backfill `skip_git_repo_check: true` to avoid the
+   `C:\` trusted-directory smoke failure. Runtime run-list status is merged from
+   `status.run`, so snapshots do not report stale `running` after cancel, fail,
+   or complete.
+9. The latest desktop debug start used `GuLiCode/logs/gulicode-desktop-direct.log`;
+   it reached `server ready` with renderer `http://localhost:5173/` and sidecar
+   `http://127.0.0.1:9766`.
+10. The code-level debug cleanup in this pass covers `blueprint-list-models`
+   Windows spawn/`EPERM` handling, DnD cleanup warnings, stale PTY WebSocket
+   errors, and Solid SVG computation warnings.
+11. Current stream priority is Codex-first. If Agent output still appears
+   non-streaming, first verify the blueprint uses `cli_kind=codex`, then inspect
+   WebSocket lifetime/cursor handling and Codex JSONL event mapping. Do not
+   chase CodeMaker streaming for this project phase unless explicitly asked.
+12. Highest next priority: desktop blueprint `live` runs are currently starting
+    ordinary and Test Agents as raw CLI workers before `GraphRuntime` can
+    materialize the framework-managed private context. Fix the desktop live
+    startup path so it uses `GraphRuntime(enforce_private_agent_context=True)`,
+    private checkout/CODEX_HOME, `framework-agent-runtime`, `AGENTS.md`,
+    Workspace API context, and authorized skill/rule materialization before
+    doing more Agent panel polish.
 
-1. `createBlueprintStartPlan(draft)` derives a deterministic start plan from
-   the saved blueprint graph. It covers all AgentNode descriptions, walks start
-   terminals through `exec` edges and RouteNodes to find initial AgentNodes,
-   emits tasks only for those start nodes, and adds
-   `{ allow_parallel: true, source: "blueprint-ui-derived" }`.
-2. `desktop_blueprint_service.py` adds `blueprint.listRuns(projectDir?,
-   blueprintId?)`, appends `explanation =
-   runtime.explain_status(graph=graph)` to `blueprint.status`, and keeps
-   `executionMode` guarded at status-only depth. `live` is explicitly rejected.
-3. Electron main/IPC/preload/platform boundaries now expose
-   `listBlueprintRuns`.
-4. The blueprint panel Start action saves the project `BlueprintDocument`
-   first, starts `default` with the derived plan, stores `runId`, polls
-   `blueprint.status` / `blueprint.recentEvents(runId, 50)` every 2 seconds,
-   and stops automatic polling for terminal or paused states.
-5. The Runtime side panel projects Overview, Agents, Queues, Events, and
-   Workspace directly from `status_snapshot` and `explain_status`.
-6. Complete/Pause/Cancel controls call `blueprint.end` and immediately refresh.
-7. The renderer remains a thin client: no local scheduler, queue advancement,
-   fan-in, workspace/archive semantics, top-agent governance, tick loop, or
-   worker lifecycle was added.
-
-Files to start from:
-
-- `desktop_blueprint_service.py`
-- `test_desktop_blueprint_service.py`
-- `GuLiCode/packages/app/src/pages/session/blueprint-model.ts`
-- `GuLiCode/packages/app/src/pages/session/blueprint-model.test.ts`
-- `GuLiCode/packages/app/src/pages/session/blueprint-side-panel.tsx`
-- `GuLiCode/packages/app/src/pages/session/blueprint-side-panel.test.ts`
-- `GuLiCode/packages/app/src/context/platform.tsx`
-- `GuLiCode/packages/desktop-electron/src/main/blueprint-runtime.ts`
-- `GuLiCode/packages/desktop-electron/src/main/blueprint-runtime.test.ts`
-- `GuLiCode/packages/desktop-electron/src/main/ipc-blueprint-runtime.test.ts`
-- `GuLiCode/packages/desktop-electron/src/main/ipc.ts`
-- `GuLiCode/packages/desktop-electron/src/preload/index.ts`
-- `GuLiCode/packages/desktop-electron/src/preload/types.ts`
-
-Highest next priority: manual smoke this status projection in the packaged
-desktop UI, then enter live execution depth only after the projection is stable.
-
-- Verify Start saves before start, retains `runId`, and projects status/events
-  in the Runtime panel.
-- Verify Complete/Pause/Cancel and manual Refresh against terminal runs.
-- Keep top-agent/operator audit surfaces such as utterances out of ordinary
-  Agent message context.
-- Second phase: add service-owned automatic tick loop, real
-  `CLIWorkerBackend` startup, `executionMode=live`, and live worker execution.
-
-Latest verification observed:
+Latest relevant verification:
 
 ```powershell
-cd D:\agent\multi_agent_tcp
-pytest -q test_desktop_blueprint_service.py test_graph_control.py
-python -m py_compile desktop_blueprint_service.py __main__.py __init__.py
-
-cd D:\agent\multi_agent_tcp\GuLiCode\packages\app
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
 bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts
+bun run typecheck
 bun run build
 
-cd D:\agent\multi_agent_tcp\GuLiCode\packages\desktop-electron
-bun test ./src/main/blueprint-runtime.test.ts ./src/main/ipc-blueprint-runtime.test.ts ./src/main/blueprint-catalog.test.ts
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
+bun test ./src/main/ipc-blueprint-runtime.test.ts
+bun run typecheck
 bun run build
 ```
 
-Observed result: Python `17 passed`; app `18 pass`; Electron `9 pass`; both
-Bun builds passed with existing Vite warnings only.
+Detailed archive:
 
-## Fast Handoff - 2026-05-16 Blueprint Runtime Middle Layer v1
-
-Superseded for UI/runtime status coupling by the 2026-05-17 handoff above.
-Keep this section as the historical service-middle-layer baseline.
-
-The Blueprint Runtime middle layer v1 has landed. The Python desktop
-blueprint service now owns live run registration and lifecycle polling for
-saved project blueprint documents.
-
-Completed in the current workspace:
-
-1. `desktop_blueprint_service.py` now has a service-owned in-memory run
-   registry guarded by `threading.RLock`.
-2. Run ids use `run-<12 hex>`. Each registry entry keeps project dir,
-   blueprint id, `BlueprintDocument`, `GraphDefinition`, `GraphRuntime`,
-   `GraphRuntimeControlPlane`, and created/updated timestamps.
-3. `blueprint.start` now loads the saved project blueprint JSON, converts
-   `document.graph` through `graph_definition_from_dict(...)`, calls
-   `validate_runnable()`, requires a complete `TopAgentStartPlan`, and calls
-   control-plane `run.start`.
-4. `DesktopBlueprintNoopBackend` is used for v1. It records worker configs in
-   `ensure_worker()` but does not start broker/CLI workers; `run_single()`
-   raises a clear non-execution error if reached.
-5. `blueprint.status` returns `GraphRuntime.status_snapshot(graph=graph)`.
-6. `blueprint.recentEvents` returns a bounded recent event window; default
-   limit is 20 and accepted values are clamped to `0..200`.
-7. `blueprint.end` supports `complete`, `cancel`, `fail`, and `pause`.
-   Terminal runs remain queryable, and repeated end calls return
-   `alreadyEnded: true` without calling `GraphRuntime.end_run()` again.
-8. Service errors now support optional `details` and include runtime-facing
-   codes such as `RUN_NOT_FOUND`, `INVALID_BLUEPRINT_GRAPH`,
-   `BAD_START_PLAN`, `START_PLAN_INVALID`, and `UNSUPPORTED_RUN_ACTION`.
-9. Python and Electron tests cover the real service lifecycle:
-   save -> start -> status -> recentEvents -> end.
-
-Files to start from:
-
-- `desktop_blueprint_service.py`
-- `test_desktop_blueprint_service.py`
-- `GuLiCode/packages/desktop-electron/src/main/blueprint-runtime.ts`
-- `GuLiCode/packages/desktop-electron/src/main/blueprint-runtime.test.ts`
-- `GuLiCode/packages/desktop-electron/src/main/ipc-blueprint-runtime.test.ts`
-- `GuLiCode/packages/desktop-electron/src/main/ipc.ts`
-- `GuLiCode/packages/desktop-electron/src/preload/index.ts`
-- `GuLiCode/packages/desktop-electron/src/preload/types.ts`
-- `GuLiCode/packages/app/src/context/platform.tsx`
-- `GuLiCode/packages/app/src/pages/session/blueprint-side-panel.tsx`
-
-Historical next priority, now completed by the 2026-05-17 handoff: runtime
-status projection in GuLiCode UI.
-
-- Add a start action UX that saves the project blueprint before calling
-  `blueprint.start`.
-- Display returned runtime/control-plane projections for runs, agents, queues,
-  outgoing batches, joins, jobs, workspace changes, artifacts, reports, and
-  recent events.
-- Keep renderer behavior thin. Do not move scheduler, fan-in, queue,
-  workspace/archive, or top-agent semantics into the UI.
-- Keep top-agent/operator audit surfaces such as utterances out of ordinary
-  Agent message context.
-- Add automatic tick/live CLI execution only after this status projection
-  layer is stable.
-
-Latest verification observed:
-
-```powershell
-cd D:\agent\multi_agent_tcp
-pytest -q test_desktop_blueprint_service.py test_graph_control.py
-python -m py_compile desktop_blueprint_service.py __main__.py __init__.py
-
-cd D:\agent\multi_agent_tcp\GuLiCode\packages\desktop-electron
-bun test ./src/main/blueprint-runtime.test.ts ./src/main/ipc-blueprint-runtime.test.ts
-```
-
-Observed result: `17 passed` and `5 pass`.
+- [`archive/agent_info_panel_interaction_2026-05-18.md`](archive/agent_info_panel_interaction_2026-05-18.md)
+- [`archive/agent_info_panel_test_node_json_2026-05-18.md`](archive/agent_info_panel_test_node_json_2026-05-18.md)
+- [`archive/agent_info_panel_stream_private_context_2026-05-18.md`](archive/agent_info_panel_stream_private_context_2026-05-18.md)
 
 ## Fast Handoff - 2026-05-15 Real Codex Framework Flow Baseline
 
@@ -393,6 +323,24 @@ and rebuild the installer with the `afterPack` hook. See
 `knowledge_base/gulicode_desktop.md` and `knowledge_base/guli_desktop_ui.md`
 for the full packaging/icon notes.
 
+## GuLiCode Debug Startup Fast Path
+
+Use this when the user asks to launch the desktop app with visible runtime
+errors, or after packaging/dev startup reports noisy or unclear output. Keep
+`DEBUG` unset unless explicitly investigating Vite/Babel internals; `DEBUG=*`
+will flood the terminal with transformer traversal logs.
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
+$env:ELECTRON_ENABLE_LOGGING = '1'
+$env:ELECTRON_ENABLE_STACK_DUMPING = '1'
+Remove-Item Env:\DEBUG -ErrorAction SilentlyContinue
+bun run dev
+```
+
+If a previous debug window used `DEBUG=*`, close that old PowerShell window
+before starting this cleaner session so logs and dev ports do not mix.
+
 ## Document Layout
 
 ### 1. `SKILL.md`
@@ -444,9 +392,9 @@ Historical change records only. Do not use archive content as current behavior u
 
 - [`archive/guli_desktop_ui_archive.md`](archive/guli_desktop_ui_archive.md)
 - [`archive/blueprint_integration_archive.md`](archive/blueprint_integration_archive.md)
-- [`archive/blueprint_api_bridge_2026-05-16.md`](archive/blueprint_api_bridge_2026-05-16.md)
-- [`archive/blueprint_runtime_middle_layer_2026-05-16.md`](archive/blueprint_runtime_middle_layer_2026-05-16.md)
-- [`archive/blueprint_ui_runtime_status_projection_2026-05-17.md`](archive/blueprint_ui_runtime_status_projection_2026-05-17.md)
+- [`archive/agent_info_panel_live_runtime_2026-05-18.md`](archive/agent_info_panel_live_runtime_2026-05-18.md)
+- [`archive/agent_info_panel_interaction_2026-05-18.md`](archive/agent_info_panel_interaction_2026-05-18.md)
+- [`archive/agent_info_panel_test_node_json_2026-05-18.md`](archive/agent_info_panel_test_node_json_2026-05-18.md)
 - [`archive/gulicode_runtime_baseline_archive.md`](archive/gulicode_runtime_baseline_archive.md)
 - [`archive/agents_architecture_archive.md`](archive/agents_architecture_archive.md)
 - [`archive/ring_runtime_closure_archive.md`](archive/ring_runtime_closure_archive.md)
@@ -456,6 +404,7 @@ Historical change records only. Do not use archive content as current behavior u
 
 - GuLiCode desktop startup, one-click launcher, packaged bring-up, taskbar icon, and direct Electron fallback: read `knowledge_base/gulicode_desktop.md`.
 - Guli productization, desktop UI ownership, branding, icon replacement, empty-state wording, blueprint entry placement, and blueprint workbench embedding: read `knowledge_base/guli_desktop_ui.md`, then `tasks/guli_desktop_ui_tasks.md`.
+- Blueprint Agent information panel interactions, long-press progress, context-menu entry, move/resize behavior, Test Agent JSON snapshots, user-message capture, and clean desktop debug baseline: read `archive/agent_info_panel_interaction_2026-05-18.md`, then `archive/agent_info_panel_test_node_json_2026-05-18.md`, then `tasks/current_goals.md`.
 - GuLiCode top Agent, organization view, top-agent profile, start plan, status explanation: read `多agents通信设计.md`, then `tasks/multi_agent_communication_tasks.md`.
 - Runtime start/status/end, organization, message batch, agent dispatch, join-create/join-contribute: read `knowledge_base/dispatch_workflows.md`.
 - Current architecture or component ownership: read `knowledge_base/core_architecture.md`.

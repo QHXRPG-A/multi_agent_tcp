@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .protocol import read_frame, write_frame
 
@@ -90,12 +90,15 @@ class AgentTCPClient:
         body: Any,
         *,
         gather_reply: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not self._writer:
             raise RuntimeError("not connected")
         payload: Dict[str, Any] = {"type": "send", "to": to_agent_id.strip(), "body": body}
         if gather_reply is not None and str(gather_reply).strip():
             payload["gather_reply"] = str(gather_reply).strip()
+        if meta:
+            payload["meta"] = dict(meta)
         await write_frame(self._writer, payload)
 
     async def broadcast(self, body: Any, exclude_self: bool = True) -> None:
@@ -171,6 +174,7 @@ class AgentTCPClient:
         expect_from: Optional[str] = None,
         timeout_sec: float = 300.0,
         accept_broadcast: bool = False,
+        stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Block until one ``message`` (or optional ``broadcast``) arrives; optional filter by ``from``."""
 
@@ -185,6 +189,12 @@ class AgentTCPClient:
                     continue
                 if t == "message":
                     if expect_from is None or msg.get("from") == expect_from:
+                        body = msg.get("body")
+                        if isinstance(body, dict) and body.get("type") == "agent.stream":
+                            event = body.get("event")
+                            if stream_callback is not None and isinstance(event, dict):
+                                await stream_callback(event)
+                            continue
                         return msg
                 if accept_broadcast and t == "broadcast":
                     if expect_from is None or msg.get("from") == expect_from:

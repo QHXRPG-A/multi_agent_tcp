@@ -1,10 +1,24 @@
-import { beforeAll, describe, expect, mock, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test"
+import { readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 type Handler = (_event: unknown, ...args: unknown[]) => unknown
 
 const handlers = new Map<string, Handler>()
+const testLogDir = join(tmpdir(), "gulicode-ipc-blueprint-runtime-test")
+const testLogPath = join(testLogDir, "main.log")
 
 beforeAll(() => {
+  mock.module("electron-log/main.js", () => ({
+    default: {
+      transports: {
+        file: {
+          getFile: () => ({ path: testLogPath }),
+        },
+      },
+    },
+  }))
   mock.module("./windows", () => ({
     setTitlebar: () => {},
   }))
@@ -25,6 +39,7 @@ beforeAll(() => {
     },
     app: {
       isPackaged: false,
+      getPath: () => testLogDir,
       relaunch: () => {},
       exit: () => {},
     },
@@ -55,6 +70,10 @@ beforeAll(() => {
   }))
 })
 
+afterAll(async () => {
+  await rm(testLogDir, { recursive: true, force: true })
+})
+
 describe("blueprint runtime IPC handlers", () => {
   test("route renderer blueprint calls to the runtime facade", async () => {
     const calls: string[] = []
@@ -79,8 +98,8 @@ describe("blueprint runtime IPC handlers", () => {
         calls.push(`runs:${projectDir}:${blueprintId}`)
         return [{ runId: "run-1" }]
       },
-      start: (projectDir: string, blueprintId: string, plan: Record<string, unknown>) => {
-        calls.push(`start:${projectDir}:${blueprintId}:${plan.goal}`)
+      start: (projectDir: string, blueprintId: string, plan: Record<string, unknown>, executionMode?: string) => {
+        calls.push(`start:${projectDir}:${blueprintId}:${plan.goal}:${executionMode}`)
         return { code: "NOT_IMPLEMENTED_FOR_UI" }
       },
       status: (runId: string) => {
@@ -94,6 +113,18 @@ describe("blueprint runtime IPC handlers", () => {
       recentEvents: (runId: string, limit?: number) => {
         calls.push(`events:${runId}:${limit}`)
         return { events: [] }
+      },
+      agentInfo: (runId: string | undefined, nodeId: string) => {
+        calls.push(`agent-info:${runId}:${nodeId}`)
+        return { nodeId }
+      },
+      queueAgentMessage: (runId: string, nodeId: string, text: string, mode: string) => {
+        calls.push(`agent-message:${runId}:${nodeId}:${text}:${mode}`)
+        return { ok: true }
+      },
+      agentStreamToken: (runId: string, cursor?: number) => {
+        calls.push(`agent-stream:${runId}:${cursor}`)
+        return { wsUrl: "ws://localhost/agent" }
       },
     }
     const { registerIpcHandlers } = await import("./ipc")
@@ -125,21 +156,58 @@ describe("blueprint runtime IPC handlers", () => {
     await handlers.get("blueprint-save")?.({}, "C:\\repo", { id: "default" })
     await handlers.get("blueprint-validate")?.({}, "C:\\repo", "default", { id: "default" })
     await handlers.get("blueprint-list-runs")?.({}, "C:\\repo", "default")
-    await handlers.get("blueprint-start")?.({}, "C:\\repo", "default", { goal: "ship" })
+    await handlers.get("blueprint-start")?.({}, "C:\\repo", "default", { goal: "ship" }, "live")
     await handlers.get("blueprint-status")?.({}, "run-1")
     await handlers.get("blueprint-end")?.({}, "run-1", "cancel", "user")
     await handlers.get("blueprint-recent-events")?.({}, "run-1", 10)
+    await handlers.get("blueprint-agent-info")?.({}, "run-1", "coder")
+    await handlers.get("blueprint-queue-agent-message")?.({}, "run-1", "coder", "hello", "top")
+    await handlers.get("blueprint-agent-stream-token")?.({}, "run-1", 18)
+    const saved = (await handlers.get("blueprint-save-agent-panel-test")?.(
+      {},
+      { nodeId: "test-agent", streamEvents: [{ seq: 1 }] },
+    )) as Record<string, unknown>
+    await writeFile(join(testLogDir, "agent-info-panel-tests", "agent-panel-test-test-agent-legacy.json"), "{}", "utf8")
+    const updated = (await handlers.get("blueprint-save-agent-panel-test")?.(
+      {},
+      {
+        schema_version: 2,
+        kind: "gulicode.blueprint.test_agent_messages",
+        nodeId: "test-agent",
+        jsonPath: saved.path,
+        agentReplies: [],
+        userMessages: [{ text: "hello", status: "sent" }],
+        frameworkMessages: [],
+      },
+    )) as Record<string, unknown>
+    const savedDocument = JSON.parse(await readFile(String(saved.path), "utf8")) as Record<string, unknown>
+    const savedPayload = savedDocument.payload as Record<string, unknown>
+    const testJsonFiles = await readdir(join(testLogDir, "agent-info-panel-tests"))
 
+    expect(saved.ok).toBe(true)
+    expect(String(saved.path)).toContain("agent-info-panel-tests")
+    expect(String(saved.path).endsWith("agent-panel-test.json")).toBe(true)
+    expect(updated.path).toBe(saved.path)
+    expect(savedDocument.schema_version).toBe(2)
+    expect(savedDocument.kind).toBe("gulicode.agent_info_panel_test")
+    expect(savedDocument.path).toBe(saved.path)
+    expect(savedPayload.schema_version).toBe(2)
+    expect(savedPayload.kind).toBe("gulicode.blueprint.test_agent_messages")
+    expect(JSON.stringify(savedDocument)).toContain("hello")
+    expect(testJsonFiles).toEqual(["agent-panel-test.json"])
     expect(calls).toEqual([
       "list:C:\\repo",
       "open:C:\\repo:default",
       "save:C:\\repo:default",
       "validate:C:\\repo:default:default",
       "runs:C:\\repo:default",
-      "start:C:\\repo:default:ship",
+      "start:C:\\repo:default:ship:live",
       "status:run-1",
       "end:run-1:cancel:user",
       "events:run-1:10",
+      "agent-info:run-1:coder",
+      "agent-message:run-1:coder:hello:top",
+      "agent-stream:run-1:18",
     ])
   })
 })

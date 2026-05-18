@@ -20,6 +20,21 @@
 
 ## 近期任务
 
+Current adapter priority override - 2026-05-18:
+
+- Highest related blocker: desktop blueprint `live` currently starts workers
+  from raw AgentNode configs before `GraphRuntime` materializes private Agent
+  context. Fix the desktop startup path so Codex workers are launched from the
+  materialized node config with private checkout cwd, private `CODEX_HOME`,
+  `framework-agent-runtime`, `AGENTS.md`, Workspace API env/prompt context,
+  and authorized skill/rule materialization.
+- Codex is the active implementation path for live Agent output streaming.
+- Prioritize `cli_kind=codex`, `CodexAdapter`, `codex exec --json`, and Codex
+  JSONL normalization into `AgentStreamEvent`.
+- Do not spend new effort on CodeMaker streaming or CodeMaker model UX in this
+  project phase unless the user explicitly re-opens that track.
+- Keep CodeMaker as a compatibility/fallback adapter behind `CLIWorkerBackend`.
+
 1. 将已落地的 Codex / CodeMaker adapter 收敛到 `CLIWorkerBackend` 边界：
    - prompt contract
    - execution context

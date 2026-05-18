@@ -39,10 +39,16 @@ const api: ElectronAPI = {
   blueprintValidate: (projectDir, blueprintId, document) =>
     ipcRenderer.invoke("blueprint-validate", projectDir, blueprintId, document),
   blueprintListRuns: (projectDir, blueprintId) => ipcRenderer.invoke("blueprint-list-runs", projectDir, blueprintId),
-  blueprintStart: (projectDir, blueprintId, plan) => ipcRenderer.invoke("blueprint-start", projectDir, blueprintId, plan),
+  blueprintStart: (projectDir, blueprintId, plan, executionMode) =>
+    ipcRenderer.invoke("blueprint-start", projectDir, blueprintId, plan, executionMode),
   blueprintStatus: (runId) => ipcRenderer.invoke("blueprint-status", runId),
   blueprintEnd: (runId, action, reason) => ipcRenderer.invoke("blueprint-end", runId, action, reason),
   blueprintRecentEvents: (runId, limit) => ipcRenderer.invoke("blueprint-recent-events", runId, limit),
+  blueprintAgentInfo: (runId, nodeId) => ipcRenderer.invoke("blueprint-agent-info", runId, nodeId),
+  blueprintQueueAgentMessage: (runId, nodeId, text, mode) =>
+    ipcRenderer.invoke("blueprint-queue-agent-message", runId, nodeId, text, mode),
+  blueprintAgentStreamToken: (runId, cursor) => ipcRenderer.invoke("blueprint-agent-stream-token", runId, cursor),
+  blueprintSaveAgentPanelTest: (payload) => ipcRenderer.invoke("blueprint-save-agent-panel-test", payload),
 
   getWindowCount: () => ipcRenderer.invoke("get-window-count"),
   onSqliteMigrationProgress: (cb) => {

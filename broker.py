@@ -565,6 +565,8 @@ class Broker:
                         )
                         continue
                     out = {"type": "message", "from": agent_id, "body": body}
+                    if isinstance(msg.get("meta"), dict):
+                        out["meta"] = dict(msg["meta"])
                     try:
                         await self._safe_write_frame(target, out)
                     except (ConnectionError, OSError) as e:

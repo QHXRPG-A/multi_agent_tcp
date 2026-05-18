@@ -986,6 +986,7 @@ export const dict = {
   "blueprint.add.start.description": "Start terminal with an output port",
   "blueprint.add.end.description": "End terminal with an input port",
   "blueprint.context.edit": "Edit",
+  "blueprint.context.infoPanel": "Info panel",
   "blueprint.inspector.title": "Inspector",
   "blueprint.inspector.empty": "Select a node or edge",
   "blueprint.field.nodeId": "Node ID",

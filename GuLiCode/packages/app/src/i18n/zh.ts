@@ -976,6 +976,7 @@ export const dict = {
   "blueprint.add.start.description": "带输出接口的开始终端",
   "blueprint.add.end.description": "带输入接口的结束终端",
   "blueprint.context.edit": "编辑",
+  "blueprint.context.infoPanel": "信息面板",
   "blueprint.inspector.title": "检查器",
   "blueprint.inspector.empty": "选择节点或边",
   "blueprint.field.nodeId": "节点 ID",

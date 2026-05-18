@@ -295,12 +295,12 @@ export const SortableWorkspace = (props: {
   project: LocalProject
   sortNow: Accessor<number>
   mobile?: boolean
+  sortable: Accessor<boolean>
 }): JSX.Element => {
   const navigate = useNavigate()
   const params = useParams()
   const globalSync = useGlobalSync()
   const language = useLanguage()
-  const sortable = createSortable(props.directory)
   const [workspaceStore, setWorkspaceStore] = globalSync.child(props.directory, { bootstrap: false })
   const [menu, setMenu] = createStore({
     open: false,
@@ -358,16 +358,8 @@ export const SortableWorkspace = (props: {
     globalSync.child(props.directory, { bootstrap: true })
   })
 
-  return (
-    <div
-      // @ts-ignore
-      use:sortable
-      classList={{
-        "opacity-30": sortable.isActiveDraggable,
-        "opacity-50 pointer-events-none": busy(),
-      }}
-    >
-      <Collapsible variant="ghost" open={open()} class="shrink-0" onOpenChange={openWrapper}>
+  const content = () => (
+    <Collapsible variant="ghost" open={open()} class="shrink-0" onOpenChange={openWrapper}>
         <div class="py-1">
           <div
             class="group/workspace relative"
@@ -433,7 +425,38 @@ export const SortableWorkspace = (props: {
             language={language}
           />
         </Collapsible.Content>
-      </Collapsible>
+    </Collapsible>
+  )
+
+  return (
+    <Show
+      when={props.sortable()}
+      fallback={<div classList={{ "opacity-50 pointer-events-none": busy() }}>{content()}</div>}
+    >
+      <SortableWorkspaceFrame id={props.directory} busy={busy}>
+        {content()}
+      </SortableWorkspaceFrame>
+    </Show>
+  )
+}
+
+const SortableWorkspaceFrame = (props: {
+  id: string
+  busy: Accessor<boolean>
+  children: JSX.Element
+}): JSX.Element => {
+  const sortable = createSortable(props.id)
+
+  return (
+    <div
+      // @ts-ignore
+      use:sortable
+      classList={{
+        "opacity-30": sortable.isActiveDraggable,
+        "opacity-50 pointer-events-none": props.busy(),
+      }}
+    >
+      {props.children}
     </div>
   )
 }

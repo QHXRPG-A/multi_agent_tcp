@@ -1125,6 +1125,7 @@ class PendingAgentMessage:
     source_node_id: Optional[str] = None
     source_agent_id: Optional[str] = None
     timeout_sec: Optional[float] = None
+    queue_mode: str = "default"
     created_at: float = field(default_factory=time.monotonic)
     dispatched_at: Optional[float] = None
     completed_at: Optional[float] = None
@@ -1139,6 +1140,7 @@ class PendingAgentMessage:
             "agent_id": self.agent_id,
             "body": self.body,
             "status": self.status,
+            "queue_mode": self.queue_mode,
             "created_at": self.created_at,
         }
         if self.source_node_id is not None:
@@ -1602,6 +1604,10 @@ class GraphRuntime:
         self._job_tasks: Dict[str, asyncio.Task[None]] = {}
         self._jobs: Dict[str, GraphJob] = {}
         self._events: List[GraphEvent] = []
+        self._agent_stream_events: List[Dict[str, Any]] = []
+        self._agent_stream_seq = 0
+        self.agent_stream_run_id: Optional[str] = None
+        self.agent_stream_event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
         self._tick_task: Optional[asyncio.Task[None]] = None
         self._last_tick_at: Optional[float] = None
         self._run_status: RunLifecycleStatus = "created"
@@ -1762,6 +1768,64 @@ class GraphRuntime:
         self._events.append(event)
         return event
 
+    @property
+    def agent_stream_events(self) -> List[Dict[str, Any]]:
+        return [dict(event) for event in self._agent_stream_events]
+
+    def agent_stream_events_after(
+        self,
+        cursor: Optional[int] = None,
+        *,
+        node_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        min_seq = int(cursor or 0)
+        return [
+            dict(event)
+            for event in self._agent_stream_events
+            if int(event.get("seq", 0)) > min_seq
+            and (node_id is None or event.get("node_id") == node_id)
+        ]
+
+    def record_agent_stream_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        self._agent_stream_seq += 1
+        data = dict(event)
+        data.setdefault("event_id", f"agent-stream-{uuid.uuid4().hex[:12]}")
+        data["seq"] = self._agent_stream_seq
+        data.setdefault("created_at", time.time())
+        if self.agent_stream_run_id is not None:
+            data.setdefault("run_id", self.agent_stream_run_id)
+        self._agent_stream_events.append(data)
+        if len(self._agent_stream_events) > 1000:
+            self._agent_stream_events = self._agent_stream_events[-1000:]
+        callback = self.agent_stream_event_callback
+        if callback is not None:
+            try:
+                callback(dict(data))
+            except Exception:
+                log.exception("[graph] agent stream callback failed")
+        return data
+
+    def _agent_stream_status_event(
+        self,
+        inst: AgentInstance,
+        *,
+        kind: str = "status",
+        message_id: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "kind": kind,
+            "node_id": inst.node.node_id,
+            "agent_id": inst.agent_id,
+            "message_id": message_id or inst.current_message_id,
+            "agent_state": inst.state,
+            "busy_count": inst.busy_count,
+            "queue_size": len(self._agent_message_queues.get(inst.node.node_id, [])),
+            "current_message_id": inst.current_message_id,
+            "messages_sent": inst.messages_sent,
+            "last_error": error if error is not None else inst.last_error,
+        }
+
     def _extract_agent_said(self, reply: Any) -> str:
         if isinstance(reply, dict):
             body = reply.get("body")
@@ -1893,6 +1957,15 @@ class GraphRuntime:
     ) -> None:
         old_state = inst.state
         inst.set_state(state, error=error, message_id=message_id)
+        if old_state != state:
+            self.record_agent_stream_event(
+                self._agent_stream_status_event(
+                    inst,
+                    kind="status",
+                    message_id=message_id,
+                    error=error,
+                )
+            )
         if emit and old_state != state:
             self._emit(
                 GraphEvent(
@@ -1963,6 +2036,17 @@ class GraphRuntime:
             queue.pop(0)
             pending.status = "dispatching"
             pending.dispatched_at = time.monotonic()
+            self.record_agent_stream_event(
+                {
+                    "kind": "queue.updated",
+                    "node_id": pending.node_id,
+                    "agent_id": pending.agent_id,
+                    "message_id": pending.message_id,
+                    "status": pending.status,
+                    "queue_size": len(queue),
+                    "queue_mode": pending.queue_mode,
+                }
+            )
             self._emit(
                 GraphEvent(
                     "AgentQueuedMessageDispatched",
@@ -2247,6 +2331,18 @@ class GraphRuntime:
             raise
         finally:
             pending.completed_at = time.monotonic()
+            self.record_agent_stream_event(
+                {
+                    "kind": "queue.updated",
+                    "node_id": pending.node_id,
+                    "agent_id": pending.agent_id,
+                    "message_id": pending.message_id,
+                    "status": pending.status,
+                    "queue_size": len(self._agent_message_queues.get(pending.node_id, [])),
+                    "queue_mode": pending.queue_mode,
+                    "last_error": pending.error,
+                }
+            )
             self._emit(
                 GraphEvent(
                     "AgentQueuedMessageCompleted",
@@ -2368,6 +2464,7 @@ class GraphRuntime:
             "joins": join_state,
             "jobs": jobs_state,
             "recent_events": [event.to_dict() for event in events],
+            "agent_stream_events": self.agent_stream_events_after(),
             "workspace": self._workspace_state_snapshot(),
         }
         if graph is not None:
@@ -3354,6 +3451,7 @@ class GraphRuntime:
         timeout_sec: Optional[float] = None,
         source_node_id: Optional[str] = None,
         source_agent_id: Optional[str] = None,
+        queue_mode: str = "default",
     ) -> Dict[str, Any]:
         self._mark_run_running()
         if node.execution_mode == "nonblocking":
@@ -3373,6 +3471,7 @@ class GraphRuntime:
                 timeout_sec=timeout_sec,
                 source_node_id=source_node_id,
                 source_agent_id=source_agent_id,
+                queue_mode=queue_mode,
             )
             return {
                 "type": "graph_message_queued",
@@ -3386,6 +3485,7 @@ class GraphRuntime:
             node,
             body,
             timeout_sec=timeout_sec,
+            message_id=f"msg-{uuid.uuid4().hex[:12]}",
         )
 
     def queue_agent_message(
@@ -3397,10 +3497,14 @@ class GraphRuntime:
         source_node_id: Optional[str] = None,
         source_agent_id: Optional[str] = None,
         message_id: Optional[str] = None,
+        queue_mode: str = "default",
     ) -> PendingAgentMessage:
         """Store a message until the target agent returns to an idle state."""
         if self._closed:
             raise RuntimeError("GraphRuntime is closed")
+        normalized_queue_mode = str(queue_mode or "default").strip().lower()
+        if normalized_queue_mode not in {"default", "top"}:
+            raise ValueError("queue_mode must be 'default' or 'top'")
         self._mark_run_running()
         inst = self._instances.get(node.node_id)
         agent_id = inst.agent_id if inst is not None else node.runtime_agent_id
@@ -3412,11 +3516,27 @@ class GraphRuntime:
             source_node_id=source_node_id,
             source_agent_id=source_agent_id,
             timeout_sec=timeout_sec,
+            queue_mode=normalized_queue_mode,
         )
-        self._agent_message_queues.setdefault(node.node_id, []).append(pending)
+        queue = self._agent_message_queues.setdefault(node.node_id, [])
+        if normalized_queue_mode == "top":
+            queue.insert(0, pending)
+        else:
+            queue.append(pending)
         self._pending_messages[pending.message_id] = pending
         if inst is not None and inst.state == "idle":
             self._set_agent_state(inst, "queued")
+        self.record_agent_stream_event(
+            {
+                "kind": "queue.updated",
+                "node_id": node.node_id,
+                "agent_id": agent_id,
+                "message_id": pending.message_id,
+                "status": pending.status,
+                "queue_size": len(queue),
+                "queue_mode": normalized_queue_mode,
+            }
+        )
         self._record_message_io(
             record_type="framework.message.queued",
             sender={
@@ -3479,8 +3599,16 @@ class GraphRuntime:
         timeout_sec: Optional[float] = None,
         message_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        message_id = message_id or f"msg-{uuid.uuid4().hex[:12]}"
         inst = await self.ensure_agent(node)
         inst.busy_count += 1
+        self.record_agent_stream_event(
+            self._agent_stream_status_event(
+                inst,
+                kind="message.started",
+                message_id=message_id,
+            )
+        )
         self._record_message_io(
             record_type="framework.message.sent",
             sender={"type": "framework"},
@@ -3493,11 +3621,29 @@ class GraphRuntime:
         try:
             self._set_agent_state(inst, "running", message_id=message_id)
             self._set_agent_state(inst, "waiting_for_reply", message_id=message_id)
-            reply = await self.cluster.run_single(
-                inst.agent_id,
-                body,
-                timeout_sec=timeout_sec if timeout_sec is not None else node.timeout_sec,
-            )
+            stream_meta = {
+                "run_id": self.agent_stream_run_id,
+                "node_id": node.node_id,
+                "agent_id": inst.agent_id,
+                "message_id": message_id,
+            }
+            effective_timeout = timeout_sec if timeout_sec is not None else node.timeout_sec
+            try:
+                reply = await self.cluster.run_single(
+                    inst.agent_id,
+                    body,
+                    timeout_sec=effective_timeout,
+                    meta={"framework_stream": stream_meta},
+                    stream_callback=self.record_agent_stream_event,
+                )
+            except TypeError as exc:
+                if "unexpected keyword" not in str(exc):
+                    raise
+                reply = await self.cluster.run_single(
+                    inst.agent_id,
+                    body,
+                    timeout_sec=effective_timeout,
+                )
             failure_reason = _reply_failure_reason(reply)
             if failure_reason is not None:
                 raise AgentMessageFailed(f"agent reply failed: {failure_reason}")
@@ -3556,6 +3702,25 @@ class GraphRuntime:
             reply=reply,
             message_id=message_id,
             task_id=task_id,
+        )
+        self.record_agent_stream_event(
+            {
+                "kind": "message.completed",
+                "node_id": node.node_id,
+                "agent_id": inst.agent_id,
+                "message_id": message_id,
+                "part_id": utterance.utterance_id,
+                "part_type": "text",
+                "field": "text",
+                "text": utterance.said,
+                "status": "completed",
+                "agent_state": inst.state,
+                "busy_count": inst.busy_count,
+                "queue_size": len(self._agent_message_queues.get(node.node_id, [])),
+                "current_message_id": inst.current_message_id,
+                "messages_sent": inst.messages_sent,
+                "last_error": inst.last_error,
+            }
         )
         return utterance.to_dict()
 
@@ -3807,10 +3972,23 @@ class BrokerAgentRuntime:
         *,
         timeout_sec: float = 600.0,
         _skip_skill_inject: bool = False,
+        meta: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ) -> Dict[str, Any]:
         client = await self._ensure_client()
-        await client.send_to(worker_id, body)
-        return await client.wait_for_message(expect_from=worker_id, timeout_sec=timeout_sec)
+        await client.send_to(worker_id, body, meta=meta)
+
+        async def _stream(event: Dict[str, Any]) -> None:
+            if stream_callback is not None:
+                result = stream_callback(event)
+                if asyncio.iscoroutine(result):
+                    await result
+
+        return await client.wait_for_message(
+            expect_from=worker_id,
+            timeout_sec=timeout_sec,
+            stream_callback=_stream if stream_callback is not None else None,
+        )
 
     async def close(self) -> None:
         if self._client is not None:

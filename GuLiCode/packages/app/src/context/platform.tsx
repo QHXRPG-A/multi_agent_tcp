@@ -103,7 +103,12 @@ export type Platform = {
   listBlueprintRuns?(projectDir?: string, blueprintId?: string): Promise<Record<string, unknown>[]>
 
   /** Reserved runtime API for the next status UI pass (desktop only) */
-  startBlueprintRun?(projectDir: string, blueprintId: string, plan: Record<string, unknown>): Promise<Record<string, unknown>>
+  startBlueprintRun?(
+    projectDir: string,
+    blueprintId: string,
+    plan: Record<string, unknown>,
+    executionMode?: "status" | "live",
+  ): Promise<Record<string, unknown>>
 
   /** Reserved runtime API for the next status UI pass (desktop only) */
   blueprintRunStatus?(runId: string): Promise<Record<string, unknown>>
@@ -113,6 +118,23 @@ export type Platform = {
 
   /** Reserved runtime API for the next status UI pass (desktop only) */
   blueprintRecentEvents?(runId: string, limit?: number): Promise<Record<string, unknown>>
+
+  /** Agent detail snapshot for the blueprint canvas hover panel (desktop only) */
+  blueprintAgentInfo?(runId: string | undefined, nodeId: string): Promise<Record<string, unknown>>
+
+  /** Queue a user message to one live blueprint AgentNode (desktop only) */
+  queueBlueprintAgentMessage?(
+    runId: string,
+    nodeId: string,
+    text: string,
+    mode: "default" | "top",
+  ): Promise<Record<string, unknown>>
+
+  /** Return a one-time WebSocket URL for live blueprint agent stream events (desktop only) */
+  blueprintAgentStreamToken?(runId: string, cursor?: number): Promise<Record<string, unknown>>
+
+  /** Save a local Agent info panel test snapshot beside desktop logs (desktop only) */
+  saveBlueprintAgentPanelTest?(payload: Record<string, unknown>): Promise<Record<string, unknown>>
 
   /** Storage mechanism, defaults to localStorage */
   storage?: (name?: string) => SyncStorage | AsyncStorage

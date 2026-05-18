@@ -3,7 +3,13 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { describe, expect, test } from "bun:test"
 
-import { listBlueprintRules, listBlueprintSkills, parseCodemakerModels, parseCodexModels } from "./blueprint-catalog"
+import {
+  listBlueprintRules,
+  listBlueprintSkills,
+  parseCodemakerModels,
+  parseCodexModels,
+  resolveCommandForExec,
+} from "./blueprint-catalog"
 
 describe("blueprint catalog", () => {
   test("parses CodeMaker models from line output", () => {
@@ -21,6 +27,39 @@ describe("blueprint catalog", () => {
         }),
       ),
     ).toEqual(["gpt-5.4", "gpt-5.4-mini"])
+  })
+
+  test("resolves Windows command shims before extensionless files", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "blueprint-commands-"))
+    await writeFile(path.join(root, "codex"), "")
+    await writeFile(path.join(root, "codex.cmd"), "")
+
+    const resolved = await resolveCommandForExec("codex", ["debug", "models"], {
+      platform: "win32",
+      env: { PATH: root, PATHEXT: ".EXE;.CMD" },
+      comspec: "cmd.exe",
+    })
+
+    expect(resolved.command).toBe("cmd.exe")
+    expect(resolved.args.slice(0, 2)).toEqual(["/d", "/c"])
+    expect(resolved.args[2]?.toLowerCase()).toBe(
+      `call "${path.join(root, "codex.cmd").toLowerCase()}" "debug" "models"`,
+    )
+  })
+
+  test("runs Windows exe commands directly", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "blueprint-commands-"))
+    const command = path.join(root, "codemaker.exe")
+    await writeFile(command, "")
+
+    const resolved = await resolveCommandForExec("codemaker", ["models", "netease-codemaker"], {
+      platform: "win32",
+      env: { PATH: root, PATHEXT: ".EXE;.CMD" },
+      comspec: "cmd.exe",
+    })
+
+    expect(resolved.command.toLowerCase()).toBe(command.toLowerCase())
+    expect(resolved.args).toEqual(["models", "netease-codemaker"])
   })
 
   test("scans skills by subdirectory SKILL.md and uses manifest descriptions as enrichment", async () => {

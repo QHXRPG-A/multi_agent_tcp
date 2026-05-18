@@ -272,10 +272,10 @@ export const SortableProject = (props: {
   mobile?: boolean
   ctx: ProjectSidebarContext
   sortNow: Accessor<number>
+  sortable: Accessor<boolean>
 }): JSX.Element => {
   const globalSync = useGlobalSync()
   const language = useLanguage()
-  const sortable = createSortable(props.project.worktree)
   const selected = createMemo(() => props.ctx.currentProject()?.worktree === props.project.worktree)
   const workspaces = createMemo(() => props.ctx.workspaceIds(props.project).slice(0, 2))
   const workspaceEnabled = createMemo(() => props.ctx.workspacesEnabled(props.project))
@@ -331,37 +331,50 @@ export const SortableProject = (props: {
     />
   )
 
+  const content = () => (
+    <Show when={preview() && !selected()} fallback={tile()}>
+      <HoverCard
+        open={!state.suppressHover && hoverOpen() && !state.menu}
+        openDelay={0}
+        closeDelay={0}
+        placement="right-start"
+        gutter={6}
+        trigger={tile()}
+        onOpenChange={(value) => {
+          if (state.menu) return
+          if (value && state.suppressHover) return
+          props.ctx.onHoverOpenChanged(props.project.worktree, value)
+        }}
+      >
+        <ProjectPreviewPanel
+          project={props.project}
+          mobile={props.mobile}
+          selected={selected}
+          workspaceEnabled={workspaceEnabled}
+          workspaces={workspaces}
+          label={label}
+          projectSessions={projectSessions}
+          workspaceSessions={workspaceSessions}
+          ctx={props.ctx}
+          language={language}
+        />
+      </HoverCard>
+    </Show>
+  )
+
+  return (
+    <Show when={props.sortable()} fallback={<div>{content()}</div>}>
+      <SortableProjectFrame id={props.project.worktree}>{content()}</SortableProjectFrame>
+    </Show>
+  )
+}
+
+const SortableProjectFrame = (props: { id: string; children: JSX.Element }): JSX.Element => {
+  const sortable = createSortable(props.id)
   return (
     // @ts-ignore
     <div use:sortable classList={{ "opacity-30": sortable.isActiveDraggable }}>
-      <Show when={preview() && !selected()} fallback={tile()}>
-        <HoverCard
-          open={!state.suppressHover && hoverOpen() && !state.menu}
-          openDelay={0}
-          closeDelay={0}
-          placement="right-start"
-          gutter={6}
-          trigger={tile()}
-          onOpenChange={(value) => {
-            if (state.menu) return
-            if (value && state.suppressHover) return
-            props.ctx.onHoverOpenChanged(props.project.worktree, value)
-          }}
-        >
-          <ProjectPreviewPanel
-            project={props.project}
-            mobile={props.mobile}
-            selected={selected}
-            workspaceEnabled={workspaceEnabled}
-            workspaces={workspaces}
-            label={label}
-            projectSessions={projectSessions}
-            workspaceSessions={workspaceSessions}
-            ctx={props.ctx}
-            language={language}
-          />
-        </HoverCard>
-      </Show>
+      {props.children}
     </div>
   )
 }

@@ -2048,6 +2048,7 @@ export default function Layout(props: ParentProps) {
       if (!item) return [] as string[]
       return workspaceIds(item)
     })
+    const sortableWorkspaces = createMemo(() => workspaces().length > 1)
     const unseenCount = createMemo(() =>
       workspaces().reduce((total, directory) => total + notification.project.unseenCount(directory), 0),
     )
@@ -2276,6 +2277,7 @@ export default function Layout(props: ParentProps) {
                                   project={project()}
                                   sortNow={sortNow}
                                   mobile={panelProps.mobile}
+                                  sortable={sortableWorkspaces}
                                 />
                               )}
                             </For>
@@ -2337,8 +2339,14 @@ export default function Layout(props: ParentProps) {
       opened={() => layout.sidebar.opened()}
       aimMove={aim.move}
       projects={projects}
-      renderProject={(project) => (
-        <SortableProject ctx={projectSidebarCtx} project={project} sortNow={sortNow} mobile={mobile} />
+      renderProject={(project, sortable) => (
+        <SortableProject
+          ctx={projectSidebarCtx}
+          project={project}
+          sortNow={sortNow}
+          mobile={mobile}
+          sortable={sortable}
+        />
       )}
       handleDragStart={handleDragStart}
       handleDragEnd={handleDragEnd}

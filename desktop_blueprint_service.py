@@ -8,20 +8,26 @@ code away from Python package paths, runtime tokens, and direct file writes.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import base64
+import hashlib
 import json
 import re
 import secrets
+import socket
 import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Dict, Optional
-from urllib.parse import urlparse
+from typing import Any, Callable, Dict, Optional
+from urllib.parse import parse_qs, urlparse
 
+from .cluster import CLIWorkerBackend
 from .graph_control import GraphRuntimeControlPlane, graph_definition_from_dict
 from .graph_runtime import GraphRuntime, GuLiCodeTopAgentProfile, TopAgentStartPlan
 
@@ -47,6 +53,64 @@ class BlueprintServiceError(ValueError):
         self.details = dict(details or {})
 
 
+class DesktopAsyncLoop:
+    """Small owner for the asyncio loop used by live desktop blueprint runs."""
+
+    def __init__(self) -> None:
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
+
+    def _ensure_started(self) -> asyncio.AbstractEventLoop:
+        with self._lock:
+            if self._loop is not None and self._thread is not None and self._thread.is_alive():
+                return self._loop
+
+            self._ready.clear()
+
+            def run_loop() -> None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self._loop = loop
+                self._ready.set()
+                loop.run_forever()
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.close()
+
+            self._thread = threading.Thread(target=run_loop, name="desktop-blueprint-live-loop", daemon=True)
+            self._thread.start()
+        self._ready.wait(timeout=5)
+        if self._loop is None:
+            raise RuntimeError("desktop live runtime event loop failed to start")
+        return self._loop
+
+    def run(self, coro: Any, *, timeout: Optional[float] = None) -> Any:
+        loop = self._ensure_started()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=timeout)
+
+    def call(self, fn: Callable[[], Any], *, timeout: Optional[float] = None) -> Any:
+        async def wrapper() -> Any:
+            return fn()
+
+        return self.run(wrapper(), timeout=timeout)
+
+    def close(self) -> None:
+        loop = self._loop
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(loop.stop)
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        self._loop = None
+        self._thread = None
+
+
 @dataclass
 class DesktopBlueprintRun:
     """One live, service-owned blueprint runtime."""
@@ -61,6 +125,8 @@ class DesktopBlueprintRun:
     execution_mode: str
     created_at: float
     updated_at: float
+    backend: Any = None
+    stream_condition: Any = field(default_factory=threading.Condition)
 
     def summary(self) -> Dict[str, Any]:
         return {
@@ -89,6 +155,8 @@ class DesktopBlueprintNoopBackend:
         *,
         timeout_sec: float = 600.0,
         _skip_skill_inject: bool = False,
+        meta: Optional[Dict[str, Any]] = None,
+        stream_callback: Any = None,
     ) -> Dict[str, Any]:
         raise RuntimeError(
             "desktop blueprint runtime v1 does not execute CLI workers; "
@@ -103,6 +171,8 @@ class DesktopBlueprintService:
     now: Any = time.time
     _lock: Any = field(default_factory=threading.RLock, init=False, repr=False)
     _runs: Dict[str, DesktopBlueprintRun] = field(default_factory=dict, init=False, repr=False)
+    _async_loop: DesktopAsyncLoop = field(default_factory=DesktopAsyncLoop, init=False, repr=False)
+    _stream_tokens: Dict[str, Dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
 
     def handle_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         command = str(payload.get("command", "")).strip()
@@ -171,6 +241,24 @@ class DesktopBlueprintService:
             return self.recent_blueprint_events(
                 request_run_id(args),
                 limit=coerce_event_limit(args.get("limit", 20)),
+            )
+        if command == "blueprint.agentInfo":
+            return self.agent_info(
+                str(args.get("nodeId", "")).strip(),
+                run_id=str(args.get("runId", "")).strip() or None,
+            )
+        if command == "blueprint.queueAgentMessage":
+            return self.queue_agent_message(
+                request_run_id(args),
+                str(args.get("nodeId", "")).strip(),
+                str(args.get("text", "")),
+                mode=str(args.get("mode", "default")),
+            )
+        if command == "blueprint.agentStreamToken":
+            return self.agent_stream_token(
+                request_run_id(args),
+                base_url=str(args.get("baseUrl", "")),
+                cursor=args.get("cursor"),
             )
 
         raise BlueprintServiceError("UNKNOWN_COMMAND", f"unsupported desktop blueprint command: {command!r}")
@@ -251,7 +339,7 @@ class DesktopBlueprintService:
                 continue
             if normalized_blueprint_id and run.blueprint_id != normalized_blueprint_id:
                 continue
-            status = run.runtime.status_snapshot()["run"]
+            status = self._runtime_call(run, lambda: run.runtime.status_snapshot()["run"])
             summary = run.summary()
             summary["status"] = status["status"]
             summary["finalStatus"] = status.get("final_status")
@@ -268,11 +356,11 @@ class DesktopBlueprintService:
         execution_mode: str = "status",
     ) -> Dict[str, Any]:
         execution_mode = str(execution_mode).strip().lower() or "status"
-        if execution_mode != "status":
+        if execution_mode not in {"status", "live"}:
             raise BlueprintServiceError(
                 "UNSUPPORTED_EXECUTION_MODE",
-                "desktop blueprint runtime currently supports executionMode='status' only",
-                details={"supported": ["status"]},
+                "desktop blueprint runtime supports executionMode='status' or 'live'",
+                details={"supported": ["status", "live"]},
             )
         document = self.open_blueprint(project_dir, blueprint_id)
         try:
@@ -299,10 +387,25 @@ class DesktopBlueprintService:
                 details={"blueprintId": str(document["id"])},
             ) from exc
 
-        runtime = GraphRuntime(DesktopBlueprintNoopBackend())
-        control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
-        started = control.handle_request({"command": "run.start", "args": {"plan": plan.to_dict()}})
+        with self._lock:
+            run_id = self._generate_run_id_locked()
+
+        if execution_mode == "live":
+            backend, runtime, control, started = self._async_loop.run(
+                self._start_live_runtime(run_id, graph, plan)
+            )
+        else:
+            backend = DesktopBlueprintNoopBackend()
+            runtime = GraphRuntime(backend)
+            control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
+            runtime.agent_stream_run_id = run_id
+            started = control.handle_request({"command": "run.start", "args": {"plan": plan.to_dict()}})
         if not started.get("ok"):
+            if execution_mode == "live":
+                self._async_loop.run(runtime.close())
+                stop = getattr(backend, "stop", None)
+                if callable(stop):
+                    self._async_loop.run(stop())
             raise BlueprintServiceError(
                 "START_PLAN_INVALID",
                 "start plan failed validation",
@@ -315,7 +418,7 @@ class DesktopBlueprintService:
         now = float(self.now())
         with self._lock:
             run = DesktopBlueprintRun(
-                run_id=self._generate_run_id_locked(),
+                run_id=run_id,
                 project_dir=validate_project_dir(project_dir),
                 blueprint_id=str(document["id"]),
                 document=document,
@@ -325,9 +428,11 @@ class DesktopBlueprintService:
                 execution_mode=execution_mode,
                 created_at=now,
                 updated_at=now,
+                backend=backend,
             )
+            self._attach_stream_notification(run)
             self._runs[run.run_id] = run
-        status = runtime.status_snapshot(graph=graph)
+        status = self._runtime_call(run, lambda: runtime.status_snapshot(graph=graph))
         return {
             "ok": True,
             "runId": run.run_id,
@@ -346,21 +451,45 @@ class DesktopBlueprintService:
                 "ok": True,
                 "runId": run.run_id,
                 "run": run.summary(),
-                "status": run.runtime.status_snapshot(graph=run.graph),
-                "explanation": run.runtime.explain_status(graph=run.graph),
+                "status": self._runtime_call(run, lambda: run.runtime.status_snapshot(graph=run.graph)),
+                "explanation": self._runtime_call(run, lambda: run.runtime.explain_status(graph=run.graph)),
             }
 
     def recent_blueprint_events(self, run_id: str, *, limit: int = 20) -> Dict[str, Any]:
         with self._lock:
             run = self._get_run(run_id)
             run.updated_at = float(self.now())
-            status = run.runtime.status_snapshot(graph=run.graph, recent_events_limit=limit)
+            status = self._runtime_call(
+                run,
+                lambda: run.runtime.status_snapshot(graph=run.graph, recent_events_limit=limit),
+            )
             return {
                 "ok": True,
                 "runId": run.run_id,
                 "limit": limit,
                 "events": status["recent_events"],
             }
+
+    async def _start_live_runtime(
+        self,
+        run_id: str,
+        graph: Any,
+        plan: TopAgentStartPlan,
+    ) -> tuple[Any, GraphRuntime, GraphRuntimeControlPlane, Dict[str, Any]]:
+        workers = [node.to_worker_config() for node in graph.agent_nodes.values()]
+        backend = await CLIWorkerBackend.create(workers, port=_free_tcp_port())
+        runtime = GraphRuntime(backend)
+        runtime.agent_stream_run_id = run_id
+        control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
+        try:
+            started = await control.start_run(plan)
+            if started.get("ok"):
+                runtime.start_tick_loop()
+            return backend, runtime, control, started
+        except Exception:
+            await runtime.close()
+            await backend.stop()
+            raise
 
     def end_blueprint_run(
         self,
@@ -378,7 +507,7 @@ class DesktopBlueprintService:
             )
         with self._lock:
             run = self._get_run(run_id)
-            run_status = run.runtime.status_snapshot()["run"]
+            run_status = self._runtime_call(run, lambda: run.runtime.status_snapshot()["run"])
             already_ended = run_status["status"] in {
                 "completed",
                 "cancelled",
@@ -395,18 +524,206 @@ class DesktopBlueprintService:
                     "archived": False,
                 }
             else:
-                end_result = run.runtime.end_run(action, reason=reason, archive=False).to_dict()
+                end_result = self._runtime_call(
+                    run,
+                    lambda: run.runtime.end_run(action, reason=reason, archive=False).to_dict(),
+                )
             run.updated_at = float(self.now())
+            status = self._runtime_call(run, lambda: run.runtime.status_snapshot(graph=run.graph))
             response: Dict[str, Any] = {
                 "ok": True,
                 "runId": run.run_id,
                 "run": run.summary(),
                 "end": end_result,
-                "status": run.runtime.status_snapshot(graph=run.graph),
+                "status": status,
             }
             if already_ended:
                 response["alreadyEnded"] = True
-            return response
+        if run.execution_mode == "live" and not already_ended:
+            self._async_loop.run(self._close_live_run(run))
+        with run.stream_condition:
+            run.stream_condition.notify_all()
+        return response
+
+    def agent_info(self, node_id: str, *, run_id: Optional[str] = None) -> Dict[str, Any]:
+        if not node_id:
+            raise BlueprintServiceError("BAD_REQUEST", "nodeId must be a non-empty string")
+        if not run_id:
+            return {
+                "ok": True,
+                "nodeId": node_id,
+                "running": False,
+                "runtime": None,
+                "streamEvents": [],
+                "messageJournal": [],
+                "frameworkApiCalls": [],
+            }
+        with self._lock:
+            run = self._get_run(run_id)
+            if node_id not in run.graph.agent_nodes:
+                raise BlueprintServiceError(
+                    "NODE_NOT_FOUND",
+                    f"agent node was not found: {node_id}",
+                    status=404,
+                )
+            status = self._runtime_call(run, lambda: run.runtime.status_snapshot(graph=run.graph))
+            node = run.graph.agent_nodes[node_id]
+            runtime_agent = status["agents"].get(node_id) or {}
+            agent_id = str(runtime_agent.get("agent_id") or node.runtime_agent_id)
+            return {
+                "ok": True,
+                "runId": run.run_id,
+                "nodeId": node_id,
+                "running": True,
+                "node": node.to_dict(),
+                "runtime": runtime_agent,
+                "queue": status["queues"]["by_agent"].get(node_id, []),
+                "streamEvents": self._runtime_call(
+                    run,
+                    lambda: run.runtime.agent_stream_events_after(node_id=node_id),
+                ),
+                "messageJournal": self._runtime_call(
+                    run,
+                    lambda: _message_journal_for_node(run.runtime, node_id, limit=200),
+                ),
+                "frameworkApiCalls": self._runtime_call(
+                    run,
+                    lambda: _framework_api_calls_for_node(run, node_id, agent_id, limit=200),
+                ),
+            }
+
+    def queue_agent_message(
+        self,
+        run_id: str,
+        node_id: str,
+        text: str,
+        *,
+        mode: str = "default",
+    ) -> Dict[str, Any]:
+        if not node_id:
+            raise BlueprintServiceError("BAD_REQUEST", "nodeId must be a non-empty string")
+        if not text.strip():
+            raise BlueprintServiceError("BAD_REQUEST", "text must be a non-empty string")
+        normalized_mode = str(mode or "default").strip().lower()
+        if normalized_mode not in {"default", "top"}:
+            raise BlueprintServiceError(
+                "BAD_REQUEST",
+                "mode must be 'default' or 'top'",
+                details={"supported": ["default", "top"]},
+            )
+        with self._lock:
+            run = self._get_run(run_id)
+            if run.execution_mode != "live":
+                raise BlueprintServiceError(
+                    "RUN_NOT_LIVE",
+                    "agent messages can only be sent to a live blueprint run",
+                )
+            node = run.graph.agent_nodes.get(node_id)
+            if node is None:
+                raise BlueprintServiceError(
+                    "NODE_NOT_FOUND",
+                    f"agent node was not found: {node_id}",
+                    status=404,
+                )
+            result = self._async_loop.call(
+                lambda: run.runtime.queue_agent_message(
+                    node,
+                    {"prompt": text.strip(), "type": "user_message"},
+                    queue_mode=normalized_mode,
+                ).to_dict()
+            )
+            run.updated_at = float(self.now())
+            return {
+                "ok": True,
+                "runId": run.run_id,
+                "nodeId": node_id,
+                "mode": normalized_mode,
+                "result": result,
+                "status": self._runtime_call(run, lambda: run.runtime.status_snapshot(graph=run.graph)),
+            }
+
+    def agent_stream_token(
+        self,
+        run_id: str,
+        *,
+        base_url: str = "",
+        cursor: Any = None,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            run = self._get_run(run_id)
+            if run.execution_mode != "live":
+                raise BlueprintServiceError(
+                    "RUN_NOT_LIVE",
+                    "agent stream is only available for live blueprint runs",
+                )
+            token = secrets.token_urlsafe(24)
+            self._stream_tokens[token] = {
+                "run_id": run.run_id,
+                "expires_at": float(self.now()) + 60.0,
+            }
+        parsed = urlparse(base_url)
+        host = parsed.netloc
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        ws_url = f"{scheme}://{host}/agent-stream?streamToken={token}&cursor={int(cursor or 0)}"
+        return {"ok": True, "runId": run_id, "streamToken": token, "wsUrl": ws_url}
+
+    def accept_stream_token(self, token: str) -> str:
+        with self._lock:
+            data = self._stream_tokens.pop(str(token), None)
+            if not data or float(data.get("expires_at", 0)) < float(self.now()):
+                raise BlueprintServiceError("UNAUTHORIZED", "invalid or expired stream token", status=401)
+            return str(data["run_id"])
+
+    def stream_agent_events(
+        self,
+        run_id: str,
+        *,
+        cursor: int = 0,
+        send: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        run = self._get_run(run_id)
+        next_cursor = int(cursor or 0)
+        while True:
+            events = self._runtime_call(run, lambda: run.runtime.agent_stream_events_after(next_cursor))
+            for event in events:
+                send(event)
+                next_cursor = max(next_cursor, int(event.get("seq", next_cursor)))
+            status = self._runtime_call(run, lambda: run.runtime.status_snapshot()["run"])
+            if status.get("status") in {"completed", "cancelled", "failed"} and not events:
+                return
+            with run.stream_condition:
+                run.stream_condition.wait(timeout=15.0)
+
+    def _attach_stream_notification(self, run: DesktopBlueprintRun) -> None:
+        def notify(_event: Dict[str, Any]) -> None:
+            with run.stream_condition:
+                run.stream_condition.notify_all()
+
+        run.runtime.agent_stream_event_callback = notify
+
+    def _runtime_call(self, run: DesktopBlueprintRun, fn: Callable[[], Any]) -> Any:
+        if run.execution_mode == "live":
+            return self._async_loop.call(fn)
+        return fn()
+
+    async def _close_live_run(self, run: DesktopBlueprintRun) -> None:
+        await run.runtime.close()
+        stop = getattr(run.backend, "stop", None)
+        if callable(stop):
+            await stop()
+
+    def close(self) -> None:
+        with self._lock:
+            runs = list(self._runs.values())
+        for run in runs:
+            if run.execution_mode == "live":
+                try:
+                    self._async_loop.run(self._close_live_run(run), timeout=10)
+                except Exception:
+                    pass
+            with run.stream_condition:
+                run.stream_condition.notify_all()
+        self._async_loop.close()
 
     def _generate_run_id_locked(self) -> str:
         with self._lock:
@@ -448,6 +765,231 @@ def request_run_id(args: Dict[str, Any]) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BlueprintServiceError("BAD_REQUEST", "runId must be a non-empty string")
     return value.strip()
+
+
+def _free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _write_ws_text(wfile: Any, text: str) -> None:
+    data = text.encode("utf-8")
+    header = bytearray([0x81])
+    if len(data) < 126:
+        header.append(len(data))
+    elif len(data) < 65536:
+        header.extend([126, (len(data) >> 8) & 0xFF, len(data) & 0xFF])
+    else:
+        header.append(127)
+        header.extend(len(data).to_bytes(8, "big"))
+    wfile.write(bytes(header) + data)
+    wfile.flush()
+
+
+def _message_journal_for_node(runtime: GraphRuntime, node_id: str, *, limit: int = 200) -> list[Dict[str, Any]]:
+    records = [
+        _project_message_record(record)
+        for record in runtime.message_journal
+        if _message_record_involves_node(record, node_id)
+    ]
+    return records[-limit:]
+
+
+def _framework_api_calls_for_node(
+    run: DesktopBlueprintRun,
+    node_id: str,
+    agent_id: str,
+    *,
+    limit: int = 200,
+) -> list[Dict[str, Any]]:
+    calls: list[Dict[str, Any]] = []
+    for record in run.runtime.message_journal:
+        if not _message_record_involves_node(record, node_id):
+            continue
+        record_type = str(record.get("record_type") or "")
+        sender = _record_dict(record.get("sender"))
+        if record_type in {"agent.outgoing.staged", "agent.outgoing.no_op"} and sender.get("node_id") == node_id:
+            projected = _project_message_record(record)
+            calls.append(
+                {
+                    **projected,
+                    "api": "agent.dispatch",
+                    "summary": projected.get("summary"),
+                }
+            )
+
+    for event in run.runtime.events:
+        payload = _record_dict(event.payload)
+        if event.event_type == "JoinContributionSubmitted" and payload.get("source_node_id") == node_id:
+            calls.append(
+                _compact_dict(
+                    {
+                        "id": f"framework-{event.event_type}-{len(calls) + 1}",
+                        "api": "join.contribute",
+                        "time": None,
+                        "from": node_id,
+                        "to": "framework",
+                        "status": event.status,
+                        "summary": payload.get("join_id"),
+                    }
+                )
+            )
+        elif event.event_type in {"ChangesetSubmitted", "ChangesetAccepted"} and _event_matches_agent(payload, node_id, agent_id):
+            calls.append(
+                _compact_dict(
+                    {
+                        "id": f"framework-{event.event_type}-{len(calls) + 1}",
+                        "api": "changeset.submit",
+                        "from": node_id,
+                        "to": "framework",
+                        "status": event.status,
+                        "summary": payload.get("summary") or payload.get("changeset_id"),
+                    }
+                )
+            )
+        elif event.event_type == "ArtifactPublished" and _event_matches_agent(payload, node_id, agent_id):
+            calls.append(
+                _compact_dict(
+                    {
+                        "id": f"framework-{event.event_type}-{len(calls) + 1}",
+                        "api": "artifact.publish",
+                        "from": node_id,
+                        "to": "framework",
+                        "status": event.status,
+                        "summary": payload.get("path") or payload.get("artifact_id"),
+                    }
+                )
+            )
+        elif event.event_type == "AgentReportSubmitted" and _event_matches_agent(payload, node_id, agent_id):
+            calls.append(
+                _compact_dict(
+                    {
+                        "id": f"framework-{event.event_type}-{len(calls) + 1}",
+                        "api": "report.submit",
+                        "from": node_id,
+                        "to": "framework",
+                        "status": event.status,
+                        "summary": payload.get("path") or payload.get("report_id"),
+                    }
+                )
+            )
+
+    calls.extend(_workspace_api_calls_for_agent(run, node_id, agent_id))
+    return calls[-limit:]
+
+
+def _workspace_api_calls_for_agent(run: DesktopBlueprintRun, node_id: str, agent_id: str) -> list[Dict[str, Any]]:
+    workspace = getattr(run.runtime, "workspace", None)
+    if workspace is None:
+        return []
+    manifest_path = Path(workspace.workspace_root) / "shared" / "manifest.json"
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    calls: list[Dict[str, Any]] = []
+    for index, record in enumerate(data.get("writes", []), start=1):
+        if not isinstance(record, dict):
+            continue
+        if record.get("event_type") != "workspace_api_call" and record.get("workspace_event") != "WorkspaceAPICalled":
+            continue
+        if str(record.get("agent_id") or "") != agent_id:
+            continue
+        command = str(record.get("command") or "").strip()
+        calls.append(
+            _compact_dict(
+                {
+                    "id": f"workspace-api-{index}",
+                    "api": "workspace",
+                    "command": command,
+                    "time": record.get("created_at") or record.get("updated_at"),
+                    "from": node_id,
+                    "to": "framework",
+                    "status": "called",
+                    "summary": record.get("path") or record.get("summary") or record.get("area"),
+                }
+            )
+        )
+    return calls
+
+
+def _project_message_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = _record_dict(record.get("metadata"))
+    projected = {
+        "id": record.get("record_id"),
+        "recordType": record.get("record_type"),
+        "time": _iso_time(record.get("recorded_at")),
+        "from": _endpoint_label(record.get("sender")),
+        "to": _endpoint_label(record.get("receiver")),
+        "status": record.get("status"),
+        "summary": _message_summary(record.get("payload")),
+        "messageId": record.get("message_id"),
+        "batchId": record.get("batch_id"),
+        "targetNodeId": metadata.get("target_node_id"),
+        "targetAgentId": metadata.get("target_agent_id"),
+    }
+    return _compact_dict(projected)
+
+
+def _message_record_involves_node(record: Dict[str, Any], node_id: str) -> bool:
+    sender = _record_dict(record.get("sender"))
+    receiver = _record_dict(record.get("receiver"))
+    metadata = _record_dict(record.get("metadata"))
+    return node_id in {
+        str(sender.get("node_id") or ""),
+        str(receiver.get("node_id") or ""),
+        str(metadata.get("target_node_id") or ""),
+    }
+
+
+def _event_matches_agent(payload: Dict[str, Any], node_id: str, agent_id: str) -> bool:
+    return node_id in {
+        str(payload.get("node_id") or ""),
+        str(payload.get("source_node_id") or ""),
+    } or agent_id == str(payload.get("agent_id") or "")
+
+
+def _record_dict(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _endpoint_label(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    record = _record_dict(value)
+    for key in ("node_id", "agent_id", "type"):
+        raw = record.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
+def _message_summary(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if not isinstance(value, dict):
+        return None
+    for key in ("text", "prompt", "message", "summary", "content"):
+        raw = value.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    body = value.get("body")
+    if isinstance(body, dict):
+        return _message_summary(body)
+    return None
+
+
+def _iso_time(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return None
+
+
+def _compact_dict(value: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: item for key, item in value.items() if item is not None and item != ""}
 
 
 def coerce_event_limit(value: Any) -> int:
@@ -568,6 +1110,45 @@ class DesktopBlueprintHTTPServer:
                     status = 500
                 self._write_json(response, status=status)
 
+            def do_GET(self) -> None:  # noqa: N802
+                parsed = urlparse(self.path)
+                if parsed.path.rstrip("/") != "/agent-stream":
+                    self._write_json({"ok": False, "code": "NOT_FOUND", "error": "not found"}, status=404)
+                    return
+                try:
+                    query = parse_qs(parsed.query)
+                    run_id = owner.service.accept_stream_token(
+                        str((query.get("streamToken") or [""])[0])
+                    )
+                    key = self.headers.get("Sec-WebSocket-Key", "")
+                    if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
+                        raise BlueprintServiceError("BAD_REQUEST", "websocket upgrade required")
+                    accept = base64.b64encode(
+                        hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+                    ).decode("ascii")
+                    self.send_response(101, "Switching Protocols")
+                    self.send_header("Upgrade", "websocket")
+                    self.send_header("Connection", "Upgrade")
+                    self.send_header("Sec-WebSocket-Accept", accept)
+                    self.end_headers()
+
+                    def send(event: Dict[str, Any]) -> None:
+                        _write_ws_text(self.wfile, json.dumps(event, ensure_ascii=False, default=str))
+
+                    owner.service.stream_agent_events(
+                        run_id,
+                        cursor=int((query.get("cursor") or ["0"])[0] or 0),
+                        send=send,
+                    )
+                except BlueprintServiceError as exc:
+                    if not self.wfile.closed:
+                        self._write_json({"ok": False, "code": exc.code, "error": str(exc)}, status=exc.status)
+                except (BrokenPipeError, ConnectionError, OSError):
+                    return
+                except Exception as exc:  # pragma: no cover - defensive boundary
+                    if not self.wfile.closed:
+                        self._write_json({"ok": False, "code": "INTERNAL_ERROR", "error": str(exc)}, status=500)
+
             def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
                 return
 
@@ -582,6 +1163,7 @@ class DesktopBlueprintHTTPServer:
         self._server.server_close()
         if self._thread is not None:
             self._thread.join(timeout=2)
+        self.service.close()
         self._server = None
         self._thread = None
 

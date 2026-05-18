@@ -166,6 +166,8 @@ async def _agent_loop_adapter(client: AgentTCPClient, adapter: CLIAdapter) -> No
         gid = _gather_reply_id(msg)
         try:
             message = body_to_agent_message(body)
+            if isinstance(msg.get("meta"), dict):
+                message.metadata = dict(msg["meta"])
             if not message.prompt:
                 raise ValueError("empty prompt")
             log.info(
@@ -179,7 +181,11 @@ async def _agent_loop_adapter(client: AgentTCPClient, adapter: CLIAdapter) -> No
                 adapter.cli_kind,
             )
             log.info("[chain] agent=%s -> adapter.send_message START", aid)
-            result = await adapter.send_message(message)
+            async def stream_callback(event: dict[str, object]) -> None:
+                if isinstance(sender, str) and sender:
+                    await client.send_to(sender, {"type": "agent.stream", "event": event})
+
+            result = await adapter.send_message(message, stream_callback=stream_callback)
             log.info(
                 "[chain] agent=%s <- adapter.send_message END ok=%s status=%s",
                 aid,

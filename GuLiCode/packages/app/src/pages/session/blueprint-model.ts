@@ -9,7 +9,14 @@ export type BlueprintTerminalKind = "start" | "end"
 export type BlueprintRouteKind = "sequence" | "parallel" | "parallel_reduce"
 export type BlueprintPromptViaFile = "auto" | "always" | "never"
 export type BlueprintNodeKind = "agent" | "route" | "terminal"
-export type BlueprintAddNodeKind = "agent" | "route-sequence" | "route-parallel" | "route-parallel-reduce" | "start" | "end"
+export type BlueprintAddNodeKind =
+  | "agent"
+  | "test-agent"
+  | "route-sequence"
+  | "route-parallel"
+  | "route-parallel-reduce"
+  | "start"
+  | "end"
 export type BlueprintCliKind = "codemaker" | "codex"
 
 export type BlueprintSkillSelection = {
@@ -173,6 +180,7 @@ const DEFAULT_PROJECT_WORKDIR = "."
 export const DEFAULT_SKILL_DIR = "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\skill_list"
 export const DEFAULT_RULE_DIR = ""
 export const CLI_KIND_OPTIONS: BlueprintCliKind[] = ["codemaker", "codex"]
+export const TEST_AGENT_NODE_FLAG = "gulicode_test_node"
 
 export function defaultCommandForCliKind(cliKind: string) {
   if (cliKind === "codex") return "codex"
@@ -315,8 +323,8 @@ export function fromBlueprintDocument(
   projectWorkdir = DEFAULT_PROJECT_WORKDIR,
 ): BlueprintDraft {
   const fallback = createDefaultBlueprintDraft(projectWorkdir)
-  const graph = document.graph ?? fallback.graph
-  const ui = document.ui ?? {}
+  const graph = (document.graph ?? fallback.graph) as RuntimeGraphDraft
+  const ui = (document.ui ?? {}) as Partial<BlueprintDocument["ui"]>
   return cloneBlueprintDraft({
     schema_version: 1,
     config: normalizeBlueprintConfig(ui.config ?? fallback.config),
@@ -419,6 +427,7 @@ export function addNode(
   },
 ) {
   if (input.kind === "agent") return addAgentNode(draft, input)
+  if (input.kind === "test-agent") return addTestAgentNode(draft, input)
   if (input.kind === "start" || input.kind === "end") return addTerminalNode(draft, input.kind, input)
   return addRouteNode(draft, routeKindFromAddKind(input.kind), input)
 }
@@ -437,6 +446,33 @@ export function addAgentNode(
     agent_id: `agent-${node_id}`,
     prompt: "Describe this agent's work.",
   })
+  next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
+  next.selection = { type: "node", id: node_id }
+  next.inspector = { type: "node", id: node_id }
+  return next
+}
+
+export function addTestAgentNode(
+  draft: BlueprintDraft,
+  input: {
+    node_id?: string
+    position?: BlueprintNodeLayout
+  } = {},
+) {
+  const next = cloneBlueprintDraft(draft)
+  const node_id = uniqueNodeId(next, input.node_id ?? "test-agent")
+  next.graph.agent_nodes[node_id] = {
+    ...createAgentNode({
+      node_id,
+      agent_id: `agent-${node_id}`,
+      prompt: "Display sample Agent information panel content for UI testing.",
+    }),
+    cli_kind: "codex",
+    model: defaultModelForCliKind("codex"),
+    command: defaultCommandForCliKind("codex"),
+    timeout_sec: 60,
+    adapter_options: { [TEST_AGENT_NODE_FLAG]: true, skip_git_repo_check: true },
+  }
   next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
   next.selection = { type: "node", id: node_id }
   next.inspector = { type: "node", id: node_id }
@@ -810,6 +846,11 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
   })
   const skills = [...(node.skills ?? node.skill_selection?.skill_hashes ?? defaults.skills)]
   const skillSelection = normalizeSkillSelection(node.skill_selection ?? defaults.skill_selection, skills)
+  const adapterOptions = { ...(node.adapter_options ?? defaults.adapter_options) }
+  const cliKind = String(node.cli_kind ?? defaults.cli_kind)
+  if (adapterOptions[TEST_AGENT_NODE_FLAG] === true && cliKind === "codex") {
+    adapterOptions.skip_git_repo_check ??= true
+  }
   return {
     ...defaults,
     ...node,
@@ -817,7 +858,7 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
     skills,
     skill_selection: skillSelection,
     rule_paths: [...(node.rule_paths ?? defaults.rule_paths)],
-    adapter_options: { ...(node.adapter_options ?? defaults.adapter_options) },
+    adapter_options: adapterOptions,
     extra_env: Object.fromEntries(
       Object.entries(node.extra_env ?? defaults.extra_env).map(([key, value]) => [key, String(value)]),
     ),

@@ -17,7 +17,7 @@ export const SidebarContent = (props: {
   opened: Accessor<boolean>
   aimMove: (event: MouseEvent) => void
   projects: Accessor<LocalProject[]>
-  renderProject: (project: LocalProject) => JSX.Element
+  renderProject: (project: LocalProject, sortable: Accessor<boolean>) => JSX.Element
   handleDragStart: (event: unknown) => void
   handleDragEnd: () => void
   handleDragOver: (event: DragEvent) => void
@@ -34,6 +34,8 @@ export const SidebarContent = (props: {
 }): JSX.Element => {
   const expanded = createMemo(() => !!props.mobile || props.opened())
   const placement = () => (props.mobile ? "bottom" : "right")
+  const projectIds = createMemo(() => props.projects().map((project) => project.worktree))
+  const sortableProjects = createMemo(() => projectIds().length > 1)
   let panel: HTMLDivElement | undefined
 
   createEffect(() => {
@@ -63,8 +65,8 @@ export const SidebarContent = (props: {
             <DragDropSensors />
             <ConstrainDragXAxis />
             <div class="h-full w-full flex flex-col items-center gap-3 px-3 py-3 overflow-y-auto no-scrollbar">
-              <SortableProvider ids={props.projects().map((p) => p.worktree)}>
-                <For each={props.projects()}>{(project) => props.renderProject(project)}</For>
+              <SortableProvider ids={projectIds()}>
+                <For each={props.projects()}>{(project) => props.renderProject(project, sortableProjects)}</For>
               </SortableProvider>
               <Tooltip
                 placement={placement()}

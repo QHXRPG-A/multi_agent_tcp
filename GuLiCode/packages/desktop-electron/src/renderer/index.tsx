@@ -155,14 +155,23 @@ const createPlatform = (): Platform => {
 
     listBlueprintRuns: (projectDir?: string, blueprintId?: string) => window.api.blueprintListRuns(projectDir, blueprintId),
 
-    startBlueprintRun: (projectDir: string, blueprintId: string, plan) =>
-      window.api.blueprintStart(projectDir, blueprintId, plan),
+    startBlueprintRun: (projectDir: string, blueprintId: string, plan, executionMode) =>
+      window.api.blueprintStart(projectDir, blueprintId, plan, executionMode),
 
     blueprintRunStatus: (runId: string) => window.api.blueprintStatus(runId),
 
     endBlueprintRun: (runId, action, reason) => window.api.blueprintEnd(runId, action, reason),
 
     blueprintRecentEvents: (runId, limit) => window.api.blueprintRecentEvents(runId, limit),
+
+    blueprintAgentInfo: (runId, nodeId) => window.api.blueprintAgentInfo(runId, nodeId),
+
+    queueBlueprintAgentMessage: (runId, nodeId, text, mode) =>
+      window.api.blueprintQueueAgentMessage(runId, nodeId, text, mode),
+
+    blueprintAgentStreamToken: (runId, cursor) => window.api.blueprintAgentStreamToken(runId, cursor),
+
+    saveBlueprintAgentPanelTest: (payload) => window.api.blueprintSaveAgentPanelTest(payload),
 
     openLink(url: string) {
       window.api.openLink(url)

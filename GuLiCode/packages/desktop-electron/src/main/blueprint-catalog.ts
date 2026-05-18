@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process"
-import { readdir, readFile } from "node:fs/promises"
+import { constants } from "node:fs"
+import { access, readdir, readFile } from "node:fs/promises"
 import path from "node:path"
 
 export type BlueprintCatalogItem = {
@@ -10,6 +11,7 @@ export type BlueprintCatalogItem = {
 
 const RULE_EXTENSIONS = new Set([".md", ".txt", ".json", ".yaml", ".yml", ".toml"])
 const MODEL_COMMAND_TIMEOUT_MS = 15_000
+const WINDOWS_SCRIPT_EXTENSIONS = new Set([".bat", ".cmd"])
 
 export async function listBlueprintDirectories(root: string): Promise<BlueprintCatalogItem[]> {
   if (!root.trim()) return []
@@ -57,13 +59,18 @@ export async function listBlueprintRules(dir: string): Promise<BlueprintCatalogI
 }
 
 export async function listBlueprintModels(cliKind: string): Promise<string[]> {
-  if (cliKind === "codemaker") {
-    const output = await execFileText("codemaker", ["models", "netease-codemaker"])
-    return parseCodemakerModels(output)
-  }
-  if (cliKind === "codex") {
-    const output = await execFileText("codex", ["debug", "models"])
-    return parseCodexModels(output)
+  try {
+    if (cliKind === "codemaker") {
+      const output = await execFileText("codemaker", ["models", "netease-codemaker"])
+      return parseCodemakerModels(output)
+    }
+    if (cliKind === "codex") {
+      const output = await execFileText("codex", ["debug", "models"])
+      return parseCodexModels(output)
+    }
+  } catch (error) {
+    console.warn(`Failed to list blueprint models for ${cliKind}`, error)
+    return []
   }
   throw new Error(`Unsupported CLI kind: ${cliKind}`)
 }
@@ -117,16 +124,94 @@ async function readSkillManifest(dir: string): Promise<Record<string, { descript
   }
 }
 
-function execFileText(command: string, args: string[]): Promise<string> {
+type ExecCommand = {
+  command: string
+  args: string[]
+  windowsVerbatimArguments?: boolean
+}
+
+type ResolveCommandOptions = {
+  platform?: NodeJS.Platform
+  env?: NodeJS.ProcessEnv
+  comspec?: string
+  exists?: (file: string) => Promise<boolean>
+}
+
+export async function resolveCommandForExec(
+  command: string,
+  args: string[],
+  options: ResolveCommandOptions = {},
+): Promise<ExecCommand> {
+  const platform = options.platform ?? process.platform
+  if (platform !== "win32") return { command, args }
+
+  const executable = await resolveWindowsCommand(command, options)
+  if (!executable) return { command, args }
+
+  const extension = path.extname(executable).toLowerCase()
+  if (!WINDOWS_SCRIPT_EXTENSIONS.has(extension)) return { command: executable, args }
+
+  return {
+    command: options.comspec ?? process.env.ComSpec ?? "cmd.exe",
+    args: ["/d", "/c", `call ${[executable, ...args].map(quoteWindowsShellArg).join(" ")}`],
+    windowsVerbatimArguments: true,
+  }
+}
+
+async function execFileText(command: string, args: string[]): Promise<string> {
+  const resolved = await resolveCommandForExec(command, args)
   return new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: MODEL_COMMAND_TIMEOUT_MS, windowsHide: true }, (error, stdout, stderr) => {
-      if (error) {
-        reject(error)
-        return
-      }
-      resolve(`${stdout ?? ""}${stderr ? `\n${stderr}` : ""}`)
-    })
+    execFile(
+      resolved.command,
+      resolved.args,
+      {
+        timeout: MODEL_COMMAND_TIMEOUT_MS,
+        windowsHide: true,
+        windowsVerbatimArguments: resolved.windowsVerbatimArguments,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(error)
+          return
+        }
+        resolve(`${stdout ?? ""}${stderr ? `\n${stderr}` : ""}`)
+      },
+    )
   })
+}
+
+async function resolveWindowsCommand(command: string, options: ResolveCommandOptions) {
+  const env = options.env ?? process.env
+  const exists = options.exists ?? pathExists
+  const hasPathSeparator = command.includes("/") || command.includes("\\")
+  const hasExtension = path.extname(command).length > 0
+  const pathExt = (env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((extension) => extension.trim())
+    .filter(Boolean)
+  const commandCandidates = hasExtension
+    ? [command]
+    : [...pathExt.map((extension) => `${command}${extension}`), command]
+  const directories = hasPathSeparator ? [""] : (env.PATH || env.Path || "").split(path.delimiter).filter(Boolean)
+
+  for (const directory of directories) {
+    for (const candidate of commandCandidates) {
+      const file = directory ? path.join(directory, candidate) : candidate
+      if (await exists(file)) return file
+    }
+  }
+
+  return undefined
+}
+
+function pathExists(file: string) {
+  return access(file, constants.F_OK)
+    .then(() => true)
+    .catch(() => false)
+}
+
+function quoteWindowsShellArg(value: string) {
+  return `"${value.replaceAll('"', '""')}"`
 }
 
 function parseJsonObjectFromOutput(output: string): unknown {

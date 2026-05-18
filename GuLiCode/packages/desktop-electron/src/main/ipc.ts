@@ -1,5 +1,8 @@
 import { execFile } from "node:child_process"
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
 import { BrowserWindow, Notification, app, clipboard, dialog, ipcMain, shell } from "electron"
+import log from "electron-log/main.js"
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
 
 import type {
@@ -25,6 +28,11 @@ const pickerFilters = (ext?: string[]) => {
   return [{ name: "Files", extensions: ext }]
 }
 
+const AGENT_PANEL_TEST_DIR = "agent-info-panel-tests"
+const AGENT_PANEL_TEST_FILE = "agent-panel-test.json"
+
+let agentPanelTestResetPromise: Promise<void> | undefined
+
 type Deps = {
   killSidecar: () => void
   awaitInitialization: (sendStep: (step: InitStep) => void) => Promise<ServerReadyData>
@@ -49,6 +57,10 @@ type Deps = {
 }
 
 export function registerIpcHandlers(deps: Deps) {
+  agentPanelTestResetPromise = resetAgentPanelTestDirectory().catch((error) => {
+    log.warn("failed to reset agent panel test json", error)
+  })
+
   ipcMain.handle("kill-sidecar", () => deps.killSidecar())
   ipcMain.handle("await-initialization", (event: IpcMainInvokeEvent) => {
     const send = (step: InitStep) => event.sender.send("init-step", step)
@@ -125,8 +137,16 @@ export function registerIpcHandlers(deps: Deps) {
   )
   ipcMain.handle(
     "blueprint-start",
-    (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string, plan: Record<string, unknown>) =>
-      deps.blueprintRuntime.start(projectDir, blueprintId, plan),
+    async (
+      _event: IpcMainInvokeEvent,
+      projectDir: string,
+      blueprintId: string,
+      plan: Record<string, unknown>,
+      executionMode,
+    ) => {
+      await resetAgentPanelTestDirectory()
+      return deps.blueprintRuntime.start(projectDir, blueprintId, plan, executionMode)
+    },
   )
   ipcMain.handle("blueprint-status", (_event: IpcMainInvokeEvent, runId: string) => deps.blueprintRuntime.status(runId))
   ipcMain.handle(
@@ -136,6 +156,20 @@ export function registerIpcHandlers(deps: Deps) {
   )
   ipcMain.handle("blueprint-recent-events", (_event: IpcMainInvokeEvent, runId: string, limit?: number) =>
     deps.blueprintRuntime.recentEvents(runId, limit),
+  )
+  ipcMain.handle("blueprint-agent-info", (_event: IpcMainInvokeEvent, runId: string | undefined, nodeId: string) =>
+    deps.blueprintRuntime.agentInfo(runId, nodeId),
+  )
+  ipcMain.handle(
+    "blueprint-queue-agent-message",
+    (_event: IpcMainInvokeEvent, runId: string, nodeId: string, text: string, mode: "default" | "top") =>
+      deps.blueprintRuntime.queueAgentMessage(runId, nodeId, text, mode),
+  )
+  ipcMain.handle("blueprint-agent-stream-token", (_event: IpcMainInvokeEvent, runId: string, cursor?: number) =>
+    deps.blueprintRuntime.agentStreamToken(runId, cursor),
+  )
+  ipcMain.handle("blueprint-save-agent-panel-test", (_event: IpcMainInvokeEvent, payload: Record<string, unknown>) =>
+    saveAgentPanelTestSnapshot(recordValue(payload) ?? { value: payload }),
   )
 
   ipcMain.handle(
@@ -246,4 +280,74 @@ export function sendMenuCommand(win: BrowserWindow, id: string) {
 
 export function sendDeepLinks(win: BrowserWindow, urls: string[]) {
   win.webContents.send("deep-link", urls)
+}
+
+async function saveAgentPanelTestSnapshot(payload: Record<string, unknown>) {
+  if (agentPanelTestResetPromise) await agentPanelTestResetPromise
+  const dir = agentPanelTestDirectory()
+  await mkdir(dir, { recursive: true })
+  const now = new Date()
+  await clearObsoleteAgentPanelTestJsonFiles(dir)
+  const path = join(dir, AGENT_PANEL_TEST_FILE)
+  const document = {
+    schema_version: 2,
+    kind: "gulicode.agent_info_panel_test",
+    saved_at: now.toISOString(),
+    path,
+    payload: {
+      ...payload,
+      jsonPath: path,
+    },
+  }
+  await writeFile(path, JSON.stringify(document, null, 2), "utf8")
+  return { ok: true, path }
+}
+
+async function resetAgentPanelTestDirectory() {
+  const dir = agentPanelTestDirectory()
+  await mkdir(dir, { recursive: true })
+  await clearAgentPanelTestJsonFiles(dir)
+}
+
+function agentPanelTestDirectory() {
+  const logFile = currentLogFilePath()
+  if (logFile) return join(dirname(logFile), AGENT_PANEL_TEST_DIR)
+  try {
+    const getPath = (app as { getPath?: (name: "logs") => string }).getPath
+    if (getPath) return join(getPath.call(app, "logs"), AGENT_PANEL_TEST_DIR)
+  } catch {
+    // fall through to the project-local debug log convention
+  }
+  return join(process.cwd(), "debug-logs", AGENT_PANEL_TEST_DIR)
+}
+
+function currentLogFilePath() {
+  try {
+    const path = log.transports.file.getFile().path
+    return typeof path === "string" && path ? path : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function clearAgentPanelTestJsonFiles(dir: string) {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
+      .map((entry) => rm(join(dir, entry.name), { force: true })),
+  )
+}
+
+async function clearObsoleteAgentPanelTestJsonFiles(dir: string) {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json") && entry.name !== AGENT_PANEL_TEST_FILE)
+      .map((entry) => rm(join(dir, entry.name), { force: true })),
+  )
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
 }

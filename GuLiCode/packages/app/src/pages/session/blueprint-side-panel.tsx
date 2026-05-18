@@ -1,4 +1,5 @@
 import { Button } from "@opencode-ai/ui/button"
+import { Collapsible } from "@opencode-ai/ui/collapsible"
 import { ContextMenu } from "@opencode-ai/ui/context-menu"
 import { DropdownMenu } from "@opencode-ai/ui/dropdown-menu"
 import { Icon } from "@opencode-ai/ui/icon"
@@ -21,6 +22,7 @@ import {
   CLI_KIND_OPTIONS,
   DEFAULT_BLUEPRINT_ID,
   DEFAULT_BLUEPRINT_NAME,
+  TEST_AGENT_NODE_FLAG,
   createBlueprintStartPlan,
   createDefaultBlueprintDraft,
   defaultCommandForCliKind,
@@ -54,6 +56,7 @@ import {
   type BlueprintRouteNode,
   type BlueprintTerminalKind,
 } from "@/pages/session/blueprint-model"
+import { createTestAgentPanelSnapshot } from "@/pages/session/blueprint-test-agent-snapshot"
 import { usePlatform, type BlueprintCatalogItem, type BlueprintRunEndAction } from "@/context/platform"
 
 const NODE_WIDTH = 172
@@ -62,6 +65,15 @@ const TERMINAL_WIDTH = 92
 const TERMINAL_HEIGHT = 44
 const MIN_ZOOM = 0.35
 const MAX_ZOOM = 1.8
+const AGENT_PANEL_LONG_PRESS_MS = 800
+const AGENT_PANEL_LONG_PRESS_CANCEL_PX = 8
+const AGENT_PANEL_PROGRESS_RADIUS = 8
+const AGENT_PANEL_PROGRESS_CIRCUMFERENCE = 2 * Math.PI * AGENT_PANEL_PROGRESS_RADIUS
+const AGENT_PANEL_DEFAULT_WIDTH = 374
+const AGENT_PANEL_DEFAULT_HEIGHT = 410
+const AGENT_PANEL_MIN_WIDTH = 320
+const AGENT_PANEL_MIN_HEIGHT = 300
+const AGENT_PANEL_MARGIN = 8
 const BLUEPRINT_THEME = {
   "--background-base": "#0b111b",
   "--background-strong": "#0e1724",
@@ -198,6 +210,66 @@ type BlueprintRuntimeState = {
   action?: string
   error?: string
   lastUpdatedAt?: number
+}
+
+type AgentStreamEvent = Record<string, unknown> & {
+  seq?: number
+  kind?: string
+  node_id?: string
+  message_id?: string
+  part_type?: string
+  delta?: string
+  text?: string
+  status?: string
+}
+
+type AgentPanelDisplayEvent = {
+  id: string
+  kind: string
+  seq?: number
+  status?: string
+  text: string
+}
+
+type AgentPanelUserMessage = {
+  id: string
+  runId?: string
+  runtimeMessageId?: string
+  nodeId: string
+  mode: "default" | "top"
+  text: string
+  status: "queued" | "sent" | "dispatching" | "running" | "succeeded" | "failed"
+  runtimeStatus?: string
+  created_at: string
+  sent_at?: string
+  completed_at?: string
+  failed_at?: string
+  error?: string
+}
+
+type AgentPanelEntry = {
+  nodeId: string
+  pinned: boolean
+  x: number
+  y: number
+  width: number
+  height: number
+  input: string
+  mode: "default" | "top"
+  sending: boolean
+  error?: string
+  info?: Record<string, unknown>
+  userMessages?: AgentPanelUserMessage[]
+  testJsonPath?: string
+  testJsonPending?: boolean
+  testJsonError?: string
+}
+
+type AgentPanelState = {
+  panels: Record<string, AgentPanelEntry>
+  streamEvents: Record<string, AgentStreamEvent[]>
+  streamCursor: number
+  streamError?: string
 }
 
 const INSPECTOR_TIPS = {
@@ -342,11 +414,36 @@ type DragState =
       startY: number
       zoom: number
     }
+  | {
+      type: "agent-panel-move"
+      nodeId: string
+      startClientX: number
+      startClientY: number
+      startX: number
+      startY: number
+      width: number
+      height: number
+    }
+  | {
+      type: "agent-panel-resize"
+      nodeId: string
+      startClientX: number
+      startClientY: number
+      startX: number
+      startY: number
+      startWidth: number
+      startHeight: number
+    }
 
 type ConnectionState = {
   source: string
   output_port: string
   pointer?: BlueprintNodeLayout
+}
+
+type AgentPanelPressState = {
+  nodeId: string
+  progress: number
 }
 
 type NodeItem =
@@ -377,6 +474,7 @@ export function BlueprintSidePanel() {
   )
   const [drag, setDrag] = createSignal<DragState>()
   const [connection, setConnection] = createSignal<ConnectionState>()
+  const [agentPanelPress, setAgentPanelPress] = createSignal<AgentPanelPressState>()
   const [addMenuOpen, setAddMenuOpen] = createSignal(false)
   const [catalog, setCatalog] = createSignal<CatalogState>({
     skillDir: "",
@@ -400,16 +498,45 @@ export function BlueprintSidePanel() {
     events: [],
     loading: false,
   })
+  const [agentPanel, setAgentPanel] = createStore<AgentPanelState>({
+    panels: {},
+    streamEvents: {},
+    streamCursor: 0,
+  })
   const [panelMode, setPanelMode] = createSignal<RuntimePanelMode>("runtime")
   let canvasRef: HTMLDivElement | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
+  const testAgentPersistTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {}
+  const testAgentPersistRunning: Record<string, boolean | undefined> = {}
+  const testAgentPersistQueued: Record<string, boolean | undefined> = {}
+  let agentPanelPressFrame: number | undefined
+  let agentPanelLongPress:
+    | {
+        nodeId: string
+        pointerId: number
+        startClientX: number
+        startClientY: number
+        startedAt: number
+      }
+    | undefined
   let applyingRemote = false
+
+  onCleanup(() => {
+    for (const timer of Object.values(testAgentPersistTimers)) {
+      if (timer) clearTimeout(timer)
+    }
+  })
 
   const addOptions = createMemo(() => [
     {
       kind: "agent" as const,
       label: language.t("blueprint.node.agent"),
       description: language.t("blueprint.add.agent.description"),
+    },
+    {
+      kind: "test-agent" as const,
+      label: "测试节点",
+      description: "实时记录 Agent 信息面板数据",
     },
     {
       kind: "route-sequence" as const,
@@ -562,16 +689,18 @@ export function BlueprintSidePanel() {
   createEffect(() => {
     if (!draftReady()) return
     if (persistence().loaded || persistence().loading) return
-    if (!platform.openBlueprint || !platform.saveBlueprint) {
+    const openBlueprint = platform.openBlueprint
+    const saveBlueprint = platform.saveBlueprint
+    if (!openBlueprint || !saveBlueprint) {
       setPersistence({ loaded: true, loading: false, saving: false, source: "local" })
       return
     }
     setPersistence({ loaded: false, loading: true, saving: false, source: "local" })
     void (async () => {
       try {
-        const document = await platform.openBlueprint(projectDirectory, DEFAULT_BLUEPRINT_ID)
+        const document = await openBlueprint(projectDirectory, DEFAULT_BLUEPRINT_ID)
         applyingRemote = true
-        replaceDraft(fromBlueprintDocument(document, projectDirectory))
+        replaceDraft(fromBlueprintDocument(document as Parameters<typeof fromBlueprintDocument>[0], projectDirectory))
         queueMicrotask(() => {
           applyingRemote = false
         })
@@ -681,6 +810,35 @@ export function BlueprintSidePanel() {
     onCleanup(() => clearInterval(interval))
   })
 
+  createEffect(() => {
+    const runId = runtime().runId
+    const status = runtimeStatus(runtime().status)
+    if (!runId || isTerminalRuntimeStatus(status) || !platform.blueprintAgentStreamToken) return
+    let socket: WebSocket | undefined
+    let cancelled = false
+    void platform
+      .blueprintAgentStreamToken(runId, untrack(() => agentPanel.streamCursor))
+      .then((response) => {
+        if (cancelled) return
+        const wsUrl = typeof response.wsUrl === "string" ? response.wsUrl : undefined
+        if (!wsUrl) return
+        socket = new WebSocket(wsUrl)
+        socket.onmessage = (event) => {
+          try {
+            appendAgentStreamEvent(JSON.parse(String(event.data)))
+          } catch (error) {
+            setAgentPanel("streamError", readableError(error))
+          }
+        }
+        socket.onerror = () => setAgentPanel("streamError", "agent stream disconnected")
+      })
+      .catch((error) => setAgentPanel("streamError", readableError(error)))
+    onCleanup(() => {
+      cancelled = true
+      socket?.close()
+    })
+  })
+
   async function refreshBlueprintRuntime(runId = runtime().runId, opts: { quiet?: boolean } = {}) {
     if (!runId || !platform.blueprintRunStatus) return
     if (!opts.quiet) setRuntime((current) => ({ ...current, loading: true, error: undefined }))
@@ -689,16 +847,22 @@ export function BlueprintSidePanel() {
         platform.blueprintRunStatus(runId),
         platform.blueprintRecentEvents?.(runId, 50),
       ])
+      const runtimeStatusSnapshot = asRecord(statusResponse.status)
+      const recentEvents = arrayOfRecords(eventsResponse?.events)
+      syncAgentPanelUserMessagesFromRuntimeEvents(recentEvents)
       setRuntime((current) => ({
         ...current,
         runId,
-        status: asRecord(statusResponse.status),
+        runs: mergeRuntimeRunsWithStatus(current.runs, statusResponse),
+        status: runtimeStatusSnapshot,
         explanation: asRecord(statusResponse.explanation),
-        events: arrayOfRecords(eventsResponse?.events),
+        events: recentEvents,
         loading: false,
         error: undefined,
         lastUpdatedAt: Date.now(),
       }))
+      await refreshOpenAgentPanelInfos(runId)
+      scheduleOpenTestAgentPanelPersists()
     } catch (error) {
       setRuntime((current) => ({
         ...current,
@@ -727,11 +891,13 @@ export function BlueprintSidePanel() {
         projectDirectory,
         DEFAULT_BLUEPRINT_ID,
         createBlueprintStartPlan(draft),
+        "live",
       )
       const runId = typeof started.runId === "string" ? started.runId : undefined
       setRuntime((current) => ({
         ...current,
         runId,
+        runs: mergeRuntimeRunsWithStatus(current.runs, started),
         status: asRecord(started.status),
         events: arrayOfRecords(asRecord(started.status)?.recent_events),
         loading: false,
@@ -739,6 +905,7 @@ export function BlueprintSidePanel() {
         error: undefined,
         lastUpdatedAt: Date.now(),
       }))
+      scheduleOpenTestAgentPanelPersists()
       if (platform.listBlueprintRuns) {
         const runs = await platform.listBlueprintRuns(projectDirectory, DEFAULT_BLUEPRINT_ID)
         setRuntime((current) => ({ ...current, runs }))
@@ -757,19 +924,390 @@ export function BlueprintSidePanel() {
     setRuntime((current) => ({ ...current, loading: true, action, error: undefined }))
     try {
       const ended = await platform.endBlueprintRun(runId, action, `blueprint UI ${action}`)
+      syncAgentPanelUserMessagesFromRuntimeEvents(arrayOfRecords(asRecord(ended.status)?.recent_events))
       setRuntime((current) => ({
         ...current,
+        runs: mergeRuntimeRunsWithStatus(current.runs, ended),
         status: asRecord(ended.status),
         events: arrayOfRecords(asRecord(ended.status)?.recent_events),
         loading: false,
         action: undefined,
         lastUpdatedAt: Date.now(),
       }))
+      scheduleOpenTestAgentPanelPersists()
       void refreshBlueprintRuntime(runId, { quiet: true })
     } catch (error) {
       setRuntime((current) => ({ ...current, loading: false, action: undefined, error: readableError(error) }))
     }
   }
+
+  function scheduleOpenTestAgentPanelPersists() {
+    for (const panel of Object.values(agentPanel.panels)) {
+      if (isTestAgentNode(draft.graph.agent_nodes[panel.nodeId])) scheduleTestAgentPanelPersist(panel.nodeId)
+    }
+  }
+
+  async function refreshOpenAgentPanelInfos(runId: string) {
+    if (!platform.blueprintAgentInfo) return
+    const panels = Object.values(agentPanel.panels)
+    if (!panels.length) return
+    await Promise.all(panels.map((panel) => refreshAgentPanelInfo(runId, panel.nodeId)))
+  }
+
+  async function refreshAgentPanelInfo(runId: string | undefined, nodeId: string) {
+    if (!platform.blueprintAgentInfo) return
+    try {
+      const info = await platform.blueprintAgentInfo(runId, nodeId)
+      setAgentPanel("panels", nodeId, "info", info)
+      const events = arrayOfRecords(asRecord(info)?.streamEvents) as AgentStreamEvent[]
+      if (events.length) setAgentPanel("streamEvents", nodeId, events.slice(-240))
+    } catch (error) {
+      setAgentPanel("panels", nodeId, "error", readableError(error))
+    }
+  }
+
+  function scheduleTestAgentPanelPersist(nodeId: string, opts: { immediate?: boolean } = {}) {
+    if (!platform.saveBlueprintAgentPanelTest) return
+    const node = draft.graph.agent_nodes[nodeId]
+    if (!isTestAgentNode(node)) return
+    const panel = agentPanel.panels[nodeId]
+    if (!panel) return
+    if (testAgentPersistTimers[nodeId]) {
+      clearTimeout(testAgentPersistTimers[nodeId])
+      testAgentPersistTimers[nodeId] = undefined
+    }
+    const persist = () => {
+      testAgentPersistTimers[nodeId] = undefined
+      void persistTestAgentPanelSnapshot(nodeId)
+    }
+    if (opts.immediate) {
+      persist()
+      return
+    }
+    testAgentPersistTimers[nodeId] = setTimeout(persist, 180)
+  }
+
+  async function persistTestAgentPanelSnapshot(nodeId: string) {
+    const node = draft.graph.agent_nodes[nodeId]
+    const panel = agentPanel.panels[nodeId]
+    if (!node || !panel || !isTestAgentNode(node) || !platform.saveBlueprintAgentPanelTest) return
+    if (testAgentPersistRunning[nodeId]) {
+      testAgentPersistQueued[nodeId] = true
+      return
+    }
+    testAgentPersistRunning[nodeId] = true
+    setAgentPanel("panels", nodeId, "testJsonPending", true)
+    setAgentPanel("panels", nodeId, "testJsonError", undefined)
+    try {
+      const saved = await platform.saveBlueprintAgentPanelTest(
+        createTestAgentPanelSnapshot({
+          node,
+          panel,
+          events: agentPanel.streamEvents[nodeId] ?? [],
+          runId: runtime().runId,
+          jsonPath: panel.testJsonPath,
+        }),
+      )
+      const jsonPath = typeof saved.path === "string" ? saved.path : undefined
+      setAgentPanel("panels", nodeId, "testJsonPending", false)
+      if (jsonPath) setAgentPanel("panels", nodeId, "testJsonPath", jsonPath)
+    } catch (error) {
+      setAgentPanel("panels", nodeId, "testJsonPending", false)
+      setAgentPanel("panels", nodeId, "testJsonError", readableError(error))
+    } finally {
+      testAgentPersistRunning[nodeId] = false
+      if (testAgentPersistQueued[nodeId]) {
+        testAgentPersistQueued[nodeId] = false
+        scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+      }
+    }
+  }
+
+  function appendAgentStreamEvent(value: unknown) {
+    const event = asRecord(value) as AgentStreamEvent | undefined
+    if (!event) return
+    const nodeId = typeof event.node_id === "string" ? event.node_id : undefined
+    const seq = typeof event.seq === "number" ? event.seq : Number(event.seq ?? 0)
+    if (Number.isFinite(seq)) setAgentPanel("streamCursor", Math.max(agentPanel.streamCursor, seq))
+    if (!nodeId) return
+    const current = agentPanel.streamEvents[nodeId] ?? []
+    if (seq && current.some((entry) => Number(entry.seq ?? 0) === seq)) return
+    setAgentPanel("streamEvents", nodeId, [...current, event].slice(-240))
+    syncAgentPanelUserMessageFromStreamEvent(nodeId, event)
+    scheduleTestAgentPanelPersist(nodeId)
+  }
+
+  function closeFloatingAgentPanels() {
+    replaceAgentPanels(Object.fromEntries(Object.entries(agentPanel.panels).filter(([, panel]) => panel.pinned)))
+  }
+
+  function closeAgentPanel(nodeId: string) {
+    replaceAgentPanels(Object.fromEntries(Object.entries(agentPanel.panels).filter(([id]) => id !== nodeId)))
+  }
+
+  function replaceAgentPanels(panels: Record<string, AgentPanelEntry>) {
+    setAgentPanel("panels", reconcile(panels))
+  }
+
+  function normalizeAgentPanelFrame(frame: { x: number; y: number; width: number; height: number }) {
+    return {
+      x: frame.x,
+      y: frame.y,
+      width: Math.max(AGENT_PANEL_MIN_WIDTH, frame.width),
+      height: Math.max(AGENT_PANEL_MIN_HEIGHT, frame.height),
+    }
+  }
+
+  function clampAgentPanelInitialFrame(frame: { x: number; y: number; width: number; height: number }) {
+    const rect = canvasRef?.getBoundingClientRect()
+    const canvasWidth = rect?.width ?? 900
+    const canvasHeight = rect?.height ?? 640
+    const width = clamp(frame.width, AGENT_PANEL_MIN_WIDTH, Math.max(AGENT_PANEL_MIN_WIDTH, canvasWidth - AGENT_PANEL_MARGIN * 2))
+    const height = clamp(
+      frame.height,
+      AGENT_PANEL_MIN_HEIGHT,
+      Math.max(AGENT_PANEL_MIN_HEIGHT, canvasHeight - AGENT_PANEL_MARGIN * 2),
+    )
+    return {
+      x: clamp(frame.x, AGENT_PANEL_MARGIN, Math.max(AGENT_PANEL_MARGIN, canvasWidth - width - AGENT_PANEL_MARGIN)),
+      y: clamp(frame.y, AGENT_PANEL_MARGIN, Math.max(AGENT_PANEL_MARGIN, canvasHeight - height - AGENT_PANEL_MARGIN)),
+      width,
+      height,
+    }
+  }
+
+  function updateAgentPanelFrame(nodeId: string, frame: { x: number; y: number; width: number; height: number }) {
+    const next = normalizeAgentPanelFrame(frame)
+    if (!agentPanel.panels[nodeId]) return
+    setAgentPanel("panels", nodeId, (panel) => ({ ...panel, ...next }))
+  }
+
+  function agentPanelSize(panel?: AgentPanelEntry) {
+    return {
+      width: panel?.width ?? AGENT_PANEL_DEFAULT_WIDTH,
+      height: panel?.height ?? AGENT_PANEL_DEFAULT_HEIGHT,
+    }
+  }
+
+  function agentPanelPosition(nodeId: string, width = AGENT_PANEL_DEFAULT_WIDTH, height = AGENT_PANEL_DEFAULT_HEIGHT) {
+    const layout = draft.layout.nodes[nodeId]
+    const viewport = draft.layout.viewport
+    const x = (layout?.x ?? 0) * viewport.zoom + viewport.x + NODE_WIDTH * viewport.zoom + 16
+    const y = (layout?.y ?? 0) * viewport.zoom + viewport.y - 18
+    return clampAgentPanelInitialFrame({ x, y, width, height })
+  }
+
+  async function openAgentPanel(nodeId: string, pinned = false) {
+    const existing = agentPanel.panels[nodeId]
+    const node = draft.graph.agent_nodes[nodeId]
+    const testAgent = isTestAgentNode(node)
+    const size = agentPanelSize(existing)
+    const position = agentPanelPosition(nodeId, size.width, size.height)
+    setAgentPanel("panels", nodeId, {
+      nodeId,
+      pinned: pinned || existing?.pinned || false,
+      x: position.x,
+      y: position.y,
+      width: position.width,
+      height: position.height,
+      input: existing?.input ?? "",
+      mode: existing?.mode ?? "default",
+      sending: false,
+      info: existing?.info,
+      userMessages: existing?.userMessages ?? [],
+      testJsonPath: existing?.testJsonPath,
+      testJsonPending: testAgent && Boolean(platform.saveBlueprintAgentPanelTest),
+      testJsonError: undefined,
+    })
+    if (testAgent) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+    await refreshAgentPanelInfo(runtime().runId, nodeId)
+    if (testAgent) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+  }
+
+  function cancelAgentPanelLongPress() {
+    if (agentPanelPressFrame !== undefined) {
+      cancelAnimationFrame(agentPanelPressFrame)
+      agentPanelPressFrame = undefined
+    }
+    agentPanelLongPress = undefined
+    setAgentPanelPress(undefined)
+  }
+
+  function tickAgentPanelLongPress() {
+    const current = agentPanelLongPress
+    if (!current) return
+    const progress = clamp((performance.now() - current.startedAt) / AGENT_PANEL_LONG_PRESS_MS, 0, 1)
+    setAgentPanelPress({ nodeId: current.nodeId, progress })
+    if (progress >= 1) {
+      agentPanelLongPress = undefined
+      agentPanelPressFrame = undefined
+      setAgentPanelPress(undefined)
+      setDrag(undefined)
+      void openAgentPanel(current.nodeId, false)
+      return
+    }
+    agentPanelPressFrame = requestAnimationFrame(tickAgentPanelLongPress)
+  }
+
+  function startAgentPanelLongPress(event: PointerEvent, item: NodeItem) {
+    if (item.type !== "agent") return
+    cancelAgentPanelLongPress()
+    agentPanelLongPress = {
+      nodeId: item.id,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startedAt: performance.now(),
+    }
+    setAgentPanelPress({ nodeId: item.id, progress: 0 })
+    agentPanelPressFrame = requestAnimationFrame(tickAgentPanelLongPress)
+  }
+
+  function cancelAgentPanelLongPressOnMove(event: PointerEvent) {
+    const current = agentPanelLongPress
+    if (!current || current.pointerId !== event.pointerId) return
+    const distance = Math.hypot(event.clientX - current.startClientX, event.clientY - current.startClientY)
+    if (distance >= AGENT_PANEL_LONG_PRESS_CANCEL_PX) cancelAgentPanelLongPress()
+  }
+
+  function endAgentPanelLongPress(event: PointerEvent) {
+    const current = agentPanelLongPress
+    if (!current || current.pointerId !== event.pointerId) return
+    cancelAgentPanelLongPress()
+  }
+
+  function appendAgentPanelUserMessage(message: AgentPanelUserMessage) {
+    const current = agentPanel.panels[message.nodeId]?.userMessages ?? []
+    setAgentPanel("panels", message.nodeId, "userMessages", [...current, message].slice(-120))
+  }
+
+  function updateAgentPanelUserMessage(nodeId: string, id: string, patch: Partial<AgentPanelUserMessage>) {
+    const current = agentPanel.panels[nodeId]?.userMessages ?? []
+    setAgentPanel(
+      "panels",
+      nodeId,
+      "userMessages",
+      current.map((message) => (message.id === id ? { ...message, ...patch } : message)),
+    )
+  }
+
+  function updateAgentPanelUserMessageByRuntimeMessageId(
+    nodeId: string,
+    runtimeMessageId: string,
+    patch: Partial<AgentPanelUserMessage>,
+  ) {
+    const current = agentPanel.panels[nodeId]?.userMessages ?? []
+    if (!current.length) return false
+    let changed = false
+    const next = current.map((message) => {
+      if (message.runtimeMessageId !== runtimeMessageId) return message
+      if (isTerminalUserMessageStatus(message.status) && !isTerminalUserMessageStatus(patch.status)) return message
+      changed = true
+      return { ...message, ...patch }
+    })
+    if (changed) setAgentPanel("panels", nodeId, "userMessages", next)
+    return changed
+  }
+
+  function syncAgentPanelUserMessagesFromRuntimeEvents(events: Record<string, unknown>[]) {
+    const changedNodes = new Set<string>()
+    for (const event of events) {
+      const payload = asRecord(event.payload)
+      const nodeId = stringValue(event.node_id) ?? stringValue(payload?.node_id)
+      const runtimeMessageId = stringValue(payload?.message_id)
+      if (!nodeId || !runtimeMessageId || !isTestAgentNode(draft.graph.agent_nodes[nodeId])) continue
+      const eventType = stringValue(event.event_type)
+      const runtimeStatus = stringValue(event.status) ?? stringValue(payload?.status)
+      const error = stringValue(payload?.error)
+      const now = new Date().toISOString()
+      let patch: Partial<AgentPanelUserMessage> | undefined
+      if (eventType === "AgentQueuedMessageDispatched") {
+        patch = { status: "dispatching", runtimeStatus: runtimeStatus ?? "dispatching" }
+      } else if (eventType === "AgentQueuedMessageCompleted") {
+        patch =
+          runtimeStatus === "failed" || error
+            ? { status: "failed", runtimeStatus: runtimeStatus ?? "failed", failed_at: now, error }
+            : { status: "succeeded", runtimeStatus: runtimeStatus ?? "completed", completed_at: now, error: undefined }
+      }
+      if (patch && updateAgentPanelUserMessageByRuntimeMessageId(nodeId, runtimeMessageId, patch)) changedNodes.add(nodeId)
+    }
+    for (const nodeId of changedNodes) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+  }
+
+  function syncAgentPanelUserMessageFromStreamEvent(nodeId: string, event: AgentStreamEvent) {
+    if (!isTestAgentNode(draft.graph.agent_nodes[nodeId])) return
+    const runtimeMessageId = stringValue(event.message_id)
+    if (!runtimeMessageId) return
+    const kind = stringValue(event.kind)
+    const runtimeStatus = stringValue(event.status)
+    const agentState = stringValue(event.agent_state)
+    const lastError = stringValue(event.last_error)
+    const now = new Date().toISOString()
+    let patch: Partial<AgentPanelUserMessage> | undefined
+    if (lastError) {
+      patch = { status: "failed", runtimeStatus: runtimeStatus ?? agentState ?? "failed", failed_at: now, error: lastError }
+    } else if (kind === "queue.updated" && runtimeStatus === "dispatching") {
+      patch = { status: "dispatching", runtimeStatus }
+    } else if (agentState === "running" || agentState === "waiting_for_reply") {
+      patch = { status: "running", runtimeStatus: agentState }
+    }
+    if (patch) updateAgentPanelUserMessageByRuntimeMessageId(nodeId, runtimeMessageId, patch)
+  }
+
+  async function sendAgentPanelMessage(nodeId: string) {
+    const panel = agentPanel.panels[nodeId]
+    const runId = runtime().runId
+    if (!panel || !runId || !platform.queueBlueprintAgentMessage) return
+    const text = panel.input
+    const testAgent = isTestAgentNode(draft.graph.agent_nodes[nodeId])
+    const messageId = `user-msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    if (testAgent) {
+      appendAgentPanelUserMessage({
+        id: messageId,
+        runId,
+        nodeId,
+        mode: panel.mode,
+        text,
+        status: "queued",
+        created_at: new Date().toISOString(),
+      })
+      scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+    }
+    setAgentPanel("panels", nodeId, "sending", true)
+    setAgentPanel("panels", nodeId, "error", undefined)
+    try {
+      const queued = await platform.queueBlueprintAgentMessage(runId, nodeId, text, panel.mode)
+      const runtimeMessageId = runtimeMessageIdFromQueueResponse(queued)
+      if (testAgent) {
+        updateAgentPanelUserMessage(nodeId, messageId, {
+          status: "sent",
+          runtimeStatus: "queued",
+          runtimeMessageId,
+          sent_at: new Date().toISOString(),
+        })
+        syncAgentPanelUserMessagesFromRuntimeEvents(arrayOfRecords(asRecord(queued.status)?.recent_events))
+        scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+      }
+      setAgentPanel("panels", nodeId, "input", "")
+      void refreshBlueprintRuntime(runId, { quiet: true })
+    } catch (error) {
+      const message = readableError(error)
+      if (testAgent) {
+        updateAgentPanelUserMessage(nodeId, messageId, {
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error: message,
+        })
+        scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+      }
+      setAgentPanel("panels", nodeId, "error", message)
+    } finally {
+      setAgentPanel("panels", nodeId, "sending", false)
+      if (testAgent) scheduleTestAgentPanelPersist(nodeId)
+    }
+  }
+
+  const agentPanelEntries = createMemo(() => Object.values(agentPanel.panels))
 
   const selectNode = (id: string) => {
     replaceDraft(setSelection(draft, { type: "node", id }))
@@ -892,6 +1430,8 @@ export function BlueprintSidePanel() {
   }
 
   const handleCanvasPointerDown = (event: PointerEvent) => {
+    closeFloatingAgentPanels()
+    cancelAgentPanelLongPress()
     if (event.button === 0) {
       replaceDraft(setInspector(setSelection(draft, undefined), undefined))
       return
@@ -950,8 +1490,11 @@ export function BlueprintSidePanel() {
     setConnection(undefined)
   }
 
-  const handleNodePointerDown = (event: PointerEvent, id: string) => {
+  const handleNodePointerDown = (event: PointerEvent, item: NodeItem) => {
+    const id = item.id
+    closeFloatingAgentPanels()
     if (event.button === 2) {
+      cancelAgentPanelLongPress()
       event.stopPropagation()
       selectNode(id)
       return
@@ -960,6 +1503,7 @@ export function BlueprintSidePanel() {
     event.stopPropagation()
 
     selectNode(id)
+    startAgentPanelLongPress(event, item)
     const layout = draft.layout.nodes[id]
     if (!layout) return
 
@@ -974,8 +1518,47 @@ export function BlueprintSidePanel() {
     })
   }
 
+  const handleAgentPanelMovePointerDown = (event: PointerEvent, panel: AgentPanelEntry) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    cancelAgentPanelLongPress()
+    setConnection(undefined)
+    const size = agentPanelSize(panel)
+    setDrag({
+      type: "agent-panel-move",
+      nodeId: panel.nodeId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: panel.x,
+      startY: panel.y,
+      width: size.width,
+      height: size.height,
+    })
+  }
+
+  const handleAgentPanelResizePointerDown = (event: PointerEvent, panel: AgentPanelEntry) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    cancelAgentPanelLongPress()
+    setConnection(undefined)
+    const size = agentPanelSize(panel)
+    setDrag({
+      type: "agent-panel-resize",
+      nodeId: panel.nodeId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: panel.x,
+      startY: panel.y,
+      startWidth: size.width,
+      startHeight: size.height,
+    })
+  }
+
   const handleOutputPortPointerDown = (event: PointerEvent, id: string) => {
     if (event.button !== 0) return
+    cancelAgentPanelLongPress()
     event.preventDefault()
     event.stopPropagation()
     selectNode(id)
@@ -989,6 +1572,7 @@ export function BlueprintSidePanel() {
   const handleInputPortPointerUp = (event: PointerEvent, id: string) => {
     const current = connection()
     if (!current) return
+    cancelAgentPanelLongPress()
     event.preventDefault()
     event.stopPropagation()
     if (current.source !== id) {
@@ -998,6 +1582,8 @@ export function BlueprintSidePanel() {
   }
 
   const handlePointerMove = (event: PointerEvent) => {
+    cancelAgentPanelLongPressOnMove(event)
+
     const currentConnection = connection()
     if (currentConnection) {
       setConnection({ ...currentConnection, pointer: worldPointFromClient(event.clientX, event.clientY) })
@@ -1012,6 +1598,26 @@ export function BlueprintSidePanel() {
       return
     }
 
+    if (current.type === "agent-panel-move") {
+      updateAgentPanelFrame(current.nodeId, {
+        x: current.startX + event.clientX - current.startClientX,
+        y: current.startY + event.clientY - current.startClientY,
+        width: current.width,
+        height: current.height,
+      })
+      return
+    }
+
+    if (current.type === "agent-panel-resize") {
+      updateAgentPanelFrame(current.nodeId, {
+        x: current.startX,
+        y: current.startY,
+        width: current.startWidth + event.clientX - current.startClientX,
+        height: current.startHeight + event.clientY - current.startClientY,
+      })
+      return
+    }
+
     if (!draft.layout.nodes[current.id]) return
     const snapped = snapPosition({
       x: current.startX + (event.clientX - current.startClientX) / current.zoom,
@@ -1021,6 +1627,8 @@ export function BlueprintSidePanel() {
   }
 
   const handlePointerUp = (event: PointerEvent) => {
+    endAgentPanelLongPress(event)
+
     const currentConnection = connection()
     if (currentConnection) {
       const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null
@@ -1030,6 +1638,12 @@ export function BlueprintSidePanel() {
         replaceDraft(addEdge(draft, currentConnection.source, targetNode, "exec", currentConnection.output_port, DEFAULT_INPUT_PORT))
       }
     }
+    setDrag(undefined)
+    setConnection(undefined)
+  }
+
+  const handlePointerCancel = (event: PointerEvent) => {
+    endAgentPanelLongPress(event)
     setDrag(undefined)
     setConnection(undefined)
   }
@@ -1047,13 +1661,16 @@ export function BlueprintSidePanel() {
   onMount(() => {
     window.addEventListener("pointermove", handlePointerMove)
     window.addEventListener("pointerup", handlePointerUp)
+    window.addEventListener("pointercancel", handlePointerCancel)
     window.addEventListener("dragover", handleWindowDragOver, true)
     window.addEventListener("drop", handleWindowDrop, true)
     onCleanup(() => {
       window.removeEventListener("pointermove", handlePointerMove)
       window.removeEventListener("pointerup", handlePointerUp)
+      window.removeEventListener("pointercancel", handlePointerCancel)
       window.removeEventListener("dragover", handleWindowDragOver, true)
       window.removeEventListener("drop", handleWindowDrop, true)
+      cancelAgentPanelLongPress()
     })
   })
 
@@ -1127,7 +1744,7 @@ export function BlueprintSidePanel() {
                       }}
                       onSelect={() => addNodeAtCenter(option.kind)}
                     >
-                      <Icon size="small" name={option.kind === "agent" ? "blueprint" : "branch"} />
+                      <Icon size="small" name={addNodeIcon(option.kind)} />
                       <div class="flex min-w-0 flex-col">
                         <DropdownMenu.ItemLabel>{option.label}</DropdownMenu.ItemLabel>
                         <DropdownMenu.ItemDescription>{option.description}</DropdownMenu.ItemDescription>
@@ -1205,8 +1822,10 @@ export function BlueprintSidePanel() {
           ref={canvasRef}
           class="relative flex-1 min-w-0 min-h-0 overflow-hidden touch-none outline-none"
           classList={{
-            "cursor-grabbing": drag()?.type === "pan",
-            "cursor-default": drag()?.type !== "pan",
+            "cursor-grabbing": drag()?.type === "pan" || drag()?.type === "agent-panel-move",
+            "cursor-nwse-resize": drag()?.type === "agent-panel-resize",
+            "cursor-default":
+              drag()?.type !== "pan" && drag()?.type !== "agent-panel-move" && drag()?.type !== "agent-panel-resize",
           }}
           style={{
             "background-color": "var(--blueprint-canvas-base)",
@@ -1241,8 +1860,8 @@ export function BlueprintSidePanel() {
             <svg class="absolute left-0 top-0 overflow-visible" width="1" height="1" aria-hidden="true">
               <For each={draft.graph.edges}>
                 {(edge) => {
-                  const path = createMemo(() => edgePath(draft, edge))
-                  const selected = createMemo(() => draft.selection?.type === "edge" && draft.selection.id === edge.id)
+                  const path = () => edgePath(draft, edge)
+                  const selected = () => draft.selection?.type === "edge" && draft.selection.id === edge.id
                   return (
                     <g>
                       <path
@@ -1272,22 +1891,19 @@ export function BlueprintSidePanel() {
                 }}
               </For>
               <Show when={connection()}>
-                {(current) => {
-                  const path = createMemo(() => connectionPath(draft, current()))
-                  return (
-                    <path
-                      d={path()}
-                      fill="none"
-                      stroke="var(--blueprint-edge-active)"
-                      stroke-width="1.5"
-                      stroke-dasharray="4 4"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      marker-end="url(#blueprint-arrow-active)"
-                      style={{ "pointer-events": "none" }}
-                    />
-                  )
-                }}
+                {(current) => (
+                  <path
+                    d={connectionPath(draft, current())}
+                    fill="none"
+                    stroke="var(--blueprint-edge-active)"
+                    stroke-width="1.5"
+                    stroke-dasharray="4 4"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    marker-end="url(#blueprint-arrow-active)"
+                    style={{ "pointer-events": "none" }}
+                  />
+                )}
               </Show>
               <defs>
                 <marker id="blueprint-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
@@ -1308,17 +1924,37 @@ export function BlueprintSidePanel() {
                   selected={draft.selection?.type === "node" && draft.selection.id === item.id}
                   inspecting={draft.inspector?.type === "node" && draft.inspector.id === item.id}
                   connecting={connection()?.source === item.id}
+                  agentPanelProgress={agentPanelPress()?.nodeId === item.id ? (agentPanelPress()?.progress ?? 0) : 0}
                   layout={draft.layout.nodes[item.id]}
-                  onPointerDown={(event) => handleNodePointerDown(event, item.id)}
+                  onPointerDown={(event) => handleNodePointerDown(event, item)}
                   onDoubleClick={() => inspectNode(item.id)}
                   onDelete={() => replaceDraft(deleteNode(draft, item.id))}
                   onEdit={() => inspectNode(item.id)}
+                  onInfoPanel={() => void openAgentPanel(item.id, false)}
                   onOutputPointerDown={(event) => handleOutputPortPointerDown(event, item.id)}
                   onInputPointerUp={(event) => handleInputPortPointerUp(event, item.id)}
                 />
               )}
             </For>
           </div>
+          <For each={agentPanelEntries()}>
+            {(panel) => (
+              <AgentInfoPanel
+                panel={panel}
+                node={draft.graph.agent_nodes[panel.nodeId]}
+                runId={runtime().runId}
+                runtimeStatus={runtimeStatus(runtime().status)}
+                events={agentPanel.streamEvents[panel.nodeId] ?? []}
+                onClose={() => closeAgentPanel(panel.nodeId)}
+                onPin={() => setAgentPanel("panels", panel.nodeId, "pinned", !panel.pinned)}
+                onMovePointerDown={(event) => handleAgentPanelMovePointerDown(event, panel)}
+                onResizePointerDown={(event) => handleAgentPanelResizePointerDown(event, panel)}
+                onInput={(value) => setAgentPanel("panels", panel.nodeId, "input", value)}
+                onMode={(mode) => setAgentPanel("panels", panel.nodeId, "mode", mode)}
+                onSend={() => void sendAgentPanelMessage(panel.nodeId)}
+              />
+            )}
+          </For>
         </div>
 
         <Show when={panelMode() === "runtime" || inspectorOpen()}>
@@ -1555,6 +2191,24 @@ function RuntimeMetric(props: { label: string; value: string | number }) {
   )
 }
 
+function AgentStatusRow(props: { label: string; value: string; mono?: boolean; tone?: "danger" }) {
+  return (
+    <div class="min-w-0 rounded-sm border border-[rgba(103,232,249,0.1)] bg-[#06101a] px-2 py-1.5">
+      <div class="text-10-regular text-[#95afc4]">{props.label}</div>
+      <div
+        class="mt-0.5 break-all text-11-regular leading-4"
+        classList={{
+          "font-mono": props.mono,
+          "text-[#f8fdff]": props.tone !== "danger",
+          "text-[#fecaca]": props.tone === "danger",
+        }}
+      >
+        {props.value}
+      </div>
+    </div>
+  )
+}
+
 function RuntimeRow(props: { title: string; meta?: string; detail?: string }) {
   return (
     <div class="min-w-0 rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] px-2 py-1.5">
@@ -1590,6 +2244,218 @@ function RuntimeJsonPreview(props: { value: Record<string, unknown> }) {
   )
 }
 
+function AgentInfoPanel(props: {
+  panel: AgentPanelEntry
+  node?: BlueprintAgentNode
+  runId?: string
+  runtimeStatus?: string
+  events: AgentStreamEvent[]
+  onClose: () => void
+  onPin: () => void
+  onMovePointerDown: (event: PointerEvent) => void
+  onResizePointerDown: (event: PointerEvent) => void
+  onInput: (value: string) => void
+  onMode: (value: "default" | "top") => void
+  onSend: () => void
+}) {
+  const runtime = createMemo(() => asRecord(props.panel.info?.runtime))
+  const latestStatus = createMemo(() => latestAgentStatusEvent(props.events))
+  const latestStatusRecord = createMemo(() => asRecord(latestStatus()))
+  const statusField = (key: string) => latestStatusRecord()?.[key] ?? runtime()?.[key]
+  const testMode = createMemo(() => Boolean(props.panel.info?.testMode))
+  const testAgentRecording = createMemo(
+    () => isTestAgentNode(props.node) || testMode() || Boolean(props.panel.testJsonPath) || Boolean(props.panel.testJsonPending),
+  )
+  const testJsonPath = createMemo(() => {
+    const path = props.panel.testJsonPath ?? props.panel.info?.jsonPath
+    return typeof path === "string" && path ? path : undefined
+  })
+  const live = createMemo(() => !!props.runId && !isTerminalRuntimeStatus(props.runtimeStatus))
+  const state = createMemo(() =>
+    String(statusField("agent_state") ?? runtime()?.state ?? (props.runId ? props.runtimeStatus ?? "running" : "未运行")),
+  )
+  const queueSize = createMemo(() => String(statusField("queue_size") ?? 0))
+  const messagesSent = createMemo(() => String(statusField("messages_sent") ?? 0))
+  const busyCount = createMemo(() => String(statusField("busy_count") ?? 0))
+  const currentMessageId = createMemo(() => stringValue(statusField("current_message_id")) ?? stringValue(statusField("message_id")))
+  const statusUpdatedAt = createMemo(() => formatAgentStreamEventTime(statusField("created_at")))
+  const lastError = createMemo(() => stringValue(statusField("last_error")))
+  const visibleEvents = createMemo(() => visibleAgentPanelEvents(props.events))
+  const statusDetails = createMemo(() =>
+    [
+      { label: "runId", value: stringValue(statusField("run_id")) ?? props.runId },
+      { label: "eventId", value: stringValue(statusField("event_id")) },
+      { label: "seq", value: agentStatusFieldText(statusField("seq")) },
+      { label: "messageId", value: stringValue(statusField("message_id")) },
+      { label: "currentMessageId", value: currentMessageId() },
+    ].filter((item): item is { label: string; value: string } => Boolean(item.value)),
+  )
+  const sendDisabled = createMemo(() => testMode() || !live() || props.panel.sending || !props.panel.input.trim())
+  const width = () => props.panel.width ?? AGENT_PANEL_DEFAULT_WIDTH
+  const height = () => props.panel.height ?? AGENT_PANEL_DEFAULT_HEIGHT
+
+  return (
+    <div
+      data-agent-info-panel
+      class="absolute z-30 flex select-text flex-col overflow-hidden rounded-lg border border-[rgba(103,232,249,0.44)] bg-[rgba(6,16,26,0.98)] text-[#d6e9f5] shadow-[0_22px_80px_rgba(0,0,0,0.58),0_0_0_1px_rgba(103,232,249,0.14)] backdrop-blur"
+      style={{
+        left: `${props.panel.x}px`,
+        top: `${props.panel.y}px`,
+        width: `${width()}px`,
+        height: `${height()}px`,
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onWheel={(event) => event.stopPropagation()}
+    >
+      <div class="flex h-10 shrink-0 items-center justify-between border-b border-[rgba(103,232,249,0.16)] px-3">
+        <div
+          class="min-w-0 flex-1 cursor-move select-none"
+          onPointerDown={props.onMovePointerDown}
+          title="拖动移动信息面板"
+        >
+          <div class="truncate text-12-medium text-[#f8fdff]">{props.node?.agent_id || props.panel.nodeId}</div>
+          <div class="truncate text-10-regular text-[#8fb4c8]">
+            {props.node?.cli_kind ?? "agent"} · {state()}
+          </div>
+        </div>
+        <div class="flex items-center gap-1">
+          <IconButton
+            icon="status"
+            variant="ghost"
+            class="h-7 w-7 text-[#d7f7ff]"
+            classList={{ "bg-[rgba(103,232,249,0.16)]": props.panel.pinned }}
+            onClick={props.onPin}
+            aria-label="pin agent panel"
+          />
+          <IconButton
+            icon="close-small"
+            variant="ghost"
+            class="h-7 w-7 text-[#d7f7ff]"
+            onClick={props.onClose}
+            aria-label="close agent panel"
+          />
+        </div>
+      </div>
+      <div class="grid grid-cols-4 gap-2 border-b border-[rgba(103,232,249,0.12)] p-3 text-11-regular">
+        <RuntimeMetric label="状态" value={state()} />
+        <RuntimeMetric label="队列" value={queueSize()} />
+        <RuntimeMetric label="消息" value={messagesSent()} />
+        <RuntimeMetric label="忙碌" value={busyCount()} />
+      </div>
+      <div class="min-h-0 flex-1 overflow-y-auto px-3 py-2" onWheel={(event) => event.stopPropagation()}>
+        <Show when={latestStatus() || currentMessageId() || statusUpdatedAt() || lastError()}>
+          <div class="mb-2 rounded-md border border-[rgba(103,232,249,0.14)] bg-[#08131f] p-2">
+            <div class="mb-2 text-10-medium uppercase text-[#67e8f9]">运行状态</div>
+            <div class="flex flex-col gap-1">
+              <Show when={currentMessageId()}>
+                {(value) => <AgentStatusRow label="当前消息" value={value()} mono />}
+              </Show>
+              <Show when={statusUpdatedAt()}>
+                {(value) => <AgentStatusRow label="最后更新" value={value()} />}
+              </Show>
+              <Show when={lastError()}>
+                {(value) => <AgentStatusRow label="最后错误" value={value()} tone="danger" />}
+              </Show>
+            </div>
+            <Show when={statusDetails().length}>
+              <Collapsible variant="ghost" class="mt-2">
+                <Collapsible.Trigger class="flex w-full items-center justify-between rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] px-2 py-1.5 text-left text-11-medium text-[#d6e9f5]">
+                  <span>状态详情</span>
+                  <Collapsible.Arrow class="text-[#7fa4ba]" />
+                </Collapsible.Trigger>
+                <Collapsible.Content>
+                  <div class="mt-1 flex flex-col gap-1">
+                    <For each={statusDetails()}>
+                      {(item) => <AgentStatusRow label={item.label} value={item.value} mono />}
+                    </For>
+                  </div>
+                </Collapsible.Content>
+              </Collapsible>
+            </Show>
+          </div>
+        </Show>
+        <Show when={testAgentRecording()}>
+          <div class="mb-2 rounded-md border border-[rgba(250,204,21,0.22)] bg-[rgba(250,204,21,0.06)] p-2">
+            <div class="mb-1 text-10-medium uppercase text-[#facc15]">JSON 位置</div>
+            <div class="break-all font-mono text-[11px] leading-4 text-[#fde68a]">
+              {testJsonPath() ?? (props.panel.testJsonPending ? "写入中..." : "未生成")}
+            </div>
+            <Show when={props.panel.testJsonError}>
+              {(error) => <div class="mt-1 break-all text-10-regular text-[#fca5a5]">JSON 保存失败: {error()}</div>}
+            </Show>
+          </div>
+        </Show>
+        <Show
+          when={visibleEvents().length}
+          fallback={<div class="py-8 text-center text-11-regular text-[#7fa4ba]">暂无 agent 输出</div>}
+        >
+          <For each={visibleEvents()}>
+            {(event) => (
+              <div class="mb-2 rounded-md border border-[rgba(103,232,249,0.12)] bg-[#071019] p-2">
+                <div class="mb-1 flex items-center justify-between gap-2 text-10-regular text-[#7fa4ba]">
+                  <span>{event.kind}</span>
+                  <span>#{String(event.seq ?? "—")}</span>
+                </div>
+                <pre class="select-text whitespace-pre-wrap break-words font-mono text-[11px] leading-4 text-[#d6e9f5]">
+                  {event.text}
+                </pre>
+              </div>
+            )}
+          </For>
+        </Show>
+      </div>
+      <div class="shrink-0 border-t border-[rgba(103,232,249,0.16)] p-3">
+        <Show when={testAgentRecording()}>
+          <div class="mb-2 rounded border border-[rgba(250,204,21,0.28)] bg-[rgba(250,204,21,0.08)] px-2 py-1.5 text-11-regular text-[#fde68a]">
+            测试节点信息正在实时写入 JSON。
+          </div>
+        </Show>
+        <Show when={!live() && !testMode()}>
+          <div class="mb-2 rounded border border-[rgba(251,191,36,0.2)] bg-[rgba(251,191,36,0.08)] px-2 py-1.5 text-11-regular text-[#facc15]">
+            蓝图未 live 运行，点击开始后可发送消息。
+          </div>
+        </Show>
+        <Show when={props.panel.error}>
+          <div class="mb-2 rounded border border-[rgba(248,113,113,0.28)] bg-[rgba(127,29,29,0.24)] px-2 py-1.5 text-11-regular text-[#fecaca]">
+            {props.panel.error}
+          </div>
+        </Show>
+        <textarea
+          class="h-16 w-full resize-none rounded-md border border-[rgba(103,232,249,0.18)] bg-[#06101a] px-2 py-1.5 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#607f92] focus:border-[rgba(103,232,249,0.52)]"
+          value={props.panel.input}
+          disabled={testMode() || !live() || props.panel.sending}
+          placeholder={live() ? "发送给这个 agent…" : "等待 live runtime"}
+          onInput={(event) => props.onInput(event.currentTarget.value)}
+        />
+        <div class="mt-2 flex items-center gap-2">
+          <select
+            class="h-8 rounded-md border border-[rgba(103,232,249,0.18)] bg-[#071019] px-2 text-11-regular text-[#d6e9f5]"
+            value={props.panel.mode}
+            disabled={testMode() || !live() || props.panel.sending}
+            onInput={(event) => props.onMode(event.currentTarget.value === "top" ? "top" : "default")}
+          >
+            <option value="default">默认</option>
+            <option value="top">置顶</option>
+          </select>
+          <Button size="small" onClick={props.onSend} disabled={sendDisabled()} class="ml-auto">
+            {props.panel.sending ? "发送中" : "发送"}
+          </Button>
+        </div>
+      </div>
+      <button
+        type="button"
+        class="absolute bottom-0 right-0 z-10 size-5 cursor-nwse-resize rounded-tl-md border-l border-t border-[rgba(103,232,249,0.24)] bg-[rgba(7,16,25,0.76)] text-[#67e8f9] hover:bg-[rgba(103,232,249,0.16)]"
+        onPointerDown={props.onResizePointerDown}
+        aria-label="resize agent info panel"
+        title="拖动缩放信息面板"
+      >
+        <span class="absolute bottom-1 right-1 h-2.5 w-2.5 border-b border-r border-current opacity-80" />
+        <span class="absolute bottom-1 right-1 h-1.5 w-1.5 border-b border-r border-current opacity-60" />
+      </button>
+    </div>
+  )
+}
+
 function BlueprintNodeView(props: {
   item: NodeItem
   title: string
@@ -1597,11 +2463,13 @@ function BlueprintNodeView(props: {
   selected: boolean
   inspecting: boolean
   connecting: boolean
+  agentPanelProgress: number
   layout?: BlueprintNodeLayout
   onPointerDown: (event: PointerEvent) => void
   onDoubleClick: () => void
   onDelete: () => void
   onEdit: () => void
+  onInfoPanel: () => void
   onOutputPointerDown: (event: PointerEvent) => void
   onInputPointerUp: (event: PointerEvent) => void
 }) {
@@ -1610,6 +2478,7 @@ function BlueprintNodeView(props: {
   const height = () => (props.item.type === "terminal" ? TERMINAL_HEIGHT : NODE_HEIGHT)
   const showInput = () => props.item.type !== "terminal" || props.item.kind === "end"
   const showOutput = () => props.item.type !== "terminal" || props.item.kind === "start"
+  const agentPanelProgress = () => clamp(props.agentPanelProgress, 0, 1)
   const nodeTone = createMemo(() => {
     if (props.item.type === "terminal") {
       return props.item.kind === "start"
@@ -1632,6 +2501,14 @@ function BlueprintNodeView(props: {
         border: props.selected ? "rgba(125, 211, 252, 0.94)" : "rgba(56, 189, 248, 0.5)",
         glow: "0 16px 42px rgba(14, 165, 233, 0.18)",
         icon: "#7dd3fc",
+      }
+    }
+    if (props.item.type === "agent" && isTestAgentNode(props.item.node)) {
+      return {
+        background: "linear-gradient(135deg, rgba(51, 48, 25, 0.98), rgba(13, 28, 30, 0.98))",
+        border: props.selected ? "rgba(250, 204, 21, 0.94)" : "rgba(250, 204, 21, 0.5)",
+        glow: "0 16px 42px rgba(250, 204, 21, 0.14)",
+        icon: "#facc15",
       }
     }
     return {
@@ -1694,10 +2571,41 @@ function BlueprintNodeView(props: {
           <Show when={props.item.type !== "terminal"}>
             <div class="w-full truncate text-11-regular text-[#d6e9f5]">{props.subtitle}</div>
           </Show>
+          <Show when={props.item.type === "agent" && agentPanelProgress() > 0}>
+            <div class="pointer-events-none absolute right-2 top-2 size-5 rounded-full bg-[#071019]/80 shadow-[0_0_12px_rgba(103,232,249,0.28)]">
+              <svg class="size-full -rotate-90" viewBox="0 0 20 20" aria-hidden="true">
+                <circle
+                  cx="10"
+                  cy="10"
+                  r={AGENT_PANEL_PROGRESS_RADIUS}
+                  fill="none"
+                  stroke="rgba(103,232,249,0.2)"
+                  stroke-width="2"
+                />
+                <circle
+                  cx="10"
+                  cy="10"
+                  r={AGENT_PANEL_PROGRESS_RADIUS}
+                  fill="none"
+                  stroke="#67e8f9"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-dasharray={`${AGENT_PANEL_PROGRESS_CIRCUMFERENCE}`}
+                  stroke-dashoffset={`${AGENT_PANEL_PROGRESS_CIRCUMFERENCE * (1 - agentPanelProgress())}`}
+                />
+              </svg>
+            </div>
+          </Show>
         </div>
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
         <ContextMenu.Content>
+          <Show when={props.item.type === "agent"}>
+            <ContextMenu.Item onSelect={props.onInfoPanel}>
+              <Icon size="small" name="eye" />
+              <ContextMenu.ItemLabel>{language.t("blueprint.context.infoPanel")}</ContextMenu.ItemLabel>
+            </ContextMenu.Item>
+          </Show>
           <ContextMenu.Item onSelect={props.onEdit}>
             <Icon size="small" name="edit" />
             <ContextMenu.ItemLabel>{language.t("blueprint.context.edit")}</ContextMenu.ItemLabel>
@@ -2364,6 +3272,7 @@ function InspectorTipButton(props: { label: string; tip: InspectorTipKey }) {
 
 function nodeTitle(t: (key: never, params?: Record<string, string | number | boolean>) => string, item: NodeItem) {
   if (item.type === "terminal") return item.kind === "start" ? t("blueprint.node.start" as never) : t("blueprint.node.end" as never)
+  if (item.type === "agent" && isTestAgentNode(item.node)) return "测试节点"
   return item.id
 }
 
@@ -2376,6 +3285,16 @@ function nodeSubtitle(t: (key: never, params?: Record<string, string | number | 
 function routeLabelKey(routeKind: string) {
   if (routeKind === "parallel_reduce") return "parallelReduce"
   return routeKind
+}
+
+function isTestAgentNode(node?: BlueprintAgentNode) {
+  return node?.adapter_options?.[TEST_AGENT_NODE_FLAG] === true
+}
+
+function addNodeIcon(kind: BlueprintAddNodeKind): "blueprint" | "branch" | "selector" {
+  if (kind === "agent" || kind === "test-agent") return "blueprint"
+  if (kind === "start" || kind === "end") return "selector"
+  return "branch"
 }
 
 function fallbackModels(cliKind: string) {
@@ -2405,6 +3324,40 @@ function arrayOfRecords(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.map((entry) => asRecord(entry) ?? { value: entry }) : []
 }
 
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined
+}
+
+function isTerminalUserMessageStatus(status: AgentPanelUserMessage["status"] | undefined) {
+  return status === "succeeded" || status === "failed"
+}
+
+function runtimeMessageIdFromQueueResponse(response: Record<string, unknown>) {
+  return stringValue(asRecord(response.result)?.message_id)
+}
+
+function mergeRuntimeRunsWithStatus(
+  runs: Record<string, unknown>[],
+  response: Record<string, unknown>,
+): Record<string, unknown>[] {
+  const responseRun = asRecord(response.run)
+  const statusRun = asRecord(asRecord(response.status)?.run)
+  const runId = stringValue(response.runId) ?? stringValue(responseRun?.runId)
+  if (!runId) return runs
+  const existing = runs.find((run) => stringValue(run.runId) === runId)
+  const merged: Record<string, unknown> = {
+    ...(existing ?? {}),
+    ...(responseRun ?? {}),
+    runId,
+  }
+  const status = stringValue(statusRun?.status)
+  if (status) merged.status = status
+  if (statusRun?.final_status !== undefined) merged.finalStatus = statusRun.final_status
+  if (statusRun?.ended_at !== undefined) merged.endedAt = statusRun.ended_at
+  const rest = runs.filter((run) => stringValue(run.runId) !== runId)
+  return [merged, ...rest]
+}
+
 function runtimeStatus(status: unknown) {
   const snapshot = asRecord(status)
   const run = asRecord(snapshot?.run)
@@ -2413,6 +3366,149 @@ function runtimeStatus(status: unknown) {
 
 function isTerminalRuntimeStatus(status: string | undefined) {
   return status === "completed" || status === "cancelled" || status === "failed" || status === "paused"
+}
+
+function latestAgentStatusEvent(events: AgentStreamEvent[]) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index]?.kind === "status") return events[index]
+  }
+  return undefined
+}
+
+function visibleAgentPanelEvents(events: AgentStreamEvent[]): AgentPanelDisplayEvent[] {
+  const replies = new Map<string, AgentPanelDisplayEvent>()
+  const display: AgentPanelDisplayEvent[] = []
+
+  for (const event of events) {
+    const kind = stringValue(event.kind) ?? "event"
+    if (isHiddenAgentPanelStreamKind(kind)) continue
+
+    if (kind === "part.delta" || kind === "message.completed") {
+      if (!isAgentReplyTextEvent(event, kind)) continue
+      const text = cleanAgentPanelReplyText(agentStreamEventContentText(event))
+      const messageId = stringValue(event.message_id)
+      if (!messageId) {
+        if (text) display.push(agentPanelDisplayEventFromStream(event, kind, text))
+        continue
+      }
+
+      const current = replies.get(messageId)
+      if (!text) {
+        if (current && kind === "message.completed") {
+          current.status = stringValue(event.status) ?? "completed"
+          current.seq = event.seq ?? current.seq
+        }
+        continue
+      }
+
+      if (!current) {
+        const reply = agentPanelDisplayEventFromStream(event, "Agent 回复", text, `reply-${messageId}`)
+        replies.set(messageId, reply)
+        display.push(reply)
+        continue
+      }
+
+      current.text =
+        kind === "message.completed" || shouldReplaceAgentReplyDraft(current.text, text)
+          ? text
+          : `${current.text}${text}`
+      current.status = stringValue(event.status) ?? current.status
+      current.seq = event.seq ?? current.seq
+      continue
+    }
+
+    const text = cleanAgentPanelReplyText(agentStreamEventContentText(event))
+    if (text) display.push(agentPanelDisplayEventFromStream(event, kind, text))
+  }
+
+  return display
+}
+
+function isHiddenAgentPanelStreamKind(kind: string) {
+  return (
+    kind === "status" ||
+    kind === "message.started" ||
+    kind === "queue.updated" ||
+    kind === "tool.started" ||
+    kind === "tool.completed"
+  )
+}
+
+function isAgentReplyTextEvent(event: AgentStreamEvent, kind: string) {
+  if (kind === "message.completed") return true
+  const partType = stringValue(event.part_type)
+  return partType === undefined || partType === "text" || partType === "agent_message"
+}
+
+function agentPanelDisplayEventFromStream(
+  event: AgentStreamEvent,
+  kind: string,
+  text: string,
+  fallbackId = `event-${event.seq ?? kind}`,
+): AgentPanelDisplayEvent {
+  return {
+    id: stringValue(event.event_id) ?? stringValue(event.part_id) ?? stringValue(event.message_id) ?? fallbackId,
+    kind,
+    seq: event.seq,
+    status: stringValue(event.status),
+    text,
+  }
+}
+
+function shouldReplaceAgentReplyDraft(current: string, next: string) {
+  return next.length >= current.length && (next.startsWith(current) || current.startsWith(next))
+}
+
+function cleanAgentPanelReplyText(value: string | undefined) {
+  if (!value) return undefined
+  const text = value
+    .split(/\r?\n/)
+    .filter((line) => !isCodexInternalLogLine(line))
+    .join("\n")
+    .trim()
+  return text || undefined
+}
+
+function isCodexInternalLogLine(line: string) {
+  const trimmed = line.trim()
+  return (
+    /^\d{4}-\d{2}-\d{2}T[^\s]+Z\s+(ERROR|WARN|INFO|DEBUG|TRACE)\s+codex_/.test(trimmed) ||
+    trimmed.includes("codex_core::") ||
+    trimmed.includes("windows sandbox: CreateProcessWithLogonW failed")
+  )
+}
+
+function agentStatusFieldText(value: unknown) {
+  if (typeof value === "string" && value.trim()) return value.trim()
+  if (typeof value === "number" && Number.isFinite(value)) return String(value)
+  if (typeof value === "boolean") return String(value)
+  return undefined
+}
+
+function agentStreamEventContentText(event: AgentStreamEvent) {
+  const text = event.delta ?? event.text ?? event["tool_output"] ?? event["tool_input"] ?? event.status
+  if (typeof text === "string") return text
+  if (text !== undefined) return JSON.stringify(text, null, 2)
+  return undefined
+}
+
+function agentStreamEventText(event: AgentStreamEvent) {
+  const text = agentStreamEventContentText(event)
+  if (text !== undefined) return text
+  return JSON.stringify(event["raw"] ?? event, null, 2)
+}
+
+function formatAgentStreamEventTime(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds = value > 10_000_000_000 ? value : value * 1000
+    return new Date(milliseconds).toLocaleTimeString()
+  }
+  if (typeof value === "string" && value.trim()) {
+    const time = Date.parse(value)
+    if (Number.isFinite(time)) return new Date(time).toLocaleTimeString()
+    return value
+  }
+  return undefined
 }
 
 function formatRuntimeTime(value: number) {

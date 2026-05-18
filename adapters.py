@@ -6,7 +6,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .codex_bridge import codex_run, load_codex_runtime
 from .codemaker_bridge import codemaker_run, load_codemaker_runtime
@@ -22,6 +22,7 @@ class AgentMessage:
     context: Optional[str] = None
     attachments: List[Any] = field(default_factory=list)
     raw_body: Any = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -32,6 +33,9 @@ class AdapterResult:
     payload: Dict[str, Any]
     status: str = "success"
     error: Optional[str] = None
+
+
+AgentStreamCallback = Callable[[Dict[str, Any]], Awaitable[None]]
 
 
 def body_to_agent_message(body: Any) -> AgentMessage:
@@ -90,7 +94,12 @@ class CLIAdapter(ABC):
         self._started = True
 
     @abstractmethod
-    async def send_message(self, message: AgentMessage) -> AdapterResult:
+    async def send_message(
+        self,
+        message: AgentMessage,
+        *,
+        stream_callback: Optional[AgentStreamCallback] = None,
+    ) -> AdapterResult:
         """Send one message to the bound CLI agent instance."""
 
     async def health_check(self) -> Dict[str, Any]:
@@ -120,7 +129,12 @@ class CodeMakerAdapter(CLIAdapter):
         agent_id = str(cfg["agent_id"])
         return cls(agent_id, load_codemaker_runtime(cfg))
 
-    async def send_message(self, message: AgentMessage) -> AdapterResult:
+    async def send_message(
+        self,
+        message: AgentMessage,
+        *,
+        stream_callback: Optional[AgentStreamCallback] = None,
+    ) -> AdapterResult:
         if not self._started:
             await self.start()
         if not message.prompt.strip():
@@ -171,7 +185,12 @@ class CodexAdapter(CLIAdapter):
         agent_id = str(cfg["agent_id"])
         return cls(agent_id, load_codex_runtime(cfg))
 
-    async def send_message(self, message: AgentMessage) -> AdapterResult:
+    async def send_message(
+        self,
+        message: AgentMessage,
+        *,
+        stream_callback: Optional[AgentStreamCallback] = None,
+    ) -> AdapterResult:
         if not self._started:
             await self.start()
         if not message.prompt.strip():
@@ -191,6 +210,8 @@ class CodexAdapter(CLIAdapter):
             stdin_context=message.context,
             attachments=message.attachments,
             codex_cfg=self.runtime_config,
+            stream_callback=stream_callback,
+            stream_context=message.metadata.get("framework_stream"),
         )
         self.messages_handled += 1
         ok = result.get("returncode") == 0

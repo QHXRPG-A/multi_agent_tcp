@@ -37,7 +37,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TYPE_CHECKING, Tuple
 
 from .client import AgentTCPClient
 from ._proc_utils import terminate_and_wait
@@ -940,6 +940,8 @@ class CLIWorkerBackend:
         *,
         timeout_sec: float = 600.0,
         _skip_skill_inject: bool = False,
+        meta: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Send one task to one worker, wait for its reply."""
         if not _skip_skill_inject:
@@ -947,9 +949,17 @@ class CLIWorkerBackend:
             _, body = injected[0]
         client = await self._ensure_client()
         log.info("run_single worker=%s timeout_sec=%s", worker_id, timeout_sec)
-        await client.send_to(worker_id, body)
+        await client.send_to(worker_id, body, meta=meta)
+        async def _stream(event: Dict[str, Any]) -> None:
+            if stream_callback is None:
+                return
+            result = stream_callback(event)
+            if asyncio.iscoroutine(result):
+                await result
+
         reply = await client.wait_for_message(
             expect_from=worker_id, timeout_sec=timeout_sec,
+            stream_callback=_stream if stream_callback is not None else None,
         )
         return reply
 

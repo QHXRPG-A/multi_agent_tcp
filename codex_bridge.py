@@ -10,13 +10,14 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ._proc_utils import async_kill_process_tree
 
 log = logging.getLogger(__name__)
 
 DANGEROUS_CODEX_SANDBOX = "danger-full-access"
+AgentStreamCallback = Callable[[Dict[str, Any]], Awaitable[None]]
 
 
 def _as_bool(value: Any, *, default: bool) -> bool:
@@ -399,6 +400,98 @@ def _extract_text_from_content(value: Any) -> str:
     return ""
 
 
+def codex_jsonl_event_to_agent_stream_events(
+    event: Dict[str, Any],
+    *,
+    stream_context: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Normalize public Codex JSONL events into blueprint agent stream events."""
+    context = dict(stream_context or {})
+    events: List[Dict[str, Any]] = []
+
+    def base(kind: str) -> Dict[str, Any]:
+        data = {
+            "kind": kind,
+            "run_id": context.get("run_id"),
+            "node_id": context.get("node_id"),
+            "agent_id": context.get("agent_id"),
+            "message_id": context.get("message_id"),
+            "raw": event,
+        }
+        return {key: value for key, value in data.items() if value is not None}
+
+    item = event.get("item")
+    if isinstance(item, dict):
+        item_type = str(item.get("type", ""))
+        item_id = str(item.get("id") or item.get("call_id") or item_type or "codex")
+        if item_type in {"agent_message", "message"}:
+            text = _extract_text_from_content(item.get("text") or item.get("content"))
+            if text:
+                data = base("part.delta")
+                data.update(
+                    {
+                        "part_id": item_id,
+                        "part_type": "text",
+                        "field": "text",
+                        "delta": text,
+                        "text": text,
+                        "status": "completed" if event.get("type") == "item.completed" else "running",
+                    }
+                )
+                events.append(data)
+        elif item_type in {"reasoning", "reasoning_summary", "thought"}:
+            text = _extract_text_from_content(item.get("text") or item.get("content") or item.get("summary"))
+            if text:
+                data = base("part.delta")
+                data.update(
+                    {
+                        "part_id": item_id,
+                        "part_type": "reasoning",
+                        "field": "text",
+                        "delta": text,
+                        "text": text,
+                        "status": "completed" if event.get("type") == "item.completed" else "running",
+                    }
+                )
+                events.append(data)
+        elif "tool" in item_type or item_type in {"command_execution", "function_call"}:
+            data = base("tool.completed" if event.get("type") == "item.completed" else "tool.started")
+            data.update(
+                {
+                    "part_id": item_id,
+                    "part_type": "tool",
+                    "tool_name": item.get("name") or item.get("tool_name") or item_type,
+                    "tool_input": item.get("arguments") or item.get("input") or item.get("command"),
+                    "tool_output": item.get("output") or item.get("result"),
+                    "status": "completed" if event.get("type") == "item.completed" else "running",
+                }
+            )
+            events.append(data)
+
+    message = event.get("message")
+    if isinstance(message, (str, list, dict)):
+        text = _extract_text_from_content(message)
+        if text:
+            data = base("part.delta")
+            data.update(
+                {
+                    "part_id": str(event.get("message_id") or "message"),
+                    "part_type": "text",
+                    "field": "text",
+                    "delta": text,
+                    "text": text,
+                    "status": "running",
+                }
+            )
+            events.append(data)
+
+    if event.get("type") == "turn.completed":
+        data = base("message.completed")
+        data.update({"status": "completed"})
+        events.append(data)
+    return events
+
+
 def extract_codex_final_text(stdout: str) -> str:
     """Best-effort final assistant text extraction from `codex exec --json` stdout."""
     candidates: List[str] = []
@@ -423,6 +516,8 @@ async def codex_run(
     stdin_context: Optional[str] = None,
     attachments: Optional[List[Any]] = None,
     codex_cfg: Dict[str, Any],
+    stream_callback: Optional[AgentStreamCallback] = None,
+    stream_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run one non-interactive `codex exec` and return stdout/stderr/result metadata."""
     text = _merge_prompt(prompt, stdin_context, codex_cfg)
@@ -477,26 +572,89 @@ async def codex_run(
     )
     timeout = codex_cfg.get("timeout_sec")
 
-    communicate = asyncio.create_task(proc.communicate(text.encode("utf-8")))
+    stdout_parts: List[str] = []
+    stderr_parts: List[str] = []
+
+    async def _emit(event: Dict[str, Any]) -> None:
+        if stream_callback is not None:
+            await stream_callback(event)
+
+    async def _write_stdin() -> None:
+        if proc.stdin is None:
+            return
+        proc.stdin.write(text.encode("utf-8"))
+        await proc.stdin.drain()
+        proc.stdin.close()
+        try:
+            await proc.stdin.wait_closed()
+        except (AttributeError, BrokenPipeError, ConnectionError):
+            pass
+
+    async def _read_stdout() -> None:
+        if proc.stdout is None:
+            return
+        while True:
+            chunk = await proc.stdout.readline()
+            if not chunk:
+                break
+            line = chunk.decode("utf-8", errors="replace")
+            stdout_parts.append(line)
+            stripped = line.strip()
+            if not stripped.startswith("{"):
+                continue
+            try:
+                event = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            for stream_event in codex_jsonl_event_to_agent_stream_events(
+                event,
+                stream_context=stream_context,
+            ):
+                await _emit(stream_event)
+
+    async def _read_stderr() -> None:
+        if proc.stderr is None:
+            return
+        while True:
+            chunk = await proc.stderr.readline()
+            if not chunk:
+                break
+            line = chunk.decode("utf-8", errors="replace")
+            stderr_parts.append(line)
+            await _emit(
+                {
+                    **dict(stream_context or {}),
+                    "kind": "part.delta",
+                    "part_id": "stderr",
+                    "part_type": "stderr",
+                    "field": "text",
+                    "delta": line,
+                    "text": line,
+                    "status": "running",
+                }
+            )
+
+    tasks = [
+        asyncio.create_task(_write_stdin()),
+        asyncio.create_task(_read_stdout()),
+        asyncio.create_task(_read_stderr()),
+        asyncio.create_task(proc.wait()),
+    ]
     try:
-        out_b, err_b = (
-            await asyncio.wait_for(asyncio.shield(communicate), timeout=timeout)
+        await (
+            asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
             if timeout
-            else await communicate
+            else asyncio.gather(*tasks)
         )
     except asyncio.TimeoutError:
         log.warning("[codex] TIMEOUT after %ss killing pid=%s tree", timeout, proc.pid)
         await async_kill_process_tree(proc.pid, timeout=10.0)
-        out_b = b""
-        err_b = b""
-        try:
-            out_b, err_b = await asyncio.wait_for(communicate, timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            communicate.cancel()
-            try:
-                await communicate
-            except (asyncio.CancelledError, ProcessLookupError):
-                pass
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
@@ -513,8 +671,8 @@ async def codex_run(
                 last_message = ""
         else:
             last_message = ""
-        stdout = out_b.decode("utf-8", errors="replace")
-        stderr = err_b.decode("utf-8", errors="replace")
+        stdout = "".join(stdout_parts)
+        stderr = "".join(stderr_parts)
         return {
             "returncode": -9,
             "stdout": stdout,
@@ -532,8 +690,8 @@ async def codex_run(
 
     rc = proc.returncode if proc.returncode is not None else -1
     elapsed = time.monotonic() - t0
-    stdout = out_b.decode("utf-8", errors="replace")
-    stderr = err_b.decode("utf-8", errors="replace")
+    stdout = "".join(stdout_parts)
+    stderr = "".join(stderr_parts)
     last_message = ""
     if last_message_path and last_message_path.is_file():
         try:

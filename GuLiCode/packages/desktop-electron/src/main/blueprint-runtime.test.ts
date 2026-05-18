@@ -93,6 +93,15 @@ describe("blueprint runtime bridge", () => {
       expect(events.limit).toBe(10)
       expect((events.events as unknown[]).length).toBeGreaterThan(0)
 
+      const agentInfo = (await runtime.agentInfo(String(started.runId), "planner")) as Record<string, unknown>
+      expect((agentInfo.runtime as { state: string }).state).toBe("queued")
+      await expect(runtime.queueAgentMessage(String(started.runId), "planner", "hello", "default")).rejects.toMatchObject({
+        code: "RUN_NOT_LIVE",
+      })
+      await expect(runtime.agentStreamToken(String(started.runId), 0)).rejects.toMatchObject({
+        code: "RUN_NOT_LIVE",
+      })
+
       const ended = (await runtime.end(String(started.runId), "cancel", "user cancelled")) as Record<string, unknown>
       expect(((ended.end as { run_status: string }).run_status)).toBe("cancelled")
       expect(((ended.status as { run: { final_status: string } }).run).final_status).toBe("cancelled")

@@ -52,27 +52,6 @@ Do not treat the old Ryven/editor line as the current UI target.
   through Electron IPC for `codemaker` and `codex`.
 - [DONE] Added desktop catalog/model IPC and tests for skill scanning, rule
   scanning, and CLI model parsing.
-- [DONE] Implemented Blueprint 1-3 API bridge: `BlueprintDocument v1`,
-  project JSON persistence, Python `desktop_blueprint_service.py`, Electron
-  `blueprint-runtime.ts`, preload/IPC/platform APIs, and panel migration from
-  `blueprint-draft.v1` into project `default.json`.
-- [DONE] Implemented Blueprint Runtime middle layer v1:
-  service-owned live run registry, `blueprint.start/status/end/recentEvents`,
-  complete `TopAgentStartPlan` validation, `GraphRuntimeControlPlane` /
-  `GraphRuntime` binding, no-op backend for non-executing v1, bounded recent
-  events, terminal run handling, and Python/Electron lifecycle tests.
-- [DONE] Implemented Blueprint UI runtime status projection:
-  `createBlueprintStartPlan(draft)`, save-before-start behavior, `runId`
-  retention, status/events polling, terminal polling stop, manual Refresh,
-  Complete/Pause/Cancel controls, and Runtime Overview/Agents/Queues/Events/
-  Workspace projections.
-- [DONE] Added `blueprint.listRuns`, `status.explanation`, Electron/preload/
-  platform `listBlueprintRuns`, and a status-only `executionMode` guard that
-  rejects `live` until real worker execution is added.
-- [DONE] Kept runtime projection thin: the renderer displays run/agent/queue/
-  outgoing-batch/join/job/workspace/event data from runtime snapshots without
-  owning scheduling, fan-in, workspace/archive, tick, or worker lifecycle
-  semantics.
 - [DONE] Kept `adapter_options` as an advanced JSON escape hatch with clearer
   copy for low-level CLI adapter options.
 - [DONE] Documented the Windows NSIS packaging/icon workaround for
@@ -80,6 +59,34 @@ Do not treat the old Ryven/editor line as the current UI target.
 - [DONE] Ran the Windows NSIS workaround successfully on 2026-05-14 and
   produced the installer, blockmap, and unpacked exe from
   `GuLiCode/packages/desktop-electron/dist`.
+- [DONE] Added the first live blueprint runtime path through desktop Python
+  service: `status/live` start modes, live `GraphRuntime` tick loop,
+  `CLIWorkerBackend`, status/end cleanup, agentInfo, queueAgentMessage, and
+  WebSocket stream token.
+- [DONE] Added the Agent information panel on blueprint Agent nodes:
+  left mouse long-press with circular progress, right-click `信息面板`,
+  close, pin, multiple pinned panels, outside-click close for non-pinned
+  panels, stream transcript, default/top send modes, read-only static display
+  when no live run exists, drag-to-move, and bottom-right resize.
+- [DONE] Fixed Agent information panel close behavior by replacing the Solid
+  store `panels` object with `reconcile(panels)` instead of shallow-merging a
+  filtered object.
+- [DONE] Fixed the desktop debug noise from the 2026-05-18 code-error pass:
+  `blueprint-list-models` Windows `spawn EPERM`, Solid DnD nonexistent
+  droppable/draggable cleanup, stale PTY WebSocket teardown, and blueprint SVG
+  render computations.
+- [DONE] Documented clean Electron debug startup after packaging notes:
+  `ELECTRON_ENABLE_LOGGING=1`, `ELECTRON_ENABLE_STACK_DUMPING=1`, and no
+  default `DEBUG=*`.
+- [DONE] Reduced Test Agent debug JSON to v2 message arrays only:
+  `agentReplies`, `userMessages`, and `frameworkMessages`.
+- [DONE] Mapped Agent panel `status` events into structured UI and removed
+  raw `status`, `message.started`, `queue.updated`, tool traces, stderr
+  deltas, reasoning deltas, and Codex internal log lines from the visible
+  transcript.
+- [DONE] Fixed Agent panel interaction gaps: panels can be dragged outside the
+  viewport after opening, display text is selectable/copyable, and the panel
+  body handles wheel scrolling.
 
 ## In progress
 
@@ -126,13 +133,7 @@ Do not treat the old Ryven/editor line as the current UI target.
 - [TODO] Manual visual smoke pass in the packaged app for inspector colors,
   select menu readability, `非阻塞` visibility, common config placement,
   skill/rule dropdowns, model loading/failure state, and tip popovers.
-- [DONE] Define durable blueprint state ownership for the first API bridge:
-  project JSON owns saved blueprint documents under
-  `.multi_agent_workspace/blueprints/`; local `blueprint-draft.v1` remains as
-  migration/fallback state.
-- [DONE] Extended durable ownership boundary to runtime-backed run state in the
-  service middle layer. Run state is live and service-owned for v1; it is not
-  persisted back into `BlueprintDocument`.
+- [TODO] Define durable blueprint state ownership beyond local draft state: project JSON, workspace records, and runtime-backed run state.
 - [TODO] Add command palette or shortcut entry for opening the blueprint panel if it becomes a repeated workflow.
 
 ### 2. Guli productization
@@ -157,25 +158,29 @@ Do not treat the old Ryven/editor line as the current UI target.
   from user-editable inspector controls.
 - [DONE] Add the first Electron/preload blueprint catalog boundary for
   directories, skills, rules, and CLI model lists.
-- [DONE] Define the first persistence/API contract between the blueprint panel
-  and Python service: `list/open/save/validate`, plus runtime lifecycle
-  channels.
-- [DONE] Extend the Electron/preload boundary from catalog/model lookup into
-  runtime-owned graph persistence and run requests through Python/control-plane
-  APIs.
-- [DONE] Implemented the Python service middle layer for
-  `GraphRuntimeControlPlane` / `GraphRuntime` start/status/end/recentEvents,
-  including a service-owned live run registry and stable response envelopes.
-- [DONE] Show run status, agent status, queue state,
-  outgoing-batch status, join status, workspace changes, artifacts, reports,
-  jobs, and recent events in GuLiCode.
-- [DONE] Keep these views as projections of runtime/control-plane state rather than renderer-owned execution logic.
-- [TODO] Manual packaged/UI smoke for the status projection: save-before-start,
-  retained `runId`, polling, Runtime panel groups, Refresh after terminal runs,
-  and Complete/Pause/Cancel end actions.
-- [TODO] Second execution-coupling phase after smoke: service-owned automatic
-  tick loop, real `CLIWorkerBackend` startup, `executionMode=live`, and live
-  worker execution.
+- [DONE] Defined and implemented the first live UI contract between the
+  blueprint panel and `GraphRuntimeControlPlane`: `HTTP/IPC` for control
+  requests and WebSocket for unified `AgentStreamEvent` streaming.
+- [DONE] Extended Electron/preload/platform from catalog/model lookup into
+  runtime-owned start/status/end, recent events, agentInfo,
+  queueAgentMessage, and agentStreamToken.
+- [DONE] Show the first run status projection in GuLiCode: runs, agents,
+  queues, outgoing batches, joins, jobs, workspace summary, and recent events.
+- [DONE] Keep runtime and Agent panels as projections of
+  runtime/control-plane state rather than renderer-owned execution logic.
+- [DONE] Hardened `blueprint-list-models` CLI spawning enough for the current
+  debug baseline: Windows `EPERM` and missing executable cases are surfaced as
+  model-load failures instead of noisy Electron handler exceptions.
+- [TODO] Highest priority: fix desktop blueprint `live` Agent startup so
+  ordinary/Test Agents are launched from `GraphRuntime` materialized private
+  context, not raw `CLIWorkerBackend` node configs. The target path must
+  provide private checkout cwd, private `CODEX_HOME`, `framework-agent-runtime`
+  skill, `AGENTS.md`, Workspace API env/prompt context, and authorized
+  skill/rule materialization before any worker is started.
+- [TODO] Manual smoke the live run UI path: start, tick, status polling,
+  Agent long-press progress, right-click `信息面板`, move/resize, close/pin,
+  non-pinned outside-click close, WebSocket transcript, and `default/top`
+  queue sends.
 - [TODO] Add top-agent/operator audit views such as utterance history without exposing them as ordinary-Agent message context.
 
 ### 4. Desktop shell hardening
@@ -195,6 +200,10 @@ Do not treat the old Ryven/editor line as the current UI target.
   `dist/win-unpacked/d3dcompiler_47.dll`, close/kill old `GuLiCode Dev.exe`
   processes launched from `dist/win-unpacked` and rerun packaging.
 - [TODO] In a Windows session with Developer Mode/elevated symlink privileges, retry direct `bun run package:win` and compare with the workaround output.
+- [TODO] Consider turning clean debug startup into a helper script if it keeps
+  being used during live-runtime smoke:
+  `ELECTRON_ENABLE_LOGGING=1`, `ELECTRON_ENABLE_STACK_DUMPING=1`, no `DEBUG=*`,
+  then `bun run dev`.
 
 ## Immediate next-session checklist
 
@@ -238,22 +247,18 @@ bun test ./src/main/blueprint-catalog.test.ts
   the dark surface
 - verify select controls/options remain readable, especially `非阻塞`
 - verify node fills/borders are visually distinct from the dark canvas
+- long-press an Agent node and verify the circular progress ring opens the
+  information panel
+- move during long-press and verify opening is cancelled
+- right-click an Agent node and open `信息面板`
+- drag the information panel title to move it, then drag the bottom-right
+  handle to resize it
+- verify close, pin, multiple pinned panels, and outside-click close still work
 
-3. Manual-smoke the runtime status projection:
-
-- click Start and verify the project blueprint saves before `blueprint.start`
-- verify the returned `runId` is retained
-- verify the Runtime panel shows Overview, Agents, Queues, Events, and
-  Workspace projections
-- verify status and recent events poll while the run is active
-- verify Refresh works after polling stops
-- verify Complete, Pause, and Cancel call `blueprint.end` and refresh status
-- verify terminal or paused runs stop automatic polling but remain queryable
-- keep the panel as a projection layer; do not add renderer-side scheduling,
-  queue processing, joins, workspace/archive behavior, or worker lifecycle
-
-4. Then plan the live execution coupling phase: service-owned automatic tick
-loop, real `CLIWorkerBackend`, `executionMode=live`, and live worker execution.
+3. Continue runtime integration from manual live-runtime smoke and hardening.
+The Electron/preload catalog boundary has now been extended into runtime
+status/start/end and Agent stream APIs; do not add renderer-side scheduler
+semantics.
 
 ## File ownership reminders
 
@@ -272,15 +277,11 @@ This task line is in a good first state when:
 4. That surface reads runtime/control-plane state rather than reimplementing scheduler rules.
 5. Taskbar/window identity remains stable across repeated packaged launches.
 
-Current status: items 1, 2, 3, 4, and 5 have a working baseline. Item 4 now
-has Python middle-layer runtime lifecycle plus UI status projection over
-returned runtime/control-plane state. The next real blueprint milestone is
-manual packaged/UI smoke, followed by live execution coupling.
+Current status: items 1, 2, 3, 4, and 5 have a working baseline.
 Blueprint workbench local-draft editing is complete enough for the runtime
 binding pass: it has RouteNode, port edges, configurable AgentNode fields,
 terminal nodes, add/drop interactions, context menu deletion, inspector
 separation, grid snapping, common config, catalog-backed skill/rule dropdowns,
-CLI/model dropdowns, project JSON persistence, and runtime lifecycle APIs.
-Runtime start/status/end implementation in the service middle layer is
-complete for non-executing v1; status projection is complete for the first
-thin-client UI pass.
+CLI/model dropdowns, runtime status projection, and the first Agent
+information panel. Durable project persistence and manual live-runtime smoke
+remain the next UI milestones.
