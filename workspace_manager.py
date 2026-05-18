@@ -140,6 +140,103 @@ def _relative_files(
     return out
 
 
+def _path_is_copy_excluded(
+    path: Path,
+    root: Path,
+    *,
+    excluded_roots: Optional[Sequence[Path]] = None,
+    exclude_patterns: Optional[Sequence[str]] = None,
+) -> bool:
+    root = root.resolve()
+    resolved = path.resolve()
+    excluded = [Path(p).resolve() for p in (excluded_roots or [])]
+    patterns = [
+        str(pattern).replace("\\", "/").strip()
+        for pattern in (exclude_patterns or BASIC_COPY_EXCLUDE_PATTERNS)
+        if str(pattern).strip()
+    ]
+    if any(resolved == ex or _path_within(resolved, ex) for ex in excluded):
+        return True
+    rel = resolved.relative_to(root).as_posix()
+    parts = rel.split("/")
+    if any(_snapshot_pattern_matches(rel, part, patterns) for part in parts):
+        return True
+    return _snapshot_pattern_matches(rel, rel, patterns)
+
+
+def _scope_static_prefix(scope: str) -> Optional[str]:
+    normalized = str(scope).replace("\\", "/").strip().strip("/")
+    if not normalized:
+        return None
+    parts: List[str] = []
+    for part in normalized.split("/"):
+        if not part or part in {".", ".."} or ":" in part:
+            return None
+        if any(ch in part for ch in ("*", "?", "[")):
+            break
+        parts.append(part)
+    if not parts:
+        return None
+    return "/".join(parts)
+
+
+def _scope_scan_roots(src: Path, scopes: Sequence[str]) -> Optional[List[Path]]:
+    roots: List[Path] = []
+    for scope in scopes:
+        prefix = _scope_static_prefix(scope)
+        if prefix is None:
+            return None
+        candidate = (src / Path(*prefix.split("/"))).resolve()
+        if candidate != src and not _path_within(candidate, src):
+            return None
+        roots.append(candidate)
+
+    deduped: List[Path] = []
+    for root in sorted(set(roots), key=lambda item: len(item.parts)):
+        if any(root == existing or _path_within(root, existing) for existing in deduped):
+            continue
+        deduped.append(root)
+    return deduped
+
+
+def _relative_files_from_candidates(
+    root: Path,
+    candidates: Sequence[Path],
+    *,
+    excluded_roots: Optional[Sequence[Path]] = None,
+    exclude_patterns: Optional[Sequence[str]] = None,
+) -> Dict[str, Path]:
+    root = root.resolve()
+    out: Dict[str, Path] = {}
+
+    def record(path: Path) -> None:
+        if not path.is_file():
+            return
+        try:
+            rel = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            return
+        if _path_is_copy_excluded(
+            path,
+            root,
+            excluded_roots=excluded_roots,
+            exclude_patterns=exclude_patterns,
+        ):
+            return
+        out[rel] = path
+
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        if candidate.is_file():
+            record(candidate)
+            continue
+        if candidate.is_dir():
+            for path in candidate.rglob("*"):
+                record(path)
+    return out
+
+
 def _snapshot_pattern_matches(rel_path: str, name: str, patterns: Sequence[str]) -> bool:
     rel_path = rel_path.replace("\\", "/").strip("/")
     name = name.strip("/")
@@ -193,11 +290,22 @@ def _copy_project_tree(
 
     _clear_directory_contents(dst)
     if scopes:
-        for rel, path in _relative_files(
-            src,
-            excluded_roots=excluded,
-            exclude_patterns=patterns,
-        ).items():
+        scan_roots = _scope_scan_roots(src, scopes)
+        files = (
+            _relative_files(
+                src,
+                excluded_roots=excluded,
+                exclude_patterns=patterns,
+            )
+            if scan_roots is None
+            else _relative_files_from_candidates(
+                src,
+                scan_roots,
+                excluded_roots=excluded,
+                exclude_patterns=patterns,
+            )
+        )
+        for rel, path in files.items():
             if not _scope_allows(rel, scopes):
                 continue
             target = dst / rel

@@ -52,7 +52,7 @@ export async function listBlueprintRules(dir: string): Promise<BlueprintCatalogI
   return entries
     .filter((entry) => entry.isFile() && RULE_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
     .map((entry) => ({
-      value: path.join(dir, entry.name),
+      value: entry.name,
       label: entry.name,
     }))
     .sort(compareCatalogItems)

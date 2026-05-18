@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
@@ -17,6 +20,15 @@ from .workspace_rpc import WorkspaceRPCServer
 
 WORKSPACE_API_CONTEXT_ENV = "MULTI_AGENT_WORKSPACE_CONTEXT"
 CODEX_RUNTIME_STATE_FILES = ("config.toml", "auth.json", "models_cache.json")
+
+
+def workspace_api_base_command() -> str:
+    python_exe = str(Path(sys.executable).expanduser())
+    if os.name == "nt":
+        quoted = subprocess.list2cmdline([python_exe])
+        return f"& {quoted} -m multi_agent_tcp.workspace_api"
+    quoted = shlex.quote(python_exe)
+    return f"{quoted} -m multi_agent_tcp.workspace_api"
 
 
 def _write_text_no_bom(path: Path, text: str) -> None:
@@ -97,14 +109,18 @@ def _resolve_agent_workdir(raw_cwd: Path, project_root: Path) -> Path:
 
 
 def workspace_api_doc() -> str:
+    command = workspace_api_base_command()
     doc_path = Path(__file__).with_name("docs") / "workspace_api.md"
     if not doc_path.is_file():
         return (
-            "Workspace API command: `python -m multi_agent_tcp.workspace_api`. "
+            f"Workspace API command: `{command}`. "
             "Use `checkout`, `status`, `diff`, `submit`, `publish-file`, "
             "`publish`, `read`, `list`, `list-archives`, and `extract-archive`."
         )
-    return doc_path.read_text(encoding="utf-8")
+    return doc_path.read_text(encoding="utf-8").replace(
+        "python -m multi_agent_tcp.workspace_api",
+        command,
+    )
 
 
 def framework_agent_rules() -> str:
@@ -114,7 +130,7 @@ def framework_agent_rules() -> str:
             "",
             "- Understand the three workspace zones before acting: project directory is the authoritative code source/final target, private checkout is your personal workbench, temporary shared workspace is for collaboration records.",
             "- Fetch or checkout only task-relevant code into your private checkout before editing.",
-            "- Submit code changes from the private checkout through `python -m multi_agent_tcp.workspace_api submit`.",
+            "- Submit code changes from the private checkout through the Workspace API submit command.",
             "- Publish reports, artifacts, summaries, file/version references, and changeset ids through the Workspace API.",
             "- If a direct project/shared write is denied by the sandbox, treat that as boundary enforcement and continue through checkout/submit/publish instead of stopping.",
             "- Communicate with other AgentNodes through framework messages and shared references, not by copying project source trees into shared space.",
@@ -147,13 +163,13 @@ def framework_agent_skill() -> str:
             "It is not a communication channel to other AgentNodes and is not proof of submitted work.",
             "",
             "For code changes, edit the private checkout in the current working directory, "
-            "fetching only task-relevant project files with `python -m multi_agent_tcp.workspace_api checkout --path ...` or `--scope-path ...`, "
-            "inspect with `python -m multi_agent_tcp.workspace_api status` or `diff`, "
-            "then submit through `python -m multi_agent_tcp.workspace_api submit`.",
+            "fetching only task-relevant project files with the Workspace API checkout command, "
+            "inspect with Workspace API status or diff, "
+            "then submit through the Workspace API submit command.",
             "If a direct write outside the private checkout is denied by sandbox policy, "
             "recover by using the Workspace API flow rather than treating the denial as completed work.",
             "",
-            "For reports and artifacts, publish through `python -m multi_agent_tcp.workspace_api` "
+            "For reports and artifacts, publish through the Workspace API command "
             "as shared run context. Use summaries, file paths, versions, and changeset ids when another AgentNode needs code context.",
             "",
             "For downstream messages, use `python -m multi_agent_tcp runtime agent-dispatch "
@@ -366,6 +382,7 @@ def materialize_private_agent_context(
 ) -> AgentNode:
     """Return an AgentNode rewritten to a private cwd/CODEX_HOME context."""
 
+    workspace_api_command = workspace_api_base_command()
     project_context = _resolve_agent_workdir(node.cwd, manager.project_root)
     private_dir = manager.agent_workspace_dir(run, node.runtime_agent_id)
     checkout = manager.checkout_agent(run, node.runtime_agent_id, write_scope=node.write_scope)
@@ -435,7 +452,7 @@ def materialize_private_agent_context(
 
     execution_context = dict(adapter_options.get("execution_context", {}))
     execution_context["workspace_api"] = {
-        "command": "python -m multi_agent_tcp.workspace_api",
+        "command": workspace_api_command,
         "context_env": WORKSPACE_API_CONTEXT_ENV,
         "areas": ["artifacts", "reports"],
         "transport": "rpc",
@@ -451,7 +468,7 @@ def materialize_private_agent_context(
         "checkout_id": checkout.checkout_id,
         "base_ref": checkout.base_ref,
         "write_scope": list(checkout.write_scope),
-        "submit_command": "python -m multi_agent_tcp.workspace_api submit",
+        "submit_command": f"{workspace_api_command} submit",
     }
     execution_context["private_context"] = {
         "private_dir": str(private_dir),

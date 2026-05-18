@@ -941,6 +941,12 @@ export const dict = {
   "blueprint.toolbar.resetDraft": "Reset draft",
   "blueprint.graph.edges": "edges",
   "blueprint.globalConfig.title": "Blueprint config",
+  "blueprint.configRequired.title": "Blueprint config required",
+  "blueprint.configRequired.description":
+    "Set the required blueprint config paths before starting this blueprint. Required local paths must be absolute paths on this computer.",
+  "blueprint.configRequired.issue.missing": "{{field}} is required.",
+  "blueprint.configRequired.issue.absolute": "{{field}} must be an absolute path.",
+  "blueprint.configRequired.ok": "OK",
   "blueprint.catalog.count": "{{count}} items",
   "blueprint.catalog.empty": "No options",
   "blueprint.catalog.loadFailed": "Failed to load",
@@ -1044,6 +1050,15 @@ export const dict = {
   "blueprint.tip.model.usage": "Use it to pin the worker to a provider/model when the backend supports selection.",
   "blueprint.tip.cwd.what": "The working directory for the worker process.",
   "blueprint.tip.cwd.usage": "Keep it near the project root or a scoped subdirectory for predictable file access.",
+  "blueprint.tip.projectWorkdir.what": "The project directory used as every runtime AgentNode working directory.",
+  "blueprint.tip.projectWorkdir.usage":
+    "Set this to the absolute path of the project the blueprint should operate on. The runtime writes it into AgentNode cwd during export.",
+  "blueprint.tip.skillDir.what": "The local directory that contains user-provided skill folders.",
+  "blueprint.tip.skillDir.usage":
+    "Set this only when agents use selected, all, or upstream skills. It must point to a directory whose children contain SKILL.md files.",
+  "blueprint.tip.ruleDir.what": "The local directory scanned for rule files shown in the agent rule selector.",
+  "blueprint.tip.ruleDir.usage":
+    "Set this when agents use rule files. The selector reads supported rule files from here, then stores the chosen rule paths on each agent.",
   "blueprint.tip.timeoutSec.what": "The maximum runtime window in seconds.",
   "blueprint.tip.timeoutSec.usage": "It prevents stalled workers from holding the graph forever.",
   "blueprint.tip.promptViaFile.what": "How the prompt is delivered to the CLI backend.",

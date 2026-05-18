@@ -42,6 +42,8 @@ describe("blueprint runtime source", () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
 
     expect(source).toContain("createBlueprintStartPlan(draft)")
+    expect(source).toContain("validateBlueprintConfigForStart(draft)")
+    expect(source).toContain("BlueprintConfigRequiredDialog")
     expect(source).toContain("await persistProjectDraft(draft)")
     expect(source).toContain("platform.startBlueprintRun(")
     expect(source).toContain('"live"')
@@ -71,6 +73,19 @@ describe("blueprint runtime source", () => {
     expect(source).toContain('isTerminalRuntimeStatus(status)')
     expect(source).toContain('setInterval(() =>')
     expect(source).toContain('platform.endBlueprintRun(runId, action, `blueprint UI ${action}`)')
+  })
+
+  test("renders common config help buttons with inspector tip behavior", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const configPanel = source.slice(source.indexOf("function BlueprintGlobalConfigPanel"), source.indexOf("function BlueprintConfigRequiredDialog"))
+    const configField = source.slice(source.indexOf("function DirectoryConfigField"), source.indexOf("function blueprintConfigFieldLabel"))
+
+    expect(configPanel).toContain('tip="projectWorkdir"')
+    expect(configPanel).toContain('tip="skillDir"')
+    expect(configPanel).toContain('tip="ruleDir"')
+    expect(configField).toContain("InspectorFieldHeader")
+    expect(source).toContain("function InspectorTipButton")
+    expect(source).toContain("placement={props.placement ?? \"left-start\"}")
   })
 
   test("builds compact v2 test agent message snapshots", () => {

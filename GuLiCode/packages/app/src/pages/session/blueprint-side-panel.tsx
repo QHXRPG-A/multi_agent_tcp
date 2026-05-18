@@ -1,6 +1,8 @@
 import { Button } from "@opencode-ai/ui/button"
 import { Collapsible } from "@opencode-ai/ui/collapsible"
 import { ContextMenu } from "@opencode-ai/ui/context-menu"
+import { useDialog } from "@opencode-ai/ui/context/dialog"
+import { Dialog } from "@opencode-ai/ui/dialog"
 import { DropdownMenu } from "@opencode-ai/ui/dropdown-menu"
 import { Icon } from "@opencode-ai/ui/icon"
 import { IconButton } from "@opencode-ai/ui/icon-button"
@@ -27,8 +29,6 @@ import {
   createDefaultBlueprintDraft,
   defaultCommandForCliKind,
   defaultModelForCliKind,
-  DEFAULT_RULE_DIR,
-  DEFAULT_SKILL_DIR,
   deleteEdge,
   deleteNode,
   deleteSelection,
@@ -46,10 +46,12 @@ import {
   toBlueprintDocument,
   toRuntimeGraphDraft,
   updateEdge,
+  validateBlueprintConfigForStart,
   type BlueprintAddNodeKind,
   type BlueprintAgentNode,
   type BlueprintCliKind,
   type BlueprintConfig,
+  type BlueprintConfigValidationIssue,
   type BlueprintDraft,
   type BlueprintEdge,
   type BlueprintNodeLayout,
@@ -165,14 +167,6 @@ const MODEL_LIST_FALLBACKS: Record<string, string[]> = {
   codemaker: ["netease-codemaker/kimi-k2.5"],
   codex: ["gpt-5.4"],
 }
-
-const DEFAULT_SKILL_CATALOG: BlueprintCatalogItem[] = [
-  {
-    value: "multi-agent-tcp",
-    label: "multi-agent-tcp",
-    description: "GuLiCode desktop blueprint and multi-agent runtime work.",
-  },
-]
 
 export type CatalogState = {
   skillDir: string
@@ -304,6 +298,18 @@ const INSPECTOR_TIPS = {
   cwd: {
     what: "blueprint.tip.cwd.what",
     usage: "blueprint.tip.cwd.usage",
+  },
+  projectWorkdir: {
+    what: "blueprint.tip.projectWorkdir.what",
+    usage: "blueprint.tip.projectWorkdir.usage",
+  },
+  skillDir: {
+    what: "blueprint.tip.skillDir.what",
+    usage: "blueprint.tip.skillDir.usage",
+  },
+  ruleDir: {
+    what: "blueprint.tip.ruleDir.what",
+    usage: "blueprint.tip.ruleDir.usage",
   },
   timeoutSec: {
     what: "blueprint.tip.timeoutSec.what",
@@ -466,6 +472,7 @@ type NodeItem =
 export function BlueprintSidePanel() {
   const language = useLanguage()
   const platform = usePlatform()
+  const dialog = useDialog()
   const { params, view } = useSessionLayout()
   const projectDirectory = decode64(params.dir) ?? "global"
   const [draft, setDraft, _, draftReady] = persisted(
@@ -609,9 +616,9 @@ export function BlueprintSidePanel() {
   )
   const runtimeGraph = createMemo(() => toRuntimeGraphDraft(draft))
   const currentConfig = createMemo(() => ({
-    project_workdir: draft.config?.project_workdir || projectDirectory || ".",
-    skill_dir: draft.config?.skill_dir || DEFAULT_SKILL_DIR,
-    rule_dir: draft.config?.rule_dir || DEFAULT_RULE_DIR,
+    project_workdir: draft.config?.project_workdir ?? projectDirectory ?? ".",
+    skill_dir: draft.config?.skill_dir ?? "",
+    rule_dir: draft.config?.rule_dir ?? "",
   }))
 
   const updateConfigField = <K extends keyof BlueprintConfig>(field: K, value: BlueprintConfig[K]) => {
@@ -655,7 +662,7 @@ export function BlueprintSidePanel() {
   const listSkills = async (skillDir: string) => {
     if (!skillDir) return [] as BlueprintCatalogItem[]
     const items = await platform.listBlueprintSkills?.(skillDir)
-    return items ?? (skillDir === DEFAULT_SKILL_DIR ? DEFAULT_SKILL_CATALOG : [])
+    return items ?? []
   }
 
   const listRules = async (ruleDir: string) => {
@@ -875,6 +882,11 @@ export function BlueprintSidePanel() {
   async function startBlueprintRuntime() {
     if (!platform.saveBlueprint || !platform.startBlueprintRun) {
       setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
+      return
+    }
+    const configIssues = validateBlueprintConfigForStart(draft)
+    if (configIssues.length) {
+      dialog.show(() => <BlueprintConfigRequiredDialog issues={configIssues} />)
       return
     }
     if (saveTimer) {
@@ -2950,6 +2962,7 @@ function BlueprintGlobalConfigPanel(props: {
       <div class="flex flex-col gap-2">
         <DirectoryConfigField
           label={language.t("blueprint.field.projectWorkdir")}
+          tip="projectWorkdir"
           value={props.config.project_workdir}
           onChange={(value) => props.onConfigChange("project_workdir", value)}
           onBrowse={() =>
@@ -2958,6 +2971,7 @@ function BlueprintGlobalConfigPanel(props: {
         />
         <DirectoryConfigField
           label={language.t("blueprint.field.skillDir")}
+          tip="skillDir"
           value={props.config.skill_dir}
           note={props.skillError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.count", { count: props.skillCount })}
           onChange={(value) => props.onConfigChange("skill_dir", value)}
@@ -2965,6 +2979,7 @@ function BlueprintGlobalConfigPanel(props: {
         />
         <DirectoryConfigField
           label={language.t("blueprint.field.ruleDir")}
+          tip="ruleDir"
           value={props.config.rule_dir}
           note={props.ruleError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.count", { count: props.ruleCount })}
           onChange={(value) => props.onConfigChange("rule_dir", value)}
@@ -2975,16 +2990,46 @@ function BlueprintGlobalConfigPanel(props: {
   )
 }
 
+function BlueprintConfigRequiredDialog(props: { issues: BlueprintConfigValidationIssue[] }) {
+  const language = useLanguage()
+  const dialog = useDialog()
+  const label = (field: BlueprintConfigValidationIssue["field"]) => blueprintConfigFieldLabel(language.t, field)
+  const message = (issue: BlueprintConfigValidationIssue) =>
+    language.t(
+      issue.reason === "missing" ? "blueprint.configRequired.issue.missing" : "blueprint.configRequired.issue.absolute",
+      { field: label(issue.field) },
+    )
+
+  return (
+    <Dialog title={language.t("blueprint.configRequired.title")} action={<span aria-hidden="true" />} fit>
+      <div class="flex w-[420px] max-w-[calc(100vw-2rem)] flex-col gap-4 px-6 pb-4">
+        <div class="text-14-regular leading-6 text-text-base">{language.t("blueprint.configRequired.description")}</div>
+        <div class="flex flex-col gap-2 rounded-md border border-border-weaker-base bg-background-stronger p-3">
+          <For each={props.issues}>
+            {(issue) => <div class="text-13-regular leading-5 text-text-strong">{message(issue)}</div>}
+          </For>
+        </div>
+        <div class="flex justify-end">
+          <Button variant="primary" size="large" onClick={() => dialog.close()}>
+            {language.t("blueprint.configRequired.ok")}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
 function DirectoryConfigField(props: {
   label: string
+  tip?: InspectorTipKey
   value: string
   note?: string
   onChange: (value: string) => void
   onBrowse: () => void
 }) {
   return (
-    <label class="flex min-w-0 flex-col gap-1">
-      <span class="text-11-medium text-[#f8fdff]">{props.label}</span>
+    <div class="flex min-w-0 flex-col gap-1">
+      <InspectorFieldHeader label={props.label} tip={props.tip} placement="right-start" />
       <div class="flex min-w-0 gap-1">
         <input
           class="h-7 min-w-0 flex-1 rounded-md border border-[rgba(103,232,249,0.22)] bg-[#06101a] px-2 text-11-regular text-[#f8fdff] outline-none transition-colors placeholder:text-[#95afc4] focus:border-[#67e8f9]"
@@ -3003,8 +3048,17 @@ function DirectoryConfigField(props: {
       <Show when={props.note}>
         {(note) => <span class="truncate text-10-regular text-[#95afc4]">{note()}</span>}
       </Show>
-    </label>
+    </div>
   )
+}
+
+function blueprintConfigFieldLabel(
+  t: (key: never, params?: Record<string, string | number | boolean>) => string,
+  field: BlueprintConfigValidationIssue["field"],
+) {
+  if (field === "skill_dir") return t("blueprint.field.skillDir" as never)
+  if (field === "rule_dir") return t("blueprint.field.ruleDir" as never)
+  return t("blueprint.field.projectWorkdir" as never)
 }
 
 function InspectorIdentity(props: { label: string; value: string; tip?: InspectorTipKey }) {
@@ -3221,18 +3275,18 @@ function InspectorFieldHeadered(props: { label: string; tip?: InspectorTipKey; c
   )
 }
 
-function InspectorFieldHeader(props: { label: string; tip?: InspectorTipKey }) {
+function InspectorFieldHeader(props: { label: string; tip?: InspectorTipKey; placement?: "left-start" | "right-start" }) {
   return (
     <div class="flex min-w-0 items-center gap-1 text-12-medium text-[#f8fdff]">
       <span class="min-w-0 truncate">{props.label}</span>
       <Show when={props.tip}>
-        {(tip) => <InspectorTipButton label={props.label} tip={tip()} />}
+        {(tip) => <InspectorTipButton label={props.label} tip={tip()} placement={props.placement} />}
       </Show>
     </div>
   )
 }
 
-function InspectorTipButton(props: { label: string; tip: InspectorTipKey }) {
+function InspectorTipButton(props: { label: string; tip: InspectorTipKey; placement?: "left-start" | "right-start" }) {
   const language = useLanguage()
   const [open, setOpen] = createSignal(false)
   const copy = () => INSPECTOR_TIPS[props.tip]
@@ -3253,7 +3307,7 @@ function InspectorTipButton(props: { label: string; tip: InspectorTipKey }) {
       title={props.label}
       class="w-64 border-[rgba(103,232,249,0.26)] bg-[#101a28] shadow-[0_18px_48px_rgba(0,0,0,0.42)] [&_[data-slot=popover-body]]:pt-2"
       style={BLUEPRINT_THEME}
-      placement="left-start"
+      placement={props.placement ?? "left-start"}
       gutter={8}
     >
       <div class="space-y-2">

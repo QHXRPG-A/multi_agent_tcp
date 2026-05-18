@@ -29,6 +29,18 @@ const document = {
   },
 }
 
+const documentWithConfig = (projectDir: string) => ({
+  ...document,
+  ui: {
+    ...document.ui,
+    config: {
+      project_workdir: projectDir,
+      skill_dir: "",
+      rule_dir: "",
+    },
+  },
+})
+
 const plan = {
   user_goal: "Ship the plan.",
   agent_descriptions: {
@@ -75,7 +87,7 @@ describe("blueprint runtime bridge", () => {
     const projectDir = await mkdtemp(join(tmpdir(), "gulicode-blueprint-"))
     const runtime = new BlueprintRuntime()
     try {
-      await runtime.save(projectDir, document)
+      await runtime.save(projectDir, documentWithConfig(projectDir))
 
       const started = (await runtime.start(projectDir, "default", plan)) as Record<string, unknown>
       expect(String(started.runId)).toStartWith("run-")

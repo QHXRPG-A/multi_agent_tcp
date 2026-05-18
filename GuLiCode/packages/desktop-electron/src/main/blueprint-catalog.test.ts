@@ -89,6 +89,9 @@ describe("blueprint catalog", () => {
     await writeFile(path.join(root, "policy.yaml"), "name: policy")
     await writeFile(path.join(root, "binary.png"), "")
 
-    expect((await listBlueprintRules(root)).map((item) => item.label)).toEqual(["agent.md", "policy.yaml"])
+    expect(await listBlueprintRules(root)).toEqual([
+      { value: "agent.md", label: "agent.md" },
+      { value: "policy.yaml", label: "policy.yaml" },
+    ])
   })
 })

@@ -24,14 +24,18 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 from urllib.parse import parse_qs, urlparse
 
 from .cluster import CLIWorkerBackend
 from .graph_control import GraphRuntimeControlPlane, graph_definition_from_dict
 from .graph_runtime import GraphRuntime, GuLiCodeTopAgentProfile, TopAgentStartPlan
+from .skill_space import SkillRecord
+from .workspace_manager import DulwichWorkspaceManager
+from .workspace_rpc import WorkspaceRPCServer
 
 BLUEPRINT_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)")
 DEFAULT_BLUEPRINT_ID = "default"
 DEFAULT_BLUEPRINT_NAME = "Default Blueprint"
 
@@ -162,6 +166,53 @@ class DesktopBlueprintNoopBackend:
             "desktop blueprint runtime v1 does not execute CLI workers; "
             "only run registration, initial queueing, status, events, and end are available"
         )
+
+
+class DesktopBlueprintSkillCatalog:
+    """SkillSpace-compatible view over the desktop blueprint skill directory."""
+
+    def __init__(self, skill_dir: Optional[Path]) -> None:
+        self.skill_dir = Path(skill_dir).expanduser().resolve() if skill_dir is not None else None
+        self._records: Optional[Dict[str, SkillRecord]] = None
+
+    def records(self) -> Dict[str, SkillRecord]:
+        if self._records is None:
+            self._records = self._scan_records()
+        return dict(self._records)
+
+    def resolve_hashes(self, skill_hashes: Sequence[str]) -> list[SkillRecord]:
+        records = self.records()
+        resolved: list[SkillRecord] = []
+        for raw in skill_hashes:
+            key = str(raw).strip()
+            rec = records.get(key)
+            if rec is None:
+                raise KeyError(f"skill not found in desktop skill directory: {key}")
+            if self.skill_dir is not None:
+                try:
+                    rec.skill_dir.resolve().relative_to(self.skill_dir.resolve())
+                except ValueError as exc:
+                    raise ValueError(f"skill path escapes desktop skill directory: {rec.skill_dir}") from exc
+            resolved.append(rec)
+        return resolved
+
+    def _scan_records(self) -> Dict[str, SkillRecord]:
+        if self.skill_dir is None or not self.skill_dir.is_dir():
+            return {}
+        records: Dict[str, SkillRecord] = {}
+        for child in sorted(self.skill_dir.iterdir()):
+            skill_md = child / "SKILL.md"
+            if not child.is_dir() or not skill_md.is_file():
+                continue
+            name = child.name
+            records[name] = SkillRecord(
+                skill_hash=name,
+                name=name,
+                description=_description_from_skill_md(skill_md),
+                skill_dir=child.resolve(),
+                skill_md_path=skill_md.resolve(),
+            )
+        return records
 
 
 @dataclass
@@ -363,6 +414,17 @@ class DesktopBlueprintService:
                 details={"supported": ["status", "live"]},
             )
         document = self.open_blueprint(project_dir, blueprint_id)
+        config_issues = blueprint_common_config_issues(document)
+        if config_issues:
+            raise BlueprintServiceError(
+                "BLUEPRINT_CONFIG_REQUIRED",
+                "required blueprint common config paths must be set before start",
+                details={
+                    "blueprintId": str(document["id"]),
+                    "issues": config_issues,
+                },
+            )
+        document = document_with_common_config_paths(document)
         try:
             graph = graph_definition_from_dict(dict(document["graph"]))
             graph.validate_runnable()
@@ -392,7 +454,7 @@ class DesktopBlueprintService:
 
         if execution_mode == "live":
             backend, runtime, control, started = self._async_loop.run(
-                self._start_live_runtime(run_id, graph, plan)
+                self._start_live_runtime(run_id, validate_project_dir(project_dir), document, graph, plan)
             )
         else:
             backend = DesktopBlueprintNoopBackend()
@@ -473,23 +535,62 @@ class DesktopBlueprintService:
     async def _start_live_runtime(
         self,
         run_id: str,
+        project_dir: Path,
+        document: Dict[str, Any],
         graph: Any,
         plan: TopAgentStartPlan,
     ) -> tuple[Any, GraphRuntime, GraphRuntimeControlPlane, Dict[str, Any]]:
-        workers = [node.to_worker_config() for node in graph.agent_nodes.values()]
-        backend = await CLIWorkerBackend.create(workers, port=_free_tcp_port())
-        runtime = GraphRuntime(backend)
-        runtime.agent_stream_run_id = run_id
-        control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
+        backend = None
+        runtime = None
+        rpc_server = None
+
+        async def cleanup() -> None:
+            if runtime is not None:
+                try:
+                    await runtime.close()
+                except Exception:
+                    pass
+            elif rpc_server is not None:
+                try:
+                    rpc_server.close()
+                except Exception:
+                    pass
+            if backend is not None:
+                try:
+                    await backend.stop()
+                except Exception:
+                    pass
+
         try:
-            started = await control.start_run(plan)
+            backend = await CLIWorkerBackend.create([], port=_free_tcp_port(), allow_empty=True)
+            manager = DulwichWorkspaceManager.open_or_init(project_dir)
+            workspace_run = manager.create_run(run_id=run_id, code_mode="project_reference")
+            rpc_server = WorkspaceRPCServer(manager, workspace_run)
+            rpc_server.start()
+            runtime = GraphRuntime(
+                backend,
+                enforce_private_agent_context=True,
+                private_context_manager=manager,
+                private_context_run=workspace_run,
+                private_context_rpc_server=rpc_server,
+                skill_space=_desktop_skill_catalog_from_document(document, project_dir),
+            )
+            runtime.agent_stream_run_id = run_id
+            control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
+            started = await control.start_run(plan, prestart_all_agents=True)
             if started.get("ok"):
                 runtime.start_tick_loop()
             return backend, runtime, control, started
-        except Exception:
-            await runtime.close()
-            await backend.stop()
+        except BlueprintServiceError:
+            await cleanup()
             raise
+        except Exception as exc:
+            await cleanup()
+            raise BlueprintServiceError(
+                "LIVE_AGENT_START_FAILED",
+                "failed to start live blueprint Agents",
+                details={"error": str(exc)},
+            ) from exc
 
     def end_blueprint_run(
         self,
@@ -1000,6 +1101,38 @@ def coerce_event_limit(value: Any) -> int:
     return max(0, min(200, limit))
 
 
+def _desktop_skill_catalog_from_document(
+    document: Dict[str, Any],
+    project_dir: Path,
+) -> DesktopBlueprintSkillCatalog:
+    ui = document.get("ui", {})
+    config = ui.get("config", {}) if isinstance(ui, dict) else {}
+    raw_skill_dir = config.get("skill_dir") if isinstance(config, dict) else None
+    if not isinstance(raw_skill_dir, str) or not raw_skill_dir.strip():
+        return DesktopBlueprintSkillCatalog(None)
+    skill_dir = Path(raw_skill_dir).expanduser()
+    return DesktopBlueprintSkillCatalog(skill_dir)
+
+
+def _description_from_skill_md(skill_md: Path) -> str:
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            for line in parts[1].splitlines():
+                stripped = line.strip()
+                if stripped.startswith("description:"):
+                    return stripped.split(":", 1)[1].strip().strip("\"'")
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("# ").strip()[:120]
+    return ""
+
+
 def validate_project_dir(project_dir: Path) -> Path:
     resolved = project_dir.expanduser().resolve()
     if not resolved.is_dir():
@@ -1045,6 +1178,129 @@ def normalize_document(data: Dict[str, Any], *, fallback_id: Optional[str] = Non
         "graph": graph,
         "ui": ui,
     }
+
+
+def blueprint_common_config_issues(document: Dict[str, Any]) -> list[Dict[str, str]]:
+    config = _blueprint_common_config(document)
+    required = {"project_workdir"}
+    if _document_uses_skill_dir(document):
+        required.add("skill_dir")
+    if _document_uses_rule_dir(document):
+        required.add("rule_dir")
+
+    issues: list[Dict[str, str]] = []
+    for field_name in ("project_workdir", "skill_dir", "rule_dir"):
+        raw_value = config.get(field_name) if isinstance(config, dict) else None
+        value = raw_value.strip() if isinstance(raw_value, str) else ""
+        if not value:
+            if field_name in required:
+                issues.append({"field": field_name, "reason": "missing"})
+            continue
+        if not _is_absolute_blueprint_path(value):
+            issues.append({"field": field_name, "reason": "not_absolute"})
+    return issues
+
+
+def document_with_common_config_paths(document: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = normalize_document(document)
+    config = _blueprint_common_config(normalized)
+    project_workdir = str(config.get("project_workdir") or "").strip()
+    rule_dir = str(config.get("rule_dir") or "").strip()
+    graph = dict(normalized["graph"])
+    agent_nodes = graph.get("agent_nodes")
+    if isinstance(agent_nodes, dict):
+        updated_nodes: Dict[str, Any] = {}
+        for node_id, raw_node in agent_nodes.items():
+            if not isinstance(raw_node, dict):
+                updated_nodes[node_id] = raw_node
+                continue
+            node = dict(raw_node)
+            if project_workdir:
+                node["cwd"] = project_workdir
+            if rule_dir and isinstance(node.get("rule_paths"), list):
+                node["rule_paths"] = [
+                    _rule_path_from_common_config(raw_rule_path, rule_dir)
+                    for raw_rule_path in node["rule_paths"]
+                ]
+            updated_nodes[node_id] = node
+        graph["agent_nodes"] = updated_nodes
+    return {
+        **normalized,
+        "graph": graph,
+    }
+
+
+def _blueprint_common_config(document: Dict[str, Any]) -> Dict[str, Any]:
+    ui = document.get("ui", {})
+    if not isinstance(ui, dict):
+        return {}
+    config = ui.get("config", {})
+    return config if isinstance(config, dict) else {}
+
+
+def _document_agent_nodes(document: Dict[str, Any]) -> Dict[str, Any]:
+    graph = document.get("graph", {})
+    if not isinstance(graph, dict):
+        return {}
+    agent_nodes = graph.get("agent_nodes", {})
+    return agent_nodes if isinstance(agent_nodes, dict) else {}
+
+
+def _document_uses_skill_dir(document: Dict[str, Any]) -> bool:
+    for raw_node in _document_agent_nodes(document).values():
+        if not isinstance(raw_node, dict):
+            continue
+        skills = raw_node.get("skills")
+        if isinstance(skills, list) and any(str(item).strip() for item in skills):
+            return True
+        selection = raw_node.get("skill_selection")
+        if not isinstance(selection, dict):
+            continue
+        mode = str(selection.get("mode") or "").strip()
+        if mode in {"all", "upstream"}:
+            return True
+        if mode == "selected":
+            hashes = selection.get("skill_hashes")
+            if not isinstance(hashes, list) or any(str(item).strip() for item in hashes):
+                return True
+    return False
+
+
+def _document_uses_rule_dir(document: Dict[str, Any]) -> bool:
+    for raw_node in _document_agent_nodes(document).values():
+        if not isinstance(raw_node, dict):
+            continue
+        rule_paths = raw_node.get("rule_paths")
+        if isinstance(rule_paths, list) and any(str(item).strip() for item in rule_paths):
+            return True
+    return False
+
+
+def _is_absolute_blueprint_path(value: str) -> bool:
+    raw = str(value).strip()
+    if not raw:
+        return False
+    return Path(raw).expanduser().is_absolute() or bool(WINDOWS_ABSOLUTE_PATH_RE.match(raw))
+
+
+def _rule_path_from_common_config(raw_rule_path: Any, rule_dir: str) -> str:
+    value = str(raw_rule_path).strip()
+    if not value:
+        return value
+    root = Path(rule_dir).expanduser().resolve()
+    source = Path(value).expanduser()
+    if not _is_absolute_blueprint_path(value):
+        source = root / value
+    source = source.resolve()
+    try:
+        source.relative_to(root)
+    except ValueError as exc:
+        raise BlueprintServiceError(
+            "BLUEPRINT_RULE_PATH_OUTSIDE_CONFIG",
+            f"rule path is outside configured rule_dir: {value}",
+            details={"rulePath": value, "ruleDir": str(root)},
+        ) from exc
+    return str(source)
 
 
 class DesktopBlueprintHTTPServer:

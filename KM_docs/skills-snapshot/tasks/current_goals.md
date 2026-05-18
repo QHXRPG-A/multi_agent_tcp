@@ -1,6 +1,6 @@
 # Current Short-Term Goals
 
-Last cleaned: 2026-05-18
+Last cleaned: 2026-05-19
 
 ## Current Main Line
 
@@ -56,9 +56,9 @@ This round has already established the first usable desktop/UI baseline:
   `{ terminal_nodes, agent_nodes, route_nodes, edges }` runtime conversion
   without invoking runtime execution from the renderer.
 - The blueprint common config panel now owns user-visible
-  `project_workdir`, `skill_dir`, and `rule_dir`; default `skill_dir` is
-  `F:\src\Package\Script\Python\multi_agent_tcp\skill_list`, and
-  `project_workdir` defaults to the opened project directory.
+  `project_workdir`, `skill_dir`, and `rule_dir`. User-machine local paths are
+  no longer hard-coded in code defaults; `skill_dir` and `rule_dir` start empty
+  and must be set by the user when the blueprint needs them.
 - The Agent inspector now hides framework-managed execution fields:
   `cwd`, `read_scope`, `write_scope`, `artifact_scope`, `workspace_id`,
   `workspace_root`, editable `command`, and raw `skill_selection`.
@@ -123,13 +123,22 @@ This round has already established the first usable desktop/UI baseline:
 - Latest Windows package after the panel cleanup was rebuilt at
   `GuLiCode/packages/desktop-electron/dist/opencode-electron-win-x64.exe` on
   2026-05-18.
-- Critical architecture finding: desktop blueprint `live` currently starts
-  ordinary/Test Agents as raw CLI workers before private context
-  materialization. The desktop service uses `GraphRuntime(backend)` and
-  pre-starts `CLIWorkerBackend` from raw node configs, so agents do not receive
-  private checkout, private `CODEX_HOME`, `framework-agent-runtime`,
-  `AGENTS.md`, Workspace API prompt/context, or authorized skill/rule
+- The desktop blueprint live runtime now starts through the framework-managed
+  private Agent context: `GraphRuntime(enforce_private_agent_context=True)`,
+  private checkout cwd, private `CODEX_HOME`, `framework-agent-runtime`,
+  `AGENTS.md`, Workspace API prompt/context, and authorized skill/rule
   materialization.
+- Blueprint start is now guarded by common config validation in both renderer
+  and desktop service. `project_workdir` is always required and absolute;
+  `skill_dir` is required when skills are used; `rule_dir` is required when
+  rule files are selected; any non-empty optional path must be absolute.
+- Rule catalog selections now store filenames relative to configured `rule_dir`
+  instead of user-machine absolute paths. The desktop service resolves them
+  from common config during start.
+- Known remaining backend regression: the combined
+  `test_desktop_blueprint_service.py test_workspace_manager.py` run still
+  fails `test_agent_checkout_dulwich_merge_accepts_non_overlapping_same_file_changes`
+  because a non-overlapping same-file checkout submit returns `conflict`.
 
 ## Immediate Handoff For The Next Agent
 
@@ -164,7 +173,7 @@ Start from these source files:
 Before changing behavior, run:
 
 ```powershell
-cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+cd GuLiCode\packages\app
 bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts
 bun run build
 ```
@@ -173,7 +182,7 @@ If touching Electron catalog/model IPC, runtime IPC, or packaged desktop
 identity, also run:
 
 ```powershell
-cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
+cd GuLiCode\packages\desktop-electron
 bun test ./src/main/blueprint-catalog.test.ts ./src/main/blueprint-runtime.test.ts ./src/main/ipc-blueprint-runtime.test.ts
 bun run build
 ```
@@ -181,7 +190,7 @@ bun run build
 For clean debug startup with visible Electron errors:
 
 ```powershell
-cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
+cd GuLiCode\packages\desktop-electron
 $env:ELECTRON_ENABLE_LOGGING = '1'
 $env:ELECTRON_ENABLE_STACK_DUMPING = '1'
 Remove-Item Env:\DEBUG -ErrorAction SilentlyContinue
@@ -193,29 +202,12 @@ internal traversal logs.
 
 ## Active Priorities
 
-Highest 2026-05-18 priority override:
+2026-05-19 priority update:
 
-Before more Agent panel polish or Test Agent behavior tuning, fix desktop
-blueprint `live` execution so ordinary and Test Agents run through the normal
-framework-managed private Agent context.
-
-Required direction:
-
-- Start the desktop `CLIWorkerBackend` without raw prestarted workers, or use
-  an equivalent lazy-start path.
-- Construct `GraphRuntime` with `enforce_private_agent_context=True` and the
-  required workspace manager/run/RPC server/SkillSpace context.
-- Let `GraphRuntime.ensure_agent()` materialize each AgentNode first, then
-  launch the worker from the materialized config.
-- Preserve `GraphRuntimeControlPlane` ownership of start validation, queues,
-  outgoing batches, joins, status, end, and stream events.
-- Add desktop service tests proving worker configs receive private checkout
-  cwd, private `codex_home`, `prompt_execution_context`,
-  `framework-agent-runtime`, `AGENTS.md`, Workspace API env, and authorized
-  skill/rule catalog entries.
-
-Current first task: fix desktop blueprint `live` Agent startup to use the
-private framework-managed context described above.
+The desktop blueprint `live` private-context startup blocker is closed at code
+and unit-test level. The remaining first task is a manual GuLiCode desktop
+smoke pass using user-provided common config paths, followed by fixing the
+`DulwichWorkspaceManager` non-overlapping same-file merge regression.
 
 Secondary 2026-05-18 Codex/UI priority context:
 

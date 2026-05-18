@@ -372,6 +372,7 @@ class GraphRuntimeControlPlane:
                 self.start_run(
                     TopAgentStartPlan.from_dict(dict(args["plan"])),
                     manifest_path=manifest_path,
+                    prestart_all_agents=bool(args.get("prestart_all_agents", False)),
                 )
             )
 
@@ -516,12 +517,15 @@ class GraphRuntimeControlPlane:
         plan: TopAgentStartPlan,
         *,
         manifest_path: Optional[Path] = None,
+        prestart_all_agents: bool = False,
     ) -> Dict[str, Any]:
         validation = self.top_agent.validate_start_plan(self.graph, plan)
         if not validation.ok:
             return validation.to_dict()
         queued = []
         organization = scoped_organization_view(self.graph)
+        if prestart_all_agents:
+            await self.runtime.prestart_agents(list(self.graph.agent_nodes.values()))
         for node_id in plan.start_nodes:
             node = self.graph.agent_nodes[node_id]
             await self.runtime.ensure_agent(node)

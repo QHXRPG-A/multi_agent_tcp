@@ -31,6 +31,13 @@ export type BlueprintConfig = {
   rule_dir: string
 }
 
+export type BlueprintConfigField = keyof BlueprintConfig
+
+export type BlueprintConfigValidationIssue = {
+  field: BlueprintConfigField
+  reason: "missing" | "not_absolute"
+}
+
 export type BlueprintAgentNode = {
   node_id: string
   agent_id?: string
@@ -177,7 +184,7 @@ const DEFAULT_VIEWPORT: BlueprintViewport = {
 const DEFAULT_AGENT_SCOPE = ["shared/reports/**"]
 const DEFAULT_MODEL = "netease-codemaker/kimi-k2.5"
 const DEFAULT_PROJECT_WORKDIR = "."
-export const DEFAULT_SKILL_DIR = "F:\\src\\Package\\Script\\Python\\multi_agent_tcp\\skill_list"
+export const DEFAULT_SKILL_DIR = ""
 export const DEFAULT_RULE_DIR = ""
 export const CLI_KIND_OPTIONS: BlueprintCliKind[] = ["codemaker", "codex"]
 export const TEST_AGENT_NODE_FLAG = "gulicode_test_node"
@@ -684,6 +691,39 @@ export function parseStringRecord(value: string) {
   return Object.fromEntries(Object.entries(parsed).map(([key, entry]) => [key, String(entry)]))
 }
 
+export function isAbsoluteBlueprintPath(value: string) {
+  const path = value.trim()
+  if (!path) return false
+  if (path.startsWith("/")) return true
+  if (/^[A-Za-z]:[\\/]/.test(path)) return true
+  return /^\\\\[^\\]+\\[^\\]+/.test(path)
+}
+
+export function requiredBlueprintConfigFields(draft: BlueprintDraft): BlueprintConfigField[] {
+  const fields: BlueprintConfigField[] = ["project_workdir"]
+  if (blueprintUsesSkillDirectory(draft)) fields.push("skill_dir")
+  if (blueprintUsesRuleDirectory(draft)) fields.push("rule_dir")
+  return fields
+}
+
+export function validateBlueprintConfigForStart(draft: BlueprintDraft): BlueprintConfigValidationIssue[] {
+  const config = draft.config ?? createDefaultBlueprintConfig()
+  const required = new Set(requiredBlueprintConfigFields(draft))
+  const fields: BlueprintConfigField[] = ["project_workdir", "skill_dir", "rule_dir"]
+  const issues: BlueprintConfigValidationIssue[] = []
+
+  for (const field of fields) {
+    const value = String(config[field] ?? "").trim()
+    if (!value) {
+      if (required.has(field)) issues.push({ field, reason: "missing" })
+      continue
+    }
+    if (!isAbsoluteBlueprintPath(value)) issues.push({ field, reason: "not_absolute" })
+  }
+
+  return issues
+}
+
 export function snapToGrid(value: number, gridSize = GRID_SIZE) {
   return Math.round(value / gridSize) * gridSize
 }
@@ -832,9 +872,9 @@ function normalizeBlueprintConfig(config?: Partial<BlueprintConfig>): BlueprintC
   return {
     ...createDefaultBlueprintConfig(),
     ...(config ?? {}),
-    project_workdir: config?.project_workdir?.trim() || DEFAULT_PROJECT_WORKDIR,
-    skill_dir: config?.skill_dir?.trim() || DEFAULT_SKILL_DIR,
-    rule_dir: config?.rule_dir?.trim() || DEFAULT_RULE_DIR,
+    project_workdir: config?.project_workdir?.trim() ?? DEFAULT_PROJECT_WORKDIR,
+    skill_dir: config?.skill_dir?.trim() ?? DEFAULT_SKILL_DIR,
+    rule_dir: config?.rule_dir?.trim() ?? DEFAULT_RULE_DIR,
   }
 }
 
@@ -911,6 +951,17 @@ function normalizeSkillSelection(selection: BlueprintSkillSelection, skills: str
     mode: "selected",
     skill_hashes: [...skills],
   }
+}
+
+function blueprintUsesSkillDirectory(draft: BlueprintDraft) {
+  return Object.entries(draft.graph.agent_nodes).some(([id, node]) => {
+    const normalized = normalizeAgentNode(id, node)
+    return normalized.skill_selection.mode !== "none" || normalized.skills.length > 0
+  })
+}
+
+function blueprintUsesRuleDirectory(draft: BlueprintDraft) {
+  return Object.entries(draft.graph.agent_nodes).some(([id, node]) => normalizeAgentNode(id, node).rule_paths.length > 0)
 }
 
 function uniqueNodeId(draft: BlueprintDraft, preferred: string) {

@@ -48,6 +48,56 @@ F:\src\Package\Script\Python\multi_agent_tcp
 
 Historical paths such as `D:\agents\multi_agent_tcp` or `F:\src\ryven_demo` may appear in archives. Do not use them as current defaults unless the user's machine actually has that path.
 
+## Fast Handoff - 2026-05-19 Blueprint Common Config + Private Runtime
+
+When the next task is GuLiCode blueprint startup, local path handling, or
+desktop live runtime smoke, start from this state:
+
+1. Do not reintroduce hard-coded user-machine absolute paths in code defaults.
+   The blueprint common config panel owns local-only paths:
+   `project_workdir`, `skill_dir`, and `rule_dir`.
+2. `project_workdir` is always required before start and must be an absolute
+   path. `skill_dir` is required only when Agents use skills. `rule_dir` is
+   required only when Agents have rule files. Any non-empty optional path must
+   also be absolute.
+3. The common config panel fields now have `?` help buttons using the same
+   popover interaction as the inspector. Startup failure shows a blocking
+   config-required dialog with a single confirm action.
+4. Rule catalog values are now filenames relative to the configured `rule_dir`,
+   so Agent `rule_paths` no longer store user-machine absolute paths from the
+   selector. The desktop service resolves them from common `rule_dir` at start.
+5. The desktop service also validates common config during `blueprint.start`,
+   so IPC/direct service calls cannot bypass the renderer guard.
+6. Desktop live mode uses the framework-managed private Agent context:
+   `GraphRuntime(enforce_private_agent_context=True)`, private checkout cwd,
+   private `CODEX_HOME`, `framework-agent-runtime`, `AGENTS.md`, Workspace API
+   env/prompt context, and authorized skill/rule materialization.
+7. Known remaining backend risk: the combined run with
+   `test_workspace_manager.py` still fails
+   `test_agent_checkout_dulwich_merge_accepts_non_overlapping_same_file_changes`
+   because a non-overlapping same-file checkout submit returns `conflict`.
+
+Latest relevant verification:
+
+```powershell
+cd GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts ./src/i18n/parity.test.ts
+bun run typecheck
+bun run build
+
+cd ..\desktop-electron
+bun test ./src/main/blueprint-catalog.test.ts ./src/main/ipc-blueprint-runtime.test.ts ./src/main/blueprint-runtime.test.ts
+bun run typecheck
+bun run build
+
+cd ..\..\..
+pytest -q test_desktop_blueprint_service.py
+```
+
+Detailed archive:
+
+- [`archive/blueprint_common_config_paths_2026-05-19.md`](archive/blueprint_common_config_paths_2026-05-19.md)
+
 ## Fast Handoff - 2026-05-18 Blueprint Agent Panel + Debug Baseline
 
 When the next task is GuLiCode blueprint UI or desktop debug startup, start

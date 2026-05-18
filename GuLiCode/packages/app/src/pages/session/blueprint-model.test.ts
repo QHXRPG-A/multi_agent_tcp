@@ -18,6 +18,7 @@ import {
   toBlueprintDocument,
   toRuntimeGraphDraft,
   updateAgentNode,
+  validateBlueprintConfigForStart,
 } from "./blueprint-model"
 
 describe("blueprint draft model", () => {
@@ -203,6 +204,36 @@ describe("blueprint draft model", () => {
       input_port: "in",
     })
     expect("id" in graph.edges[0]).toBe(false)
+  })
+
+  test("validates required absolute blueprint common config before start", () => {
+    let draft = createDefaultBlueprintDraft()
+
+    expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "project_workdir", reason: "not_absolute" }])
+
+    draft.config.project_workdir = ""
+    expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "project_workdir", reason: "missing" }])
+
+    draft.config.project_workdir = "/repo/game"
+    expect(validateBlueprintConfigForStart(draft)).toEqual([])
+
+    draft = updateAgentNode(draft, "planner", {
+      skills: ["multi-agent-tcp"],
+      skill_selection: { mode: "none" },
+    })
+    expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "skill_dir", reason: "missing" }])
+
+    draft.config.skill_dir = "skill_list"
+    expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "skill_dir", reason: "not_absolute" }])
+
+    draft.config.skill_dir = "/repo/skill_list"
+    draft = updateAgentNode(draft, "planner", {
+      rule_paths: ["/repo/rules/agent.md"],
+    })
+    expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "rule_dir", reason: "missing" }])
+
+    draft.config.rule_dir = "/repo/rules"
+    expect(validateBlueprintConfigForStart(draft)).toEqual([])
   })
 
   test("round-trips project blueprint documents with runtime graph and UI state", () => {

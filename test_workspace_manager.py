@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any, Dict
 
 from multi_agent_tcp import DulwichWorkspaceManager, describe_dulwich_backend
+import multi_agent_tcp.workspace_manager as workspace_manager
 
 
 def _write(path: Path, text: str) -> None:
@@ -177,6 +179,25 @@ def test_project_reference_empty_scope_checkout_stays_empty_and_rejects_changes(
     assert result.status == "rejected"
     assert result.scope_violations == ["src/a.txt"]
     assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "base\n"
+
+
+def test_project_reference_missing_static_scope_does_not_scan_project_root(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-reference-missing-scope", code_mode="project_reference")
+
+    def fail_full_scan(*_args: object, **_kwargs: object) -> Dict[str, Path]:
+        raise AssertionError("project root full scan should not be used for static scoped checkout")
+
+    monkeypatch.setattr(workspace_manager, "_relative_files", fail_full_scan)
+
+    checkout = manager.checkout_agent(run, "agent-a", write_scope=["shared/reports/**"])
+
+    assert not any(checkout.checkout_dir.rglob("*"))
+    assert checkout.write_scope == ["shared/reports/**"]
 
 
 def test_run_has_private_scratch_and_shared_outcome_space(tmp_path: Path) -> None:

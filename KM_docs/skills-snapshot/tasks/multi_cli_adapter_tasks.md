@@ -22,18 +22,41 @@
 
 Current adapter priority override - 2026-05-18:
 
-- Highest related blocker: desktop blueprint `live` currently starts workers
-  from raw AgentNode configs before `GraphRuntime` materializes private Agent
-  context. Fix the desktop startup path so Codex workers are launched from the
-  materialized node config with private checkout cwd, private `CODEX_HOME`,
-  `framework-agent-runtime`, `AGENTS.md`, Workspace API env/prompt context,
-  and authorized skill/rule materialization.
+- Highest related blocker status: desktop blueprint `live` now launches workers
+  from the `GraphRuntime` materialized private Agent context, including private
+  checkout cwd, private `CODEX_HOME`, `framework-agent-runtime`, `AGENTS.md`,
+  Workspace API env/prompt context, and authorized skill/rule materialization.
 - Codex is the active implementation path for live Agent output streaming.
 - Prioritize `cli_kind=codex`, `CodexAdapter`, `codex exec --json`, and Codex
   JSONL normalization into `AgentStreamEvent`.
 - Do not spend new effort on CodeMaker streaming or CodeMaker model UX in this
   project phase unless the user explicitly re-opens that track.
 - Keep CodeMaker as a compatibility/fallback adapter behind `CLIWorkerBackend`.
+
+## 2026-05-19 Status Update - Desktop Private Context + Config Boundary
+
+Completed:
+
+1. Desktop blueprint live mode now constructs `GraphRuntime` with
+   `enforce_private_agent_context=True` and lets `GraphRuntime.ensure_agent()`
+   materialize the private worker context before `CLIWorkerBackend` sees a
+   worker config.
+2. Desktop skill selection for live runs is backed by
+   `DesktopBlueprintSkillCatalog`, sourced from common `skill_dir`, and copied
+   into each private `CODEX_HOME` only through authorized skill materialization.
+3. Rule files selected in the UI are stored as filenames relative to common
+   `rule_dir`, then resolved and materialized during desktop start. This keeps
+   user-machine absolute rule paths out of Agent node config.
+4. Blueprint start now requires absolute common config paths and rejects
+   missing required fields in both renderer and desktop service.
+
+Remaining:
+
+1. Manual desktop live smoke with Codex Agent nodes and user-provided common
+   config paths.
+2. Fix the `DulwichWorkspaceManager` non-overlapping same-file merge regression
+   currently exposed by
+   `test_agent_checkout_dulwich_merge_accepts_non_overlapping_same_file_changes`.
 
 1. 将已落地的 Codex / CodeMaker adapter 收敛到 `CLIWorkerBackend` 边界：
    - prompt contract

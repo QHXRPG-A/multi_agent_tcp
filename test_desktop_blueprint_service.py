@@ -13,10 +13,21 @@ from multi_agent_tcp.desktop_blueprint_service import (
     DesktopBlueprintService,
 )
 from multi_agent_tcp.codex_bridge import codex_jsonl_event_to_agent_stream_events
+from multi_agent_tcp.agent_launch_context import workspace_api_base_command
 from multi_agent_tcp.client import AgentTCPClient
 
 
-def _document() -> dict:
+def _document(project_dir: Path | None = None) -> dict:
+    ui = {
+        "nodes": {"planner": {"x": 120, "y": 96}},
+        "viewport": {"x": 0, "y": 0, "zoom": 1},
+    }
+    if project_dir is not None:
+        ui["config"] = {
+            "project_workdir": str(project_dir),
+            "skill_dir": "",
+            "rule_dir": "",
+        }
     return {
         "schema_version": 1,
         "id": "default",
@@ -36,10 +47,7 @@ def _document() -> dict:
                 {"from": "planner", "to": "end", "edge_type": "exec"},
             ],
         },
-        "ui": {
-            "nodes": {"planner": {"x": 120, "y": 96}},
-            "viewport": {"x": 0, "y": 0, "zoom": 1},
-        },
+        "ui": ui,
     }
 
 
@@ -99,7 +107,7 @@ def test_blueprint_service_rejects_invalid_id_and_invalid_graph(tmp_path: Path) 
     else:  # pragma: no cover
         raise AssertionError("invalid blueprint id should fail")
 
-    bad_graph = _document()
+    bad_graph = _document(project)
     bad_graph["graph"] = {
         "terminal_nodes": {"start": "start", "end": "end"},
         "agent_nodes": {},
@@ -140,7 +148,7 @@ def test_blueprint_service_starts_tracks_events_and_ends_run(tmp_path: Path) -> 
     service = DesktopBlueprintService()
     project = tmp_path / "project"
     project.mkdir()
-    service.save_blueprint(project, _document())
+    service.save_blueprint(project, _document(project))
 
     started = service.handle_request(
         {
@@ -226,11 +234,35 @@ def test_blueprint_service_starts_tracks_events_and_ends_run(tmp_path: Path) -> 
     assert terminal_status["explanation"]["pending"]["queued_messages"] == 0
 
 
-def test_blueprint_service_agent_info_projects_message_audit_for_node(tmp_path: Path) -> None:
+def test_blueprint_service_start_rejects_missing_common_config(tmp_path: Path) -> None:
     service = DesktopBlueprintService()
     project = tmp_path / "project"
     project.mkdir()
     service.save_blueprint(project, _document())
+
+    try:
+        service.handle_request(
+            {
+                "command": "blueprint.start",
+                "args": {
+                    "projectDir": str(project),
+                    "blueprintId": "default",
+                    "plan": _plan(),
+                },
+            }
+        )
+    except BlueprintServiceError as exc:
+        assert exc.code == "BLUEPRINT_CONFIG_REQUIRED"
+        assert exc.details["issues"] == [{"field": "project_workdir", "reason": "missing"}]
+    else:  # pragma: no cover
+        raise AssertionError("missing blueprint common config should fail start")
+
+
+def test_blueprint_service_agent_info_projects_message_audit_for_node(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+    project = tmp_path / "project"
+    project.mkdir()
+    service.save_blueprint(project, _document(project))
     started = service.handle_request(
         {
             "command": "blueprint.start",
@@ -274,7 +306,7 @@ def test_blueprint_service_start_rejects_invalid_graph_and_plan(tmp_path: Path) 
     project = tmp_path / "project"
     project.mkdir()
 
-    bad_graph = _document()
+    bad_graph = _document(project)
     bad_graph["graph"] = {
         "terminal_nodes": {"start": "start", "end": "end"},
         "agent_nodes": {},
@@ -298,7 +330,7 @@ def test_blueprint_service_start_rejects_invalid_graph_and_plan(tmp_path: Path) 
     else:  # pragma: no cover
         raise AssertionError("invalid graph should fail start")
 
-    service.save_blueprint(project, _document())
+    service.save_blueprint(project, _document(project))
     try:
         service.handle_request(
             {
@@ -346,7 +378,7 @@ def test_blueprint_service_rejects_unknown_run_and_bad_end_action(tmp_path: Path
 
     project = tmp_path / "project"
     project.mkdir()
-    service.save_blueprint(project, _document())
+    service.save_blueprint(project, _document(project))
     started = service.handle_request(
         {
             "command": "blueprint.start",
@@ -386,6 +418,7 @@ def test_blueprint_service_rejects_unknown_run_and_bad_end_action(tmp_path: Path
 def test_blueprint_service_live_mode_starts_tick_and_streams_agent_events(tmp_path: Path, monkeypatch) -> None:
     class FakeLiveBackend:
         instances = []
+        create_calls = []
 
         def __init__(self, workers) -> None:
             self.workers = workers
@@ -395,6 +428,9 @@ def test_blueprint_service_live_mode_starts_tick_and_streams_agent_events(tmp_pa
 
         @classmethod
         async def create(cls, workers, *, port=9140, verbose=False, allow_empty=False):
+            cls.create_calls.append({"workers": list(workers), "allow_empty": allow_empty})
+            if not workers and not allow_empty:
+                raise ValueError("workers list must be non-empty")
             return cls(workers)
 
         async def ensure_worker(self, worker) -> None:
@@ -424,7 +460,7 @@ def test_blueprint_service_live_mode_starts_tick_and_streams_agent_events(tmp_pa
     service = DesktopBlueprintService()
     project = tmp_path / "project"
     project.mkdir()
-    service.save_blueprint(project, _document())
+    service.save_blueprint(project, _document(project))
 
     started = service.handle_request(
         {
@@ -438,6 +474,9 @@ def test_blueprint_service_live_mode_starts_tick_and_streams_agent_events(tmp_pa
         }
     )
     assert started["run"]["executionMode"] == "live"
+    assert FakeLiveBackend.create_calls[-1]["workers"] == []
+    assert FakeLiveBackend.create_calls[-1]["allow_empty"] is True
+    assert set(FakeLiveBackend.instances[-1].worker_configs) == {"agent-planner"}
     service._async_loop.run(asyncio.sleep(0.2))
 
     info = service.handle_request(
@@ -458,6 +497,247 @@ def test_blueprint_service_live_mode_starts_tick_and_streams_agent_events(tmp_pa
         {"command": "blueprint.end", "args": {"runId": started["runId"], "action": "cancel"}}
     )
     assert ended["status"]["run"]["final_status"] == "cancelled"
+    assert FakeLiveBackend.instances[-1].stopped is True
+    service.close()
+
+
+def test_blueprint_service_live_mode_prestarts_all_agents_with_private_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class FakeLiveBackend:
+        instances = []
+        create_calls = []
+
+        def __init__(self, workers) -> None:
+            self.workers = workers
+            self.worker_configs = {}
+            self.stopped = False
+            FakeLiveBackend.instances.append(self)
+
+        @classmethod
+        async def create(cls, workers, *, port=9140, verbose=False, allow_empty=False):
+            cls.create_calls.append({"workers": list(workers), "allow_empty": allow_empty})
+            return cls(workers)
+
+        async def ensure_worker(self, worker) -> None:
+            self.worker_configs[str(worker.agent_id)] = worker
+
+        async def run_single(self, worker_id, body, *, timeout_sec=600.0, _skip_skill_inject=False, meta=None, stream_callback=None):
+            return {"type": "message", "body": {"ok": True, "text": "done"}}
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr("multi_agent_tcp.desktop_blueprint_service.CLIWorkerBackend", FakeLiveBackend)
+
+    project = tmp_path / "project"
+    project.mkdir()
+    skill_dir = project / "skills"
+    business_skill = skill_dir / "business-skill"
+    business_skill.mkdir(parents=True)
+    (business_skill / "SKILL.md").write_text(
+        "---\n"
+        "name: business-skill\n"
+        "description: Business skill description\n"
+        "---\n"
+        "# Business Skill\n",
+        encoding="utf-8",
+    )
+    rules_dir = project / "rules"
+    rules_dir.mkdir()
+    rule = rules_dir / "policy.md"
+    rule.write_text("# Business Rule\n\nFollow the policy.\n", encoding="utf-8")
+
+    document = _document(project)
+    document["graph"]["agent_nodes"]["planner"].update(
+        {
+            "cli_kind": "codex",
+            "model": "gpt-5.4",
+            "command": "codex",
+        }
+    )
+    document["graph"]["agent_nodes"]["test-agent"] = {
+        "node_id": "test-agent",
+        "agent_id": "agent-test-agent",
+        "prompt": "Show panel content.",
+        "cli_kind": "codex",
+        "model": "gpt-5.4",
+        "command": "codex",
+        "skills": ["business-skill"],
+        "skill_selection": {"mode": "selected", "skill_hashes": ["business-skill"]},
+        "rule_paths": ["policy.md"],
+        "adapter_options": {"gulicode_test_node": True, "skip_git_repo_check": True},
+    }
+    document["ui"]["config"] = {
+        "project_workdir": str(project),
+        "skill_dir": str(skill_dir),
+        "rule_dir": str(rules_dir),
+    }
+    plan = _plan()
+    plan["agent_descriptions"]["test-agent"] = "Test panel agent."
+
+    service = DesktopBlueprintService()
+    service.save_blueprint(project, document)
+    started = service.handle_request(
+        {
+            "command": "blueprint.start",
+            "args": {
+                "projectDir": str(project),
+                "blueprintId": "default",
+                "plan": plan,
+                "executionMode": "live",
+            },
+        }
+    )
+
+    backend = FakeLiveBackend.instances[-1]
+    assert FakeLiveBackend.create_calls[-1]["workers"] == []
+    assert FakeLiveBackend.create_calls[-1]["allow_empty"] is True
+    assert set(backend.worker_configs) == {"agent-planner", "agent-test-agent"}
+
+    for agent_id, worker in backend.worker_configs.items():
+        private = (
+            project
+            / ".multi_agent_workspace"
+            / "runs"
+            / "active"
+            / started["runId"]
+            / "agents"
+            / agent_id
+            / "private"
+        )
+        assert worker.cwd == private / "checkout"
+        assert worker.adapter_options["codex_home"] == str(private / "codex_home")
+        assert "prompt_execution_context" in worker.adapter_options
+        assert "workspace_api" in worker.adapter_options["prompt_execution_context"]
+        workspace_api_command = workspace_api_base_command()
+        assert worker.adapter_options["execution_context"]["workspace_api"]["command"] == workspace_api_command
+        assert (
+            worker.adapter_options["prompt_execution_context"]["workspace_api"]["command"]
+            == workspace_api_command
+        )
+        assert (
+            worker.adapter_options["execution_context"]["code_workspace"]["submit_command"]
+            == f"{workspace_api_command} submit"
+        )
+        assert worker.extra_env["MULTI_AGENT_WORKSPACE_CONTEXT"] == str(
+            private / "workspace_api_context.json"
+        )
+        assert (private / "workspace_api_context.json").is_file()
+        assert (private / "checkout" / "AGENTS.md").is_file()
+        assert (private / "codex_home" / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
+
+    test_worker = backend.worker_configs["agent-test-agent"]
+    private_context = test_worker.adapter_options["execution_context"]["private_context"]
+    assert test_worker.adapter_options["gulicode_test_node"] is True
+    assert any(
+        item.get("hash") == "business-skill" and item.get("source") == "business"
+        for item in private_context["skill_catalog"]
+    )
+    assert private_context["rule_catalog"][0]["name"] == "Business Rule"
+    assert Path(private_context["rule_catalog"][0]["rule_path"]).is_file()
+
+    service.close()
+
+
+def test_blueprint_service_live_mode_does_not_start_workers_for_invalid_plan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class FakeLiveBackend:
+        instances = []
+
+        def __init__(self, workers) -> None:
+            self.worker_configs = {}
+            self.stopped = False
+            FakeLiveBackend.instances.append(self)
+
+        @classmethod
+        async def create(cls, workers, *, port=9140, verbose=False, allow_empty=False):
+            return cls(workers)
+
+        async def ensure_worker(self, worker) -> None:
+            self.worker_configs[str(worker.agent_id)] = worker
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr("multi_agent_tcp.desktop_blueprint_service.CLIWorkerBackend", FakeLiveBackend)
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService()
+    service.save_blueprint(project, _document(project))
+    bad_plan = _plan()
+    bad_plan["agent_descriptions"] = {}
+
+    try:
+        service.handle_request(
+            {
+                "command": "blueprint.start",
+                "args": {
+                    "projectDir": str(project),
+                    "blueprintId": "default",
+                    "plan": bad_plan,
+                    "executionMode": "live",
+                },
+            }
+        )
+    except BlueprintServiceError as exc:
+        assert exc.code == "START_PLAN_INVALID"
+    else:  # pragma: no cover
+        raise AssertionError("invalid live start plan should fail")
+
+    assert FakeLiveBackend.instances[-1].worker_configs == {}
+    assert FakeLiveBackend.instances[-1].stopped is True
+    service.close()
+
+
+def test_blueprint_service_live_mode_cleans_up_failed_private_agent_start(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class FakeLiveBackend:
+        instances = []
+
+        def __init__(self, workers) -> None:
+            self.stopped = False
+            FakeLiveBackend.instances.append(self)
+
+        @classmethod
+        async def create(cls, workers, *, port=9140, verbose=False, allow_empty=False):
+            return cls(workers)
+
+        async def ensure_worker(self, worker) -> None:
+            raise RuntimeError("boom")
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr("multi_agent_tcp.desktop_blueprint_service.CLIWorkerBackend", FakeLiveBackend)
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService()
+    service.save_blueprint(project, _document(project))
+
+    try:
+        service.handle_request(
+            {
+                "command": "blueprint.start",
+                "args": {
+                    "projectDir": str(project),
+                    "blueprintId": "default",
+                    "plan": _plan(),
+                    "executionMode": "live",
+                },
+            }
+        )
+    except BlueprintServiceError as exc:
+        assert exc.code == "LIVE_AGENT_START_FAILED"
+        assert "boom" in exc.details["error"]
+    else:  # pragma: no cover
+        raise AssertionError("failed live Agent startup should surface a stable error")
+
     assert FakeLiveBackend.instances[-1].stopped is True
     service.close()
 

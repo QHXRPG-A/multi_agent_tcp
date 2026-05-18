@@ -87,6 +87,21 @@ Do not treat the old Ryven/editor line as the current UI target.
 - [DONE] Fixed Agent panel interaction gaps: panels can be dragged outside the
   viewport after opening, display text is selectable/copyable, and the panel
   body handles wheel scrolling.
+- [DONE] Removed hard-coded user-machine absolute path defaults from blueprint
+  code. `skill_dir` and `rule_dir` start empty and are supplied through the
+  blueprint common config panel when needed.
+- [DONE] Added common config `?` help buttons using the same popover
+  interaction as inspector `?` buttons.
+- [DONE] Blocked blueprint start when required common config paths are missing
+  or not absolute. The guard exists in the renderer before save/start and in
+  the desktop service `blueprint.start` path for IPC/direct calls.
+- [DONE] Changed rule catalog selection values to filenames relative to common
+  `rule_dir`; the desktop service resolves them at start so Agent `rule_paths`
+  no longer capture local absolute paths from the user's machine.
+- [DONE] Fixed desktop blueprint live startup so workers are launched from the
+  `GraphRuntime` materialized private Agent context, including private
+  checkout cwd, private `CODEX_HOME`, `framework-agent-runtime`, `AGENTS.md`,
+  Workspace API env/prompt context, and authorized skill/rule materialization.
 
 ## In progress
 
@@ -126,7 +141,7 @@ Do not treat the old Ryven/editor line as the current UI target.
 - [DONE] Limited the Agent inspector to per-Agent execution/capability fields
   while keeping hidden schema compatibility fields for runtime export.
 - [DONE] Added skill/rule multi-select controls with Electron catalog lookup
-  and static fallbacks for web/test environments.
+  and empty web/test fallback behavior.
 - [DONE] Added CLI/model dropdown behavior. `cli_kind` supports `codemaker`
   and `codex`; changing it refreshes model choices and the runtime export
   generates the command string.
@@ -171,16 +186,16 @@ Do not treat the old Ryven/editor line as the current UI target.
 - [DONE] Hardened `blueprint-list-models` CLI spawning enough for the current
   debug baseline: Windows `EPERM` and missing executable cases are surfaced as
   model-load failures instead of noisy Electron handler exceptions.
-- [TODO] Highest priority: fix desktop blueprint `live` Agent startup so
-  ordinary/Test Agents are launched from `GraphRuntime` materialized private
-  context, not raw `CLIWorkerBackend` node configs. The target path must
-  provide private checkout cwd, private `CODEX_HOME`, `framework-agent-runtime`
-  skill, `AGENTS.md`, Workspace API env/prompt context, and authorized
-  skill/rule materialization before any worker is started.
+- [DONE] Fixed desktop blueprint `live` Agent startup so ordinary/Test Agents
+  are launched from `GraphRuntime` materialized private context, not raw
+  `CLIWorkerBackend` node configs.
 - [TODO] Manual smoke the live run UI path: start, tick, status polling,
   Agent long-press progress, right-click `信息面板`, move/resize, close/pin,
   non-pinned outside-click close, WebSocket transcript, and `default/top`
   queue sends.
+- [TODO] Fix the backend workspace regression where
+  `test_agent_checkout_dulwich_merge_accepts_non_overlapping_same_file_changes`
+  reports a conflict for non-overlapping same-file changes.
 - [TODO] Add top-agent/operator audit views such as utterance history without exposing them as ordinary-Agent message context.
 
 ### 4. Desktop shell hardening
@@ -210,7 +225,7 @@ Do not treat the old Ryven/editor line as the current UI target.
 1. Confirm the current local blueprint model:
 
 ```powershell
-cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+cd GuLiCode\packages\app
 bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts
 bun run build
 ```
@@ -218,7 +233,7 @@ bun run build
 If touching catalog/model IPC, also run:
 
 ```powershell
-cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
+cd GuLiCode\packages\desktop-electron
 bun test ./src/main/blueprint-catalog.test.ts
 ```
 
