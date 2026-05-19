@@ -44,6 +44,9 @@ from multi_agent_tcp.workspace_rpc import WorkspaceRPCServer
 from multi_agent_tcp.codemaker_bridge import _merge_prompt as _merge_codemaker_prompt
 from multi_agent_tcp.codemaker_bridge import load_codemaker_runtime
 from multi_agent_tcp.codex_bridge import _merge_prompt as _merge_codex_prompt
+from multi_agent_tcp.codex_bridge import _write_codex_diagnostics
+from multi_agent_tcp.codex_bridge import _CodexStderrStreamLimiter
+from multi_agent_tcp.codex_bridge import compact_codex_result_for_transport
 from multi_agent_tcp.codex_bridge import load_codex_runtime
 from multi_agent_tcp.agent_launch_context import initialize_private_codex_home
 from multi_agent_tcp.ryven_blueprint import _apply_run_workspace_to_node
@@ -576,6 +579,53 @@ def test_codex_runtime_rejects_extra_args_add_dir_for_project_context(tmp_path: 
         )
 
 
+def test_codex_diagnostics_writer_preserves_stdout_stderr_and_final_text(tmp_path: Path) -> None:
+    diagnostics = _write_codex_diagnostics(
+        codex_cfg={"diagnostics_dir": str(tmp_path / "diag")},
+        cmd=["codex", "exec", "-"],
+        cwd=tmp_path,
+        stdout='{"type":"message","message":"hello"}\n',
+        stderr="warning\n",
+        final_text="hello",
+        returncode=0,
+        timeout=False,
+        elapsed_sec=1.25,
+    )
+
+    meta = json.loads(Path(diagnostics["meta"]).read_text(encoding="utf-8"))
+    assert meta["returncode"] == 0
+    assert meta["timeout"] is False
+    assert meta["event_count"] == 1
+    assert Path(diagnostics["stdout"]).read_text(encoding="utf-8").strip()
+    assert Path(diagnostics["stderr"]).read_text(encoding="utf-8") == "warning\n"
+    assert Path(diagnostics["final_text"]).read_text(encoding="utf-8") == "hello"
+
+
+def test_codex_stderr_stream_limiter_truncates_live_noise_once() -> None:
+    limiter = _CodexStderrStreamLimiter(max_chars=5, notice="[truncated]")
+
+    assert limiter.chunks("abc") == ["abc"]
+    assert limiter.chunks("defgh") == ["de", "[truncated]"]
+    assert limiter.chunks("ijk") == []
+
+
+def test_compact_codex_result_for_transport_truncates_large_stderr_only() -> None:
+    result = {
+        "returncode": 0,
+        "stdout": "ok",
+        "stderr": "x" * 20000,
+        "final_text": "done",
+    }
+
+    compacted = compact_codex_result_for_transport(result)
+
+    assert compacted["stdout"] == "ok"
+    assert compacted["stderr"].startswith("x" * 100)
+    assert compacted["stderr_truncated"] is True
+    assert compacted["stderr_original_chars"] == 20000
+    assert compacted["final_text"] == "done"
+
+
 def test_multimodal_envelope_serializes_and_normalizes() -> None:
     env = MultiModalEnvelope.text("hello", meta={"port": "out"})
 
@@ -637,6 +687,48 @@ class _FailingThenOkCluster(_FakeCluster):
                 },
             },
         }
+
+
+class _TimeoutThenOkCluster(_FakeCluster):
+    async def run_single(
+        self,
+        worker_id: str,
+        body: Any,
+        *,
+        timeout_sec: float = 600.0,
+        _skip_skill_inject: bool = False,
+    ) -> dict[str, Any]:
+        self.sent.append((worker_id, body, timeout_sec))
+        if len(self.sent) > 1:
+            return {"type": "message", "from": worker_id, "body": {"ok": True, "recovered": True}}
+        return {
+            "type": "message",
+            "from": worker_id,
+            "body": {
+                "ok": False,
+                "codex": {
+                    "returncode": -9,
+                    "stderr": "plugin warning noise",
+                    "final_text": "partial progress",
+                    "timeout": True,
+                },
+            },
+        }
+
+
+class _BackendTimeoutThenOkCluster(_FakeCluster):
+    async def run_single(
+        self,
+        worker_id: str,
+        body: Any,
+        *,
+        timeout_sec: float = 600.0,
+        _skip_skill_inject: bool = False,
+    ) -> dict[str, Any]:
+        self.sent.append((worker_id, body, timeout_sec))
+        if len(self.sent) > 1:
+            return {"type": "message", "from": worker_id, "body": {"ok": True, "recovered": True}}
+        raise asyncio.TimeoutError
 
 
 class _RouteCluster(_FakeCluster):
@@ -855,6 +947,50 @@ async def test_graph_runtime_keeps_agent_idle_after_worker_ok_false() -> None:
     assert runtime.instances["node-a"].state == "idle"
     assert cluster.sent == [
         ("node-a", {"prompt": "next"}, 42.0),
+        ("node-a", {"prompt": "retry"}, 42.0),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_keeps_agent_idle_after_structured_worker_timeout() -> None:
+    cluster = _TimeoutThenOkCluster()
+    node = AgentNode(node_id="node-a", cwd=Path("."), timeout_sec=42.0)
+    runtime = GraphRuntime(cluster)
+
+    with pytest.raises(RuntimeError, match="codex timed out"):
+        await runtime.send_agent_message(node, {"prompt": "next"})
+
+    inst = runtime.instances["node-a"]
+    assert inst.state == "idle"
+    assert inst.last_error == "agent reply failed: codex timed out"
+
+    recovered = await runtime.send_agent_message(node, {"prompt": "retry"})
+    assert recovered["said"] == json.dumps({"ok": True, "recovered": True}, ensure_ascii=False)
+    assert runtime.instances["node-a"].state == "idle"
+    assert cluster.sent == [
+        ("node-a", {"prompt": "next"}, 42.0),
+        ("node-a", {"prompt": "retry"}, 42.0),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_can_retry_after_backend_timeout() -> None:
+    cluster = _BackendTimeoutThenOkCluster()
+    node = AgentNode(node_id="node-a", cwd=Path("."), timeout_sec=42.0)
+    runtime = GraphRuntime(cluster)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await runtime.send_agent_message(node, {"prompt": "slow"})
+
+    inst = runtime.instances["node-a"]
+    assert inst.state == "timed_out"
+    assert inst.can_accept_message is True
+
+    recovered = await runtime.send_agent_message(node, {"prompt": "retry"})
+    assert recovered["said"] == json.dumps({"ok": True, "recovered": True}, ensure_ascii=False)
+    assert runtime.instances["node-a"].state == "idle"
+    assert cluster.sent == [
+        ("node-a", {"prompt": "slow"}, 42.0),
         ("node-a", {"prompt": "retry"}, 42.0),
     ]
 
@@ -3035,6 +3171,61 @@ async def test_workdir_assignment_rejects_busy_agent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cli_worker_backend_waits_for_worker_timeout_reply_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, Any, dict[str, Any] | None]] = []
+            self.wait_timeout_sec: float | None = None
+
+        async def send_to(
+            self,
+            worker_id: str,
+            body: Any,
+            *,
+            meta: dict[str, Any] | None = None,
+        ) -> None:
+            self.sent.append((worker_id, body, meta))
+
+        async def wait_for_message(
+            self,
+            *,
+            expect_from: str | None = None,
+            timeout_sec: float = 300.0,
+            stream_callback: Any = None,
+        ) -> dict[str, Any]:
+            self.wait_timeout_sec = timeout_sec
+            if stream_callback is not None:
+                await stream_callback({"kind": "part.delta", "delta": "progress"})
+            return {"type": "message", "from": expect_from, "body": {"ok": True}}
+
+    backend = CLIWorkerBackend()
+    fake_client = FakeClient()
+    stream_events: list[dict[str, Any]] = []
+
+    async def fake_ensure_client() -> FakeClient:
+        return fake_client
+
+    monkeypatch.setattr(backend, "_ensure_client", fake_ensure_client)
+
+    reply = await backend.run_single(
+        "agent-a",
+        {"prompt": "work"},
+        timeout_sec=2.0,
+        meta={"framework_stream": {"node_id": "agent-a"}},
+        stream_callback=lambda event: stream_events.append(event),
+    )
+
+    assert reply["body"]["ok"] is True
+    assert fake_client.sent == [
+        ("agent-a", {"prompt": "work"}, {"framework_stream": {"node_id": "agent-a"}})
+    ]
+    assert fake_client.wait_timeout_sec == 32.0
+    assert stream_events == [{"kind": "part.delta", "delta": "progress"}]
+
+
+@pytest.mark.asyncio
 async def test_codemaker_adapter_reuses_instance_for_multiple_messages(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, str | None, dict[str, Any]]] = []
 
@@ -3080,6 +3271,8 @@ async def test_codex_adapter_reuses_instance_for_multiple_messages(monkeypatch: 
         stdin_context: str | None = None,
         attachments: list[Any] | None = None,
         codex_cfg: dict[str, Any],
+        stream_callback: Any = None,
+        stream_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         calls.append((prompt, stdin_context, list(attachments or []), codex_cfg))
         return {

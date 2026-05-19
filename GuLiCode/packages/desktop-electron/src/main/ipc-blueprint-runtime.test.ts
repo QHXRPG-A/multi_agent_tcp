@@ -98,6 +98,14 @@ describe("blueprint runtime IPC handlers", () => {
         calls.push(`runs:${projectDir}:${blueprintId}`)
         return [{ runId: "run-1" }]
       },
+      detectPython: (projectDir?: string, pythonCommand?: string) => {
+        calls.push(`detect-python:${projectDir}:${pythonCommand ?? ""}`)
+        return { ok: true, pythonCommand: "C:\\Python\\python.exe" }
+      },
+      configure: (opts?: { pythonCommand?: string }) => {
+        calls.push(`configure:${opts?.pythonCommand ?? ""}`)
+        return { ok: true }
+      },
       start: (projectDir: string, blueprintId: string, plan: Record<string, unknown>, executionMode?: string) => {
         calls.push(`start:${projectDir}:${blueprintId}:${plan.goal}:${executionMode}`)
         return { code: "NOT_IMPLEMENTED_FOR_UI" }
@@ -156,6 +164,8 @@ describe("blueprint runtime IPC handlers", () => {
     await handlers.get("blueprint-save")?.({}, "C:\\repo", { id: "default" })
     await handlers.get("blueprint-validate")?.({}, "C:\\repo", "default", { id: "default" })
     await handlers.get("blueprint-list-runs")?.({}, "C:\\repo", "default")
+    await handlers.get("blueprint-detect-python")?.({}, "C:\\repo", "C:\\Candidate\\python.exe")
+    await handlers.get("blueprint-configure-runtime")?.({}, "C:\\Python\\python.exe")
     await handlers.get("blueprint-start")?.({}, "C:\\repo", "default", { goal: "ship" }, "live")
     await handlers.get("blueprint-status")?.({}, "run-1")
     await handlers.get("blueprint-end")?.({}, "run-1", "cancel", "user")
@@ -201,6 +211,8 @@ describe("blueprint runtime IPC handlers", () => {
       "save:C:\\repo:default",
       "validate:C:\\repo:default:default",
       "runs:C:\\repo:default",
+      "detect-python:C:\\repo:C:\\Candidate\\python.exe",
+      "configure:C:\\Python\\python.exe",
       "start:C:\\repo:default:ship:live",
       "status:run-1",
       "end:run-1:cancel:user",

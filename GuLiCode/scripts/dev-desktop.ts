@@ -67,10 +67,19 @@ function getPackagedExePath() {
   return join(PKG_DESKTOP, PACKAGED_OUTPUT_REL, "win-unpacked", `${getProductName()}.exe`)
 }
 
+function getElectronBuilderCacheRoot() {
+  return (
+    process.env.ELECTRON_BUILDER_CACHE ||
+    process.env.ELECTRON_BUILDER_CACHE_DIR ||
+    (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "electron-builder", "Cache") : undefined) ||
+    join(homedir(), "AppData", "Local", "electron-builder", "Cache")
+  )
+}
+
 function findRceditPath() {
   if (platform() !== "win32") return null
 
-  const cacheRoot = join(homedir(), "AppData", "Local", "electron-builder", "Cache", "winCodeSign")
+  const cacheRoot = join(getElectronBuilderCacheRoot(), "winCodeSign")
   if (!existsSync(cacheRoot)) return null
 
   const subdirs = readdirSync(cacheRoot, { withFileTypes: true })

@@ -6,6 +6,47 @@
 
 旧路径如 `F:\src\ryven_demo\多agents通信设计.md` 只代表早期材料来源，不应作为当前默认项目路径。
 
+## 2026-05-19 MCP Full-Control Update
+
+MCP is now the high-priority path for exposing framework-owned tools to
+Codex-backed AgentNodes. Treat it as a protocol adapter over the existing
+runtime/workspace/control-plane implementation, not as a new scheduler.
+
+Completed:
+
+1. One live blueprint run starts one local ASGI/uvicorn MCP runtime handle.
+2. The handle mounts `framework_ordinary` at `/ordinary/mcp` and
+   `framework_control` at `/control/mcp`.
+3. Ordinary MCP exposes Workspace tools, scoped `agent_context`,
+   `agent_dispatch`, and scoped `join_contribute`.
+4. Control MCP covers the public control plane: organization read,
+   top-agent context/start-session/ask/explain/utterances, run
+   validate/start/status/end, message batch/stage, control-side
+   `agent_dispatch`, join create/contribute, and read-only Workspace inspect.
+5. Ordinary `agent_dispatch` uses active token message context
+   (`outgoing_batch_id`, `required_outgoing_targets`) and does not scan the
+   message journal as the primary path.
+6. Framework skill/rule injection remains in place. MCP gives callable tools;
+   skill/rules still define the Agent behavior contract.
+7. Server-side gates enforce `ask`, `start`, `status`, `end`, `utterances`,
+   and debug-only `fixture`; the Codex `enabled_tools` list is not the only
+   permission boundary.
+8. MCP `runtime_end` now routes through the desktop live close callback when
+   available, so backend teardown and MCP token close happen together.
+9. The opt-in real Codex MCP smoke passes through the full
+   `DesktopBlueprintService` live path with planner -> reviewer dispatch.
+10. Codex stderr stream noise and large stdout/stderr transport payloads are
+    capped for TCP delivery while full diagnostics remain on disk.
+
+Next required work:
+
+1. Reproduce the original timeout-after-panel-message scenario with MCP
+   enabled and compare stream events, MCP calls, and runtime context refresh.
+2. Add negative auth/session/path-escape tests with the MCP dependency
+   installed in the active desktop runtime.
+3. Expose top-agent/operator control and utterance audit in GuLiCode UI without
+   giving ordinary Agents global control tools.
+
 短期推进范围只聚焦框架掌握 Agent 间通信和调度权：
 
 - Agent 提交意图；

@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-from .codex_bridge import codex_run, load_codex_runtime
+from .codex_bridge import compact_codex_result_for_transport, codex_run, load_codex_runtime
 from .codemaker_bridge import codemaker_run, load_codemaker_runtime
 
 log = logging.getLogger(__name__)
@@ -218,7 +218,7 @@ class CodexAdapter(CLIAdapter):
         status = "timeout" if result.get("timeout") else ("success" if ok else "error")
         payload = {
             "ok": ok,
-            "codex": result,
+            "codex": compact_codex_result_for_transport(result),
             "adapter": {
                 "cli_kind": self.cli_kind,
                 "agent_id": self.agent_id,

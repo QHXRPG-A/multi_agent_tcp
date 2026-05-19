@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 import os
@@ -18,6 +19,75 @@ log = logging.getLogger(__name__)
 
 DANGEROUS_CODEX_SANDBOX = "danger-full-access"
 AgentStreamCallback = Callable[[Dict[str, Any]], Awaitable[None]]
+CODEX_STDERR_STREAM_MAX_CHARS = 16 * 1024
+CODEX_STDERR_STREAM_TRUNCATED_NOTICE = (
+    "\n[codex stderr stream truncated; full stderr is available in diagnostics]\n"
+)
+CODEX_TRANSPORT_STDOUT_MAX_CHARS = 256 * 1024
+CODEX_TRANSPORT_STDERR_MAX_CHARS = 16 * 1024
+CODEX_TRANSPORT_TEXT_TRUNCATED_NOTICE = (
+    "\n[codex transport text truncated; full text is available in diagnostics]\n"
+)
+
+
+class _CodexStderrStreamLimiter:
+    """Limit noisy stderr live-stream chunks while preserving diagnostics."""
+
+    def __init__(
+        self,
+        *,
+        max_chars: int = CODEX_STDERR_STREAM_MAX_CHARS,
+        notice: str = CODEX_STDERR_STREAM_TRUNCATED_NOTICE,
+    ) -> None:
+        self.max_chars = max(0, int(max_chars))
+        self.notice = notice
+        self.emitted_chars = 0
+        self.truncated = False
+
+    def chunks(self, text: str) -> List[str]:
+        if not text:
+            return []
+        chunks: List[str] = []
+        remaining = self.max_chars - self.emitted_chars
+        emitted_from_text = 0
+        if remaining > 0:
+            chunk = text[:remaining]
+            if chunk:
+                chunks.append(chunk)
+                emitted_from_text = len(chunk)
+                self.emitted_chars += emitted_from_text
+        if len(text) > emitted_from_text and not self.truncated:
+            self.truncated = True
+            chunks.append(self.notice)
+        return chunks
+
+
+def _truncate_codex_transport_text(text: str, *, max_chars: int) -> tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars] + CODEX_TRANSPORT_TEXT_TRUNCATED_NOTICE, True
+
+
+def compact_codex_result_for_transport(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a broker-friendly Codex result while keeping diagnostics authoritative."""
+    compacted = dict(result)
+    limits = {
+        "stdout": CODEX_TRANSPORT_STDOUT_MAX_CHARS,
+        "stderr": CODEX_TRANSPORT_STDERR_MAX_CHARS,
+    }
+    for field, limit in limits.items():
+        value = compacted.get(field)
+        if not isinstance(value, str):
+            continue
+        truncated, did_truncate = _truncate_codex_transport_text(
+            value,
+            max_chars=max(0, int(limit)),
+        )
+        if did_truncate:
+            compacted[field] = truncated
+            compacted[f"{field}_truncated"] = True
+            compacted[f"{field}_original_chars"] = len(value)
+    return compacted
 
 
 def _as_bool(value: Any, *, default: bool) -> bool:
@@ -207,6 +277,7 @@ def _parse_codex_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "extra_args": _parse_str_list(raw.get("extra_args"), field_name="extra_args"),
         "image_paths": _parse_str_list(raw.get("image_paths"), field_name="image_paths"),
         "codex_home": raw.get("codex_home"),
+        "diagnostics_dir": raw.get("diagnostics_dir"),
         "prompt_preamble": raw.get("prompt_preamble"),
         "execution_context": dict(execution_context or {}),
         "prompt_execution_context": dict(prompt_execution_context or {}),
@@ -455,17 +526,29 @@ def codex_jsonl_event_to_agent_stream_events(
                 )
                 events.append(data)
         elif "tool" in item_type or item_type in {"command_execution", "function_call"}:
-            data = base("tool.completed" if event.get("type") == "item.completed" else "tool.started")
+            item_status = str(item.get("status") or "").strip()
+            completed = event.get("type") == "item.completed" or item_status in {
+                "completed",
+                "failed",
+                "cancelled",
+            }
+            data = base("tool.completed" if completed else "tool.started")
+            tool_name = item.get("name") or item.get("tool_name") or item.get("tool") or item_type
             data.update(
                 {
                     "part_id": item_id,
                     "part_type": "tool",
-                    "tool_name": item.get("name") or item.get("tool_name") or item_type,
+                    "tool_name": tool_name,
+                    "tool_kind": item_type,
                     "tool_input": item.get("arguments") or item.get("input") or item.get("command"),
-                    "tool_output": item.get("output") or item.get("result"),
-                    "status": "completed" if event.get("type") == "item.completed" else "running",
+                    "tool_output": item.get("output") or item.get("result") or item.get("structured_content"),
+                    "status": item_status or ("completed" if completed else "running"),
                 }
             )
+            if item.get("server") is not None:
+                data["tool_server"] = item.get("server")
+            if item.get("error") is not None:
+                data["tool_error"] = item.get("error")
             events.append(data)
 
     message = event.get("message")
@@ -490,6 +573,58 @@ def codex_jsonl_event_to_agent_stream_events(
         data.update({"status": "completed"})
         events.append(data)
     return events
+
+
+def _write_codex_diagnostics(
+    *,
+    codex_cfg: Dict[str, Any],
+    cmd: List[str],
+    cwd: Path,
+    stdout: str,
+    stderr: str,
+    final_text: str,
+    returncode: int,
+    timeout: bool,
+    elapsed_sec: float,
+) -> Dict[str, str]:
+    raw_dir = codex_cfg.get("diagnostics_dir")
+    diagnostics_dir: Optional[Path] = None
+    if raw_dir:
+        diagnostics_dir = Path(str(raw_dir)).expanduser()
+    elif codex_cfg.get("codex_home"):
+        diagnostics_dir = Path(str(codex_cfg["codex_home"])).expanduser() / "diagnostics"
+    if diagnostics_dir is None:
+        return {}
+    if not diagnostics_dir.is_absolute():
+        diagnostics_dir = cwd / diagnostics_dir
+    diagnostics_dir = diagnostics_dir.resolve()
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"codex_exec_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    paths = {
+        "meta": diagnostics_dir / f"{stem}.json",
+        "stdout": diagnostics_dir / f"{stem}.stdout.jsonl",
+        "stderr": diagnostics_dir / f"{stem}.stderr.log",
+        "final_text": diagnostics_dir / f"{stem}.final.md",
+    }
+    paths["stdout"].write_text(stdout, encoding="utf-8")
+    paths["stderr"].write_text(stderr, encoding="utf-8")
+    paths["final_text"].write_text(final_text, encoding="utf-8")
+    meta = {
+        "cwd": str(cwd),
+        "command": cmd,
+        "returncode": int(returncode),
+        "timeout": bool(timeout),
+        "elapsed_sec": float(elapsed_sec),
+        "stdout_path": str(paths["stdout"]),
+        "stderr_path": str(paths["stderr"]),
+        "final_text_path": str(paths["final_text"]),
+        "final_text_chars": len(final_text),
+        "stdout_chars": len(stdout),
+        "stderr_chars": len(stderr),
+        "event_count": len(_parse_jsonl(stdout)),
+    }
+    paths["meta"].write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {key: str(value) for key, value in paths.items()}
 
 
 def extract_codex_final_text(stdout: str) -> str:
@@ -574,10 +709,26 @@ async def codex_run(
 
     stdout_parts: List[str] = []
     stderr_parts: List[str] = []
+    stderr_stream = _CodexStderrStreamLimiter()
 
     async def _emit(event: Dict[str, Any]) -> None:
         if stream_callback is not None:
             await stream_callback(event)
+
+    async def _emit_stderr_delta(text_delta: str) -> None:
+        for chunk in stderr_stream.chunks(text_delta):
+            await _emit(
+                {
+                    **dict(stream_context or {}),
+                    "kind": "part.delta",
+                    "part_id": "stderr",
+                    "part_type": "stderr",
+                    "field": "text",
+                    "delta": chunk,
+                    "text": chunk,
+                    "status": "running",
+                }
+            )
 
     async def _write_stdin() -> None:
         if proc.stdin is None:
@@ -590,51 +741,65 @@ async def codex_run(
         except (AttributeError, BrokenPipeError, ConnectionError):
             pass
 
+    async def _handle_stdout_line(line: str) -> None:
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            return
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict):
+            return
+        for stream_event in codex_jsonl_event_to_agent_stream_events(
+            event,
+            stream_context=stream_context,
+        ):
+            await _emit(stream_event)
+
     async def _read_stdout() -> None:
         if proc.stdout is None:
             return
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        pending = ""
         while True:
-            chunk = await proc.stdout.readline()
+            chunk = await proc.stdout.read(65536)
             if not chunk:
                 break
-            line = chunk.decode("utf-8", errors="replace")
-            stdout_parts.append(line)
-            stripped = line.strip()
-            if not stripped.startswith("{"):
-                continue
-            try:
-                event = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(event, dict):
-                continue
-            for stream_event in codex_jsonl_event_to_agent_stream_events(
-                event,
-                stream_context=stream_context,
-            ):
-                await _emit(stream_event)
+            text_chunk = decoder.decode(chunk)
+            stdout_parts.append(text_chunk)
+            pending += text_chunk
+            while True:
+                newline = pending.find("\n")
+                if newline < 0:
+                    break
+                line = pending[:newline]
+                pending = pending[newline + 1 :]
+                await _handle_stdout_line(line)
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            stdout_parts.append(tail)
+            pending += tail
+        if pending.strip():
+            await _handle_stdout_line(pending)
 
     async def _read_stderr() -> None:
         if proc.stderr is None:
             return
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         while True:
-            chunk = await proc.stderr.readline()
+            chunk = await proc.stderr.read(65536)
             if not chunk:
                 break
-            line = chunk.decode("utf-8", errors="replace")
+            line = decoder.decode(chunk)
+            if not line:
+                continue
             stderr_parts.append(line)
-            await _emit(
-                {
-                    **dict(stream_context or {}),
-                    "kind": "part.delta",
-                    "part_id": "stderr",
-                    "part_type": "stderr",
-                    "field": "text",
-                    "delta": line,
-                    "text": line,
-                    "status": "running",
-                }
-            )
+            await _emit_stderr_delta(line)
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            stderr_parts.append(tail)
+            await _emit_stderr_delta(tail)
 
     tasks = [
         asyncio.create_task(_write_stdin()),
@@ -673,6 +838,22 @@ async def codex_run(
             last_message = ""
         stdout = "".join(stdout_parts)
         stderr = "".join(stderr_parts)
+        final_text = last_message or extract_codex_final_text(stdout)
+        diagnostics = _write_codex_diagnostics(
+            codex_cfg=codex_cfg,
+            cmd=cmd,
+            cwd=cwd,
+            stdout=stdout,
+            stderr="\n".join(
+                part
+                for part in (stderr, f"codex exec timeout after {timeout}s")
+                if part
+            ),
+            final_text=final_text,
+            returncode=-9,
+            timeout=True,
+            elapsed_sec=time.monotonic() - t0,
+        )
         return {
             "returncode": -9,
             "stdout": stdout,
@@ -684,8 +865,9 @@ async def codex_run(
             "timeout": True,
             "elapsed_sec": time.monotonic() - t0,
             "last_message": last_message,
-            "final_text": last_message or extract_codex_final_text(stdout),
+            "final_text": final_text,
             "events": _parse_jsonl(stdout),
+            "diagnostics": diagnostics,
         }
 
     rc = proc.returncode if proc.returncode is not None else -1
@@ -702,6 +884,17 @@ async def codex_run(
             except OSError:
                 pass
     final_text = last_message or extract_codex_final_text(stdout)
+    diagnostics = _write_codex_diagnostics(
+        codex_cfg=codex_cfg,
+        cmd=cmd,
+        cwd=cwd,
+        stdout=stdout,
+        stderr=stderr,
+        final_text=final_text,
+        returncode=rc,
+        timeout=False,
+        elapsed_sec=elapsed,
+    )
 
     log.info(
         "[codex] subprocess EXIT pid=%s returncode=%s elapsed_sec=%.2f stdout_chars=%s stderr_chars=%s final_chars=%s",
@@ -721,4 +914,5 @@ async def codex_run(
         "last_message": last_message,
         "final_text": final_text,
         "events": _parse_jsonl(stdout),
+        "diagnostics": diagnostics,
     }

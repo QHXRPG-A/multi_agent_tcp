@@ -5,7 +5,7 @@ import { ServerConnection } from "./server"
 
 type PickerPaths = string | string[] | null
 type OpenDirectoryPickerOptions = { title?: string; multiple?: boolean; defaultPath?: string }
-type OpenFilePickerOptions = { title?: string; multiple?: boolean; accept?: string[]; extensions?: string[] }
+type OpenFilePickerOptions = { title?: string; multiple?: boolean; defaultPath?: string; accept?: string[]; extensions?: string[] }
 type SaveFilePickerOptions = { title?: string; defaultPath?: string }
 type UpdateInfo = { updateAvailable: boolean; version?: string }
 
@@ -86,6 +86,12 @@ export type Platform = {
 
   /** Blueprint model candidates for the selected CLI adapter (desktop only) */
   listBlueprintModels?(cliKind: string): Promise<string[]>
+
+  /** Detect a Python interpreter usable by the desktop blueprint runtime (desktop only) */
+  detectBlueprintPython?(projectDir?: string, pythonCommand?: string): Promise<Record<string, unknown>>
+
+  /** Configure the desktop blueprint Python runtime before project persistence/start calls (desktop only) */
+  configureBlueprintRuntime?(pythonPath?: string): Promise<Record<string, unknown>>
 
   /** Project blueprint document list (desktop only) */
   listBlueprints?(projectDir: string): Promise<BlueprintSummary[]>

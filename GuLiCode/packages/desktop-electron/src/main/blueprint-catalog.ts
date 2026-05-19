@@ -14,25 +14,27 @@ const MODEL_COMMAND_TIMEOUT_MS = 15_000
 const WINDOWS_SCRIPT_EXTENSIONS = new Set([".bat", ".cmd"])
 
 export async function listBlueprintDirectories(root: string): Promise<BlueprintCatalogItem[]> {
-  if (!root.trim()) return []
-  const entries = await readdir(root, { withFileTypes: true })
+  const rootDir = root.trim()
+  if (!rootDir) return []
+  const entries = await readCatalogDirectory(rootDir)
   return entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => ({
-      value: path.join(root, entry.name),
+      value: path.join(rootDir, entry.name),
       label: entry.name,
     }))
     .sort(compareCatalogItems)
 }
 
 export async function listBlueprintSkills(dir: string): Promise<BlueprintCatalogItem[]> {
-  if (!dir.trim()) return []
-  const [entries, manifest] = await Promise.all([readdir(dir, { withFileTypes: true }), readSkillManifest(dir)])
+  const skillDir = dir.trim()
+  if (!skillDir) return []
+  const [entries, manifest] = await Promise.all([readCatalogDirectory(skillDir), readSkillManifest(skillDir)])
   const skills: Array<BlueprintCatalogItem | undefined> = await Promise.all(
     entries
       .filter((entry) => entry.isDirectory())
       .map(async (entry) => {
-        const skillPath = path.join(dir, entry.name, "SKILL.md")
+        const skillPath = path.join(skillDir, entry.name, "SKILL.md")
         const source = await readFile(skillPath, "utf8").catch(() => undefined)
         if (!source) return undefined
         const metadata = parseSkillMetadata(source)
@@ -47,8 +49,9 @@ export async function listBlueprintSkills(dir: string): Promise<BlueprintCatalog
 }
 
 export async function listBlueprintRules(dir: string): Promise<BlueprintCatalogItem[]> {
-  if (!dir.trim()) return []
-  const entries = await readdir(dir, { withFileTypes: true })
+  const ruleDir = dir.trim()
+  if (!ruleDir) return []
+  const entries = await readCatalogDirectory(ruleDir)
   return entries
     .filter((entry) => entry.isFile() && RULE_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
     .map((entry) => ({
@@ -73,6 +76,23 @@ export async function listBlueprintModels(cliKind: string): Promise<string[]> {
     return []
   }
   throw new Error(`Unsupported CLI kind: ${cliKind}`)
+}
+
+async function readCatalogDirectory(dir: string) {
+  try {
+    return await readdir(dir, { withFileTypes: true })
+  } catch (error) {
+    if (isMissingDirectoryError(error)) return []
+    throw error
+  }
+}
+
+function isMissingDirectoryError(error: unknown) {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR")
+  )
 }
 
 export function parseCodemakerModels(output: string): string[] {

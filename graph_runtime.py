@@ -35,10 +35,10 @@ _VALID_EXECUTION_MODES = {"blocking", "nonblocking"}
 _VALID_ROUTE_KINDS = {"sequence", "parallel", "parallel_reduce"}
 _VALID_SKILL_SELECTION_MODES = {"none", "all", "selected", "upstream"}
 _VALID_BLUEPRINT_TERMINAL_KINDS = {"start", "end"}
-_VALID_TOP_AGENT_RUN_PERMISSIONS = {"ask", "start", "status", "end", "utterances"}
+_VALID_TOP_AGENT_RUN_PERMISSIONS = {"ask", "start", "status", "end", "utterances", "fixture"}
 _VALID_JOIN_POLICIES = {"wait-all", "wait-any", "quorum"}
 _VALID_RUN_END_ACTIONS = {"complete", "cancel", "fail", "pause", "archive_only"}
-_AGENT_CAN_ACCEPT_STATES = {"idle", "queued"}
+_AGENT_CAN_ACCEPT_STATES = {"idle", "queued", "timed_out"}
 _VALID_AGENT_RUNTIME_STATES = {
     "created",
     "starting",
@@ -83,12 +83,12 @@ def _reply_failure_reason(reply: Any) -> Optional[str]:
         payload = body.get(key)
         if not isinstance(payload, dict):
             continue
+        if payload.get("timeout"):
+            return f"{key} timed out"
         for nested_key in ("stderr", "final_text", "last_message", "stdout"):
             value = payload.get(nested_key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-        if payload.get("timeout"):
-            return f"{key} timed out"
         return f"{key} returned non-zero exit status"
     return "worker returned ok=false"
 
@@ -1559,6 +1559,7 @@ class GraphRuntime:
         private_context_run: Any = None,
         private_context_rpc_server: Any = None,
         skill_space: Any = None,
+        private_context_mcp_provider: Any = None,
         tick_interval_sec: float = 0.5,
         message_journal_path: Optional[Path] = None,
     ) -> None:
@@ -1571,6 +1572,7 @@ class GraphRuntime:
         self.private_context_run = private_context_run
         self.private_context_rpc_server = private_context_rpc_server
         self.skill_space = skill_space
+        self.private_context_mcp_provider = private_context_mcp_provider
         self.tick_interval_sec = float(tick_interval_sec)
         if message_journal_path is not None:
             self.message_journal_path: Optional[Path] = Path(message_journal_path).expanduser()
@@ -1608,6 +1610,7 @@ class GraphRuntime:
         self._agent_stream_seq = 0
         self.agent_stream_run_id: Optional[str] = None
         self.agent_stream_event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+        self.agent_message_context_callback: Optional[Callable[[Dict[str, Any]], Any]] = None
         self._tick_task: Optional[asyncio.Task[None]] = None
         self._last_tick_at: Optional[float] = None
         self._run_status: RunLifecycleStatus = "created"
@@ -1664,6 +1667,7 @@ class GraphRuntime:
             run=self.private_context_run,
             rpc_server=self.private_context_rpc_server,
             skill_space=self.skill_space,
+            mcp_context_provider=self.private_context_mcp_provider,
         )
         self._launch_nodes[node.node_id] = launch_node
         return launch_node
@@ -3628,6 +3632,23 @@ class GraphRuntime:
                 "message_id": message_id,
             }
             effective_timeout = timeout_sec if timeout_sec is not None else node.timeout_sec
+            callback = self.agent_message_context_callback
+            if callback is not None:
+                try:
+                    result = callback(
+                        {
+                            "run_id": self.agent_stream_run_id,
+                            "node_id": node.node_id,
+                            "agent_id": inst.agent_id,
+                            "message_id": message_id,
+                            "body": body,
+                            "timeout_sec": effective_timeout,
+                        }
+                    )
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    log.exception("agent message context callback failed")
             try:
                 reply = await self.cluster.run_single(
                     inst.agent_id,

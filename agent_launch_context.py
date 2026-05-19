@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from .codex_bridge import validate_codex_launch_safety
 from .graph_runtime import AgentNode
@@ -130,13 +130,14 @@ def framework_agent_rules() -> str:
             "",
             "- Understand the three workspace zones before acting: project directory is the authoritative code source/final target, private checkout is your personal workbench, temporary shared workspace is for collaboration records.",
             "- Fetch or checkout only task-relevant code into your private checkout before editing.",
-            "- Submit code changes from the private checkout through the Workspace API submit command.",
-            "- Publish reports, artifacts, summaries, file/version references, and changeset ids through the Workspace API.",
+            "- Prefer framework MCP tools when they are configured in Codex. Use the Workspace API CLI only as a fallback or debugging path.",
+            "- Submit code changes from the private checkout through `workspace_submit` or the Workspace API submit command.",
+            "- Publish reports, artifacts, summaries, file/version references, and changeset ids through `workspace_publish` / `workspace_publish_file` or the Workspace API.",
             "- If a direct project/shared write is denied by the sandbox, treat that as boundary enforcement and continue through checkout/submit/publish instead of stopping.",
             "- Communicate with other AgentNodes through framework messages and shared references, not by copying project source trees into shared space.",
             "- Your natural-language worker reply is a framework-private utterance record; it is not delivered to other AgentNodes.",
-            "- To provide information to another AgentNode, use the injected `agent.dispatch` interface for the current batch.",
-            "- Sending an empty string `\"\"` or numeric `0` through `agent.dispatch` means this target has no task and should not receive a downstream message.",
+            "- To provide information to another AgentNode, use `agent_dispatch` for the current batch.",
+            "- Sending an empty string `\"\"` or numeric `0` through `agent_dispatch` means this target has no task and should not receive a downstream message.",
             "- To provide durable results to the framework, use Workspace API submit/publish or an assigned structured framework tool.",
             "- Do not request or depend on top-agent-only utterance inspection APIs.",
             "- Framework rules and skills are materialized once when your private worker context is prepared; per-message updates arrive only through `framework_context`.",
@@ -155,24 +156,28 @@ def framework_agent_skill() -> str:
             "# Framework Agent Runtime",
             "",
             "Use the injected `framework_context` for your current message envelope, "
-            "including `outgoing_batch_id`, required downstream targets, and `agent.dispatch` usage.",
+            "including `outgoing_batch_id`, required downstream targets, and `agent_dispatch` usage.",
             "The framework runtime skill is stable for the worker context; per-message state changes are provided through `framework_context`.",
+            "",
+            "If Codex lists a framework MCP server such as `framework_ordinary`, use those MCP tools first. "
+            "They are the preferred interface for checkout/status/diff/submit/sync, publish/read/list/archive access, and downstream dispatch. "
+            "The Workspace API CLI remains available as a fallback and for debugging.",
             "",
             "Your final CLI reply is only a minimal framework-private utterance record "
             "containing who spoke, what was said, time, and task/message identity. "
             "It is not a communication channel to other AgentNodes and is not proof of submitted work.",
             "",
             "For code changes, edit the private checkout in the current working directory, "
-            "fetching only task-relevant project files with the Workspace API checkout command, "
-            "inspect with Workspace API status or diff, "
-            "then submit through the Workspace API submit command.",
+            "fetching only task-relevant project files with `workspace_checkout` or the Workspace API checkout command, "
+            "inspect with `workspace_status` / `workspace_diff` or Workspace API status/diff, "
+            "then submit through `workspace_submit` or the Workspace API submit command.",
             "If a direct write outside the private checkout is denied by sandbox policy, "
             "recover by using the Workspace API flow rather than treating the denial as completed work.",
             "",
-            "For reports and artifacts, publish through the Workspace API command "
+            "For reports and artifacts, publish through `workspace_publish` / `workspace_publish_file` or the Workspace API command "
             "as shared run context. Use summaries, file paths, versions, and changeset ids when another AgentNode needs code context.",
             "",
-            "For downstream messages, use `python -m multi_agent_tcp runtime agent-dispatch "
+            "For downstream messages, prefer the `agent_dispatch` MCP tool. As fallback, use `python -m multi_agent_tcp runtime agent-dispatch "
             "--source-node-id <self> --target-node-id <target> --batch-id <outgoing_batch_id> "
             "--body-json '{...}'`. The target must be listed in the current message's "
             "`framework_context.message_envelope.required_outgoing_targets`.",
@@ -334,7 +339,82 @@ def _build_prompt_execution_context(execution_context: Dict[str, Any]) -> Dict[s
     if workspace_scopes is not None:
         prompt_context["workspace_scopes"] = workspace_scopes
 
+    mcp = execution_context.get("mcp")
+    if isinstance(mcp, dict):
+        prompt_mcp = {
+            key: mcp[key]
+            for key in ("enabled", "server_kind", "server_name", "tools")
+            if key in mcp
+        }
+        if prompt_mcp:
+            prompt_context["mcp"] = prompt_mcp
+
     return prompt_context
+
+
+def _is_toml_bare_key(value: str) -> bool:
+    return bool(value) and all(ch.isascii() and (ch.isalnum() or ch in {"_", "-"}) for ch in value)
+
+
+def _remove_toml_table_block(text: str, table_name: str) -> str:
+    header = f"[mcp_servers.{table_name}]"
+    nested_prefix = f"[mcp_servers.{table_name}."
+    lines = text.splitlines()
+    output: list[str] = []
+    skipping = False
+    for line in lines:
+        stripped = line.strip()
+        if skipping and stripped.startswith("[") and stripped.endswith("]"):
+            skipping = stripped == header or stripped.startswith(nested_prefix)
+            if skipping:
+                continue
+        elif stripped == header or stripped.startswith(nested_prefix):
+            skipping = True
+            continue
+        if not skipping:
+            output.append(line)
+    return "\n".join(output).rstrip() + ("\n" if output else "")
+
+
+def write_private_codex_mcp_config(
+    codex_home: Path,
+    *,
+    server_name: str,
+    url: str,
+    bearer_token_env_var: str,
+    tools: Optional[Sequence[str]] = None,
+    tool_approval_mode: str = "approve",
+) -> None:
+    server_key = str(server_name)
+    if not _is_toml_bare_key(server_key):
+        raise ValueError(f"Codex MCP server name is not a TOML bare key: {server_key!r}")
+    tool_names = [str(item) for item in (tools or [])]
+    for tool in tool_names:
+        if not _is_toml_bare_key(tool):
+            raise ValueError(f"Codex MCP tool name is not a TOML bare key: {tool!r}")
+    config_path = codex_home / "config.toml"
+    existing = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    existing = _remove_toml_table_block(existing, server_key)
+    block_lines = [
+        f"[mcp_servers.{server_key}]",
+        "enabled = true",
+        f"url = {json.dumps(str(url))}",
+        f"bearer_token_env_var = {json.dumps(str(bearer_token_env_var))}",
+    ]
+    if tool_names:
+        block_lines.append(f"enabled_tools = {json.dumps(tool_names)}")
+    approval = str(tool_approval_mode or "").strip()
+    if approval and tool_names:
+        for tool in tool_names:
+            block_lines.extend(
+                [
+                    "",
+                    f"[mcp_servers.{server_key}.tools.{tool}]",
+                    f"approval_mode = {json.dumps(approval)}",
+                ]
+            )
+    block = "\n".join([*block_lines, ""])
+    _write_text_no_bom(config_path, f"{existing.rstrip()}\n\n{block}" if existing.strip() else block)
 
 
 def build_private_agents_md(
@@ -379,6 +459,7 @@ def materialize_private_agent_context(
     run: RunWorkspace,
     rpc_server: WorkspaceRPCServer,
     skill_space: Optional[SkillSpace] = None,
+    mcp_context_provider: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
 ) -> AgentNode:
     """Return an AgentNode rewritten to a private cwd/CODEX_HOME context."""
 
@@ -388,6 +469,23 @@ def materialize_private_agent_context(
     checkout = manager.checkout_agent(run, node.runtime_agent_id, write_scope=node.write_scope)
     codex_home = private_dir / "codex_home"
     initialize_private_codex_home(codex_home)
+    mcp_context: Optional[Dict[str, Any]] = None
+    if mcp_context_provider is not None:
+        candidate = mcp_context_provider(
+            node=node,
+            private_dir=private_dir,
+            checkout_dir=checkout.checkout_dir,
+            codex_home=codex_home,
+        )
+        if candidate:
+            mcp_context = dict(candidate)
+            write_private_codex_mcp_config(
+                codex_home,
+                server_name=str(mcp_context["server_name"]),
+                url=str(mcp_context["url"]),
+                bearer_token_env_var=str(mcp_context["bearer_token_env_var"]),
+                tools=[str(item) for item in mcp_context.get("tools", [])],
+            )
 
     skill_catalog = materialize_codex_skill_selection(
         node,
@@ -442,6 +540,7 @@ def materialize_private_agent_context(
             protected_readonly_roots=[project_context],
         )
         adapter_options.setdefault("codex_home", str(codex_home))
+        adapter_options.setdefault("diagnostics_dir", str(private_dir / "logs" / "codex"))
         adapter_options.setdefault("skip_git_repo_check", True)
 
     existing = adapter_options.get("prompt_preamble")
@@ -478,12 +577,21 @@ def materialize_private_agent_context(
         "rule_catalog": rule_catalog,
     }
     execution_context["workspace_scopes"] = ["run"]
+    if mcp_context is not None:
+        execution_context["mcp"] = {
+            "enabled": True,
+            "server_kind": str(mcp_context.get("server_kind", "")),
+            "server_name": str(mcp_context.get("server_name", "")),
+            "tools": [str(item) for item in mcp_context.get("tools", [])],
+        }
     adapter_options["execution_context"] = execution_context
     adapter_options["prompt_execution_context"] = _build_prompt_execution_context(execution_context)
     data["adapter_options"] = adapter_options
 
     extra_env = {str(k): str(v) for k, v in dict(data.get("extra_env", {})).items()}
     extra_env[WORKSPACE_API_CONTEXT_ENV] = str(api_context_path)
+    if mcp_context is not None:
+        extra_env[str(mcp_context["bearer_token_env_var"])] = str(mcp_context["bearer_token"])
     package_parent = str(Path(__file__).resolve().parent.parent)
     existing_pythonpath = extra_env.get("PYTHONPATH") or os.environ.get("PYTHONPATH")
     extra_env["PYTHONPATH"] = (

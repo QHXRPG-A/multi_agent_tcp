@@ -441,6 +441,56 @@ def _unified_diff(base_file: Path, new_file: Path, rel_path: str) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def _changed_line_regions(base_lines: List[str], other_lines: List[str]) -> List[tuple[int, int, List[str]]]:
+    regions: List[tuple[int, int, List[str]]] = []
+    matcher = difflib.SequenceMatcher(a=base_lines, b=other_lines, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        regions.append((i1, i2, other_lines[j1:j2]))
+    return regions
+
+
+def _line_regions_overlap(left: tuple[int, int, List[str]], right: tuple[int, int, List[str]]) -> bool:
+    left_start, left_end, left_replacement = left
+    right_start, right_end, right_replacement = right
+    if left_start == right_start and left_end == right_end:
+        return left_replacement != right_replacement
+    if left_start == left_end:
+        return right_start <= left_start <= right_end
+    if right_start == right_end:
+        return left_start <= right_start <= left_end
+    return max(left_start, right_start) < min(left_end, right_end)
+
+
+def _merge_non_overlapping_line_changes(base: str, current: str, job: str) -> Optional[str]:
+    base_lines = base.splitlines(keepends=True)
+    current_changes = _changed_line_regions(base_lines, current.splitlines(keepends=True))
+    job_changes = _changed_line_regions(base_lines, job.splitlines(keepends=True))
+
+    for current_change in current_changes:
+        for job_change in job_changes:
+            if _line_regions_overlap(current_change, job_change):
+                return None
+
+    merged_changes: List[tuple[int, int, List[str]]] = []
+    for change in [*current_changes, *job_changes]:
+        if change not in merged_changes:
+            merged_changes.append(change)
+    merged_changes.sort(key=lambda item: (item[0], item[1]))
+
+    merged_lines: List[str] = []
+    cursor = 0
+    for start, end, replacement in merged_changes:
+        if start < cursor:
+            return None
+        merged_lines.extend(base_lines[cursor:start])
+        merged_lines.extend(replacement)
+        cursor = end
+    merged_lines.extend(base_lines[cursor:])
+    return "".join(merged_lines)
+
+
 def _merge_text(base: str, current: str, job: str) -> tuple[bool, str]:
     """Three-way text merge, using Dulwich when its merge backend is available."""
     if current == job:
@@ -449,6 +499,7 @@ def _merge_text(base: str, current: str, job: str) -> tuple[bool, str]:
         return True, job
     if job == base:
         return True, current
+    conflict_preview: Optional[str] = None
     if _DULWICH_AVAILABLE and Blob is not None and merge_blobs is not None:
         try:
             merged, had_conflicts = merge_blobs(
@@ -456,9 +507,17 @@ def _merge_text(base: str, current: str, job: str) -> tuple[bool, str]:
                 Blob.from_string(current.encode("utf-8")),
                 Blob.from_string(job.encode("utf-8")),
             )
-            return not had_conflicts, merged.decode("utf-8")
+            decoded = merged.decode("utf-8")
+            if not had_conflicts:
+                return True, decoded
+            conflict_preview = decoded
         except Exception:
             pass
+    merged = _merge_non_overlapping_line_changes(base, current, job)
+    if merged is not None:
+        return True, merged
+    if conflict_preview is not None:
+        return False, conflict_preview
     conflict = (
         "<<<<<<< CURRENT\n"
         f"{current}"

@@ -135,10 +135,10 @@ This round has already established the first usable desktop/UI baseline:
 - Rule catalog selections now store filenames relative to configured `rule_dir`
   instead of user-machine absolute paths. The desktop service resolves them
   from common config during start.
-- Known remaining backend regression: the combined
-  `test_desktop_blueprint_service.py test_workspace_manager.py` run still
-  fails `test_agent_checkout_dulwich_merge_accepts_non_overlapping_same_file_changes`
-  because a non-overlapping same-file checkout submit returns `conflict`.
+- Backend workspace merge regression is fixed: non-overlapping same-file
+  checkout submits are accepted even when Dulwich is unavailable or reports a
+  false conflict, and the combined
+  `test_desktop_blueprint_service.py test_workspace_manager.py` run passes.
 
 ## Immediate Handoff For The Next Agent
 
@@ -202,12 +202,90 @@ internal traversal logs.
 
 ## Active Priorities
 
+2026-05-19 MCP full-control acceptance update:
+
+MCP is accepted as the full run-scoped tool protocol for live blueprint Agents.
+The layer now covers the public `GraphRuntimeControlPlane` control surface with
+separate ordinary-Agent and top-agent/control tool boundaries. Ordinary Agents
+receive only scoped execution tools; Top Agent receives orchestration,
+observation, lifecycle, message, join, utterance, and read-only workspace
+inspection tools.
+
+The original ordinary-agent adoption blocker was Codex CLI non-interactive MCP
+approval: JSONL showed `mcp_tool_call` followed by
+`user cancelled MCP tool call` before requests reached the framework MCP
+server. Private `CODEX_HOME/config.toml` now writes `enabled_tools` and
+per-tool `approval_mode = "approve"` for the run-scoped framework MCP server.
+
+Closed in this pass:
+
+1. Runtime dependencies are declared and install through
+   `python -m pip install -e .`: `mcp`, `uvicorn`, `starlette`, and `httpx`.
+2. The run-scoped ordinary/control MCP servers start through the full live
+   framework path and expose the intended ordinary/control public tool sets.
+3. MCP tool calls are audited as `framework_mcp_tool_call` with safe argument
+   summaries, while Workspace RPC still audits `workspace_api_call`.
+4. Private `CODEX_HOME` MCP config is materialized with token env vars, and
+   prompt-facing context excludes bearer tokens, RPC tokens, private checkout
+   paths, and raw Codex home paths.
+5. Deterministic live MCP client tests cover checkout/status/diff/submit,
+   publish/read/list/archive, `agent_dispatch`, runtime control caveats, and
+   message journal flow.
+6. Skill/rule injection remains part of the private Agent context:
+   `framework-agent-runtime`, selected business skill/rule, and checkout/base
+   `AGENTS.md` are materialized.
+7. Real Codex MCP smoke now passes through the full framework backend live
+   flow; no fallback `python -m multi_agent_tcp.workspace_api` shell command is
+   used in that acceptance path.
+8. Control MCP parity is implemented for organization/top-agent context,
+   run validate/start/status/end, message batch/stage, control-side
+   `agent_dispatch`, join create/contribute, top-agent utterances, and
+   read-only workspace inspect tools.
+9. `runtime_end` now prefers the `DesktopBlueprintService` live close callback,
+   which tears down the backend path and closes MCP tokens.
+10. Real-smoke transport hardening is complete: live stderr stream noise is
+    capped and Codex stdout/stderr are compacted over TCP while full
+    diagnostics remain available on disk.
+
+Accepted real-Codex evidence:
+
+1. `MULTI_AGENT_TCP_RUN_REAL_CODEX_MCP=1 pytest -q test_desktop_blueprint_service.py::test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow -vv`
+   passed on 2026-05-19: `1 passed, 2 warnings in 135.84s`.
+2. Codex JSONL and runtime `agent_stream_events` showed real MCP tool invocation
+   rather than fallback `python -m multi_agent_tcp.workspace_api` CLI commands.
+3. `run.shared/manifest.json` contained `framework_mcp_tool_call` entries for
+   `workspace_checkout`, `workspace_status`, `workspace_diff`,
+   `workspace_submit`, `workspace_publish`, `workspace_publish_file`,
+   `workspace_read`, and `agent_dispatch`, plus corresponding
+   `workspace_api_call` entries where Workspace RPC is used.
+4. The project file remained at base content before submit and contained the
+   test marker exactly once after accepted `workspace_submit`.
+5. Final/report text proved framework skill, selected business skill, and
+   selected business rule were injected.
+6. Planner/reviewer flow proved cross-Agent information still moves through
+   `agent_dispatch`, the message journal, queues/ticks, and shared references;
+   natural language replies remain private utterances unless explicitly
+   dispatched.
+
+Remaining queue after MCP full-control acceptance:
+
+1. Reproduce the original Agent timeout/panel-message scenario with MCP
+   enabled; verify active message context refresh, Codex JSONL completion, and
+   WebSocket stream continuity after follow-up sends.
+2. Keep or extend the real direct-write boundary smoke in the MCP-enabled
+   private context, especially project/shared write denial versus private
+   checkout write allowance.
+3. Add negative HTTP/MCP coverage for missing bearer token and
+   `Mcp-Session-Id` reuse across ordinary/control endpoints.
+4. Add UI-facing top-agent/operator surfaces for MCP control status and
+   utterance audit without exposing those tools to ordinary Agents.
+
 2026-05-19 priority update:
 
-The desktop blueprint `live` private-context startup blocker is closed at code
-and unit-test level. The remaining first task is a manual GuLiCode desktop
-smoke pass using user-provided common config paths, followed by fixing the
-`DulwichWorkspaceManager` non-overlapping same-file merge regression.
+The desktop blueprint `live` private-context startup blocker and the
+`DulwichWorkspaceManager` non-overlapping same-file merge regression are closed
+at code and unit-test level. The remaining first task is a manual GuLiCode
+desktop smoke pass using user-provided common config paths.
 
 Secondary 2026-05-18 Codex/UI priority context:
 

@@ -122,6 +122,7 @@ const createPlatform = (): Platform => {
       const result = await window.api.openFilePicker({
         multiple: opts?.multiple ?? false,
         title: opts?.title ?? t("desktop.dialog.chooseFile"),
+        defaultPath: opts?.defaultPath,
         accept: opts?.accept ?? ACCEPTED_FILE_TYPES,
         extensions: opts?.extensions ?? ACCEPTED_FILE_EXTENSIONS,
       })
@@ -143,6 +144,10 @@ const createPlatform = (): Platform => {
     listBlueprintRules: (dir: string) => window.api.blueprintListRules(dir),
 
     listBlueprintModels: (cliKind: string) => window.api.blueprintListModels(cliKind),
+
+    detectBlueprintPython: (projectDir?: string, pythonCommand?: string) => window.api.blueprintDetectPython(projectDir, pythonCommand),
+
+    configureBlueprintRuntime: (pythonPath?: string) => window.api.blueprintConfigureRuntime(pythonPath),
 
     listBlueprints: (projectDir: string) => window.api.blueprintList(projectDir),
 

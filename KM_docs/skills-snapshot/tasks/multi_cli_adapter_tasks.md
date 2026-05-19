@@ -33,6 +33,37 @@ Current adapter priority override - 2026-05-18:
   project phase unless the user explicitly re-opens that track.
 - Keep CodeMaker as a compatibility/fallback adapter behind `CLIWorkerBackend`.
 
+## 2026-05-19 Status Update - Codex MCP Transport Hardening
+
+Completed:
+
+1. The opt-in real Codex MCP smoke now passes through the full
+   `DesktopBlueprintService` live path: planner uses `framework_ordinary`
+   Workspace and dispatch tools, reviewer reads the shared report through MCP,
+   and both worker replies complete in `GraphRuntime`.
+2. Codex stderr live-stream forwarding is capped. Full stderr is still written
+   to diagnostics, but noisy plugin/sandbox output no longer floods the broker
+   stream channel.
+3. Codex stdout/stderr fields are compacted before being returned over the TCP
+   worker reply. `final_text`, return code, timeout metadata, and diagnostics
+   paths remain available, while the large raw payload stays on disk.
+4. Windows real-smoke projects default to
+   `%LOCALAPPDATA%\multi_agent_tcp\real_codex_mcp` to avoid pytest temporary
+   directory ACL issues. Use `MULTI_AGENT_TCP_REAL_CODEX_MCP_ROOT` to override
+   and `MULTI_AGENT_TCP_KEEP_REAL_CODEX_MCP=1` to keep a successful smoke
+   project for inspection.
+
+Current validation:
+
+```powershell
+$env:MULTI_AGENT_TCP_RUN_REAL_CODEX_MCP = "1"
+python -m pytest -q test_desktop_blueprint_service.py::test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow -vv
+# 1 passed, 2 warnings in 135.84s
+
+python -m pytest -q test_agent_runtime.py -k "not real_codex_cli"
+# 77 passed, 3 deselected
+```
+
 ## 2026-05-19 Status Update - Desktop Private Context + Config Boundary
 
 Completed:
@@ -54,9 +85,6 @@ Remaining:
 
 1. Manual desktop live smoke with Codex Agent nodes and user-provided common
    config paths.
-2. Fix the `DulwichWorkspaceManager` non-overlapping same-file merge regression
-   currently exposed by
-   `test_agent_checkout_dulwich_merge_accepts_non_overlapping_same_file_changes`.
 
 1. 将已落地的 Codex / CodeMaker adapter 收敛到 `CLIWorkerBackend` 边界：
    - prompt contract

@@ -26,6 +26,7 @@ export type BlueprintSkillSelection = {
 }
 
 export type BlueprintConfig = {
+  python_path: string
   project_workdir: string
   skill_dir: string
   rule_dir: string
@@ -155,6 +156,7 @@ export type BlueprintDocument = {
 }
 
 export type BlueprintStartPlan = {
+  common_config: BlueprintConfig
   user_goal: string
   agent_descriptions: Record<string, string>
   start_nodes: string[]
@@ -184,6 +186,7 @@ const DEFAULT_VIEWPORT: BlueprintViewport = {
 const DEFAULT_AGENT_SCOPE = ["shared/reports/**"]
 const DEFAULT_MODEL = "netease-codemaker/kimi-k2.5"
 const DEFAULT_PROJECT_WORKDIR = "."
+export const DEFAULT_PYTHON_PATH = ""
 export const DEFAULT_SKILL_DIR = ""
 export const DEFAULT_RULE_DIR = ""
 export const CLI_KIND_OPTIONS: BlueprintCliKind[] = ["codemaker", "codex"]
@@ -201,6 +204,7 @@ export function defaultModelForCliKind(cliKind: string) {
 
 export function createDefaultBlueprintConfig(projectWorkdir = DEFAULT_PROJECT_WORKDIR): BlueprintConfig {
   return {
+    python_path: DEFAULT_PYTHON_PATH,
     project_workdir: projectWorkdir || DEFAULT_PROJECT_WORKDIR,
     skill_dir: DEFAULT_SKILL_DIR,
     rule_dir: DEFAULT_RULE_DIR,
@@ -477,7 +481,7 @@ export function addTestAgentNode(
     cli_kind: "codex",
     model: defaultModelForCliKind("codex"),
     command: defaultCommandForCliKind("codex"),
-    timeout_sec: 60,
+    timeout_sec: 300,
     adapter_options: { [TEST_AGENT_NODE_FLAG]: true, skip_git_repo_check: true },
   }
   next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
@@ -700,7 +704,7 @@ export function isAbsoluteBlueprintPath(value: string) {
 }
 
 export function requiredBlueprintConfigFields(draft: BlueprintDraft): BlueprintConfigField[] {
-  const fields: BlueprintConfigField[] = ["project_workdir"]
+  const fields: BlueprintConfigField[] = ["python_path", "project_workdir"]
   if (blueprintUsesSkillDirectory(draft)) fields.push("skill_dir")
   if (blueprintUsesRuleDirectory(draft)) fields.push("rule_dir")
   return fields
@@ -709,7 +713,7 @@ export function requiredBlueprintConfigFields(draft: BlueprintDraft): BlueprintC
 export function validateBlueprintConfigForStart(draft: BlueprintDraft): BlueprintConfigValidationIssue[] {
   const config = draft.config ?? createDefaultBlueprintConfig()
   const required = new Set(requiredBlueprintConfigFields(draft))
-  const fields: BlueprintConfigField[] = ["project_workdir", "skill_dir", "rule_dir"]
+  const fields: BlueprintConfigField[] = ["python_path", "project_workdir", "skill_dir", "rule_dir"]
   const issues: BlueprintConfigValidationIssue[] = []
 
   for (const field of fields) {
@@ -762,6 +766,7 @@ export function toRuntimeGraphDraft(draft: BlueprintDraft): RuntimeGraphDraft {
 }
 
 export function createBlueprintStartPlan(draft: BlueprintDraft): BlueprintStartPlan {
+  const common_config = normalizeBlueprintConfig(draft.config)
   const agentNodes = Object.entries(draft.graph.agent_nodes)
   const startNodes = deriveStartAgentNodes(draft)
   const agent_descriptions = Object.fromEntries(
@@ -788,6 +793,7 @@ export function createBlueprintStartPlan(draft: BlueprintDraft): BlueprintStartP
   )
 
   return {
+    common_config,
     user_goal: "Run the current GuLiCode blueprint.",
     agent_descriptions,
     start_nodes: startNodes,
@@ -872,6 +878,7 @@ function normalizeBlueprintConfig(config?: Partial<BlueprintConfig>): BlueprintC
   return {
     ...createDefaultBlueprintConfig(),
     ...(config ?? {}),
+    python_path: config?.python_path?.trim() ?? DEFAULT_PYTHON_PATH,
     project_workdir: config?.project_workdir?.trim() ?? DEFAULT_PROJECT_WORKDIR,
     skill_dir: config?.skill_dir?.trim() ?? DEFAULT_SKILL_DIR,
     rule_dir: config?.rule_dir?.trim() ?? DEFAULT_RULE_DIR,

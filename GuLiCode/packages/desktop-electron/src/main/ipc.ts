@@ -116,6 +116,12 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("blueprint-list-skills", (_event: IpcMainInvokeEvent, dir: string) => listBlueprintSkills(dir))
   ipcMain.handle("blueprint-list-rules", (_event: IpcMainInvokeEvent, dir: string) => listBlueprintRules(dir))
   ipcMain.handle("blueprint-list-models", (_event: IpcMainInvokeEvent, cliKind: string) => listBlueprintModels(cliKind))
+  ipcMain.handle("blueprint-detect-python", (_event: IpcMainInvokeEvent, projectDir?: string, pythonCommand?: string) =>
+    deps.blueprintRuntime.detectPython(projectDir, pythonCommand),
+  )
+  ipcMain.handle("blueprint-configure-runtime", (_event: IpcMainInvokeEvent, pythonPath?: string) =>
+    deps.blueprintRuntime.configure({ pythonCommand: pythonPath }),
+  )
   ipcMain.handle("blueprint-list", (_event: IpcMainInvokeEvent, projectDir: string) =>
     deps.blueprintRuntime.list(projectDir),
   )

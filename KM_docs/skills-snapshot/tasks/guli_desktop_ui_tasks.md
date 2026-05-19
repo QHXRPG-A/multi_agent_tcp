@@ -193,9 +193,9 @@ Do not treat the old Ryven/editor line as the current UI target.
   Agent long-press progress, right-click `信息面板`, move/resize, close/pin,
   non-pinned outside-click close, WebSocket transcript, and `default/top`
   queue sends.
-- [TODO] Fix the backend workspace regression where
+- [DONE] Fixed the backend workspace regression where
   `test_agent_checkout_dulwich_merge_accepts_non_overlapping_same_file_changes`
-  reports a conflict for non-overlapping same-file changes.
+  reported a conflict for non-overlapping same-file changes.
 - [TODO] Add top-agent/operator audit views such as utterance history without exposing them as ordinary-Agent message context.
 
 ### 4. Desktop shell hardening

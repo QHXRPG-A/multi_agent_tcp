@@ -34,6 +34,7 @@ const documentWithConfig = (projectDir: string) => ({
   ui: {
     ...document.ui,
     config: {
+      python_path: join(projectDir, "python.exe"),
       project_workdir: projectDir,
       skill_dir: "",
       rule_dir: "",
@@ -60,6 +61,46 @@ const plan = {
 describe("blueprint runtime bridge", () => {
   test("validates project directories before calling Python", async () => {
     expect(() => validateProjectDir("relative")).toThrow("absolute")
+  })
+
+  test("stores the user configured Python command", () => {
+    const runtime = new BlueprintRuntime()
+    try {
+      expect(runtime.configure({ pythonCommand: "C:\\Python\\python.exe" })).toEqual({
+        ok: true,
+        pythonCommand: "C:\\Python\\python.exe",
+      })
+      expect(runtime.configure({ pythonCommand: "" })).toEqual({
+        ok: true,
+        pythonCommand: null,
+      })
+    } finally {
+      runtime.close()
+    }
+  })
+
+  test("detects an absolute Python executable for common config autofill", () => {
+    const runtime = new BlueprintRuntime()
+    try {
+      const detected = runtime.detectPython()
+      expect(detected.ok).toBe(true)
+      expect(String(detected.pythonCommand).toLowerCase()).toContain("python")
+      expect(String(detected.source).length).toBeGreaterThan(0)
+    } finally {
+      runtime.close()
+    }
+  })
+
+  test("manual detection can ignore a stale configured Python command", () => {
+    const runtime = new BlueprintRuntime()
+    try {
+      runtime.configure({ pythonCommand: "Z:\\missing\\python.exe" })
+      const detected = runtime.detectPython(undefined, "")
+      expect(detected.ok).toBe(true)
+      expect(String(detected.pythonCommand).toLowerCase()).toContain("python")
+    } finally {
+      runtime.close()
+    }
   })
 
   test("round-trips documents through the desktop blueprint service", async () => {

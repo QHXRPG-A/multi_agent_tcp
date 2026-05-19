@@ -419,6 +419,61 @@ def test_agent_checkout_dulwich_merge_accepts_non_overlapping_same_file_changes(
     assert (run.integration_dir / "src" / "shared.txt").read_text(encoding="utf-8") == "ONE\ntwo\nTHREE\n"
 
 
+def test_agent_checkout_line_merge_accepts_non_overlapping_same_file_without_dulwich(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(workspace_manager, "_DULWICH_AVAILABLE", False)
+    monkeypatch.setattr(workspace_manager, "merge_blobs", None)
+    _write(tmp_path / "src" / "shared.txt", "one\ntwo\nthree\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-line-merge")
+    checkout_a = manager.checkout_agent(run, "agent-a", write_scope=["src/**"])
+    checkout_b = manager.checkout_agent(run, "agent-b", write_scope=["src/**"])
+
+    _write(checkout_a.checkout_dir / "src" / "shared.txt", "ONE\ntwo\nthree\n")
+    _write(checkout_b.checkout_dir / "src" / "shared.txt", "one\ntwo\nTHREE\n")
+
+    assert manager.submit_checkout(run, checkout_a).ok is True
+    result_b = manager.submit_checkout(run, checkout_b)
+
+    assert result_b.ok is True
+    assert result_b.status == "accepted"
+    assert (run.integration_dir / "src" / "shared.txt").read_text(encoding="utf-8") == "ONE\ntwo\nTHREE\n"
+
+
+def test_agent_checkout_line_merge_accepts_non_overlapping_same_file_after_false_dulwich_conflict(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    class FakeBlob:
+        @classmethod
+        def from_string(cls, data: bytes) -> bytes:
+            return data
+
+    def fake_merge_blobs(*args: Any, **kwargs: Any) -> tuple[bytes, bool]:
+        return b"<<<<<<< ours\n", True
+
+    monkeypatch.setattr(workspace_manager, "_DULWICH_AVAILABLE", True)
+    monkeypatch.setattr(workspace_manager, "Blob", FakeBlob)
+    monkeypatch.setattr(workspace_manager, "merge_blobs", fake_merge_blobs)
+    _write(tmp_path / "src" / "shared.txt", "one\ntwo\nthree\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-false-dulwich-conflict")
+    checkout_a = manager.checkout_agent(run, "agent-a", write_scope=["src/**"])
+    checkout_b = manager.checkout_agent(run, "agent-b", write_scope=["src/**"])
+
+    _write(checkout_a.checkout_dir / "src" / "shared.txt", "ONE\ntwo\nthree\n")
+    _write(checkout_b.checkout_dir / "src" / "shared.txt", "one\ntwo\nTHREE\n")
+
+    assert manager.submit_checkout(run, checkout_a).ok is True
+    result_b = manager.submit_checkout(run, checkout_b)
+
+    assert result_b.ok is True
+    assert result_b.status == "accepted"
+    assert (run.integration_dir / "src" / "shared.txt").read_text(encoding="utf-8") == "ONE\ntwo\nTHREE\n"
+
+
 def test_agent_checkout_sync_uses_latest_integration_as_base(tmp_path: Path) -> None:
     _write(tmp_path / "src" / "a.txt", "base\n")
     _write(tmp_path / "src" / "b.txt", "base\n")

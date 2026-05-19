@@ -40,12 +40,45 @@ More focused diagrams live in [`docs/diagrams/multi_agents_communication/`](docs
 - `CLIWorkerBackend` is not the center of the blueprint architecture. It is one execution backend used when a scheduled AgentNode needs to call a CLI worker through TCP.
 - In one-to-many dispatch, `stage_outgoing_message()` immediately returns `remaining_targets` to the caller after each `agent.dispatch`. Separately, `tick()` emits `AgentOutgoingTargetsReminder` only when the source Agent is idle/can accept messages and a staging batch still has missing targets. So the diagram concern about "should this wait for idle?" is a diagram wording issue, not a runtime bug: immediate return and idle reminder are two different feedback channels.
 
+## Run-Scoped MCP Layer
+
+Live blueprint runs can expose framework tools to Codex through a run-scoped
+MCP server. The desktop service starts one local ASGI/uvicorn MCP handle per
+live run with two tool boundaries:
+
+- `framework_ordinary`: for ordinary `AgentNode` execution. It exposes scoped
+  Workspace checkout/status/diff/submit/sync/publish/read/list/archive tools,
+  scoped `agent_context`, scoped `agent_dispatch`, and scoped
+  `join_contribute`.
+- `framework_control`: for the Top Agent/control path. It exposes organization
+  and top-agent context, run lifecycle, message batch/stage, control-side
+  dispatch, join create/contribute, utterance inspection, and read-only
+  Workspace inspection.
+
+Tool availability is also enforced server-side with permission gates. Top
+Agent does not receive Workspace write/submit/publish tools, and ordinary
+Agents do not receive global lifecycle, utterance, message-batch, or
+join-create tools.
+
+The full live Codex MCP smoke is opt-in because it launches the real Codex CLI
+and depends on local credentials/network/model availability:
+
+```powershell
+$env:MULTI_AGENT_TCP_RUN_REAL_CODEX_MCP = "1"
+python -m pytest -q test_desktop_blueprint_service.py::test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow -vv
+```
+
 ## Requirements
 
 - Python 3.10+
 - `merge3` Python package is recommended for Dulwich-powered three-way text merges in the workspace changeset flow (`python -m pip install merge3`).
+- MCP/live blueprint dependencies are declared in `pyproject.toml` and installed
+  by `python -m pip install -e .`: `mcp`, `uvicorn`, `starlette`, and `httpx`.
 - At least one supported agent CLI on `PATH`. Currently:
   - `codemaker` (non-interactive `codemaker run` with `--format json`) — fully supported via `codemaker_bridge.py`.
+  - `codex` (non-interactive `codex exec --json`) is the current primary live
+    Agent path, including private `CODEX_HOME`, Workspace API/MCP tools, and
+    real-smoke coverage.
   - Other CLIs require future adapter work in this repository.
 - Run with the **parent** of this folder on `PYTHONPATH`, or from a project that already imports `multi_agent_tcp` as a package.
 
@@ -79,4 +112,7 @@ See [`examples/HOWTO.txt`](examples/HOWTO.txt) for low-level setup and [`GUIDE_F
 | [`examples/HOWTO.txt`](examples/HOWTO.txt) | Low-level: `broker` / `agent` / `spawn` / orchestrate recipes / library API. |
 | [`KM_docs/skills-snapshot/`](KM_docs/skills-snapshot/) | Backup copy of the local `multi-agent-tcp` Codex skill snapshot. |
 | [`codemaker_cli.md`](codemaker_cli.md) | (Local-only, gitignored) CodeMaker CLI reference notes. |
+
+Latest focused MCP validation is tracked in
+[`KM_docs/skills-snapshot/archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md`](KM_docs/skills-snapshot/archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md).
 

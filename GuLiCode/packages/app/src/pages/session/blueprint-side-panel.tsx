@@ -43,6 +43,7 @@ import {
   setSelection,
   snapPosition,
   fromBlueprintDocument,
+  isAbsoluteBlueprintPath,
   toBlueprintDocument,
   toRuntimeGraphDraft,
   updateEdge,
@@ -51,6 +52,7 @@ import {
   type BlueprintAgentNode,
   type BlueprintCliKind,
   type BlueprintConfig,
+  type BlueprintConfigField,
   type BlueprintConfigValidationIssue,
   type BlueprintDraft,
   type BlueprintEdge,
@@ -192,6 +194,13 @@ type PersistenceState = {
   error?: string
 }
 
+type BlueprintHeaderStatusState = {
+  tone: "loading" | "saving" | "error"
+  title: string
+  label: string
+  detail: string
+}
+
 type RuntimePanelMode = "runtime" | "inspector"
 
 type BlueprintRuntimeState = {
@@ -298,6 +307,10 @@ const INSPECTOR_TIPS = {
   cwd: {
     what: "blueprint.tip.cwd.what",
     usage: "blueprint.tip.cwd.usage",
+  },
+  pythonPath: {
+    what: "blueprint.tip.pythonPath.what",
+    usage: "blueprint.tip.pythonPath.usage",
   },
   projectWorkdir: {
     what: "blueprint.tip.projectWorkdir.what",
@@ -483,6 +496,10 @@ export function BlueprintSidePanel() {
   const [connection, setConnection] = createSignal<ConnectionState>()
   const [agentPanelPress, setAgentPanelPress] = createSignal<AgentPanelPressState>()
   const [addMenuOpen, setAddMenuOpen] = createSignal(false)
+  const [globalConfigOpen, setGlobalConfigOpen] = createSignal(false)
+  const [configIssues, setConfigIssues] = createSignal<BlueprintConfigValidationIssue[]>([])
+  const [pythonDetecting, setPythonDetecting] = createSignal(false)
+  const [pythonDetectFailed, setPythonDetectFailed] = createSignal(false)
   const [catalog, setCatalog] = createSignal<CatalogState>({
     skillDir: "",
     ruleDir: "",
@@ -616,12 +633,45 @@ export function BlueprintSidePanel() {
   )
   const runtimeGraph = createMemo(() => toRuntimeGraphDraft(draft))
   const currentConfig = createMemo(() => ({
+    python_path: draft.config?.python_path ?? "",
     project_workdir: draft.config?.project_workdir ?? projectDirectory ?? ".",
     skill_dir: draft.config?.skill_dir ?? "",
     rule_dir: draft.config?.rule_dir ?? "",
   }))
+  const headerStatus = createMemo<BlueprintHeaderStatusState | undefined>(() => {
+    const state = persistence()
+    if (state.loading) {
+      const label = language.t("common.loading")
+      return {
+        tone: "loading",
+        title: language.t("blueprint.headerStatus.loadingTitle" as never),
+        label,
+        detail: language.t("blueprint.headerStatus.loadingDetail" as never),
+      }
+    }
+    if (state.saving) {
+      const label = language.t("common.save")
+      return {
+        tone: "saving",
+        title: language.t("blueprint.headerStatus.savingTitle" as never),
+        label,
+        detail: language.t("blueprint.headerStatus.savingDetail" as never),
+      }
+    }
+    if (state.error) {
+      return {
+        tone: "error",
+        title: language.t("blueprint.headerStatus.errorTitle" as never),
+        label: state.error,
+        detail: state.error,
+      }
+    }
+    return undefined
+  })
 
   const updateConfigField = <K extends keyof BlueprintConfig>(field: K, value: BlueprintConfig[K]) => {
+    setConfigIssues((issues) => issues.filter((issue) => issue.field !== field))
+    if (field === "python_path") setPythonDetectFailed(false)
     setDraft("config", field, value as never)
   }
 
@@ -671,6 +721,104 @@ export function BlueprintSidePanel() {
     return items ?? []
   }
 
+  let attemptedCommonConfigBackfill = false
+  const joinProjectPath = (root: string, child: string) => {
+    const separator = root.includes("\\") ? "\\" : "/"
+    return `${root.replace(/[\\/]+$/, "")}${separator}${child}`
+  }
+  const blankCommonPath = (value?: string) => {
+    const trimmed = value?.trim() ?? ""
+    return !trimmed || trimmed === "."
+  }
+  const samePath = (left?: string, right?: string) =>
+    (left ?? "").trim().replace(/[\\/]+$/, "").toLowerCase() === (right ?? "").trim().replace(/[\\/]+$/, "").toLowerCase()
+
+  const detectBlueprintPythonPath = async (projectRoot?: string, pythonCommand?: string) => {
+    const root = projectRoot?.trim()
+    const result = await platform.detectBlueprintPython?.(root && isAbsoluteBlueprintPath(root) ? root : undefined, pythonCommand)
+    const pythonPath = typeof result?.pythonCommand === "string" ? result.pythonCommand.trim() : ""
+    return pythonPath && isAbsoluteBlueprintPath(pythonPath) ? pythonPath : ""
+  }
+
+  const draftSnapshotWithPythonPath = (pythonPath: string): BlueprintDraft => ({
+    ...draft,
+    config: {
+      ...draft.config,
+      python_path: pythonPath,
+    },
+  })
+
+  const ensureDetectedPythonPath = async () => {
+    const currentPython = draft.config.python_path.trim()
+    if (currentPython) return draft
+    const projectRoot = draft.config.project_workdir.trim() || projectDirectory.trim()
+    const detectedPython = await detectBlueprintPythonPath(projectRoot, currentPython).catch(() => "")
+    if (!detectedPython) return draft
+    setDraft("config", "python_path", detectedPython)
+    setConfigIssues((issues) => issues.filter((issue) => issue.field !== "python_path"))
+    setPythonDetectFailed(false)
+    return draftSnapshotWithPythonPath(detectedPython)
+  }
+
+  const detectAndApplyPythonPath = async () => {
+    if (pythonDetecting()) return
+    setPythonDetecting(true)
+    setPythonDetectFailed(false)
+    try {
+      const currentPython = draft.config.python_path.trim()
+      const projectRoot = draft.config.project_workdir.trim() || projectDirectory.trim()
+      const detectedPython = await detectBlueprintPythonPath(projectRoot, currentPython).catch(() => "")
+      if (!detectedPython) {
+        const reason: BlueprintConfigValidationIssue["reason"] =
+          currentPython && !isAbsoluteBlueprintPath(currentPython) ? "not_absolute" : "missing"
+        setConfigIssues((issues) => [{ field: "python_path", reason }, ...issues.filter((issue) => issue.field !== "python_path")])
+        setPythonDetectFailed(true)
+        return
+      }
+      setDraft("config", "python_path", detectedPython)
+      setConfigIssues((issues) => issues.filter((issue) => issue.field !== "python_path"))
+      setPythonDetectFailed(false)
+    } finally {
+      setPythonDetecting(false)
+    }
+  }
+
+  const backfillCommonConfigPaths = async () => {
+    if (attemptedCommonConfigBackfill) return
+    attemptedCommonConfigBackfill = true
+    const projectRoot = projectDirectory.trim()
+    if (!projectRoot || projectRoot === "global" || !isAbsoluteBlueprintPath(projectRoot)) return
+
+    const config = untrack(currentConfig)
+    const updates: Partial<BlueprintConfig> = {}
+    if (blankCommonPath(config.python_path)) {
+      const detectedPython = await detectBlueprintPythonPath(projectRoot, config.python_path).catch(() => "")
+      if (detectedPython) updates.python_path = detectedPython
+    }
+    if (blankCommonPath(config.project_workdir)) updates.project_workdir = projectRoot
+
+    const skillDirCandidate = joinProjectPath(projectRoot, "skill_list")
+    if (blankCommonPath(config.skill_dir) || samePath(config.skill_dir, projectRoot)) {
+      const skills = await listSkills(skillDirCandidate).catch(() => [] as BlueprintCatalogItem[])
+      if (skills.length > 0) updates.skill_dir = skillDirCandidate
+    }
+
+    const ruleDirCandidate = joinProjectPath(projectRoot, "rules")
+    if (blankCommonPath(config.rule_dir)) {
+      const rules = await listRules(ruleDirCandidate).catch(() => [] as BlueprintCatalogItem[])
+      if (rules.length > 0) updates.rule_dir = ruleDirCandidate
+    }
+
+    for (const [field, value] of Object.entries(updates) as Array<[keyof BlueprintConfig, string]>) {
+      setDraft("config", field, value as never)
+    }
+  }
+
+  createEffect(() => {
+    if (!draftReady() || !persistence().loaded) return
+    void backfillCommonConfigPaths()
+  })
+
   createEffect(() => {
     const skillDir = currentConfig().skill_dir
     const ruleDir = currentConfig().rule_dir
@@ -705,6 +853,7 @@ export function BlueprintSidePanel() {
     setPersistence({ loaded: false, loading: true, saving: false, source: "local" })
     void (async () => {
       try {
+        await platform.configureBlueprintRuntime?.(currentConfig().python_path)
         const document = await openBlueprint(projectDirectory, DEFAULT_BLUEPRINT_ID)
         applyingRemote = true
         replaceDraft(fromBlueprintDocument(document as Parameters<typeof fromBlueprintDocument>[0], projectDirectory))
@@ -731,6 +880,7 @@ export function BlueprintSidePanel() {
 
   createEffect(() => {
     draft.schema_version
+    draft.config.python_path
     draft.config.project_workdir
     draft.config.skill_dir
     draft.config.rule_dir
@@ -884,11 +1034,14 @@ export function BlueprintSidePanel() {
       setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
       return
     }
-    const configIssues = validateBlueprintConfigForStart(draft)
+    const startDraft = await ensureDetectedPythonPath()
+    const configIssues = validateBlueprintConfigForStart(startDraft)
     if (configIssues.length) {
+      setConfigIssues(configIssues)
       dialog.show(() => <BlueprintConfigRequiredDialog issues={configIssues} />)
       return
     }
+    setConfigIssues([])
     if (saveTimer) {
       clearTimeout(saveTimer)
       saveTimer = undefined
@@ -897,12 +1050,13 @@ export function BlueprintSidePanel() {
     setPersistence((current) => ({ ...current, saving: true, error: undefined }))
     setRuntime((current) => ({ ...current, loading: true, action: "start", error: undefined }))
     try {
-      await persistProjectDraft(draft)
+      await platform.configureBlueprintRuntime?.(startDraft.config.python_path)
+      await persistProjectDraft(startDraft)
       setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
       const started = await platform.startBlueprintRun(
         projectDirectory,
         DEFAULT_BLUEPRINT_ID,
-        createBlueprintStartPlan(draft),
+        createBlueprintStartPlan(startDraft),
         "live",
       )
       const runId = typeof started.runId === "string" ? started.runId : undefined
@@ -1712,14 +1866,8 @@ export function BlueprintSidePanel() {
           <Show when={!draftReady()}>
             <div class="text-11-regular text-text-weaker">{language.t("common.loading")}</div>
           </Show>
-          <Show when={persistence().loading || persistence().saving || persistence().error}>
-            <div class="max-w-80 truncate text-11-regular text-text-weaker">
-              {persistence().loading
-                ? language.t("common.loading")
-                : persistence().saving
-                  ? language.t("common.save")
-                  : persistence().error}
-            </div>
+          <Show when={headerStatus()}>
+            {(status) => <BlueprintHeaderStatus status={status()} />}
           </Show>
         </div>
         <Tooltip placement="bottom" value={language.t("common.close")}>
@@ -1738,7 +1886,13 @@ export function BlueprintSidePanel() {
         style={BLUEPRINT_CHROME_THEME}
       >
         <div class="flex min-w-0 items-center gap-1">
-          <DropdownMenu open={addMenuOpen()} onOpenChange={setAddMenuOpen}>
+          <DropdownMenu
+            open={addMenuOpen()}
+            onOpenChange={(open) => {
+              setAddMenuOpen(open)
+              if (open) setGlobalConfigOpen(false)
+            }}
+          >
             <DropdownMenu.Trigger as={Button} size="small" variant="ghost" icon="plus-small" class="h-7 px-2">
               <span class="hidden lg:inline">{language.t("blueprint.toolbar.addNode")}</span>
               <Icon size="small" name="chevron-down" class="text-icon-weak" />
@@ -1767,6 +1921,42 @@ export function BlueprintSidePanel() {
               </DropdownMenu.Content>
             </DropdownMenu.Portal>
           </DropdownMenu>
+          <div class="relative flex shrink-0">
+            <Button
+              data-blueprint-global-config-toggle
+              size="small"
+              variant="ghost"
+              icon="blueprint"
+              data-active={globalConfigOpen()}
+              class="h-7 px-2"
+              aria-expanded={globalConfigOpen()}
+              onClick={() => {
+                setAddMenuOpen(false)
+                setGlobalConfigOpen((open) => !open)
+              }}
+            >
+              <span class="hidden lg:inline">{language.t("blueprint.globalConfig.title")}</span>
+              <Icon
+                size="small"
+                name="chevron-down"
+                class={`text-icon-weak transition-transform ${globalConfigOpen() ? "rotate-180" : ""}`}
+              />
+            </Button>
+            <Show when={globalConfigOpen()}>
+              <BlueprintGlobalConfigPanel
+                config={currentConfig()}
+                onConfigChange={updateConfigField}
+                skillCount={catalog().skills.length}
+                ruleCount={catalog().rules.length}
+                skillError={catalog().skillError}
+                ruleError={catalog().ruleError}
+                invalidFields={configIssues().map((issue) => issue.field)}
+                detectingPython={pythonDetecting()}
+                pythonDetectFailed={pythonDetectFailed()}
+                onDetectPython={detectAndApplyPythonPath}
+              />
+            </Show>
+          </div>
         </div>
         <div class="flex shrink-0 items-center gap-1">
           <Tooltip placement="bottom" value={language.t("blueprint.runtime.start")}>
@@ -1854,14 +2044,6 @@ export function BlueprintSidePanel() {
           onDragOver={handleCanvasDragOver}
           onDrop={handleCanvasDrop}
         >
-          <BlueprintGlobalConfigPanel
-            config={currentConfig()}
-            onConfigChange={updateConfigField}
-            skillCount={catalog().skills.length}
-            ruleCount={catalog().rules.length}
-            skillError={catalog().skillError}
-            ruleError={catalog().ruleError}
-          />
           <div
             class="absolute left-0 top-0"
             style={{
@@ -2005,6 +2187,60 @@ export function BlueprintSidePanel() {
         </Show>
       </div>
     </div>
+  )
+}
+
+function BlueprintHeaderStatus(props: { status: BlueprintHeaderStatusState }) {
+  const language = useLanguage()
+  const [open, setOpen] = createSignal(false)
+  const dotClass = () =>
+    props.status.tone === "error"
+      ? "bg-[#ef4444]"
+      : props.status.tone === "saving"
+        ? "bg-[#0284c7]"
+        : "bg-[#64748b]"
+
+  return (
+    <Popover
+      open={open()}
+      onOpenChange={setOpen}
+      triggerAs={Button}
+      triggerProps={{
+        size: "small",
+        variant: "ghost",
+        class: "h-6 min-w-0 max-w-80 px-1.5",
+        "data-blueprint-header-status-trigger": "true",
+        "aria-label": language.t("blueprint.headerStatus.expand" as never),
+        type: "button",
+      }}
+      trigger={
+        <div class="flex min-w-0 items-center gap-1.5 text-11-regular">
+          <span class={`size-1.5 shrink-0 rounded-full ${dotClass()}`} />
+          <span
+            class="min-w-0 truncate"
+            classList={{
+              "text-[#b91c1c]": props.status.tone === "error",
+              "text-text-weaker": props.status.tone !== "error",
+            }}
+          >
+            {props.status.label}
+          </span>
+          <Icon name={open() ? "chevron-down" : "chevron-right"} size="small" class="shrink-0 text-icon-weak" />
+        </div>
+      }
+      title={props.status.title}
+      class="w-[420px] max-w-[calc(100vw-32px)] border-border-weak-base bg-background-strong shadow-[0_18px_48px_rgba(15,23,42,0.18)] [&_[data-slot=popover-body]]:pt-2"
+      style={BLUEPRINT_CHROME_THEME}
+      placement="bottom-start"
+      gutter={6}
+    >
+      <div
+        data-blueprint-header-status-details
+        class="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-12-regular leading-5 text-text-base"
+      >
+        {props.status.detail}
+      </div>
+    </Popover>
   )
 }
 
@@ -2935,9 +3171,14 @@ function BlueprintGlobalConfigPanel(props: {
   ruleCount: number
   skillError?: string
   ruleError?: string
+  invalidFields: BlueprintConfigField[]
+  detectingPython: boolean
+  pythonDetectFailed: boolean
+  onDetectPython: () => void | Promise<void>
 }) {
   const language = useLanguage()
   const platform = usePlatform()
+  const invalid = (field: BlueprintConfigField) => props.invalidFields.includes(field)
 
   const pickDirectory = async (field: keyof BlueprintConfig, title: string, defaultPath?: string) => {
     const result = await platform.openDirectoryPickerDialog?.({
@@ -2948,22 +3189,47 @@ function BlueprintGlobalConfigPanel(props: {
     if (typeof result === "string" && result.trim()) props.onConfigChange(field, result)
   }
 
+  const pickFile = async (field: keyof BlueprintConfig, title: string, defaultPath?: string) => {
+    const result = await platform.openFilePickerDialog?.({
+      title,
+      multiple: false,
+      defaultPath,
+      extensions: platform.os === "windows" ? ["exe"] : undefined,
+    })
+    if (typeof result === "string" && result.trim()) props.onConfigChange(field, result)
+  }
+
   return (
     <div
       data-blueprint-global-config
-      class="absolute left-3 top-3 z-20 w-[266px] rounded-md border border-[rgba(103,232,249,0.22)] bg-[rgba(7,16,25,0.88)] p-3 text-[#d6e9f5] shadow-[0_18px_48px_rgba(0,0,0,0.34)] backdrop-blur"
+      class="absolute left-0 top-8 z-40 max-h-[270px] w-[360px] max-w-[calc(100vw-1rem)] overflow-y-auto rounded-md border border-[rgba(103,232,249,0.22)] bg-[rgba(7,16,25,0.94)] p-3 text-[#d6e9f5] shadow-[0_18px_48px_rgba(0,0,0,0.34)] backdrop-blur"
+      style={BLUEPRINT_INSPECTOR_THEME}
     >
-      <div class="mb-2 flex items-center justify-between gap-2">
-        <div class="text-12-medium text-[#f8fdff]">{language.t("blueprint.globalConfig.title")}</div>
-        <div class="text-11-regular text-[#95afc4]">
-          {props.skillCount} / {props.ruleCount}
-        </div>
-      </div>
       <div class="flex flex-col gap-2">
+        <DirectoryConfigField
+          label={language.t("blueprint.field.pythonPath")}
+          tip="pythonPath"
+          value={props.config.python_path}
+          note={
+            props.detectingPython
+              ? language.t("blueprint.python.detecting")
+              : props.pythonDetectFailed
+                ? language.t("blueprint.python.detectFailed")
+                : undefined
+          }
+          invalid={invalid("python_path")}
+          onChange={(value) => props.onConfigChange("python_path", value)}
+          onBrowse={() => void pickFile("python_path", language.t("blueprint.directory.pickPython"), props.config.python_path)}
+          onDetect={() => void props.onDetectPython()}
+          detectLabel={language.t("blueprint.python.detect")}
+          detectText={language.t("blueprint.python.detectShort")}
+          detecting={props.detectingPython}
+        />
         <DirectoryConfigField
           label={language.t("blueprint.field.projectWorkdir")}
           tip="projectWorkdir"
           value={props.config.project_workdir}
+          invalid={invalid("project_workdir")}
           onChange={(value) => props.onConfigChange("project_workdir", value)}
           onBrowse={() =>
             void pickDirectory("project_workdir", language.t("blueprint.directory.pickProject"), props.config.project_workdir)
@@ -2974,6 +3240,7 @@ function BlueprintGlobalConfigPanel(props: {
           tip="skillDir"
           value={props.config.skill_dir}
           note={props.skillError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.count", { count: props.skillCount })}
+          invalid={invalid("skill_dir")}
           onChange={(value) => props.onConfigChange("skill_dir", value)}
           onBrowse={() => void pickDirectory("skill_dir", language.t("blueprint.directory.pickSkill"), props.config.skill_dir)}
         />
@@ -2982,6 +3249,7 @@ function BlueprintGlobalConfigPanel(props: {
           tip="ruleDir"
           value={props.config.rule_dir}
           note={props.ruleError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.count", { count: props.ruleCount })}
+          invalid={invalid("rule_dir")}
           onChange={(value) => props.onConfigChange("rule_dir", value)}
           onBrowse={() => void pickDirectory("rule_dir", language.t("blueprint.directory.pickRule"), props.config.rule_dir)}
         />
@@ -3024,23 +3292,61 @@ function DirectoryConfigField(props: {
   tip?: InspectorTipKey
   value: string
   note?: string
+  invalid?: boolean
   onChange: (value: string) => void
   onBrowse: () => void
+  onDetect?: () => void
+  detectLabel?: string
+  detectText?: string
+  detecting?: boolean
 }) {
+  const language = useLanguage()
+  const sideButtonClass =
+    "!h-11 !w-10 rounded-md border border-[rgba(103,232,249,0.24)] !bg-[#0d1826] !text-[#d7f7ff] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] hover:!bg-[rgba(56,214,244,0.12)] disabled:opacity-50 [&_[data-slot=icon-svg]]:!text-[#d7f7ff]"
+  const detectButtonClass =
+    "!h-11 shrink-0 rounded-md border border-[rgba(103,232,249,0.24)] !bg-[#0d1826] !px-2 !text-[#d7f7ff] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] hover:!bg-[rgba(56,214,244,0.12)] disabled:opacity-50 [&_[data-slot=icon-svg]]:!text-[#d7f7ff]"
+
   return (
     <div class="flex min-w-0 flex-col gap-1">
       <InspectorFieldHeader label={props.label} tip={props.tip} placement="right-start" />
-      <div class="flex min-w-0 gap-1">
-        <input
-          class="h-7 min-w-0 flex-1 rounded-md border border-[rgba(103,232,249,0.22)] bg-[#06101a] px-2 text-11-regular text-[#f8fdff] outline-none transition-colors placeholder:text-[#95afc4] focus:border-[#67e8f9]"
+      <div class="flex min-w-0 items-stretch gap-2">
+        <textarea
+          class={`h-11 min-w-0 flex-1 resize-none rounded-md border bg-[#06101a] px-2 py-1 font-mono text-[10.5px] leading-4 text-[#f8fdff] outline-none transition-colors placeholder:text-[#95afc4] ${
+            props.invalid ? "border-[#fb7185] focus:border-[#fb7185]" : "border-[rgba(103,232,249,0.22)] focus:border-[#67e8f9]"
+          }`}
           value={props.value}
-          onInput={(event) => props.onChange(event.currentTarget.value)}
+          title={props.value}
+          placeholder={language.t("blueprint.globalConfig.unset")}
+          aria-label={props.label}
+          spellcheck={false}
+          wrap="soft"
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.preventDefault()
+          }}
+          onInput={(event) => props.onChange(event.currentTarget.value.replace(/\r?\n/g, ""))}
         />
+        <Show when={props.onDetect && props.detectLabel}>
+          <Tooltip placement="top" value={props.detecting ? language.t("blueprint.python.detecting") : (props.detectLabel ?? "")}>
+            <Button
+              icon="magnifying-glass"
+              variant="secondary"
+              size="small"
+              class={detectButtonClass}
+              disabled={props.detecting}
+              onClick={() => props.onDetect?.()}
+              aria-label={props.detectLabel ?? ""}
+              data-blueprint-detect-python
+            >
+              {props.detectText ?? props.detectLabel}
+            </Button>
+          </Tooltip>
+        </Show>
         <IconButton
           icon="folder"
-          variant="ghost"
-          size="small"
-          class="h-7 w-7 shrink-0 text-[#d7f7ff] hover:text-[#67e8f9]"
+          variant="secondary"
+          size="normal"
+          iconSize="small"
+          class={sideButtonClass}
           onClick={props.onBrowse}
           aria-label={props.label}
         />
@@ -3056,6 +3362,7 @@ function blueprintConfigFieldLabel(
   t: (key: never, params?: Record<string, string | number | boolean>) => string,
   field: BlueprintConfigValidationIssue["field"],
 ) {
+  if (field === "python_path") return t("blueprint.field.pythonPath" as never)
   if (field === "skill_dir") return t("blueprint.field.skillDir" as never)
   if (field === "rule_dir") return t("blueprint.field.ruleDir" as never)
   return t("blueprint.field.projectWorkdir" as never)

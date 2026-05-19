@@ -9,6 +9,7 @@ import {
   createBlueprintStartPlan,
   createDefaultBlueprintDraft,
   fromBlueprintDocument,
+  DEFAULT_PYTHON_PATH,
   DEFAULT_SKILL_DIR,
   TEST_AGENT_NODE_FLAG,
   deleteNode,
@@ -26,6 +27,7 @@ describe("blueprint draft model", () => {
     const draft = createDefaultBlueprintDraft()
 
     expect(draft.config).toEqual({
+      python_path: DEFAULT_PYTHON_PATH,
       project_workdir: ".",
       skill_dir: DEFAULT_SKILL_DIR,
       rule_dir: "",
@@ -85,7 +87,7 @@ describe("blueprint draft model", () => {
       cli_kind: "codex",
       model: "gpt-5.4",
       command: "codex",
-      timeout_sec: 60,
+      timeout_sec: 300,
       adapter_options: { [TEST_AGENT_NODE_FLAG]: true, skip_git_repo_check: true },
     })
     expect(draft.layout.nodes["test-agent"]).toEqual({ x: 0, y: 24 })
@@ -209,8 +211,12 @@ describe("blueprint draft model", () => {
   test("validates required absolute blueprint common config before start", () => {
     let draft = createDefaultBlueprintDraft()
 
-    expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "project_workdir", reason: "not_absolute" }])
+    expect(validateBlueprintConfigForStart(draft)).toEqual([
+      { field: "python_path", reason: "missing" },
+      { field: "project_workdir", reason: "not_absolute" },
+    ])
 
+    draft.config.python_path = "/usr/bin/python3"
     draft.config.project_workdir = ""
     expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "project_workdir", reason: "missing" }])
 
@@ -253,6 +259,7 @@ describe("blueprint draft model", () => {
       },
       ui: {
         config: {
+          python_path: DEFAULT_PYTHON_PATH,
           project_workdir: "F:\\repo\\game",
           skill_dir: DEFAULT_SKILL_DIR,
           rule_dir: "",
@@ -272,6 +279,10 @@ describe("blueprint draft model", () => {
   test("derives a complete start plan from the default blueprint", () => {
     const plan = createBlueprintStartPlan(createDefaultBlueprintDraft())
 
+    expect(plan.common_config).toMatchObject({
+      python_path: DEFAULT_PYTHON_PATH,
+      project_workdir: ".",
+    })
     expect(plan.agent_descriptions).toMatchObject({
       planner: "Break down the user goal and dispatch implementation work.",
       coder: "Implement the requested changes.",

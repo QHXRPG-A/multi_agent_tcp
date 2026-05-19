@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, Optional, Sequence
 from urllib.parse import parse_qs, urlparse
 
 from .cluster import CLIWorkerBackend
+from .blueprint_mcp_runtime import RunMCPRuntimeHandle
 from .graph_control import GraphRuntimeControlPlane, graph_definition_from_dict
 from .graph_runtime import GraphRuntime, GuLiCodeTopAgentProfile, TopAgentStartPlan
 from .skill_space import SkillRecord
@@ -130,10 +131,11 @@ class DesktopBlueprintRun:
     created_at: float
     updated_at: float
     backend: Any = None
+    mcp: Any = None
     stream_condition: Any = field(default_factory=threading.Condition)
 
     def summary(self) -> Dict[str, Any]:
-        return {
+        data = {
             "runId": self.run_id,
             "projectDir": str(self.project_dir),
             "blueprintId": self.blueprint_id,
@@ -141,6 +143,9 @@ class DesktopBlueprintRun:
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
         }
+        if self.mcp is not None:
+            data["mcp"] = self.mcp.summary()
+        return data
 
 
 class DesktopBlueprintNoopBackend:
@@ -453,17 +458,20 @@ class DesktopBlueprintService:
             run_id = self._generate_run_id_locked()
 
         if execution_mode == "live":
-            backend, runtime, control, started = self._async_loop.run(
+            backend, runtime, control, mcp, started = self._async_loop.run(
                 self._start_live_runtime(run_id, validate_project_dir(project_dir), document, graph, plan)
             )
         else:
             backend = DesktopBlueprintNoopBackend()
             runtime = GraphRuntime(backend)
             control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
+            mcp = None
             runtime.agent_stream_run_id = run_id
             started = control.handle_request({"command": "run.start", "args": {"plan": plan.to_dict()}})
         if not started.get("ok"):
             if execution_mode == "live":
+                if mcp is not None:
+                    mcp.close()
                 self._async_loop.run(runtime.close())
                 stop = getattr(backend, "stop", None)
                 if callable(stop):
@@ -491,6 +499,7 @@ class DesktopBlueprintService:
                 created_at=now,
                 updated_at=now,
                 backend=backend,
+                mcp=mcp,
             )
             self._attach_stream_notification(run)
             self._runs[run.run_id] = run
@@ -539,12 +548,18 @@ class DesktopBlueprintService:
         document: Dict[str, Any],
         graph: Any,
         plan: TopAgentStartPlan,
-    ) -> tuple[Any, GraphRuntime, GraphRuntimeControlPlane, Dict[str, Any]]:
+    ) -> tuple[Any, GraphRuntime, GraphRuntimeControlPlane, Optional[RunMCPRuntimeHandle], Dict[str, Any]]:
         backend = None
         runtime = None
         rpc_server = None
+        mcp = None
 
         async def cleanup() -> None:
+            if mcp is not None:
+                try:
+                    mcp.close()
+                except Exception:
+                    pass
             if runtime is not None:
                 try:
                     await runtime.close()
@@ -574,13 +589,31 @@ class DesktopBlueprintService:
                 private_context_run=workspace_run,
                 private_context_rpc_server=rpc_server,
                 skill_space=_desktop_skill_catalog_from_document(document, project_dir),
+                message_journal_path=workspace_run.shared_dir / "logs" / "message_journal.jsonl",
             )
             runtime.agent_stream_run_id = run_id
             control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
+            top_agent_node = control.top_agent.to_agent_node()
+            mcp = RunMCPRuntimeHandle(
+                run_id=run_id,
+                runtime=runtime,
+                control=control,
+                graph=graph,
+                workspace_rpc_server=rpc_server,
+                manager=manager,
+                workspace_run=workspace_run,
+                runtime_loop=self._async_loop,
+                top_agent_node_id=top_agent_node.node_id,
+                top_agent_id=top_agent_node.runtime_agent_id,
+                close_run_callback=lambda **kwargs: self._end_live_run_from_mcp(run_id, **kwargs),
+            )
+            mcp.start()
+            runtime.private_context_mcp_provider = mcp.provision_context_for_node
+            runtime.agent_message_context_callback = mcp.refresh_message_context
             started = await control.start_run(plan, prestart_all_agents=True)
             if started.get("ok"):
                 runtime.start_tick_loop()
-            return backend, runtime, control, started
+            return backend, runtime, control, mcp, started
         except BlueprintServiceError:
             await cleanup()
             raise
@@ -808,10 +841,62 @@ class DesktopBlueprintService:
         return fn()
 
     async def _close_live_run(self, run: DesktopBlueprintRun) -> None:
+        if run.mcp is not None:
+            run.mcp.close()
+        await self._close_live_run_backend(run)
+
+    async def _close_live_run_backend(self, run: DesktopBlueprintRun) -> None:
         await run.runtime.close()
         stop = getattr(run.backend, "stop", None)
         if callable(stop):
             await stop()
+
+    def _end_live_run_from_mcp(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        reason: str = "",
+        archive: bool = False,
+    ) -> Dict[str, Any]:
+        action = str(action).strip().lower()
+        if action not in {"complete", "cancel", "fail", "pause", "archive_only"}:
+            raise BlueprintServiceError(
+                "UNSUPPORTED_RUN_ACTION",
+                f"unsupported run end action: {action!r}",
+                details={"supported": ["complete", "cancel", "fail", "pause", "archive_only"]},
+            )
+        should_close_backend = False
+        with self._lock:
+            run = self._get_run(run_id)
+            run_status = self._runtime_call(run, lambda: run.runtime.status_snapshot()["run"])
+            already_ended = run_status["status"] in {"completed", "cancelled", "failed"}
+            if already_ended:
+                end_result: Dict[str, Any] = {
+                    "ok": True,
+                    "action": action,
+                    "run_status": run_status["status"],
+                    "final_status": run_status.get("final_status"),
+                    "reason": reason,
+                    "summary": {},
+                    "archived": False,
+                }
+            else:
+                end_result = self._runtime_call(
+                    run,
+                    lambda: run.runtime.end_run(
+                        action,
+                        reason=reason,
+                        archive=bool(archive),
+                    ).to_dict(),
+                )
+                should_close_backend = run.execution_mode == "live" and action != "archive_only"
+            run.updated_at = float(self.now())
+        if should_close_backend:
+            self._async_loop.run(self._close_live_run_backend(run), timeout=10)
+        with run.stream_condition:
+            run.stream_condition.notify_all()
+        return end_result
 
     def close(self) -> None:
         with self._lock:
@@ -1182,14 +1267,14 @@ def normalize_document(data: Dict[str, Any], *, fallback_id: Optional[str] = Non
 
 def blueprint_common_config_issues(document: Dict[str, Any]) -> list[Dict[str, str]]:
     config = _blueprint_common_config(document)
-    required = {"project_workdir"}
+    required = {"python_path", "project_workdir"}
     if _document_uses_skill_dir(document):
         required.add("skill_dir")
     if _document_uses_rule_dir(document):
         required.add("rule_dir")
 
     issues: list[Dict[str, str]] = []
-    for field_name in ("project_workdir", "skill_dir", "rule_dir"):
+    for field_name in ("python_path", "project_workdir", "skill_dir", "rule_dir"):
         raw_value = config.get(field_name) if isinstance(config, dict) else None
         value = raw_value.strip() if isinstance(raw_value, str) else ""
         if not value:

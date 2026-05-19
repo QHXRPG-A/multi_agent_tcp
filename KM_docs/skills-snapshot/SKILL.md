@@ -48,6 +48,155 @@ F:\src\Package\Script\Python\multi_agent_tcp
 
 Historical paths such as `D:\agents\multi_agent_tcp` or `F:\src\ryven_demo` may appear in archives. Do not use them as current defaults unless the user's machine actually has that path.
 
+## Fast Handoff - 2026-05-19 Full MCP Control + Real Codex Smoke
+
+When the next task is MCP integration, live Agent tool discovery, or the
+original Agent timeout after panel messages, start from this state:
+
+1. Run-scoped MCP runtime is implemented in `blueprint_mcp_runtime.py`: one
+   ASGI/uvicorn server per live blueprint run, with `/ordinary/mcp` and
+   `/control/mcp` FastMCP mounts.
+2. `DesktopBlueprintRun.mcp` owns the handle. Live start order is
+   WorkspaceRPCServer -> GraphRuntime/ControlPlane -> MCP handle -> private
+   Codex context -> `control.start_run()`.
+3. Private `CODEX_HOME/config.toml` gets `framework_ordinary` or
+   `framework_control` using `url` + `bearer_token_env_var`,
+   `enabled_tools`, and per-tool `approval_mode = "approve"`; bearer tokens
+   are injected only through env vars.
+4. Ordinary MCP exposes execution-scoped tools only: Workspace checkout/status/
+   diff/submit/sync/publish/publish_file/read/list/archive inspect,
+   `agent_dispatch`, scoped `agent_context`, and scoped `join_contribute`.
+5. Control MCP exposes top-agent/control-plane tools: organization read,
+   top-agent context/ask/status/utterances, run validate/start/status/end,
+   message batch/stage, control-side agent dispatch, join create/contribute,
+   and read-only Workspace inspect tools.
+6. Permission gates are server-enforced: `ask`, `start`, `status`, `end`,
+   `utterances`, and debug-only `fixture`. Ordinary Agents cannot call global
+   lifecycle/message-batch/utterance tools; Top Agent cannot call Workspace
+   write/submit/publish tools.
+7. Framework skill/rule injection remains required. The framework skill is
+   MCP-first with CLI fallback; MCP is only the tool protocol.
+8. Active ordinary Agent message context is refreshed from
+   `GraphRuntime.agent_message_context_callback`; `agent_dispatch` uses token
+   scope context and does not scan journals.
+9. Path validation for `workspace_publish_file` is done in MCP before
+   Workspace RPC and blocks traversal, drive-relative paths, arbitrary absolute
+   paths, and symlink/junction escape.
+10. MCP `runtime_end` now prefers the `DesktopBlueprintService` live-run close
+    callback and closes MCP tokens; it falls back to `GraphRuntime.end_run()`
+    only when no desktop close callback is available.
+11. Real `codex exec` launched through the full `DesktopBlueprintService` live
+    path completes the ordinary MCP flow:
+    checkout/status/diff/submit/publish/publish_file/agent_dispatch/read all
+    produce `framework_mcp_tool_call` audit entries.
+12. Real-smoke hardening is in place: the Windows project root defaults to
+    `%LOCALAPPDATA%\multi_agent_tcp\real_codex_mcp`, live stderr streaming is
+    capped, and Codex stdout/stderr are compacted for TCP transport while full
+    diagnostics remain on disk.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp
+python -m pip install -e .
+python -m py_compile __init__.py blueprint_mcp_runtime.py agent_launch_context.py graph_runtime.py graph_control.py workspace_rpc.py desktop_blueprint_service.py test_desktop_blueprint_service.py test_agent_runtime.py test_workspace_api.py test_workspace_manager.py codex_bridge.py
+pytest -q test_desktop_blueprint_service.py test_agent_runtime.py test_workspace_api.py test_workspace_manager.py
+# Latest full related result: 146 passed, 1 skipped, 2 warnings.
+pytest -q test_desktop_blueprint_service.py::test_live_blueprint_mcp_workspace_dispatch_flow_with_agent_backend -vv
+$env:MULTI_AGENT_TCP_RUN_REAL_CODEX_MCP = "1"
+pytest -q test_desktop_blueprint_service.py::test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow -vv
+# Latest focused real Codex result: 1 passed, 2 warnings in 135.84s.
+```
+
+Detailed archive:
+
+- [`archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md`](archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md)
+- [`archive/blueprint_run_mcp_runtime_2026-05-19.md`](archive/blueprint_run_mcp_runtime_2026-05-19.md)
+
+## Fast Handoff - 2026-05-19 Blueprint Header Status + IPC Restart
+
+When the next task is GuLiCode blueprint header status, persistence errors, or
+desktop IPC mismatch debugging, start from this state:
+
+1. The blueprint header persistence area is now expandable. Loading/saving
+   remain compact one-line states; errors open a popover with the full message.
+2. This was added after the header showed a truncated
+   `blueprint-configure-runtime` IPC error. The expanded message confirmed a
+   main/preload mismatch:
+   `No handler registered for 'blueprint-configure-runtime'`.
+3. The source already has the handler in
+   `GuLiCode/packages/desktop-electron/src/main/ipc.ts`. If the error appears
+   again after IPC/preload edits, restart the whole Electron main process;
+   reloading only the renderer is not enough.
+4. The latest clean restart reached renderer `http://localhost:5173/` and
+   sidecar `http://127.0.0.1:5337`, with logs at
+   `GuLiCode/logs/gulicode-desktop-restart-20260519-122112.log` and matching
+   `.err.log`.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-side-panel.test.ts
+bun test --preload ./happydom.ts ./src/i18n/parity.test.ts
+bun run typecheck
+bun run build
+```
+
+Detailed archive:
+
+- [`archive/blueprint_header_status_debug_restart_2026-05-19.md`](archive/blueprint_header_status_debug_restart_2026-05-19.md)
+
+## Fast Handoff - 2026-05-19 Blueprint Python Detection + Config UX
+
+When the next task is GuLiCode blueprint startup, Python interpreter setup, or
+common config UI, start from this state:
+
+1. `python_path` is now part of blueprint common config. It is required before
+   start, validated as an absolute path, and checked in both renderer and
+   desktop service start paths.
+2. The common config panel includes a `Python interpreter` field with a file
+   picker and a visible Detect button. Detect validates the current input first,
+   then falls back through the runtime detection order.
+3. Runtime Python resolution order is:
+   configured `python_path`, `GULICODE_PYTHON`, `python`, `python3`, Windows
+   `py -3`, then project/package `.venv`.
+4. Detection runs Python with `-c "import sys; print(sys.executable)"` and only
+   writes a verified absolute `sys.executable` back into the UI.
+5. The renderer also auto-detects Python during common-config backfill and just
+   before blueprint start. If detection fails, the field stays red and the
+   config-required dialog remains the blocking path.
+6. The common config panel lives next to Add Node in the toolbar, opens and
+   collapses by click, scrolls vertically, and is widened to `360px`.
+7. Electron IPC/preload/platform now includes `blueprint-detect-python` and
+   `blueprint-configure-runtime`. Restart any already running debug Electron
+   window after this change because main/preload IPC changed.
+8. Adjacent local path cleanup is included: `dev-desktop.ts` uses
+   electron-builder cache env vars / `LOCALAPPDATA` first, and examples no
+   longer use local `F:/src` paths.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts ./src/i18n/parity.test.ts
+bun run typecheck
+bun run build
+
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
+bun test ./src/main/blueprint-runtime.test.ts ./src/main/ipc-blueprint-runtime.test.ts
+bun run typecheck
+bun run build
+
+cd F:\src\Package\Script\Python\multi_agent_tcp
+pytest -q test_desktop_blueprint_service.py
+python -m py_compile desktop_blueprint_service.py cluster.py
+```
+
+Detailed archive:
+
+- [`archive/blueprint_python_detection_config_2026-05-19.md`](archive/blueprint_python_detection_config_2026-05-19.md)
+
 ## Fast Handoff - 2026-05-19 Blueprint Common Config + Private Runtime
 
 When the next task is GuLiCode blueprint startup, local path handling, or
@@ -72,10 +221,10 @@ desktop live runtime smoke, start from this state:
    `GraphRuntime(enforce_private_agent_context=True)`, private checkout cwd,
    private `CODEX_HOME`, `framework-agent-runtime`, `AGENTS.md`, Workspace API
    env/prompt context, and authorized skill/rule materialization.
-7. Known remaining backend risk: the combined run with
-   `test_workspace_manager.py` still fails
-   `test_agent_checkout_dulwich_merge_accepts_non_overlapping_same_file_changes`
-   because a non-overlapping same-file checkout submit returns `conflict`.
+7. The previous backend risk is closed: non-overlapping same-file checkout
+   submits are accepted even when Dulwich is unavailable or reports a false
+   conflict, while real same-region conflicts still return structured
+   `conflict` results.
 
 Latest relevant verification:
 
@@ -92,6 +241,8 @@ bun run build
 
 cd ..\..\..
 pytest -q test_desktop_blueprint_service.py
+pytest -q test_workspace_manager.py
+pytest -q test_desktop_blueprint_service.py test_workspace_manager.py
 ```
 
 Detailed archive:
@@ -442,9 +593,12 @@ Historical change records only. Do not use archive content as current behavior u
 
 - [`archive/guli_desktop_ui_archive.md`](archive/guli_desktop_ui_archive.md)
 - [`archive/blueprint_integration_archive.md`](archive/blueprint_integration_archive.md)
+- [`archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md`](archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md)
+- [`archive/blueprint_run_mcp_runtime_2026-05-19.md`](archive/blueprint_run_mcp_runtime_2026-05-19.md)
 - [`archive/agent_info_panel_live_runtime_2026-05-18.md`](archive/agent_info_panel_live_runtime_2026-05-18.md)
 - [`archive/agent_info_panel_interaction_2026-05-18.md`](archive/agent_info_panel_interaction_2026-05-18.md)
 - [`archive/agent_info_panel_test_node_json_2026-05-18.md`](archive/agent_info_panel_test_node_json_2026-05-18.md)
+- [`archive/blueprint_header_status_debug_restart_2026-05-19.md`](archive/blueprint_header_status_debug_restart_2026-05-19.md)
 - [`archive/gulicode_runtime_baseline_archive.md`](archive/gulicode_runtime_baseline_archive.md)
 - [`archive/agents_architecture_archive.md`](archive/agents_architecture_archive.md)
 - [`archive/ring_runtime_closure_archive.md`](archive/ring_runtime_closure_archive.md)

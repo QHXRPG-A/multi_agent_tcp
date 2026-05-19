@@ -12,8 +12,8 @@ Typical usage::
 
     async with await CLIWorkerBackend.create(
         workers=[
-            WorkerConfig("cm1", cwd=Path("F:/src")),
-            WorkerConfig("cm2", cwd=Path("F:/src")),
+            WorkerConfig("cm1", cwd=Path(".")),
+            WorkerConfig("cm2", cwd=Path(".")),
         ],
         port=9140,
     ) as backend:
@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _IS_WIN = sys.platform == "win32"
+WORKER_REPLY_GRACE_SEC = 30.0
 
 
 def _package_parent_path() -> str:
@@ -948,7 +949,13 @@ class CLIWorkerBackend:
             injected = self._inject_skills([(worker_id, body)])
             _, body = injected[0]
         client = await self._ensure_client()
-        log.info("run_single worker=%s timeout_sec=%s", worker_id, timeout_sec)
+        reply_timeout_sec = float(timeout_sec) + WORKER_REPLY_GRACE_SEC
+        log.info(
+            "run_single worker=%s timeout_sec=%s reply_timeout_sec=%s",
+            worker_id,
+            timeout_sec,
+            reply_timeout_sec,
+        )
         await client.send_to(worker_id, body, meta=meta)
         async def _stream(event: Dict[str, Any]) -> None:
             if stream_callback is None:
@@ -958,7 +965,7 @@ class CLIWorkerBackend:
                 await result
 
         reply = await client.wait_for_message(
-            expect_from=worker_id, timeout_sec=timeout_sec,
+            expect_from=worker_id, timeout_sec=reply_timeout_sec,
             stream_callback=_stream if stream_callback is not None else None,
         )
         return reply

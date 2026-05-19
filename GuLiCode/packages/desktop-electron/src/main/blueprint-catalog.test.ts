@@ -4,6 +4,7 @@ import path from "node:path"
 import { describe, expect, test } from "bun:test"
 
 import {
+  listBlueprintDirectories,
   listBlueprintRules,
   listBlueprintSkills,
   parseCodemakerModels,
@@ -81,6 +82,15 @@ describe("blueprint catalog", () => {
         description: "manifest description",
       },
     ])
+  })
+
+  test("treats missing catalog directories as empty lists", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "blueprint-missing-catalog-"))
+    const missing = path.join(root, "missing")
+
+    expect(await listBlueprintDirectories(missing)).toEqual([])
+    expect(await listBlueprintSkills(missing)).toEqual([])
+    expect(await listBlueprintRules(missing)).toEqual([])
   })
 
   test("scans direct rule files with common text extensions", async () => {

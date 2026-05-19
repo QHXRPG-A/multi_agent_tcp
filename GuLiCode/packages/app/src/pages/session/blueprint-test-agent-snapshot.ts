@@ -139,18 +139,19 @@ function createAgentReplies(input: {
 
   for (const event of input.events) {
     const messageId = stringValue(event.message_id)
-    if (!messageId || !userRuntimeMessageIds.has(messageId)) continue
+    if (!messageId) continue
     const text = messageText(event)
     if (!text) continue
+    const toUser = userRuntimeMessageIds.has(messageId)
     upsertReply(replies, {
       id: stringValue(event.event_id) ?? stringValue(event.part_id) ?? `reply-${messageId}`,
       time: normalizeTime(event.created_at),
       from: input.nodeId,
-      to: "用户",
+      to: toUser ? "用户" : "框架",
       status: stringValue(event.status) ?? "completed",
       text,
       messageId,
-      replyType: "to_user",
+      replyType: toUser ? "to_user" : "to_framework",
     })
   }
 

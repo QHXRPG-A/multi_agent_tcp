@@ -4,19 +4,19 @@
   "workers": [
     {
       "agent_id": "cm1",
-      "cwd": "F:/src",
+      "cwd": ".",
       "model": "netease-codemaker/kimi-k2.5",
       "timeout_sec": 1800
     },
     {
       "agent_id": "cm2",
-      "cwd": "F:/src",
+      "cwd": ".",
       "model": "netease-codemaker/kimi-k2.5",
       "timeout_sec": 1800
     },
     {
       "agent_id": "cm3",
-      "cwd": "F:/src",
+      "cwd": ".",
       "model": "netease-codemaker/kimi-k2.5",
       "timeout_sec": 1800
     }
