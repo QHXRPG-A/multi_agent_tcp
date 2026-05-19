@@ -563,7 +563,19 @@ Read first when the user asks about:
 - join aggregation
 - top-agent rule / skill / profile
 
-### 3. `knowledge_base/`
+### 3. `environment_setup.md`
+
+Current local environment setup and diagnostics for this machine.
+
+Read first when the user asks about:
+
+- dependency setup or environment repair
+- Python/Bun/Codex executable paths and versions
+- PowerShell script policy or generated `multi-agent-tcp.exe` launch issues
+- system proxy / `NO_PROXY` bypass for localhost MCP tests
+- repo-local `skill_list` initialization
+
+### 4. `knowledge_base/`
 
 Stable current knowledge. Prefer these files for implementation decisions:
 
@@ -577,7 +589,7 @@ Stable current knowledge. Prefer these files for implementation decisions:
 - [`knowledge_base/runtime_notes.md`](knowledge_base/runtime_notes.md): encoding, logs, process cleanup, retry, and CLI runtime pitfalls.
 - [`knowledge_base/multi_cli_workflow.md`](knowledge_base/multi_cli_workflow.md): CLI adapter/backend history and still-relevant adapter constraints.
 
-### 4. `tasks/`
+### 5. `tasks/`
 
 Short-term work. Prefer current files in this order:
 
@@ -587,7 +599,7 @@ Short-term work. Prefer current files in this order:
 - [`tasks/node_runtime_tasks.md`](tasks/node_runtime_tasks.md): GraphRuntime / graph scheduling implementation tasks.
 - [`tasks/multi_cli_adapter_tasks.md`](tasks/multi_cli_adapter_tasks.md): CLI backend adapter work, secondary to runtime/control-plane work.
 
-### 5. `archive/`
+### 6. `archive/`
 
 Historical change records only. Do not use archive content as current behavior unless a current knowledge document points to it.
 
@@ -606,6 +618,9 @@ Historical change records only. Do not use archive content as current behavior u
 
 ## Query Map
 
+- Local environment setup, dependency repair, Python interpreter detection,
+  PowerShell/Codex command quirks, localhost MCP `502 Bad Gateway`, system
+  proxy, `NO_PROXY`, and repo `skill_list`: read `environment_setup.md`.
 - GuLiCode desktop startup, one-click launcher, packaged bring-up, taskbar icon, and direct Electron fallback: read `knowledge_base/gulicode_desktop.md`.
 - Guli productization, desktop UI ownership, branding, icon replacement, empty-state wording, blueprint entry placement, and blueprint workbench embedding: read `knowledge_base/guli_desktop_ui.md`, then `tasks/guli_desktop_ui_tasks.md`.
 - Blueprint Agent information panel interactions, long-press progress, context-menu entry, move/resize behavior, Test Agent JSON snapshots, user-message capture, and clean desktop debug baseline: read `archive/agent_info_panel_interaction_2026-05-18.md`, then `archive/agent_info_panel_test_node_json_2026-05-18.md`, then `tasks/current_goals.md`.
