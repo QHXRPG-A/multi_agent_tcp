@@ -209,7 +209,7 @@ def validate_codex_launch_safety(
         for root in roots:
             if _paths_overlap(add_dir, root):
                 raise ValueError(
-                    "codex extra_args must not use --add-dir for the read-only project context"
+                    "codex extra_args must not use --add-dir for read-only project or shared workspace roots"
                 )
 
 
@@ -287,6 +287,11 @@ def _parse_codex_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     protected_roots: List[Path] = []
     if isinstance(code_workspace, dict) and code_workspace.get("project_context"):
         protected_roots.append(Path(str(code_workspace["project_context"])).expanduser())
+    if isinstance(code_workspace, dict) and code_workspace.get("project_code_root"):
+        protected_roots.append(Path(str(code_workspace["project_code_root"])).expanduser())
+    shared_workspace = parsed["execution_context"].get("shared_workspace")
+    if isinstance(shared_workspace, dict) and shared_workspace.get("root"):
+        protected_roots.append(Path(str(shared_workspace["root"])).expanduser())
     validate_codex_launch_safety(
         cwd=parsed["cwd"],
         sandbox=parsed.get("sandbox"),

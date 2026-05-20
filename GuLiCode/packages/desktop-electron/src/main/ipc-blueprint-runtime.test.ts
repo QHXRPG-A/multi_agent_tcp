@@ -90,6 +90,16 @@ describe("blueprint runtime IPC handlers", () => {
         calls.push(`save:${projectDir}:${document.id}`)
         return document
       },
+      relocateProjectWorkdir: (
+        projectDir: string,
+        blueprintId: string,
+        document: { id: string },
+        targetProjectWorkdir: string,
+        conflictPolicy?: string,
+      ) => {
+        calls.push(`relocate:${projectDir}:${blueprintId}:${document.id}:${targetProjectWorkdir}:${conflictPolicy ?? ""}`)
+        return { ok: true, changed: true, targetProjectDir: targetProjectWorkdir, document }
+      },
       validate: (projectDir: string, blueprintId: string, document?: { id: string }) => {
         calls.push(`validate:${projectDir}:${blueprintId}:${document?.id ?? ""}`)
         return { ok: true, errors: [], warnings: [] }
@@ -162,6 +172,14 @@ describe("blueprint runtime IPC handlers", () => {
     await handlers.get("blueprint-list")?.({}, "C:\\repo")
     await handlers.get("blueprint-open")?.({}, "C:\\repo", "default")
     await handlers.get("blueprint-save")?.({}, "C:\\repo", { id: "default" })
+    await handlers.get("blueprint-relocate-project-workdir")?.(
+      {},
+      "C:\\repo",
+      "default",
+      { id: "default" },
+      "D:\\repo",
+      "overwrite",
+    )
     await handlers.get("blueprint-validate")?.({}, "C:\\repo", "default", { id: "default" })
     await handlers.get("blueprint-list-runs")?.({}, "C:\\repo", "default")
     await handlers.get("blueprint-detect-python")?.({}, "C:\\repo", "C:\\Candidate\\python.exe")
@@ -209,6 +227,7 @@ describe("blueprint runtime IPC handlers", () => {
       "list:C:\\repo",
       "open:C:\\repo:default",
       "save:C:\\repo:default",
+      "relocate:C:\\repo:default:default:D:\\repo:overwrite",
       "validate:C:\\repo:default:default",
       "runs:C:\\repo:default",
       "detect-python:C:\\repo:C:\\Candidate\\python.exe",

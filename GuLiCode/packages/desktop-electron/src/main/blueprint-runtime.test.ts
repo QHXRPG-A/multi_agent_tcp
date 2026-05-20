@@ -79,6 +79,47 @@ describe("blueprint runtime bridge", () => {
     }
   })
 
+  test("keeps a running service when configured Python is the active executable", () => {
+    const runtime = new BlueprintRuntime()
+    const detected = runtime.detectPython()
+    expect(detected.ok).toBe(true)
+    let killed = 0
+    const ready = Promise.resolve({
+      ok: true as const,
+      url: "http://127.0.0.1:1/blueprint",
+      token: "secret",
+    })
+    const internals = runtime as unknown as {
+      child?: { kill: () => void }
+      ready?: typeof ready
+      activeLauncher?: { command: string; args: string[]; source: string; executable?: string }
+    }
+    internals.child = {
+      kill: () => {
+        killed += 1
+      },
+    }
+    internals.ready = ready
+    internals.activeLauncher = {
+      command: "python",
+      args: [],
+      source: "PATH python",
+      executable: String(detected.pythonCommand),
+    }
+
+    try {
+      expect(runtime.configure({ pythonCommand: String(detected.pythonCommand) })).toEqual({
+        ok: true,
+        pythonCommand: String(detected.pythonCommand),
+      })
+      expect(killed).toBe(0)
+      expect(internals.ready).toBe(ready)
+    } finally {
+      runtime.close()
+    }
+    expect(killed).toBe(1)
+  })
+
   test("detects an absolute Python executable for common config autofill", () => {
     const runtime = new BlueprintRuntime()
     try {
@@ -161,6 +202,60 @@ describe("blueprint runtime bridge", () => {
     } finally {
       runtime.close()
       await rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
+  test("posts project workdir relocation requests to the desktop blueprint service", async () => {
+    const sourceDir = await mkdtemp(join(tmpdir(), "gulicode-blueprint-source-"))
+    const targetDir = await mkdtemp(join(tmpdir(), "gulicode-blueprint-target-"))
+    const runtime = new BlueprintRuntime()
+    const originalFetch = globalThis.fetch
+    let captured: Record<string, unknown> | undefined
+    try {
+      ;(runtime as unknown as { ready: Promise<{ ok: true; url: string; token: string }> }).ready = Promise.resolve({
+        ok: true,
+        url: "http://127.0.0.1:1/blueprint",
+        token: "secret",
+      })
+      globalThis.fetch = ((_: RequestInfo | URL, init?: RequestInit) => {
+        captured = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              changed: true,
+              projectDir: sourceDir,
+              targetProjectDir: targetDir,
+              document: documentWithConfig(targetDir),
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+        )
+      }) as typeof fetch
+
+      const result = (await runtime.relocateProjectWorkdir(
+        sourceDir,
+        "default",
+        documentWithConfig(sourceDir),
+        targetDir,
+        "overwrite",
+      )) as Record<string, unknown>
+      const args = captured?.args as Record<string, unknown>
+
+      expect(captured?.command).toBe("blueprint.relocateProjectWorkdir")
+      expect(args.projectDir).toBe(sourceDir)
+      expect(args.blueprintId).toBe("default")
+      expect(args.projectWorkdir).toBe(targetDir)
+      expect(args.conflictPolicy).toBe("overwrite")
+      expect(result.targetProjectDir).toBe(targetDir)
+    } finally {
+      globalThis.fetch = originalFetch
+      runtime.close()
+      await rm(sourceDir, { recursive: true, force: true })
+      await rm(targetDir, { recursive: true, force: true })
     }
   })
 

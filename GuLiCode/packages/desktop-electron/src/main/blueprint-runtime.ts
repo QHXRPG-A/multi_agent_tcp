@@ -27,10 +27,13 @@ export type BlueprintDocument = {
 
 export type BlueprintRunEndAction = "complete" | "cancel" | "fail" | "pause"
 
+export type BlueprintRelocateConflictPolicy = "overwrite" | "load_existing"
+
 export class BlueprintRuntime {
   private child?: ChildProcessWithoutNullStreams
   private ready?: Promise<ReadyPayload>
   private configuredPythonCommand?: string
+  private activeLauncher?: PythonLauncher
 
   constructor(
     private readonly opts: {
@@ -50,6 +53,22 @@ export class BlueprintRuntime {
 
   save(projectDir: string, document: BlueprintDocument) {
     return this.request("blueprint.save", { projectDir, document }).then((result) => result.document)
+  }
+
+  relocateProjectWorkdir(
+    projectDir: string,
+    blueprintId: string,
+    document: BlueprintDocument,
+    projectWorkdir: string,
+    conflictPolicy?: BlueprintRelocateConflictPolicy,
+  ) {
+    return this.request("blueprint.relocateProjectWorkdir", {
+      projectDir,
+      blueprintId,
+      document,
+      projectWorkdir,
+      conflictPolicy,
+    })
   }
 
   validate(projectDir: string, blueprintId: string, document?: BlueprintDocument) {
@@ -97,8 +116,8 @@ export class BlueprintRuntime {
     const nextPython = opts.pythonCommand?.trim() || undefined
     const previousPython = this.configuredPythonCommand
     if (previousPython !== nextPython) {
-      this.close()
       this.configuredPythonCommand = nextPython
+      if (this.shouldRestartForPython(nextPython)) this.close()
     }
     return {
       ok: true,
@@ -205,6 +224,7 @@ export class BlueprintRuntime {
         },
       )
       this.child = child
+      this.activeLauncher = python
 
       let stdout = ""
       let stderr = ""
@@ -214,6 +234,10 @@ export class BlueprintRuntime {
         if (resolved) return
         resolved = true
         this.ready = undefined
+        if (this.child === child) {
+          this.child = undefined
+          this.activeLauncher = undefined
+        }
         child.kill()
         rejectReady(error)
       }
@@ -240,10 +264,36 @@ export class BlueprintRuntime {
       })
       child.on("error", (error) => fail(new Error(`failed to start Python blueprint runtime with ${python.source}: ${error.message}`)))
       child.on("exit", (code) => {
+        if (this.child === child) {
+          this.child = undefined
+          this.activeLauncher = undefined
+          if (resolved) this.ready = undefined
+        }
         if (!resolved) fail(new Error(`desktop blueprint service exited before ready: ${code}; ${stderr.trim()}`))
       })
     })
     return this.ready
+  }
+
+  private shouldRestartForPython(nextPython?: string) {
+    if (!this.child && !this.ready) return false
+    const current = this.activeLauncher
+    if (!current?.executable) return true
+    const packageRoot = this.opts.packageRoot ?? findPackageRoot()
+    const runtimeEnv = {
+      ...process.env,
+      ...(this.opts.env ?? {}),
+    }
+    try {
+      const next = resolvePythonLauncher({
+        configured: nextPython,
+        env: runtimeEnv,
+        packageRoot,
+      })
+      return !sameExecutable(current.executable, next.executable)
+    } catch {
+      return true
+    }
   }
 }
 
@@ -346,6 +396,15 @@ function pythonExecutable(candidate: PythonLauncher) {
   if (result.error || result.status !== 0) return undefined
   const executable = result.stdout.trim().split(/\r?\n/).at(0)?.trim()
   return executable || undefined
+}
+
+function sameExecutable(left?: string, right?: string) {
+  if (!left || !right) return false
+  const normalizeExecutable = (value: string) => {
+    const resolved = resolve(value)
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved
+  }
+  return normalizeExecutable(left) === normalizeExecutable(right)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

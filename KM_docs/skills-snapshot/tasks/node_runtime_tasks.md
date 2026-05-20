@@ -214,11 +214,11 @@ Follow-up:
 2026-05-06 follow-up:
 
 - Added `docs/workspace_api.md` as the framework-maintained Workspace API contract for blueprint agents.
-- Added `workspace_api.py` with `publish`, `publish-file`, `read`, and `list` commands. Agents publish to logical areas (`code`, `artifacts`, `reports`) instead of writing to physical shared workspace paths.
-- Blueprint AgentNode startup now injects the Workspace API document and command contract, not the shared workspace paths. Agent `cwd` is private scratch; the API context is provided through `MULTI_AGENT_WORKSPACE_CONTEXT`.
+- Added `workspace_api.py` with `publish`, `publish-file`, checkout/status/diff/submit/sync commands for framework internals, tests, and debugging. Agents read project/shared paths directly and use MCP tools instead of learning CLI recipes.
+- Blueprint AgentNode startup now injects direct-read project/shared paths and MCP tool context. Agent `cwd` is the private checkout; the API context is provided through `MULTI_AGENT_WORKSPACE_CONTEXT` for backend use, not as prompt-facing command guidance.
 - `publish` and `publish-file` go through `DulwichWorkspaceManager` shared write APIs and lease/manifest recording.
 - Shared files now use a per-path read/write lock: concurrent reads are allowed, but any active writer blocks readers and writers, and active readers block writers.
-- Workspace API also exposes per-path write versions: agents can `read --json`, edit privately, then `publish --expected-version N` to avoid stale overwrites during multi-agent edits.
+- Workspace API also exposes per-path write versions through publish results and the shared manifest; agents can read `shared_workspace.manifest` directly, edit privately, then `publish --expected-version N` to avoid stale overwrites during multi-agent edits.
 - Remaining caveat: this is a controlled CLI API and prompt contract, not a full security boundary for every possible CLI backend. Codex strict launch currently relies on Codex `workspace-write` sandbox semantics; other backends need separate evaluation before being treated as strict.
 
 Still pending:
@@ -233,19 +233,40 @@ Completed and archived into `archive/blueprint_integration_archive.md`:
 
 - Blueprint run workspace split: `base/`, private scratch, and shared outcome areas.
 - AgentNode startup now uses private scratch as `cwd`.
-- Framework-maintained Workspace API document is injected into agents at startup.
-- `workspace_api.py` provides controlled `publish`, `publish-file`, `read`, and `list` commands.
+- Framework-maintained Workspace API document is kept for internal/debug use; ordinary Agent prompt context should prefer MCP tool guidance and direct-read roots.
+- `workspace_api.py` provides controlled `publish`, `publish-file`, checkout/status/diff/submit/sync commands.
 - Workspace API writes go through manager-owned lease and manifest recording.
 - Shared files have per-path read/write locks: concurrent reads are allowed, writers are exclusive.
-- Shared files have per-path versions for read-modify-write: `read --json` plus `publish --expected-version N`.
+- Shared files have per-path versions for read-modify-write: read the shared manifest plus `publish --expected-version N`.
 - Pytest coverage now includes Workspace API binary stale-version conflicts, API-level reader/writer blocking, active-reader publish blocking, path escape rejection, and the private `agents/<agent_id>/private/` SkillSpace integration expectation. Full project pytest is configured to skip vendored/generated dependency trees and currently passes with `59 passed`.
 
 Current short-term follow-up:
 
-- Promote Workspace API from local context-file CLI to broker/runtime-owned RPC or tool calls.
-- Add conflict records and optional Dulwich commit/ref merge for `shared/code/`.
-- Emit `WorkspaceChanged` events from Workspace API publish/read flows and surface them in the UI.
-- Define UI-visible policies for binary artifacts, deletes/renames, and scope violations.
+- Keep ordinary Agent framework actions MCP-first; do not reintroduce
+  Workspace API CLI recipes into prompt-facing context.
+- Add conflict records and optional Dulwich commit/ref merge for code
+  changesets when needed.
+- Emit `WorkspaceChanged` events from Workspace API publish flows and
+  direct-read shared manifest updates, then surface them in the UI.
+- Define UI-visible policies for binary artifacts, deletes/renames, and scope
+  violations.
+
+## 2026-05-20 archived task status
+
+Completed and archived into
+`archive/blueprint_project_workdir_agent_surface_2026-05-20.md`:
+
+- Blueprint project workdir relocation/reload flow now moves the blueprint
+  document to the target project root and reloads the session so Workspace/MCP
+  authority follows the selected directory.
+- Ordinary Agents directly read project/shared physical paths and no longer
+  receive Workspace read/list/archive tools.
+- `workspace_api.py` and `WorkspaceRPCServer` no longer expose Agent-facing
+  read/list/archive commands.
+- Ordinary Agent `prompt_execution_context` hides `workspace_api` and
+  `submit_command`; MCP is the Agent-facing tool surface.
+- Codex launch safety protects project root, project context, and run shared
+  root from `--add-dir` writable escapes.
 
 ## 2026-05-07 VCS-style workspace task update
 

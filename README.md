@@ -47,18 +47,23 @@ MCP server. The desktop service starts one local ASGI/uvicorn MCP handle per
 live run with two tool boundaries:
 
 - `framework_ordinary`: for ordinary `AgentNode` execution. It exposes scoped
-  Workspace checkout/status/diff/submit/sync/publish/read/list/archive tools,
+  Workspace checkout/status/diff/submit/sync/publish/publish_file tools,
   scoped `agent_context`, scoped `agent_dispatch`, and scoped
-  `join_contribute`.
+  `join_contribute`. Ordinary Agents read the project directory and the current
+  run's temporary shared workspace directly from injected read-only filesystem
+  paths.
 - `framework_control`: for the Top Agent/control path. It exposes organization
   and top-agent context, run lifecycle, message batch/stage, control-side
-  dispatch, join create/contribute, utterance inspection, and read-only
-  Workspace inspection.
+  dispatch, join create/contribute, and utterance inspection.
 
 Tool availability is also enforced server-side with permission gates. Top
 Agent does not receive Workspace write/submit/publish tools, and ordinary
 Agents do not receive global lifecycle, utterance, message-batch, or
 join-create tools.
+
+The older `python -m multi_agent_tcp.workspace_api ...` CLI remains available
+for framework internals, tests, and debugging, but it is not included in
+ordinary Agent prompt-facing context.
 
 The full live Codex MCP smoke is opt-in because it launches the real Codex CLI
 and depends on local credentials/network/model availability:

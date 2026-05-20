@@ -87,7 +87,7 @@ describe("blueprint draft model", () => {
       cli_kind: "codex",
       model: "gpt-5.4",
       command: "codex",
-      timeout_sec: 300,
+      timeout_sec: 1800,
       adapter_options: { [TEST_AGENT_NODE_FLAG]: true, skip_git_repo_check: true },
     })
     expect(draft.layout.nodes["test-agent"]).toEqual({ x: 0, y: 24 })
@@ -99,9 +99,13 @@ describe("blueprint draft model", () => {
 
     const legacyTestAgent = addTestAgentNode(createDefaultBlueprintDraft())
     const legacyNode = legacyTestAgent.graph.agent_nodes["test-agent"]
-    if (legacyNode) delete legacyNode.adapter_options.skip_git_repo_check
+    if (legacyNode) {
+      delete legacyNode.adapter_options.skip_git_repo_check
+      legacyNode.timeout_sec = 60
+    }
     const runtime = toRuntimeGraphDraft(legacyTestAgent)
     expect(runtime.agent_nodes["test-agent"]?.adapter_options.skip_git_repo_check).toBe(true)
+    expect(runtime.agent_nodes["test-agent"]?.timeout_sec).toBe(1800)
   })
 
   test("adds route and terminal nodes", () => {

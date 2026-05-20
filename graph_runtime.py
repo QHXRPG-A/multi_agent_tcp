@@ -3585,6 +3585,18 @@ class GraphRuntime:
             pending.error = str(exc)
         finally:
             pending.completed_at = time.monotonic()
+            self.record_agent_stream_event(
+                {
+                    "kind": "queue.updated",
+                    "node_id": pending.node_id,
+                    "agent_id": pending.agent_id,
+                    "message_id": pending.message_id,
+                    "status": pending.status,
+                    "queue_size": len(self._agent_message_queues.get(pending.node_id, [])),
+                    "queue_mode": pending.queue_mode,
+                    "last_error": pending.error,
+                }
+            )
             self._emit(
                 GraphEvent(
                     "AgentQueuedMessageCompleted",
@@ -3606,6 +3618,15 @@ class GraphRuntime:
         message_id = message_id or f"msg-{uuid.uuid4().hex[:12]}"
         inst = await self.ensure_agent(node)
         inst.busy_count += 1
+        busy_released = False
+
+        def release_busy() -> None:
+            nonlocal busy_released
+            if busy_released:
+                return
+            inst.busy_count = max(0, inst.busy_count - 1)
+            busy_released = True
+
         self.record_agent_stream_event(
             self._agent_stream_status_event(
                 inst,
@@ -3670,6 +3691,7 @@ class GraphRuntime:
                 raise AgentMessageFailed(f"agent reply failed: {failure_reason}")
             self._set_agent_state(inst, "processing_reply", message_id=message_id)
         except asyncio.TimeoutError:
+            release_busy()
             self._set_agent_state(inst, "timed_out", error="timeout", message_id=message_id)
             self._record_message_io(
                 record_type="framework.message.failed",
@@ -3681,6 +3703,7 @@ class GraphRuntime:
             )
             raise
         except asyncio.CancelledError:
+            release_busy()
             self._set_agent_state(inst, "cancelled", message_id=message_id)
             self._record_message_io(
                 record_type="framework.message.failed",
@@ -3691,6 +3714,7 @@ class GraphRuntime:
             )
             raise
         except AgentMessageFailed as exc:
+            release_busy()
             self._set_agent_state(inst, "idle", error=str(exc), message_id=message_id)
             self._record_message_io(
                 record_type="framework.message.failed",
@@ -3702,6 +3726,7 @@ class GraphRuntime:
             )
             raise
         except Exception as exc:
+            release_busy()
             self._set_agent_state(inst, "failed", error=str(exc), message_id=message_id)
             self._record_message_io(
                 record_type="framework.message.failed",
@@ -3713,7 +3738,7 @@ class GraphRuntime:
             )
             raise
         finally:
-            inst.busy_count = max(0, inst.busy_count - 1)
+            release_busy()
         inst.messages_sent += 1
         self._set_agent_state(inst, "idle")
         task_id = self._task_id_from_body(body, message_id=message_id)

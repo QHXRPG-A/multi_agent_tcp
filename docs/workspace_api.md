@@ -1,24 +1,18 @@
-# Workspace API for Blueprint Agents
+# Workspace API CLI and RPC Contract
 
-Agents should publish run-scope reports and artifacts through the framework Workspace API instead of writing directly to shared workspace paths.
+This CLI/RPC contract is kept for framework internals, tests, and debugging. In normal live Codex runs, ordinary Agents should use the configured MCP tools and direct read-only filesystem paths; the CLI command set is not injected into the Agent prompt-facing context.
 
-The framework prepares the API context before the agent starts. Agents do not need to know the physical workspace directories. In blueprint runs the context normally points at a runtime-owned local RPC endpoint with an opaque token; the CLI below is only the thin client.
+Blueprint agents work with three workspace zones:
 
-Blueprint agents edit code through a VCS-style private checkout. In the current project-reference mode, the project directory remains the authoritative code source and final code target; the private checkout starts as an agent workbench and materializes only the files requested by `checkout --path` or `checkout --scope-path`. Final code changes are submitted back to the framework as a changeset. Run-scope reports and artifacts still use `publish`/`publish-file`; run-scope code never does.
+- `project_context` / `project_code_root`: authoritative code source and final code target. Agents may read these paths directly, but must not edit them directly.
+- `checkout_path`: the writable private code workbench. The worker process starts with this path as `cwd`.
+- `shared_workspace`: the current run's temporary shared workspace. Agents may read this physical directory directly, including `reports`, `artifacts`, `manifest.json`, and `logs`; agents publish new shared outputs through framework tools instead of writing files there directly.
 
-The long-term shared workspace is read-only for agents. The framework archives each run's temporary shared workspace into a named zip under the long-term workspace. Agents can list those archives and extract interesting results into their own private workspace for reading.
+The framework injects these paths into `AGENTS.md`, the prompt preamble, and the Codex Execution Context before the agent starts.
 
-## Agent Project Working Directory
+Code changes use a VCS-style private checkout. In project-reference mode, accepted submissions merge back to the project directory; in legacy snapshot mode, they merge into the run integration tree. Run-scope reports and artifacts use `publish` / `publish-file`; run-scope code never does.
 
-Blueprint AgentNodes receive three workspace zones:
-
-- `project_context` / `project_code_root`: the authoritative code source and final code target, accessed through framework checkout/submit operations.
-- `checkout_path`: the writable private workbench. The worker process starts with this path as `cwd`.
-- temporary shared workspace areas: `reports` and `artifacts`, used for collaboration records, summaries, produced files, file/version references, and changeset ids.
-
-For Codex workers, the blueprint runtime defaults to `codex exec --sandbox workspace-write --cd <checkout_path>` unless the node explicitly overrides the Codex sandbox option.
-
-All AgentNodes are started when the blueprint run starts. A downstream working directory can only be reassigned later through the framework runtime API, and only by a `SuperAgentProfile` with `can_assign_downstream_workdir=True`. The framework rejects reassignment with `AGENT_BUSY` if the target agent is currently executing a task; otherwise it kills and relaunches that worker with the same config plus the new working directory.
+For Codex workers, the blueprint runtime defaults to `codex exec --sandbox workspace-write --cd <checkout_path>` unless the node explicitly overrides the Codex sandbox option. Strict launch validation rejects `danger-full-access` and rejects `--add-dir` entries that would make the project or shared workspace roots writable.
 
 ## Command
 
@@ -26,14 +20,14 @@ All AgentNodes are started when the blueprint run starts. A downstream working d
 python -m multi_agent_tcp.workspace_api <command> [options]
 ```
 
+The command is a thin client over the run-owned local RPC endpoint when `MULTI_AGENT_WORKSPACE_CONTEXT` points at an RPC context.
+
 ## Areas
 
 - `artifacts`: generated images, documents, binary-adjacent text metadata, or other reusable assets.
 - `reports`: summaries, manifests, test results, review notes, and structured run outputs.
 
 ## VCS-Style Code Flow
-
-Use these commands when the runtime asks agents to work in private code checkouts instead of writing directly to the project directory.
 
 Create or refresh the agent checkout:
 
@@ -63,7 +57,7 @@ Submit the checkout as a changeset:
 python -m multi_agent_tcp.workspace_api submit --task-id task-123 --summary "Implement parser fix"
 ```
 
-Accepted submissions are merged into the current code target and archived under `changesets/<changeset_id>/`. In project-reference mode the code target is the project directory; in legacy snapshot mode it is the run integration tree. Conflicts return `ok: false`, `status: "conflict"`, and structured file entries with `reason`, hashes, and a merge preview when available. After a conflict, refresh from the latest code target:
+Accepted submissions are merged into the current code target and archived under `changesets/<changeset_id>/`. Conflicts return `ok: false`, `status: "conflict"`, and structured file entries with `reason`, hashes, and a merge preview when available. After a conflict, refresh from the latest code target:
 
 ```powershell
 python -m multi_agent_tcp.workspace_api sync
@@ -83,15 +77,15 @@ Write UTF-8 text to a specific outcome area. The framework acquires a file lease
 python -m multi_agent_tcp.workspace_api publish --area reports --path status.json --text "{\"ok\": true}"
 ```
 
-The command prints JSON with `ok`, `area`, and `path`. It does not print the physical workspace location.
+The command prints JSON with `ok`, `area`, `path`, `owner`, and `version`. It does not print a new physical path because the shared root is already injected into the agent context.
 
-For read-modify-write workflows, use `read --json` to obtain the current `version`, then pass it to publish:
+For version-checked publish workflows, read `shared_workspace.manifest` directly to find the current path version, then pass it to publish:
 
 ```powershell
 python -m multi_agent_tcp.workspace_api publish --area reports --path result.md --file updated.md --expected-version 3
 ```
 
-If another agent published the same path after your read, the command fails with a version conflict instead of overwriting newer content.
+If another agent published the same path after the observed version, the command fails with a version conflict instead of overwriting newer content.
 
 ## Publish File
 
@@ -101,69 +95,20 @@ Publish any local file, including images and other binary artifacts. The file is
 python -m multi_agent_tcp.workspace_api publish-file --area artifacts --path images/result.png --file local_result.png
 ```
 
-The command prints JSON with `ok`, `area`, `path`, and `bytes`. It does not print the physical workspace location.
+The command prints JSON with `ok`, `area`, `path`, `owner`, `bytes`, and `version`.
 
-`publish-file` also supports `--expected-version <N>` for read-modify-write workflows.
-
-## Long-Term Archives
-
-List run archives stored by the framework in the read-only long-term workspace:
-
-```powershell
-python -m multi_agent_tcp.workspace_api list-archives
-```
-
-Extract a whole archive, or a single relative path inside it, into your private workspace:
-
-```powershell
-python -m multi_agent_tcp.workspace_api extract-archive --archive-id run-123-completed --path reports
-```
-
-The extract command returns the private path to read. It does not write into the long-term workspace.
-
-## Read Text
-
-Read a UTF-8 text output that has already been published through the shared workspace.
-
-```powershell
-python -m multi_agent_tcp.workspace_api read --area reports --path result.md
-```
-
-Use `--json` to include the current path version:
-
-```powershell
-python -m multi_agent_tcp.workspace_api read --area reports --path result.md --json
-```
-
-## List Files
-
-List files previously published under an area.
-
-```powershell
-python -m multi_agent_tcp.workspace_api list --area artifacts
-```
-
-The command prints JSON containing relative paths.
+`publish-file` also supports `--expected-version <N>` for version-checked workflows.
 
 ## Rules
 
-- Do not write task outcomes directly to filesystem paths.
-- Treat the project directory as the authoritative code source and final code target, but make task edits in the private checkout.
+- Read project files directly from `project_context` / `project_code_root`.
+- Read run-shared reports, artifacts, manifest, and logs directly from `shared_workspace`.
+- Treat the project directory and shared workspace as read-only completion targets.
+- Make code edits only in `checkout_path`.
 - Code collaboration must use `checkout -> edit -> status/diff -> submit`.
-- Use the temporary shared workspace for reports, artifacts, summaries, file/version references, and changeset ids instead of copying project source trees into it.
 - Use `publish-file --area artifacts` for generated assets such as images or binary files.
 - Use `publish --area reports` for summaries, manifests, and test output.
 - Keep private scratch files private. Only data published through the API is treated as a run outcome.
-- If a publish command reports a lock conflict, stop and report the conflict instead of overwriting the file.
+- If a publish command reports a lock or version conflict, stop and report the conflict instead of overwriting the file.
 
-## Read/Write Locking
-
-The Workspace API uses a per-file read/write lock:
-
-- Multiple agents may read the same file at the same time.
-- While any agent is reading a file, publishing to that same file is blocked.
-- While an agent is publishing a file, other agents cannot read or publish that same file.
-- Locks are recorded in the shared manifest and have a lease timeout so abandoned processes do not block the run forever.
-- For joint editing, combine the lock with version checking: read with `--json`, edit privately, then publish with `--expected-version`.
-
-If an API command returns JSON with `ok: false` and a lock-related `error`, do not retry by writing directly to the filesystem. Report the conflict or choose a different output path.
+Agent-facing `read`, `list`, `list-archives`, and `extract-archive` Workspace API commands are intentionally not exposed. Internal manager read/archive methods remain available to the framework for reports, archiving, tests, and state projection.

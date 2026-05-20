@@ -19,7 +19,7 @@ import {
   listBlueprintRules,
   listBlueprintSkills,
 } from "./blueprint-catalog"
-import type { BlueprintDocument, BlueprintRunEndAction, BlueprintRuntime } from "./blueprint-runtime"
+import type { BlueprintDocument, BlueprintRelocateConflictPolicy, BlueprintRunEndAction, BlueprintRuntime } from "./blueprint-runtime"
 import { getStore } from "./store"
 import { setTitlebar } from "./windows"
 
@@ -130,6 +130,24 @@ export function registerIpcHandlers(deps: Deps) {
   )
   ipcMain.handle("blueprint-save", (_event: IpcMainInvokeEvent, projectDir: string, document: BlueprintDocument) =>
     deps.blueprintRuntime.save(projectDir, document),
+  )
+  ipcMain.handle(
+    "blueprint-relocate-project-workdir",
+    (
+      _event: IpcMainInvokeEvent,
+      projectDir: string,
+      blueprintId: string,
+      document: BlueprintDocument,
+      targetProjectWorkdir: string,
+      conflictPolicy?: BlueprintRelocateConflictPolicy,
+    ) =>
+      deps.blueprintRuntime.relocateProjectWorkdir(
+        projectDir,
+        blueprintId,
+        document,
+        targetProjectWorkdir,
+        conflictPolicy,
+      ),
   )
   ipcMain.handle(
     "blueprint-validate",

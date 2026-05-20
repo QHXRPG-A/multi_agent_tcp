@@ -38,6 +38,17 @@ export type BlueprintValidationResult = {
 
 export type BlueprintRunEndAction = "complete" | "cancel" | "fail" | "pause"
 
+export type BlueprintRelocateConflictPolicy = "overwrite" | "load_existing"
+
+export type BlueprintRelocateProjectWorkdirResult = {
+  ok: boolean
+  changed: boolean
+  projectDir: string
+  targetProjectDir: string
+  document: BlueprintDocument
+  conflict?: "target_exists"
+}
+
 export type Platform = {
   /** Platform discriminator */
   platform: "web" | "desktop"
@@ -101,6 +112,15 @@ export type Platform = {
 
   /** Save one project blueprint document (desktop only) */
   saveBlueprint?(projectDir: string, document: BlueprintDocument): Promise<BlueprintDocument>
+
+  /** Move the current blueprint document to a new project workdir and make that directory the blueprint root. */
+  relocateBlueprintProjectWorkdir?(
+    projectDir: string,
+    blueprintId: string,
+    document: BlueprintDocument,
+    targetProjectWorkdir: string,
+    conflictPolicy?: BlueprintRelocateConflictPolicy,
+  ): Promise<BlueprintRelocateProjectWorkdirResult>
 
   /** Validate one project blueprint document against runtime graph rules (desktop only) */
   validateBlueprint?(projectDir: string, blueprintId: string, document?: BlueprintDocument): Promise<BlueprintValidationResult>

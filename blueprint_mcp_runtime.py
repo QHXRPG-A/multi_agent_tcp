@@ -685,34 +685,6 @@ class RunMCPRuntimeHandle:
             )
 
         @mcp.tool()
-        def workspace_read(area: str, path: str, as_json: bool = False) -> Dict[str, Any]:
-            return self._workspace_request(
-                _require_scope("ordinary"),
-                "read",
-                {"area": area, "path": path, "json": bool(as_json)},
-            )
-
-        @mcp.tool()
-        def workspace_list(area: str, path: str = "") -> Dict[str, Any]:
-            return self._workspace_request(
-                _require_scope("ordinary"),
-                "list",
-                {"area": area, "path": path},
-            )
-
-        @mcp.tool()
-        def workspace_list_archives() -> Dict[str, Any]:
-            return self._workspace_request(_require_scope("ordinary"), "list-archives", {})
-
-        @mcp.tool()
-        def workspace_extract_archive(archive_id: str, path: str = "") -> Dict[str, Any]:
-            return self._workspace_request(
-                _require_scope("ordinary"),
-                "extract-archive",
-                {"archive_id": archive_id, "path": path},
-            )
-
-        @mcp.tool()
         async def agent_dispatch(
             target_node_id: str,
             body: Any,
@@ -1067,38 +1039,6 @@ class RunMCPRuntimeHandle:
                 permission="start",
             )
 
-        @mcp.tool()
-        def workspace_read(area: str, path: str, as_json: bool = False) -> Dict[str, Any]:
-            return self._readonly_workspace_request(
-                _require_scope("control", "workspace_read"),
-                "read",
-                {"area": area, "path": path, "json": bool(as_json)},
-            )
-
-        @mcp.tool()
-        def workspace_list(area: str, path: str = "") -> Dict[str, Any]:
-            return self._readonly_workspace_request(
-                _require_scope("control", "workspace_list"),
-                "list",
-                {"area": area, "path": path},
-            )
-
-        @mcp.tool()
-        def workspace_list_archives() -> Dict[str, Any]:
-            return self._readonly_workspace_request(
-                _require_scope("control", "workspace_list_archives"),
-                "list-archives",
-                {},
-            )
-
-        @mcp.tool()
-        def workspace_extract_archive(archive_id: str, path: str = "") -> Dict[str, Any]:
-            return self._readonly_workspace_request(
-                _require_scope("control", "workspace_extract_archive"),
-                "extract-archive",
-                {"archive_id": archive_id, "path": path},
-            )
-
         allowed = set(_control_tools_for_permissions(self._top_agent_permissions()))
         for tool_name in CONTROL_TOOL_NAMES:
             if tool_name not in allowed:
@@ -1328,36 +1268,6 @@ class RunMCPRuntimeHandle:
             }
         )
 
-    def _readonly_workspace_request(
-        self,
-        scope: MCPTokenScope,
-        command: str,
-        args: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        if scope.server_kind != "control":
-            raise PermissionError("readonly workspace tools require a control MCP token")
-        _require_control_permission(scope, "status")
-        if command not in READONLY_WORKSPACE_COMMANDS:
-            raise PermissionError(f"workspace command is not readonly: {command}")
-        if not scope.workspace_rpc_token or not scope.agent_id:
-            raise PermissionError("control MCP token is missing readonly workspace RPC scope")
-        tool_name = f"workspace_{command.replace('-', '_')}"
-        _require_allowed_tool(scope, tool_name)
-        clean_args = {
-            key: value
-            for key, value in args.items()
-            if value is not None
-        }
-        self._record_mcp_tool_call(scope, tool_name, clean_args)
-        clean_args["owner"] = scope.agent_id
-        return self.workspace_rpc_server.handle_request(
-            {
-                "token": scope.workspace_rpc_token,
-                "command": command,
-                "args": clean_args,
-            }
-        )
-
     async def _agent_dispatch(
         self,
         scope: MCPTokenScope,
@@ -1421,16 +1331,11 @@ ORDINARY_TOOL_NAMES = [
     "workspace_sync",
     "workspace_publish",
     "workspace_publish_file",
-    "workspace_read",
-    "workspace_list",
-    "workspace_list_archives",
-    "workspace_extract_archive",
     "agent_dispatch",
     "agent_context",
     "join_contribute",
 ]
 
-READONLY_WORKSPACE_COMMANDS = {"read", "list", "list-archives", "extract-archive"}
 DEFAULT_CONTROL_PERMISSIONS = ["ask", "start", "status", "end", "utterances"]
 
 CONTROL_TOOL_NAMES_BY_PERMISSION = {
@@ -1455,10 +1360,6 @@ CONTROL_TOOL_NAMES_BY_PERMISSION = {
         "runtime_explain_status",
         "runtime_status",
         "agent_context",
-        "workspace_read",
-        "workspace_list",
-        "workspace_list_archives",
-        "workspace_extract_archive",
     ],
     "end": [
         "runtime_end",

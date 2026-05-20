@@ -191,6 +191,7 @@ export const DEFAULT_SKILL_DIR = ""
 export const DEFAULT_RULE_DIR = ""
 export const CLI_KIND_OPTIONS: BlueprintCliKind[] = ["codemaker", "codex"]
 export const TEST_AGENT_NODE_FLAG = "gulicode_test_node"
+const TEST_AGENT_TIMEOUT_SEC = 1800
 
 export function defaultCommandForCliKind(cliKind: string) {
   if (cliKind === "codex") return "codex"
@@ -481,7 +482,7 @@ export function addTestAgentNode(
     cli_kind: "codex",
     model: defaultModelForCliKind("codex"),
     command: defaultCommandForCliKind("codex"),
-    timeout_sec: 300,
+    timeout_sec: TEST_AGENT_TIMEOUT_SEC,
     adapter_options: { [TEST_AGENT_NODE_FLAG]: true, skip_git_repo_check: true },
   }
   next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
@@ -895,9 +896,15 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
   const skillSelection = normalizeSkillSelection(node.skill_selection ?? defaults.skill_selection, skills)
   const adapterOptions = { ...(node.adapter_options ?? defaults.adapter_options) }
   const cliKind = String(node.cli_kind ?? defaults.cli_kind)
-  if (adapterOptions[TEST_AGENT_NODE_FLAG] === true && cliKind === "codex") {
+  const testAgent = adapterOptions[TEST_AGENT_NODE_FLAG] === true && cliKind === "codex"
+  if (testAgent) {
     adapterOptions.skip_git_repo_check ??= true
   }
+  const configuredTimeoutSec = Number(node.timeout_sec)
+  const timeoutSec =
+    testAgent && (!Number.isFinite(configuredTimeoutSec) || configuredTimeoutSec < TEST_AGENT_TIMEOUT_SEC)
+      ? TEST_AGENT_TIMEOUT_SEC
+      : (node.timeout_sec ?? defaults.timeout_sec)
   return {
     ...defaults,
     ...node,
@@ -909,6 +916,7 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
     extra_env: Object.fromEntries(
       Object.entries(node.extra_env ?? defaults.extra_env).map(([key, value]) => [key, String(value)]),
     ),
+    timeout_sec: timeoutSec,
     read_scope: [...(node.read_scope ?? defaults.read_scope)],
     write_scope: [...(node.write_scope ?? defaults.write_scope)],
     artifact_scope: [...(node.artifact_scope ?? defaults.artifact_scope)],

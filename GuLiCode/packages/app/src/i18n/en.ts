@@ -942,6 +942,7 @@ export const dict = {
   "blueprint.graph.edges": "edges",
   "blueprint.globalConfig.title": "Blueprint config",
   "blueprint.globalConfig.unset": "Not set",
+  "blueprint.globalConfig.locked": "Blueprint config is locked while the blueprint is running.",
   "blueprint.headerStatus.expand": "Show blueprint status details",
   "blueprint.headerStatus.loadingTitle": "Blueprint status",
   "blueprint.headerStatus.loadingDetail": "Loading the project blueprint document.",
@@ -954,6 +955,15 @@ export const dict = {
   "blueprint.configRequired.issue.missing": "{{field}} is required.",
   "blueprint.configRequired.issue.absolute": "{{field}} must be an absolute path.",
   "blueprint.configRequired.ok": "OK",
+  "blueprint.projectWorkdir.confirmTitle": "Confirm project workdir",
+  "blueprint.projectWorkdir.confirmDescription":
+    "Confirm the project directory used by this blueprint session and Workspace root.",
+  "blueprint.projectWorkdir.confirmAction": "Confirm",
+  "blueprint.projectWorkdir.conflictTitle": "Target blueprint already exists",
+  "blueprint.projectWorkdir.conflictDescription":
+    "A blueprint already exists under {{path}}. Choose whether to overwrite it with the current blueprint or load the existing target blueprint.",
+  "blueprint.projectWorkdir.loadExisting": "Load existing",
+  "blueprint.projectWorkdir.overwrite": "Overwrite",
   "blueprint.catalog.count": "{{count}} items",
   "blueprint.catalog.empty": "No options",
   "blueprint.catalog.loadFailed": "Failed to load",

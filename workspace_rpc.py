@@ -14,6 +14,15 @@ from .workspace_manager import DulwichWorkspaceManager, RunWorkspace
 
 
 VALID_AREAS = {"artifacts", "reports"}
+SUPPORTED_RPC_COMMANDS = {
+    "publish",
+    "publish-file",
+    "checkout",
+    "status",
+    "diff",
+    "submit",
+    "sync",
+}
 
 
 def _area_path(area: str, rel_path: str = "") -> str:
@@ -128,7 +137,14 @@ class WorkspaceRPCServer:
             "areas": sorted(VALID_AREAS),
             "workspace_scopes": ["run"],
             "vcs_commands": ["checkout", "status", "diff", "submit", "sync"],
-            "archive_commands": ["list-archives", "extract-archive"],
+            "shared_workspace": {
+                "root": str(self.run.shared_dir),
+                "reports": str(self.run.shared_reports_dir),
+                "artifacts": str(self.run.shared_artifacts_dir),
+                "manifest": str(self.run.shared_dir / "manifest.json"),
+                "logs": str(self.run.shared_dir / "logs"),
+                "readonly": True,
+            },
         }
 
     def _resolve_agent(self, token: Optional[str]) -> str:
@@ -149,11 +165,11 @@ class WorkspaceRPCServer:
             payload["checkout_paths"] = [str(item) for item in args.get("checkout_paths", args.get("paths", []))]
             payload["write_scope"] = [str(item) for item in args.get("write_scope", [])]
             payload["mode"] = str(args.get("mode", "full"))
-        elif command in {"status", "diff", "submit", "sync", "list-archives", "extract-archive"}:
-            for key in ("path", "summary", "task_id", "archive_id"):
+        elif command in {"status", "diff", "submit", "sync"}:
+            for key in ("path", "summary", "task_id"):
                 if key in args:
                     payload[key] = args[key]
-        elif command in {"publish", "publish-file", "read", "list"}:
+        elif command in {"publish", "publish-file"}:
             for key in ("area", "path", "expected_version"):
                 if key in args:
                     payload[key] = args[key]
@@ -166,6 +182,8 @@ class WorkspaceRPCServer:
         args = payload.get("args", {})
         if not isinstance(args, dict):
             raise ValueError("args must be a JSON object")
+        if command not in SUPPORTED_RPC_COMMANDS:
+            raise ValueError(f"unsupported workspace RPC command: {command!r}")
         self._record_api_call(agent_id, command, args)
 
         owner = str(args.get("owner") or agent_id)
@@ -208,33 +226,6 @@ class WorkspaceRPCServer:
                     "bytes": len(data),
                     "version": self.manager.shared_file_version(self.run, rel),
                 },
-            ).to_dict()
-
-        if command == "read":
-            rel = _area_path(str(args["area"]), str(args["path"]))
-            text = self.manager.read_shared_text(self.run, rel, owner=owner)
-            if args.get("json"):
-                return WorkspaceRPCResponse(
-                    True,
-                    {
-                        "area": args["area"],
-                        "path": args["path"],
-                        "version": self.manager.shared_file_version(self.run, rel),
-                        "text": text,
-                    },
-                ).to_dict()
-            return WorkspaceRPCResponse(True, {"text": text}).to_dict()
-
-        if command == "list":
-            rel = _area_path(str(args["area"]), str(args.get("path", "")))
-            prefix = f"{args['area']}/"
-            files = [
-                item[len(prefix) :] if item.startswith(prefix) else item
-                for item in self.manager.list_shared_files(self.run, rel)
-            ]
-            return WorkspaceRPCResponse(
-                True,
-                {"area": args["area"], "path": args.get("path", ""), "files": files},
             ).to_dict()
 
         if command == "checkout":
@@ -295,24 +286,6 @@ class WorkspaceRPCServer:
             return WorkspaceRPCResponse(
                 True,
                 {"checkout_id": checkout.checkout_id, "base_ref": checkout.base_ref},
-            ).to_dict()
-
-        if command == "list-archives":
-            return WorkspaceRPCResponse(
-                True,
-                {"archives": self.manager.list_long_term_archives()},
-            ).to_dict()
-
-        if command == "extract-archive":
-            path = self.manager.extract_long_term_archive(
-                self.run,
-                owner,
-                str(args["archive_id"]),
-                path=str(args.get("path") or ""),
-            )
-            return WorkspaceRPCResponse(
-                True,
-                {"archive_id": args["archive_id"], "path": str(path)},
             ).to_dict()
 
         raise ValueError(f"unsupported workspace RPC command: {command!r}")

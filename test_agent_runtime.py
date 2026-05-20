@@ -579,6 +579,56 @@ def test_codex_runtime_rejects_extra_args_add_dir_for_project_context(tmp_path: 
         )
 
 
+def test_codex_runtime_rejects_extra_args_add_dir_for_project_code_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    subdir = project / "pkg"
+    checkout = tmp_path / "run" / "agents" / "agent-cx" / "private" / "checkout"
+    subdir.mkdir(parents=True)
+    checkout.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="--add-dir"):
+        load_codex_runtime(
+            {
+                "agent_id": "agent-cx",
+                "codex": {
+                    "cwd": str(checkout),
+                    "sandbox": "workspace-write",
+                    "extra_args": ["--add-dir", str(project)],
+                    "execution_context": {
+                        "code_workspace": {
+                            "project_context": str(subdir),
+                            "project_code_root": str(project),
+                        },
+                    },
+                },
+            }
+        )
+
+
+def test_codex_runtime_rejects_extra_args_add_dir_for_shared_workspace(tmp_path: Path) -> None:
+    checkout = tmp_path / "run" / "agents" / "agent-cx" / "private" / "checkout"
+    shared = tmp_path / "run" / "shared"
+    checkout.mkdir(parents=True)
+    shared.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="--add-dir"):
+        load_codex_runtime(
+            {
+                "agent_id": "agent-cx",
+                "codex": {
+                    "cwd": str(checkout),
+                    "sandbox": "workspace-write",
+                    "extra_args": ["--add-dir", str(shared)],
+                    "execution_context": {
+                        "shared_workspace": {
+                            "root": str(shared),
+                        },
+                    },
+                },
+            }
+        )
+
+
 def test_codex_diagnostics_writer_preserves_stdout_stderr_and_final_text(tmp_path: Path) -> None:
     diagnostics = _write_codex_diagnostics(
         codex_cfg={"diagnostics_dir": str(tmp_path / "diag")},
@@ -919,6 +969,14 @@ async def test_graph_runtime_queues_messages_until_agent_is_idle() -> None:
     assert pending.receipt["node_id"] == "node-a"
     assert pending.receipt["message_id"] == queued["message_id"]
     assert pending.receipt["said"] == json.dumps({"ok": True, "idx": 1}, ensure_ascii=False)
+    queue_updates = [
+        event
+        for event in runtime.agent_stream_events
+        if event.get("kind") == "queue.updated"
+        and event.get("message_id") == queued["message_id"]
+    ]
+    assert queue_updates[-1]["status"] == "completed"
+    assert queue_updates[-1]["last_error"] is None
     assert runtime.instances["node-a"].messages_sent == 2
     states = [entry["state"] for entry in runtime.instances["node-a"].state_history]
     assert "starting" in states
@@ -941,6 +999,10 @@ async def test_graph_runtime_keeps_agent_idle_after_worker_ok_false() -> None:
     inst = runtime.instances["node-a"]
     assert inst.state == "idle"
     assert "stream disconnected" in (inst.last_error or "")
+    status_events = [event for event in runtime.agent_stream_events if event.get("kind") == "status"]
+    assert status_events[-1]["agent_state"] == "idle"
+    assert status_events[-1]["busy_count"] == 0
+    assert "stream disconnected" in status_events[-1]["last_error"]
 
     recovered = await runtime.send_agent_message(node, {"prompt": "retry"})
     assert recovered["said"] == json.dumps({"ok": True, "recovered": True}, ensure_ascii=False)
@@ -963,6 +1025,10 @@ async def test_graph_runtime_keeps_agent_idle_after_structured_worker_timeout() 
     inst = runtime.instances["node-a"]
     assert inst.state == "idle"
     assert inst.last_error == "agent reply failed: codex timed out"
+    status_events = [event for event in runtime.agent_stream_events if event.get("kind") == "status"]
+    assert status_events[-1]["agent_state"] == "idle"
+    assert status_events[-1]["busy_count"] == 0
+    assert status_events[-1]["last_error"] == "agent reply failed: codex timed out"
 
     recovered = await runtime.send_agent_message(node, {"prompt": "retry"})
     assert recovered["said"] == json.dumps({"ok": True, "recovered": True}, ensure_ascii=False)
@@ -971,6 +1037,33 @@ async def test_graph_runtime_keeps_agent_idle_after_structured_worker_timeout() 
         ("node-a", {"prompt": "next"}, 42.0),
         ("node-a", {"prompt": "retry"}, 42.0),
     ]
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_queued_worker_failure_emits_terminal_stream_update() -> None:
+    cluster = _TimeoutThenOkCluster()
+    node = AgentNode(node_id="node-a", cwd=Path("."), timeout_sec=42.0)
+    runtime = GraphRuntime(cluster)
+    await runtime.ensure_agent(node)
+
+    pending = runtime.queue_agent_message(node, {"prompt": "queued"})
+    await runtime.tick()
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if runtime.pending_messages[pending.message_id].status == "failed":
+            break
+
+    completed = runtime.pending_messages[pending.message_id]
+    assert completed.status == "failed"
+    assert completed.error == "agent reply failed: codex timed out"
+    queue_updates = [
+        event
+        for event in runtime.agent_stream_events
+        if event.get("kind") == "queue.updated"
+        and event.get("message_id") == pending.message_id
+    ]
+    assert queue_updates[-1]["status"] == "failed"
+    assert queue_updates[-1]["last_error"] == "agent reply failed: codex timed out"
 
 
 @pytest.mark.asyncio
@@ -985,6 +1078,9 @@ async def test_graph_runtime_can_retry_after_backend_timeout() -> None:
     inst = runtime.instances["node-a"]
     assert inst.state == "timed_out"
     assert inst.can_accept_message is True
+    status_events = [event for event in runtime.agent_stream_events if event.get("kind") == "status"]
+    assert status_events[-1]["agent_state"] == "timed_out"
+    assert status_events[-1]["busy_count"] == 0
 
     recovered = await runtime.send_agent_message(node, {"prompt": "retry"})
     assert recovered["said"] == json.dumps({"ok": True, "recovered": True}, ensure_ascii=False)
@@ -1770,11 +1866,18 @@ def test_blueprint_workspace_application_uses_private_checkout_and_rpc_context(
         assert code_workspace["mode"] == "vcs_checkout"
         assert code_workspace["checkout_path"] == str(checkout_path)
         assert code_workspace["integration_dir"] == str(run.integration_dir)
+        shared_workspace = adjusted.adapter_options["execution_context"]["shared_workspace"]
+        assert shared_workspace["root"] == str(run.shared_dir.resolve())
+        assert shared_workspace["reports"] == str(run.shared_reports_dir.resolve())
+        assert shared_workspace["manifest"] == str((run.shared_dir / "manifest.json").resolve())
+        agents_md = (checkout_path / "AGENTS.md").read_text(encoding="utf-8")
+        assert f"Read-only shared workspace: `{shared_workspace['root']}`" in agents_md
+        assert f"Shared reports: `{shared_workspace['reports']}`" in agents_md
         context_path = private / "workspace_api_context.json"
-        context = context_path.read_text(encoding="utf-8")
-        assert '"transport": "rpc"' in context
-        assert str(manager.workspace_root) not in context
-        assert str(run.path) not in context
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        assert context["transport"] == "rpc"
+        assert context["shared_workspace"]["root"] == str(run.shared_dir)
+        assert "archive_commands" not in context
     finally:
         server.close()
 
@@ -1823,6 +1926,35 @@ def test_blueprint_workspace_application_rejects_codex_project_add_dir(
             cli_kind="codex",
             cwd=Path("."),
             adapter_options={"extra_args": ["--add-dir", str(tmp_path)]},
+        )
+
+        with pytest.raises(ValueError, match="--add-dir"):
+            _apply_run_workspace_to_node(
+                node,
+                manager=manager,
+                run=run,
+                private_dir=private,
+                rpc_server=server,
+            )
+    finally:
+        server.close()
+
+
+def test_blueprint_workspace_application_rejects_codex_shared_add_dir(
+    tmp_path: Path,
+) -> None:
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-blueprint")
+    private = manager.agent_workspace_dir(run, "agent-cx")
+    server = WorkspaceRPCServer(manager, run)
+    server.start()
+    try:
+        node = AgentNode(
+            node_id="agent-node",
+            agent_id="agent-cx",
+            cli_kind="codex",
+            cwd=Path("."),
+            adapter_options={"extra_args": ["--add-dir", str(run.shared_dir)]},
         )
 
         with pytest.raises(ValueError, match="--add-dir"):
@@ -1923,10 +2055,12 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
             '{"framework_context": {"message_envelope": {"outgoing_batch_id": "out-1"}}}',
             worker_json["codex"],
         )
-        assert "Workspace API" in merged_prompt
+        assert "Workspace API" not in merged_prompt
+        assert "multi_agent_tcp.workspace_api" not in merged_prompt
         assert "Codex Execution Context" in merged_prompt
-        assert json.dumps(str(checkout), ensure_ascii=False)[1:-1] not in merged_prompt
-        assert json.dumps(str(project), ensure_ascii=False)[1:-1] not in merged_prompt
+        assert json.dumps(str(checkout), ensure_ascii=False)[1:-1] in merged_prompt
+        assert json.dumps(str(project), ensure_ascii=False)[1:-1] in merged_prompt
+        assert json.dumps(str(run.shared_dir.resolve()), ensure_ascii=False)[1:-1] in merged_prompt
         assert "PRIVATE_RUNTIME_SKILL_DESCRIPTION" in merged_prompt
         assert "outgoing_batch_id" in merged_prompt
         assert "out-1" in merged_prompt
@@ -1935,8 +2069,11 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert private_context["rule_catalog"][0]["rule_path"] == str(private / "rules" / "01-business-rule.md")
         prompt_context = inst.node.adapter_options["prompt_execution_context"]
         assert "codex_home" not in prompt_context["private_context"]
-        assert "project_context" not in prompt_context["code_workspace"]
-        assert "checkout_path" not in prompt_context["code_workspace"]
+        assert "workspace_api" not in prompt_context
+        assert prompt_context["code_workspace"]["project_context"] == str(project)
+        assert prompt_context["code_workspace"]["checkout_path"] == str(checkout)
+        assert "submit_command" not in prompt_context["code_workspace"]
+        assert prompt_context["shared_workspace"]["root"] == str(run.shared_dir.resolve())
         assert (private / "workspace_api_context.json").is_file()
     finally:
         server.close()
@@ -2132,15 +2269,14 @@ async def test_real_codex_cli_framework_private_checkout_submit_and_archive_flow
         assert (private / "rules" / "01-framework-flow-rule.md").is_file()
 
         audit_commands = _workspace_api_audit_commands(run)
-        audit_index = 0
         for expected in ["checkout", "status", "diff", "submit", "publish"]:
-            while audit_index < len(audit_commands) and audit_commands[audit_index] != expected:
-                audit_index += 1
-            assert audit_index < len(audit_commands), {
+            assert expected in audit_commands, {
                 "missing": expected,
                 "audit_commands": audit_commands,
             }
-            audit_index += 1
+        assert audit_commands.index("checkout") < audit_commands.index("submit") < audit_commands.index("publish")
+        assert audit_commands.index("status") < audit_commands.index("submit")
+        assert audit_commands.index("diff") < audit_commands.index("submit")
         assert audit_commands.count("submit") == 1
         assert submit_saw_project_base is True
 

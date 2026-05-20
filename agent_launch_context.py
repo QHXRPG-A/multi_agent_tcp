@@ -115,7 +115,7 @@ def workspace_api_doc() -> str:
         return (
             f"Workspace API command: `{command}`. "
             "Use `checkout`, `status`, `diff`, `submit`, `publish-file`, "
-            "`publish`, `read`, `list`, `list-archives`, and `extract-archive`."
+            "and `publish`."
         )
     return doc_path.read_text(encoding="utf-8").replace(
         "python -m multi_agent_tcp.workspace_api",
@@ -128,17 +128,20 @@ def framework_agent_rules() -> str:
         [
             "# Multi-Agent Framework Baseline Rules",
             "",
-            "- Understand the three workspace zones before acting: project directory is the authoritative code source/final target, private checkout is your personal workbench, temporary shared workspace is for collaboration records.",
+            "- Understand the three workspace zones before acting: project directory is the authoritative code source/final target, private checkout is your personal workbench, temporary shared workspace is read-only collaboration state.",
+            "- Read project_context / project_code_root directly as read-only context when you need project files.",
+            "- Read the temporary shared workspace directly as read-only filesystem context when you need reports, artifacts, manifest.json, or logs.",
             "- Fetch or checkout only task-relevant code into your private checkout before editing.",
-            "- Prefer framework MCP tools when they are configured in Codex. Use the Workspace API CLI only as a fallback or debugging path.",
-            "- Submit code changes from the private checkout through `workspace_submit` or the Workspace API submit command.",
-            "- Publish reports, artifacts, summaries, file/version references, and changeset ids through `workspace_publish` / `workspace_publish_file` or the Workspace API.",
+            "- Use framework MCP tools when they are configured in Codex.",
+            "- Submit code changes from the private checkout through `workspace_submit`.",
+            "- Publish reports, artifacts, summaries, file/version references, and changeset ids through `workspace_publish` / `workspace_publish_file`.",
+            "- Do not write directly into project_context, project_code_root, or the temporary shared workspace as a code/output completion path.",
             "- If a direct project/shared write is denied by the sandbox, treat that as boundary enforcement and continue through checkout/submit/publish instead of stopping.",
             "- Communicate with other AgentNodes through framework messages and shared references, not by copying project source trees into shared space.",
             "- Your natural-language worker reply is a framework-private utterance record; it is not delivered to other AgentNodes.",
             "- To provide information to another AgentNode, use `agent_dispatch` for the current batch.",
             "- Sending an empty string `\"\"` or numeric `0` through `agent_dispatch` means this target has no task and should not receive a downstream message.",
-            "- To provide durable results to the framework, use Workspace API submit/publish or an assigned structured framework tool.",
+            "- To provide durable results to the framework, use assigned framework MCP tools.",
             "- Do not request or depend on top-agent-only utterance inspection APIs.",
             "- Framework rules and skills are materialized once when your private worker context is prepared; per-message updates arrive only through `framework_context`.",
             "- Use only skills and rules exposed in your private CODEX_HOME/cwd context.",
@@ -151,7 +154,7 @@ def framework_agent_skill() -> str:
         [
             "---",
             "name: framework-agent-runtime",
-            "description: Baseline multi-agent runtime, workspace API, dispatch, and private context workflow.",
+            "description: Baseline multi-agent runtime, MCP tools, dispatch, and private context workflow.",
             "---",
             "# Framework Agent Runtime",
             "",
@@ -160,30 +163,41 @@ def framework_agent_skill() -> str:
             "The framework runtime skill is stable for the worker context; per-message state changes are provided through `framework_context`.",
             "",
             "If Codex lists a framework MCP server such as `framework_ordinary`, use those MCP tools first. "
-            "They are the preferred interface for checkout/status/diff/submit/sync, publish/read/list/archive access, and downstream dispatch. "
-            "The Workspace API CLI remains available as a fallback and for debugging.",
+            "They are the preferred interface for checkout/status/diff/submit/sync, publish/publish_file, and downstream dispatch. "
+            "Read project files and temporary shared workspace files directly from the read-only paths injected into AGENTS.md, the prompt preamble, and the Codex Execution Context. "
+            "The shared workspace includes reports, artifacts, manifest.json, and logs; write reports and artifacts through publish tools.",
             "",
             "Your final CLI reply is only a minimal framework-private utterance record "
             "containing who spoke, what was said, time, and task/message identity. "
             "It is not a communication channel to other AgentNodes and is not proof of submitted work.",
             "",
             "For code changes, edit the private checkout in the current working directory, "
-            "fetching only task-relevant project files with `workspace_checkout` or the Workspace API checkout command, "
-            "inspect with `workspace_status` / `workspace_diff` or Workspace API status/diff, "
-            "then submit through `workspace_submit` or the Workspace API submit command.",
+            "fetching only task-relevant project files with `workspace_checkout`, "
+            "inspect with `workspace_status` / `workspace_diff`, "
+            "then submit through `workspace_submit`.",
             "If a direct write outside the private checkout is denied by sandbox policy, "
-            "recover by using the Workspace API flow rather than treating the denial as completed work.",
+            "recover by using the framework checkout/submit flow rather than treating the denial as completed work.",
             "",
-            "For reports and artifacts, publish through `workspace_publish` / `workspace_publish_file` or the Workspace API command "
-            "as shared run context. Use summaries, file paths, versions, and changeset ids when another AgentNode needs code context.",
+            "For reports and artifacts, publish through `workspace_publish` / `workspace_publish_file` "
+            "as shared run context. Use summaries, file paths, versions, and changeset ids when another AgentNode needs code context. "
+            "If you need a current shared path version, read the shared `manifest.json` file directly.",
             "",
-            "For downstream messages, prefer the `agent_dispatch` MCP tool. As fallback, use `python -m multi_agent_tcp runtime agent-dispatch "
-            "--source-node-id <self> --target-node-id <target> --batch-id <outgoing_batch_id> "
-            "--body-json '{...}'`. The target must be listed in the current message's "
+            "For downstream messages, use the `agent_dispatch` MCP tool. The target must be listed in the current message's "
             "`framework_context.message_envelope.required_outgoing_targets`.",
             "If a target has no work, dispatch `\"\"` or `0` for that target; the framework records it as no-op and does not queue a downstream task.",
         ]
     )
+
+
+def shared_workspace_context(run: RunWorkspace) -> Dict[str, Any]:
+    return {
+        "root": str(Path(run.shared_dir).resolve()),
+        "reports": str(Path(run.shared_reports_dir).resolve()),
+        "artifacts": str(Path(run.shared_artifacts_dir).resolve()),
+        "manifest": str((Path(run.shared_dir) / "manifest.json").resolve()),
+        "logs": str((Path(run.shared_dir) / "logs").resolve()),
+        "readonly": True,
+    }
 
 
 def copy_skill_dir_to_codex_home(source_skill_dir: Path, codex_home: Path, *, name: Optional[str] = None) -> Dict[str, str]:
@@ -225,7 +239,7 @@ def materialize_codex_skill_selection(
     catalog.append(
         {
             "name": "framework-agent-runtime",
-            "description": "Baseline multi-agent runtime, workspace API, dispatch, and private context workflow.",
+            "description": "Baseline multi-agent runtime, MCP tools, dispatch, and private context workflow.",
             "skill_md_path": str(framework_md),
             "source": "framework",
         }
@@ -287,25 +301,30 @@ def _build_prompt_execution_context(execution_context: Dict[str, Any]) -> Dict[s
     """Return a reduced execution context suitable for prompt injection."""
     prompt_context: Dict[str, Any] = {}
 
-    workspace_api = execution_context.get("workspace_api")
-    if isinstance(workspace_api, dict):
-        prompt_workspace_api = {
-            key: workspace_api[key]
-            for key in ("command", "context_env")
-            if key in workspace_api
-        }
-        if prompt_workspace_api:
-            prompt_context["workspace_api"] = prompt_workspace_api
-
     code_workspace = execution_context.get("code_workspace")
     if isinstance(code_workspace, dict):
         prompt_code_workspace = {
             key: code_workspace[key]
-            for key in ("write_scope", "submit_command")
+            for key in (
+                "project_context",
+                "project_code_root",
+                "checkout_path",
+                "write_scope",
+            )
             if key in code_workspace
         }
         if prompt_code_workspace:
             prompt_context["code_workspace"] = prompt_code_workspace
+
+    shared_workspace = execution_context.get("shared_workspace")
+    if isinstance(shared_workspace, dict):
+        prompt_shared_workspace = {
+            key: shared_workspace[key]
+            for key in ("root", "reports", "artifacts", "manifest", "logs", "readonly")
+            if key in shared_workspace
+        }
+        if prompt_shared_workspace:
+            prompt_context["shared_workspace"] = prompt_shared_workspace
 
     private_context = execution_context.get("private_context")
     if isinstance(private_context, dict):
@@ -422,6 +441,7 @@ def build_private_agents_md(
     node: AgentNode,
     project_context: Path,
     checkout_path: Path,
+    shared_workspace: Dict[str, Any],
     business_rule_catalog: Optional[Sequence[Dict[str, str]]] = None,
 ) -> str:
     sections = [
@@ -433,6 +453,13 @@ def build_private_agents_md(
         f"- Runtime agent id: `{node.runtime_agent_id}`",
         f"- Private checkout: `{checkout_path}`",
         f"- Read-only project context: `{project_context}`",
+        f"- Read-only shared workspace: `{shared_workspace['root']}`",
+        f"- Shared reports: `{shared_workspace['reports']}`",
+        f"- Shared artifacts: `{shared_workspace['artifacts']}`",
+        f"- Shared manifest: `{shared_workspace['manifest']}`",
+        f"- Shared logs: `{shared_workspace['logs']}`",
+        "",
+        "Read project and shared files directly when you need context. Edit code only in the private checkout and submit it through the framework.",
         "",
     ]
     if business_rule_catalog:
@@ -465,6 +492,7 @@ def materialize_private_agent_context(
 
     workspace_api_command = workspace_api_base_command()
     project_context = _resolve_agent_workdir(node.cwd, manager.project_root)
+    shared_workspace = shared_workspace_context(run)
     private_dir = manager.agent_workspace_dir(run, node.runtime_agent_id)
     checkout = manager.checkout_agent(run, node.runtime_agent_id, write_scope=node.write_scope)
     codex_home = private_dir / "codex_home"
@@ -501,6 +529,7 @@ def materialize_private_agent_context(
         node=node,
         project_context=project_context,
         checkout_path=checkout.checkout_dir,
+        shared_workspace=shared_workspace,
         business_rule_catalog=rule_catalog,
     )
     _write_text_no_bom(checkout.checkout_dir / "AGENTS.md", agents_md)
@@ -521,10 +550,18 @@ def materialize_private_agent_context(
 
     preamble = (
         "You are running inside a framework-managed three-zone workspace. "
-        "The project directory is the authoritative code source and final code target, but ordinary agents do not edit it directly. "
+        "The project directory is the authoritative code source and final code target; read it directly as read-only context, but do not edit it directly. "
         "Your private checkout is your personal workbench: fetch only the task-relevant code into it, edit there, and submit code changes as a changeset. "
-        "The temporary shared workspace is for run collaboration only: publish reports, artifacts, summaries, file/version references, and changeset ids there instead of copying project source trees.\n\n"
-        f"{workspace_api_doc()}"
+        "The temporary shared workspace is read-only filesystem context for reports, artifacts, manifest.json, and logs; publish new reports and artifacts through the framework instead of writing shared files directly.\n\n"
+        "Workspace paths:\n"
+        f"- Read-only project_context: `{project_context}`\n"
+        f"- Read-only project_code_root: `{manager.project_root}`\n"
+        f"- Editable checkout_path: `{checkout.checkout_dir}`\n"
+        f"- Read-only shared_workspace: `{shared_workspace['root']}`\n"
+        f"- Shared reports: `{shared_workspace['reports']}`\n"
+        f"- Shared artifacts: `{shared_workspace['artifacts']}`\n"
+        f"- Shared manifest: `{shared_workspace['manifest']}`\n"
+        f"- Shared logs: `{shared_workspace['logs']}`"
     )
     adapter_options = dict(data.get("adapter_options", {}))
     if node.cli_kind == "codex" and not adapter_options.get("sandbox"):
@@ -537,7 +574,11 @@ def materialize_private_agent_context(
             cwd=checkout.checkout_dir,
             sandbox=adapter_options.get("sandbox"),
             extra_args=[str(x) for x in extra_args],
-            protected_readonly_roots=[project_context],
+            protected_readonly_roots=[
+                project_context,
+                manager.project_root,
+                Path(shared_workspace["root"]),
+            ],
         )
         adapter_options.setdefault("codex_home", str(codex_home))
         adapter_options.setdefault("diagnostics_dir", str(private_dir / "logs" / "codex"))
@@ -569,6 +610,7 @@ def materialize_private_agent_context(
         "write_scope": list(checkout.write_scope),
         "submit_command": f"{workspace_api_command} submit",
     }
+    execution_context["shared_workspace"] = dict(shared_workspace)
     execution_context["private_context"] = {
         "private_dir": str(private_dir),
         "codex_home": str(codex_home),

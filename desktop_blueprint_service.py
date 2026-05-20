@@ -255,6 +255,21 @@ class DesktopBlueprintService:
                 raise BlueprintServiceError("BAD_REQUEST", "document must be a JSON object")
             saved = self.save_blueprint(project_dir, document)
             return {"ok": True, "document": saved}
+        if command == "blueprint.relocateProjectWorkdir":
+            project_dir = request_project_dir(args)
+            document = args.get("document")
+            if not isinstance(document, dict):
+                raise BlueprintServiceError("BAD_REQUEST", "document must be a JSON object")
+            project_workdir = args.get("projectWorkdir")
+            if not isinstance(project_workdir, str) or not project_workdir.strip():
+                raise BlueprintServiceError("BAD_REQUEST", "projectWorkdir must be a non-empty string")
+            return self.relocate_project_workdir(
+                project_dir,
+                str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
+                document,
+                project_workdir,
+                conflict_policy=str(args.get("conflictPolicy", "") or "").strip() or None,
+            )
         if command == "blueprint.validate":
             project_dir = request_project_dir(args)
             if args.get("document") is not None:
@@ -368,6 +383,61 @@ class DesktopBlueprintService:
             tmp_path = Path(tmp.name)
         tmp_path.replace(path)
         return normalized
+
+    def relocate_project_workdir(
+        self,
+        project_dir: Path,
+        blueprint_id: str,
+        document: Dict[str, Any],
+        project_workdir: str,
+        *,
+        conflict_policy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        source_dir = validate_project_dir(project_dir)
+        target_dir = validate_project_dir(Path(project_workdir))
+        normalized_id = validate_blueprint_id(blueprint_id)
+        relocated = document_with_project_workdir(document, target_dir, blueprint_id=normalized_id)
+        base_response = {
+            "ok": True,
+            "projectDir": str(source_dir),
+            "targetProjectDir": str(target_dir),
+        }
+        if source_dir == target_dir:
+            return {
+                **base_response,
+                "changed": False,
+                "document": relocated,
+            }
+
+        policy = str(conflict_policy or "").strip()
+        target_path = blueprint_path(target_dir, normalized_id)
+        if target_path.exists():
+            if policy == "load_existing":
+                return {
+                    **base_response,
+                    "changed": True,
+                    "document": self.open_blueprint(target_dir, normalized_id),
+                }
+            if policy != "overwrite":
+                return {
+                    **base_response,
+                    "changed": False,
+                    "document": relocated,
+                    "conflict": "target_exists",
+                }
+        elif policy == "load_existing":
+            raise BlueprintServiceError(
+                "NOT_FOUND",
+                f"blueprint {normalized_id!r} was not found",
+                status=404,
+            )
+
+        saved = self.save_blueprint(target_dir, relocated)
+        return {
+            **base_response,
+            "changed": True,
+            "document": saved,
+        }
 
     def validate_blueprint(self, document: Dict[str, Any]) -> Dict[str, Any]:
         errors: list[str] = []
@@ -1261,6 +1331,26 @@ def normalize_document(data: Dict[str, Any], *, fallback_id: Optional[str] = Non
         "id": blueprint_id,
         "name": str(data.get("name") or DEFAULT_BLUEPRINT_NAME),
         "graph": graph,
+        "ui": ui,
+    }
+
+
+def document_with_project_workdir(
+    document: Dict[str, Any],
+    project_workdir: Path,
+    *,
+    blueprint_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    normalized = normalize_document(document, fallback_id=blueprint_id)
+    if blueprint_id is not None:
+        normalized["id"] = validate_blueprint_id(blueprint_id)
+    ui = dict(normalized["ui"])
+    raw_config = ui.get("config", {})
+    config = dict(raw_config) if isinstance(raw_config, dict) else {}
+    config["project_workdir"] = str(project_workdir)
+    ui["config"] = config
+    return {
+        **normalized,
         "ui": ui,
     }
 

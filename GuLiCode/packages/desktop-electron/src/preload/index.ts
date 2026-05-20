@@ -38,6 +38,15 @@ const api: ElectronAPI = {
   blueprintList: (projectDir) => ipcRenderer.invoke("blueprint-list", projectDir),
   blueprintOpen: (projectDir, blueprintId) => ipcRenderer.invoke("blueprint-open", projectDir, blueprintId),
   blueprintSave: (projectDir, document) => ipcRenderer.invoke("blueprint-save", projectDir, document),
+  blueprintRelocateProjectWorkdir: (projectDir, blueprintId, document, targetProjectWorkdir, conflictPolicy) =>
+    ipcRenderer.invoke(
+      "blueprint-relocate-project-workdir",
+      projectDir,
+      blueprintId,
+      document,
+      targetProjectWorkdir,
+      conflictPolicy,
+    ),
   blueprintValidate: (projectDir, blueprintId, document) =>
     ipcRenderer.invoke("blueprint-validate", projectDir, blueprintId, document),
   blueprintListRuns: (projectDir, blueprintId) => ipcRenderer.invoke("blueprint-list-runs", projectDir, blueprintId),

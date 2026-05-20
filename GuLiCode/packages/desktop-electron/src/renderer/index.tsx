@@ -155,6 +155,9 @@ const createPlatform = (): Platform => {
 
     saveBlueprint: (projectDir: string, document) => window.api.blueprintSave(projectDir, document),
 
+    relocateBlueprintProjectWorkdir: (projectDir: string, blueprintId: string, document, targetProjectWorkdir, conflictPolicy) =>
+      window.api.blueprintRelocateProjectWorkdir(projectDir, blueprintId, document, targetProjectWorkdir, conflictPolicy),
+
     validateBlueprint: (projectDir: string, blueprintId: string, document) =>
       window.api.blueprintValidate(projectDir, blueprintId, document),
 

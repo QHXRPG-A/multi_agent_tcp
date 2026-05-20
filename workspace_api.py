@@ -187,67 +187,6 @@ def _cmd_publish_file(args: argparse.Namespace) -> None:
     )
 
 
-def _cmd_read(args: argparse.Namespace) -> None:
-    ctx = _load_context()
-    if _is_rpc_context(ctx):
-        out = _rpc_result(
-            ctx,
-            "read",
-            {
-                "area": args.area,
-                "path": args.path,
-                "json": args.json,
-                "owner": args.owner,
-            },
-        )
-        if args.json:
-            _json_out(out)
-        else:
-            sys.stdout.write(str(out.get("text", "")))
-        return
-
-    manager, run, ctx = _manager_and_run()
-    owner = str(args.owner or ctx.get("agent_id") or "agent")
-    text = manager.read_shared_text(run, _area_path(args.area, args.path), owner=owner)
-    if args.json:
-        rel = _area_path(args.area, args.path)
-        _json_out(
-            {
-                "ok": True,
-                "area": args.area,
-                "path": args.path,
-                "version": manager.shared_file_version(run, rel),
-                "text": text,
-            }
-        )
-    else:
-        sys.stdout.write(text)
-
-
-def _cmd_list(args: argparse.Namespace) -> None:
-    ctx = _load_context()
-    if _is_rpc_context(ctx):
-        out = _rpc_result(
-            ctx,
-            "list",
-            {
-                "area": args.area,
-                "path": args.path or "",
-            },
-        )
-        _json_out(out)
-        return
-
-    manager, run, _ctx = _manager_and_run()
-    rel = _area_path(args.area, args.path or "")
-    prefix = f"{args.area}/"
-    files = [
-        item[len(prefix) :] if item.startswith(prefix) else item
-        for item in manager.list_shared_files(run, rel)
-    ]
-    _json_out({"ok": True, "area": args.area, "path": args.path or "", "files": files})
-
-
 def _cmd_checkout(args: argparse.Namespace) -> None:
     ctx = _load_context()
     scopes = list(args.scope_path or [])
@@ -364,45 +303,8 @@ def _cmd_sync(args: argparse.Namespace) -> None:
     _json_out({"ok": True, "checkout_id": checkout.checkout_id, "base_ref": checkout.base_ref})
 
 
-def _cmd_list_archives(args: argparse.Namespace) -> None:
-    ctx = _load_context()
-    if _is_rpc_context(ctx):
-        out = _rpc_result(ctx, "list-archives", {"owner": args.owner})
-        _json_out(out)
-        return
-
-    manager, _run, _ctx = _manager_and_run()
-    _json_out({"ok": True, "archives": manager.list_long_term_archives()})
-
-
-def _cmd_extract_archive(args: argparse.Namespace) -> None:
-    ctx = _load_context()
-    if _is_rpc_context(ctx):
-        out = _rpc_result(
-            ctx,
-            "extract-archive",
-            {
-                "owner": args.owner,
-                "archive_id": args.archive_id,
-                "path": args.path or "",
-            },
-        )
-        _json_out(out)
-        return
-
-    manager, run, ctx = _manager_and_run()
-    owner = str(args.owner or ctx.get("agent_id") or "agent")
-    path = manager.extract_long_term_archive(
-        run,
-        owner,
-        args.archive_id,
-        path=args.path or "",
-    )
-    _json_out({"ok": True, "archive_id": args.archive_id, "path": str(path)})
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Publish and inspect blueprint workspace outputs")
+    parser = argparse.ArgumentParser(description="Publish blueprint workspace outputs and manage private code checkouts")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     publish = sub.add_parser("publish", help="publish UTF-8 text into a run outcome area")
@@ -423,18 +325,6 @@ def build_parser() -> argparse.ArgumentParser:
     publish_file.add_argument("--owner", help="override owner recorded in the manifest")
     publish_file.add_argument("--expected-version", type=int, help="fail if the target path version changed")
     publish_file.set_defaults(func=_cmd_publish_file)
-
-    read = sub.add_parser("read", help="read UTF-8 text from a run outcome area")
-    read.add_argument("--area", choices=sorted(VALID_AREAS), required=True)
-    read.add_argument("--path", required=True, help="relative path inside the area")
-    read.add_argument("--json", action="store_true", help="wrap output in JSON")
-    read.add_argument("--owner", help="override owner recorded in the lock manifest")
-    read.set_defaults(func=_cmd_read)
-
-    list_cmd = sub.add_parser("list", help="list files in a run outcome area")
-    list_cmd.add_argument("--area", choices=sorted(VALID_AREAS), required=True)
-    list_cmd.add_argument("--path", default="", help="optional relative directory inside the area")
-    list_cmd.set_defaults(func=_cmd_list)
 
     checkout = sub.add_parser("checkout", help="create or refresh the agent private code checkout")
     checkout.add_argument("--scope-path", action="append", default=[], help="allowed code path glob; repeatable")
@@ -463,15 +353,6 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--owner", help="override agent id")
     sync.set_defaults(func=_cmd_sync)
 
-    list_archives = sub.add_parser("list-archives", help="list long-term run archive zips")
-    list_archives.add_argument("--owner", help="override agent id")
-    list_archives.set_defaults(func=_cmd_list_archives)
-
-    extract_archive = sub.add_parser("extract-archive", help="extract a long-term run archive into private workspace")
-    extract_archive.add_argument("--archive-id", required=True, help="archive id or zip file name")
-    extract_archive.add_argument("--path", default="", help="optional relative path inside the archive")
-    extract_archive.add_argument("--owner", help="override agent id")
-    extract_archive.set_defaults(func=_cmd_extract_archive)
     return parser
 
 

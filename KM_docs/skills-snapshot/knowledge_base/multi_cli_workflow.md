@@ -202,21 +202,21 @@ The current blueprint runtime implementation has started enforcing the split bet
 - `base/` is the run-start project snapshot.
 - `agents/<agent_id>/private/` is private scratch for temporary files, cache, skill views, and CLI-local state. It is not treated as a result worktree and is deleted before archive.
 - `shared/code/`, `shared/artifacts/`, and `shared/reports/` are the only per-run outcome areas preserved in the archive.
-- AgentNode `cwd` points at private scratch. The primary contract for outcomes is the injected Workspace API document and command interface, not physical shared paths.
+- AgentNode `cwd` points at the private checkout. Agents read project and current-run shared files directly from injected read-only physical paths; Workspace API remains the write/submit/publish command interface.
 - Codex and CodeMaker CLI adapters both consume the injected `prompt_preamble` and `execution_context`, so the workspace contract reaches the actual CLI prompt.
 - Shared writes have a first-pass file lease API plus manifest records; this prevents basic same-path races but is not yet a complete merge/conflict protocol.
 - The controller now writes `shared/reports/blueprint_result.json` before archiving so each run has a durable summary.
 
 This means the minimum closed loop should consider `shared/` the blackboard and outcome surface. Private agent directories are disposable runtime implementation details unless an agent explicitly publishes selected files into `shared/`.
 
-Follow-up adjustment: agents should not be taught physical shared workspace paths as the primary contract. The runtime now maintains `docs/workspace_api.md` and injects that API document when an AgentNode starts. Agents publish outputs through `python -m multi_agent_tcp.workspace_api` using logical areas (`code`, `artifacts`, `reports`). The command resolves the run context internally, writes through the workspace manager, and records lease/manifest events. Shared files use a per-path read/write lock: multiple readers can coexist, writers are exclusive, and writes are blocked while readers hold the same path. Joint edits can also use `read --json` plus `publish --expected-version N` to avoid stale overwrites. Current implementation is a local controlled CLI API; stronger enforcement still requires broker-side RPC/tooling plus filesystem sandboxing.
+Follow-up adjustment: agents are now taught physical read-only project/shared paths for direct reads, plus MCP tools for framework actions. The runtime maintains `docs/workspace_api.md` for framework internals/tests/debugging, but does not inject the CLI command contract into ordinary Agent prompt-facing context. Agents publish outputs through MCP `workspace_publish` / `workspace_publish_file`; the CLI/RPC path remains available behind the framework. For version-checked publish, agents read `shared_workspace.manifest` directly and pass expected versions through the publish tool. Current implementation is local RPC plus Codex sandbox launch checks; stronger enforcement still requires backend-specific sandbox review.
 
 ## 2026-05-11 prompt-facing context note
 
 - The runtime now keeps a full internal `execution_context` and a smaller `prompt_execution_context`.
 - Codex and CodeMaker bridges should merge `prompt_execution_context` into the actual prompt when present.
-- The prompt-facing view should omit raw launch paths and private internals such as `project_context`, `checkout_path`, `codex_home`, real skill-space paths, tokens, and RPC internals.
-- Ordinary-Agent prompt context should stay limited to command contracts, scope summaries, and authorized skill/rule names and descriptions.
+- The prompt-facing view now intentionally includes read-only `project_context` / `project_code_root`, `checkout_path`, and current-run `shared_workspace` paths, while still omitting Codex home, real skill-space source paths, bearer/RPC tokens, and unrelated private internals.
+- Ordinary-Agent prompt context should include MCP tool context, direct-read roots, scope summaries, and authorized skill/rule names and descriptions, not CLI command recipes.
 
 ## 2026-05-15 real Codex private-context baseline note
 

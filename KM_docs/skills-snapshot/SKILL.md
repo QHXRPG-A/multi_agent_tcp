@@ -48,6 +48,117 @@ F:\src\Package\Script\Python\multi_agent_tcp
 
 Historical paths such as `D:\agents\multi_agent_tcp` or `F:\src\ryven_demo` may appear in archives. Do not use them as current defaults unless the user's machine actually has that path.
 
+## Fast Handoff - 2026-05-20 Agent Info Panel Stream UI
+
+When the next task is Agent information panel transcript quality, status
+display, streaming behavior, tool-call rendering, or Test Agent panel smoke,
+start from this state:
+
+1. Agent information panels default to the tall shape `420 x 620`. The old
+   width/height preset selector is removed.
+2. Agent information panels open by left mouse long-press on Agent nodes after
+   `500ms`, or through the Agent node context menu. Moving the pointer by `8px`
+   or more cancels the pending long-press open.
+3. The compact top status strip always shows four cards: status, queue,
+   messages, and busy count.
+4. The status detail expander lives in that top strip. It is the only place
+   where "运行状态" and "JSON 位置" appear; those details are not rendered in the
+   chat body or composer.
+5. Panel-sent user messages are inserted into the transcript immediately for
+   all Agents. Runtime/user-message lifecycle status is then synced from
+   runtime events and stream events. Test Agent JSON persistence still only
+   runs for Test Agent nodes.
+6. The transcript projects `AgentStreamEvent` into structured display rows:
+   user messages, Agent replies, collapsible reasoning summaries, collapsible
+   tool calls, and queue errors. Raw status/scheduler ticks stay hidden.
+7. Agent reply rows (`tone === "reply"`) render through the existing
+   `@opencode-ai/ui/markdown` `Markdown` component. Non-reply rows, reasoning,
+   errors, tool calls, and tool-call second-level expanded content remain
+   plain text / `<pre>`.
+8. Agent reply Markdown uses compact dark-panel styling. Fenced code blocks
+   render as real code blocks, and panel-local `pre` / Shiki `.shiki`
+   backgrounds are forced dark so code fences do not appear as white blocks.
+9. Consecutive tool calls are grouped by default when no visible user/Agent
+   reply, reasoning, error, or other content interrupts them. Hidden status
+   ticks do not break the group. A multi-tool segment renders as
+   `工具调用组 · N 个工具` and can be expanded to inspect individual tools.
+10. Event collapsibles are controlled by `agentPanelEventOpen`, keyed by stable
+   display event ids, so stream/status ticks do not auto-collapse rows the user
+   opened.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-side-panel.test.ts
+bun run typecheck
+```
+
+Detailed archive:
+
+- [`archive/agent_info_panel_stream_ui_2026-05-20.md`](archive/agent_info_panel_stream_ui_2026-05-20.md)
+- [`archive/agent_info_panel_markdown_longpress_2026-05-20.md`](archive/agent_info_panel_markdown_longpress_2026-05-20.md)
+
+## Fast Handoff - 2026-05-20 Blueprint Project Workdir + Agent Surface
+
+When the next task is blueprint project workdir switching, Agent tool
+surface, direct project/shared reads, or MCP/CLI exposure cleanup, start from
+this state:
+
+1. The blueprint project workdir is the authoritative session/workspace root
+   selection. The blueprint panel confirms the current project directory on
+   entry, offers a folder picker, and relocates/reloads the blueprint when the
+   directory changes.
+2. Backend relocation command is `blueprint.relocateProjectWorkdir`: unchanged
+   paths return `changed: false`; changed paths write
+   `.multi_agent_workspace/blueprints/default.json` under the target project;
+   existing target blueprints return a conflict for overwrite/load/cancel UI.
+3. Runtime/start/stop loading disables the blueprint common config entry. The
+   common-config `project_workdir` field is read-only; only the folder picker
+   can initiate relocation.
+4. Ordinary Agents directly read `project_context`, `project_code_root`, and
+   the current run `shared_workspace` physical paths. Code edits still happen
+   only in the private checkout and must submit through MCP.
+5. Ordinary MCP tool surface is intentionally small:
+   `workspace_checkout`, `workspace_status`, `workspace_diff`,
+   `workspace_submit`, `workspace_sync`, `workspace_publish`,
+   `workspace_publish_file`, `agent_dispatch`, `agent_context`, and
+   `join_contribute`.
+6. Workspace read/list/archive tools were removed from ordinary/control MCP,
+   `workspace_api.py`, and `WorkspaceRPCServer` Agent-facing surfaces. Internal
+   manager read/archive methods remain for framework reports/status/archive.
+7. CLI framework APIs remain in full internal `execution_context` and backend
+   env for tests/debugging, but ordinary Agent `prompt_execution_context` no
+   longer includes `workspace_api`, `submit_command`, or CLI command recipes.
+8. Codex launch safety rejects `danger-full-access` and rejects `--add-dir`
+   entries overlapping `project_context`, `project_code_root`, or the run
+   `shared_workspace.root`.
+9. For manual debugging, avoid using `C:\` as the project workdir. Use a normal
+   writable project directory such as `D:\agents_work_test`; setting only an
+   Agent cwd is not enough because Workspace authority follows the blueprint
+   project workdir/session root.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp
+python -m py_compile blueprint_mcp_runtime.py agent_launch_context.py workspace_api.py workspace_rpc.py codex_bridge.py test_workspace_api.py test_agent_runtime.py test_desktop_blueprint_service.py
+pytest -q test_workspace_api.py test_agent_runtime.py test_desktop_blueprint_service.py
+# Observed related full pass: 127 passed, 1 skipped, 2 warnings.
+
+cd GuLiCode\packages\app
+bun run typecheck
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-side-panel.test.ts
+
+cd ..\desktop-electron
+bun test ./src/main/blueprint-runtime.test.ts ./src/main/ipc-blueprint-runtime.test.ts
+bun run typecheck
+```
+
+Detailed archive:
+
+- [`archive/blueprint_project_workdir_agent_surface_2026-05-20.md`](archive/blueprint_project_workdir_agent_surface_2026-05-20.md)
+
 ## Fast Handoff - 2026-05-19 Full MCP Control + Real Codex Smoke
 
 When the next task is MCP integration, live Agent tool discovery, or the
@@ -64,18 +175,22 @@ original Agent timeout after panel messages, start from this state:
    `enabled_tools`, and per-tool `approval_mode = "approve"`; bearer tokens
    are injected only through env vars.
 4. Ordinary MCP exposes execution-scoped tools only: Workspace checkout/status/
-   diff/submit/sync/publish/publish_file/read/list/archive inspect,
-   `agent_dispatch`, scoped `agent_context`, and scoped `join_contribute`.
+   diff/submit/sync/publish/publish_file, `agent_dispatch`, scoped
+   `agent_context`, and scoped `join_contribute`. Ordinary Agents read
+   project_context/project_code_root and the run temporary shared workspace
+   directly through injected read-only filesystem paths.
 5. Control MCP exposes top-agent/control-plane tools: organization read,
    top-agent context/ask/status/utterances, run validate/start/status/end,
    message batch/stage, control-side agent dispatch, join create/contribute,
-   and read-only Workspace inspect tools.
+   and utterance/status inspection. It no longer exposes Workspace read/list/
+   archive tools.
 6. Permission gates are server-enforced: `ask`, `start`, `status`, `end`,
    `utterances`, and debug-only `fixture`. Ordinary Agents cannot call global
    lifecycle/message-batch/utterance tools; Top Agent cannot call Workspace
    write/submit/publish tools.
 7. Framework skill/rule injection remains required. The framework skill is
-   MCP-first with CLI fallback; MCP is only the tool protocol.
+   MCP-first; CLI framework APIs stay available for internal/debug paths but
+   are not exposed in ordinary Agent prompt-facing context.
 8. Active ordinary Agent message context is refreshed from
    `GraphRuntime.agent_message_context_callback`; `agent_dispatch` uses token
    scope context and does not scan journals.
@@ -87,7 +202,7 @@ original Agent timeout after panel messages, start from this state:
     only when no desktop close callback is available.
 11. Real `codex exec` launched through the full `DesktopBlueprintService` live
     path completes the ordinary MCP flow:
-    checkout/status/diff/submit/publish/publish_file/agent_dispatch/read all
+    checkout/status/diff/submit/publish/publish_file/agent_dispatch all
     produce `framework_mcp_tool_call` audit entries.
 12. Real-smoke hardening is in place: the Windows project root defaults to
     `%LOCALAPPDATA%\multi_agent_tcp\real_codex_mcp`, live stderr streaming is
@@ -255,7 +370,7 @@ When the next task is GuLiCode blueprint UI or desktop debug startup, start
 from this state:
 
 1. The Agent information panel no longer opens by hover. It opens by left
-   mouse long-press on Agent nodes with an `800ms` circular progress ring, or
+   mouse long-press on Agent nodes with a `500ms` circular progress ring, or
    through the Agent node right-click menu item `信息面板` / `Info panel`.
 2. Long-press cancels when pointer movement reaches `8px`; `pointercancel`,
    canvas click, port interactions, and connection drag clear pending
@@ -572,7 +687,7 @@ Read first when the user asks about:
 - dependency setup or environment repair
 - Python/Bun/Codex executable paths and versions
 - PowerShell script policy or generated `multi-agent-tcp.exe` launch issues
-- system proxy / `NO_PROXY` bypass for localhost MCP tests
+- system proxy / `NO_PROXY` bypass for localhost MCP `502` / `503` failures
 - repo-local `skill_list` initialization
 
 ### 4. `knowledge_base/`
@@ -609,6 +724,7 @@ Historical change records only. Do not use archive content as current behavior u
 - [`archive/blueprint_run_mcp_runtime_2026-05-19.md`](archive/blueprint_run_mcp_runtime_2026-05-19.md)
 - [`archive/agent_info_panel_live_runtime_2026-05-18.md`](archive/agent_info_panel_live_runtime_2026-05-18.md)
 - [`archive/agent_info_panel_interaction_2026-05-18.md`](archive/agent_info_panel_interaction_2026-05-18.md)
+- [`archive/agent_info_panel_markdown_longpress_2026-05-20.md`](archive/agent_info_panel_markdown_longpress_2026-05-20.md)
 - [`archive/agent_info_panel_test_node_json_2026-05-18.md`](archive/agent_info_panel_test_node_json_2026-05-18.md)
 - [`archive/blueprint_header_status_debug_restart_2026-05-19.md`](archive/blueprint_header_status_debug_restart_2026-05-19.md)
 - [`archive/gulicode_runtime_baseline_archive.md`](archive/gulicode_runtime_baseline_archive.md)
@@ -619,11 +735,11 @@ Historical change records only. Do not use archive content as current behavior u
 ## Query Map
 
 - Local environment setup, dependency repair, Python interpreter detection,
-  PowerShell/Codex command quirks, localhost MCP `502 Bad Gateway`, system
+  PowerShell/Codex command quirks, localhost MCP `502` / `503` failures, system
   proxy, `NO_PROXY`, and repo `skill_list`: read `environment_setup.md`.
 - GuLiCode desktop startup, one-click launcher, packaged bring-up, taskbar icon, and direct Electron fallback: read `knowledge_base/gulicode_desktop.md`.
 - Guli productization, desktop UI ownership, branding, icon replacement, empty-state wording, blueprint entry placement, and blueprint workbench embedding: read `knowledge_base/guli_desktop_ui.md`, then `tasks/guli_desktop_ui_tasks.md`.
-- Blueprint Agent information panel interactions, long-press progress, context-menu entry, move/resize behavior, Test Agent JSON snapshots, user-message capture, and clean desktop debug baseline: read `archive/agent_info_panel_interaction_2026-05-18.md`, then `archive/agent_info_panel_test_node_json_2026-05-18.md`, then `tasks/current_goals.md`.
+- Blueprint Agent information panel interactions, long-press progress, Markdown reply rendering, context-menu entry, move/resize behavior, Test Agent JSON snapshots, user-message capture, and clean desktop debug baseline: read `archive/agent_info_panel_markdown_longpress_2026-05-20.md`, then `archive/agent_info_panel_interaction_2026-05-18.md`, then `archive/agent_info_panel_test_node_json_2026-05-18.md`, then `tasks/current_goals.md`.
 - GuLiCode top Agent, organization view, top-agent profile, start plan, status explanation: read `多agents通信设计.md`, then `tasks/multi_agent_communication_tasks.md`.
 - Runtime start/status/end, organization, message batch, agent dispatch, join-create/join-contribute: read `knowledge_base/dispatch_workflows.md`.
 - Current architecture or component ownership: read `knowledge_base/core_architecture.md`.

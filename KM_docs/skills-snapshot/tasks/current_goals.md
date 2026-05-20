@@ -1,6 +1,6 @@
 # Current Short-Term Goals
 
-Last cleaned: 2026-05-19
+Last cleaned: 2026-05-20
 
 ## Current Main Line
 
@@ -202,14 +202,92 @@ internal traversal logs.
 
 ## Active Priorities
 
+2026-05-20 Agent information panel stream UI update:
+
+Closed in this pass:
+
+1. Agent information panels now default to tall mode (`420 x 620`) and no
+   longer expose the old width/height preset selector.
+2. The top status strip defaults to the four compact fields: status, queue,
+   messages, and busy count.
+3. "运行状态" and "JSON 位置" are available only from the top status detail
+   expander, not from the chat body or composer.
+4. Panel-sent user messages are recorded and displayed immediately for every
+   Agent. Runtime lifecycle sync remains event-driven; Test Agent JSON writes
+   are still limited to Test Agent nodes.
+5. Transcript projection now has explicit tones for user messages, Agent
+   replies, reasoning summaries, tool calls, queue errors, and generic visible
+   events.
+6. Reasoning and tool entries are collapsible. Their open state is controlled
+   by `agentPanelEventOpen`, keyed by display event id, so stream/status ticks
+   do not collapse content the user opened.
+7. Consecutive tool calls are grouped by default when no visible user/Agent
+   reply, reasoning, error, or other content interrupts them. Hidden status
+   ticks do not break the group. The grouped row renders as
+   `工具调用组 · N 个工具` and expands to the individual tool details.
+
+Detailed archive:
+
+- [`../archive/agent_info_panel_stream_ui_2026-05-20.md`](../archive/agent_info_panel_stream_ui_2026-05-20.md)
+
+2026-05-20 Blueprint project workdir + Agent surface update:
+
+Closed in this pass:
+
+1. Blueprint project workdir now drives the real session/workspace root:
+   entering the blueprint panel prompts the user to confirm/select the project
+   directory, and a changed directory relocates the current blueprint document
+   to `<target>/.multi_agent_workspace/blueprints/default.json` before opening
+   the target session.
+2. Runtime/start/stop loading disables the blueprint common config entry; the
+   common-config `project_workdir` field is read-only and can only be changed
+   through the folder picker plus backend relocation flow.
+3. Ordinary Agents now read `project_context` / `project_code_root` and the
+   current run `shared_workspace` directly from injected read-only filesystem
+   paths.
+4. Ordinary/control MCP no longer exposes `workspace_read`, `workspace_list`,
+   `workspace_list_archives`, or `workspace_extract_archive`.
+5. `workspace_api.py` and `WorkspaceRPCServer` no longer expose Agent-facing
+   `read`, `list`, `list-archives`, or `extract-archive`; internal manager
+   read/archive methods remain available for framework status, reports,
+   archive, and tests.
+6. Ordinary Agent prompt-facing context no longer includes `workspace_api`,
+   `submit_command`, or CLI command recipes. CLI/RPC stays in full internal
+   `execution_context` for framework internals, tests, and debugging.
+7. Codex launch safety now protects `project_context`, `project_code_root`, and
+   the run `shared_workspace.root` from `--add-dir` writable escapes, and still
+   rejects `danger-full-access`.
+
+Current ordinary Agent-facing model:
+
+```text
+read project/shared directly
+edit code only in private checkout
+submit code through MCP
+publish reports/artifacts through MCP
+communicate through agent_dispatch / join_contribute
+```
+
+Detailed archive:
+
+- [`../archive/blueprint_project_workdir_agent_surface_2026-05-20.md`](../archive/blueprint_project_workdir_agent_surface_2026-05-20.md)
+
+Immediate next checks:
+
+1. Manual GuLiCode desktop smoke with a user-selected project workdir and the
+   relocation conflict branches.
+2. Full MCP live run under a normal project directory such as
+   `D:\agents_work_test`, not `C:\`.
+3. Agent panel follow-up-send smoke after the status/idle and message-context
+   changes: confirm late replies are still streamed and recorded.
+
 2026-05-19 MCP full-control acceptance update:
 
 MCP is accepted as the full run-scoped tool protocol for live blueprint Agents.
 The layer now covers the public `GraphRuntimeControlPlane` control surface with
 separate ordinary-Agent and top-agent/control tool boundaries. Ordinary Agents
 receive only scoped execution tools; Top Agent receives orchestration,
-observation, lifecycle, message, join, utterance, and read-only workspace
-inspection tools.
+observation, lifecycle, message, join, utterance, and status tools.
 
 The original ordinary-agent adoption blocker was Codex CLI non-interactive MCP
 approval: JSONL showed `mcp_tool_call` followed by
@@ -226,11 +304,12 @@ Closed in this pass:
 3. MCP tool calls are audited as `framework_mcp_tool_call` with safe argument
    summaries, while Workspace RPC still audits `workspace_api_call`.
 4. Private `CODEX_HOME` MCP config is materialized with token env vars, and
-   prompt-facing context excludes bearer tokens, RPC tokens, private checkout
-   paths, and raw Codex home paths.
+   prompt-facing context exposes direct-read project/shared roots while still
+   excluding bearer tokens, RPC tokens, raw Codex home paths, and real
+   skill-space source paths.
 5. Deterministic live MCP client tests cover checkout/status/diff/submit,
-   publish/read/list/archive, `agent_dispatch`, runtime control caveats, and
-   message journal flow.
+   publish/publish_file, direct shared report reads, `agent_dispatch`, runtime
+   control caveats, and message journal flow.
 6. Skill/rule injection remains part of the private Agent context:
    `framework-agent-runtime`, selected business skill/rule, and checkout/base
    `AGENTS.md` are materialized.
@@ -240,7 +319,8 @@ Closed in this pass:
 8. Control MCP parity is implemented for organization/top-agent context,
    run validate/start/status/end, message batch/stage, control-side
    `agent_dispatch`, join create/contribute, top-agent utterances, and
-   read-only workspace inspect tools.
+   status inspection. Workspace read/list/archive tools are intentionally not
+   exposed to Agents.
 9. `runtime_end` now prefers the `DesktopBlueprintService` live close callback,
    which tears down the backend path and closes MCP tokens.
 10. Real-smoke transport hardening is complete: live stderr stream noise is
@@ -256,8 +336,9 @@ Accepted real-Codex evidence:
 3. `run.shared/manifest.json` contained `framework_mcp_tool_call` entries for
    `workspace_checkout`, `workspace_status`, `workspace_diff`,
    `workspace_submit`, `workspace_publish`, `workspace_publish_file`,
-   `workspace_read`, and `agent_dispatch`, plus corresponding
-   `workspace_api_call` entries where Workspace RPC is used.
+   and `agent_dispatch`, plus corresponding `workspace_api_call` entries where
+   Workspace RPC is used. The downstream reviewer reads the shared report file
+   directly from `shared_workspace.reports`.
 4. The project file remained at base content before submit and contained the
    test marker exactly once after accepted `workspace_submit`.
 5. Final/report text proved framework skill, selected business skill, and

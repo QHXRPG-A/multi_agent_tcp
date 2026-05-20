@@ -28,7 +28,6 @@ from multi_agent_tcp.blueprint_mcp_runtime import (
 )
 from multi_agent_tcp.codex_bridge import codex_jsonl_event_to_agent_stream_events
 from multi_agent_tcp.agent_launch_context import (
-    workspace_api_base_command,
     write_private_codex_mcp_config,
 )
 from multi_agent_tcp.client import AgentTCPClient
@@ -259,6 +258,100 @@ def test_blueprint_service_save_open_list_and_validate(tmp_path: Path) -> None:
     ]
 
     assert service.validate_blueprint(saved) == {"ok": True, "errors": [], "warnings": []}
+
+
+def test_blueprint_service_relocates_project_workdir_and_handles_target_conflicts(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    conflict_target = tmp_path / "conflict-target"
+    source.mkdir()
+    target.mkdir()
+    conflict_target.mkdir()
+    current = _document(source)
+    service.save_blueprint(source, current)
+
+    unchanged = service.handle_request(
+        {
+            "command": "blueprint.relocateProjectWorkdir",
+            "args": {
+                "projectDir": str(source),
+                "blueprintId": "default",
+                "document": current,
+                "projectWorkdir": str(source),
+            },
+        }
+    )
+    assert unchanged["changed"] is False
+    assert unchanged["projectDir"] == str(source.resolve())
+    assert unchanged["targetProjectDir"] == str(source.resolve())
+    assert unchanged["document"]["ui"]["config"]["project_workdir"] == str(source.resolve())
+
+    relocated = service.handle_request(
+        {
+            "command": "blueprint.relocateProjectWorkdir",
+            "args": {
+                "projectDir": str(source),
+                "blueprintId": "default",
+                "document": current,
+                "projectWorkdir": str(target),
+            },
+        }
+    )
+    assert relocated["changed"] is True
+    assert (target / ".multi_agent_workspace" / "blueprints" / "default.json").is_file()
+    opened = service.open_blueprint(target, "default")
+    assert opened["graph"]["agent_nodes"]["planner"]["prompt"] == "Plan."
+    assert opened["ui"]["config"]["python_path"] == sys.executable
+    assert opened["ui"]["config"]["project_workdir"] == str(target.resolve())
+
+    existing = _document(conflict_target)
+    existing["graph"]["agent_nodes"]["planner"]["prompt"] = "Existing target."
+    service.save_blueprint(conflict_target, existing)
+    conflict = service.handle_request(
+        {
+            "command": "blueprint.relocateProjectWorkdir",
+            "args": {
+                "projectDir": str(source),
+                "blueprintId": "default",
+                "document": current,
+                "projectWorkdir": str(conflict_target),
+            },
+        }
+    )
+    assert conflict["changed"] is False
+    assert conflict["conflict"] == "target_exists"
+    assert service.open_blueprint(conflict_target, "default")["graph"]["agent_nodes"]["planner"]["prompt"] == "Existing target."
+
+    loaded = service.handle_request(
+        {
+            "command": "blueprint.relocateProjectWorkdir",
+            "args": {
+                "projectDir": str(source),
+                "blueprintId": "default",
+                "document": current,
+                "projectWorkdir": str(conflict_target),
+                "conflictPolicy": "load_existing",
+            },
+        }
+    )
+    assert loaded["changed"] is True
+    assert loaded["document"]["graph"]["agent_nodes"]["planner"]["prompt"] == "Existing target."
+
+    overwritten = service.handle_request(
+        {
+            "command": "blueprint.relocateProjectWorkdir",
+            "args": {
+                "projectDir": str(source),
+                "blueprintId": "default",
+                "document": current,
+                "projectWorkdir": str(conflict_target),
+                "conflictPolicy": "overwrite",
+            },
+        }
+    )
+    assert overwritten["changed"] is True
+    assert service.open_blueprint(conflict_target, "default")["graph"]["agent_nodes"]["planner"]["prompt"] == "Plan."
 
 
 def test_blueprint_service_rejects_invalid_id_and_invalid_graph(tmp_path: Path) -> None:
@@ -843,7 +936,7 @@ def test_run_mcp_publish_file_path_validation_blocks_escape(tmp_path: Path) -> N
         resolve_allowed_publish_file(scope, str(link))
 
 
-def test_run_mcp_provisions_control_context_with_readonly_workspace_tools(tmp_path: Path) -> None:
+def test_run_mcp_provisions_control_context_without_workspace_read_tools(tmp_path: Path) -> None:
     class FakeWorkspaceRPCServer:
         def __init__(self) -> None:
             self.tokens = []
@@ -888,7 +981,10 @@ def test_run_mcp_provisions_control_context_with_readonly_workspace_tools(tmp_pa
     assert context["bearer_token_env_var"] == "MULTI_AGENT_MCP_CONTROL_TOKEN"
     assert "organization_read" in context["tools"]
     assert "runtime_message_batch" in context["tools"]
-    assert "workspace_read" in context["tools"]
+    assert "workspace_read" not in context["tools"]
+    assert "workspace_list" not in context["tools"]
+    assert "workspace_list_archives" not in context["tools"]
+    assert "workspace_extract_archive" not in context["tools"]
     assert "workspace_submit" not in context["tools"]
     assert "workspace_publish" not in context["tools"]
     assert "runtime_execute_fixture" not in context["tools"]
@@ -1026,19 +1122,26 @@ def test_run_mcp_streamable_http_tools_are_split_by_token(tmp_path: Path) -> Non
     assert "agent_context" in ordinary_tools
     assert "join_contribute" in ordinary_tools
     assert "workspace_status" in ordinary_tools
+    assert "workspace_read" not in ordinary_tools
+    assert "workspace_list" not in ordinary_tools
+    assert "workspace_list_archives" not in ordinary_tools
+    assert "workspace_extract_archive" not in ordinary_tools
     assert "runtime_status" not in ordinary_tools
     assert "organization_read" not in ordinary_tools
     assert "runtime_status" in control_tools
     assert "organization_read" in control_tools
     assert "agent_dispatch" in control_tools
     assert "join_create" in control_tools
-    assert "workspace_read" in control_tools
+    assert "workspace_read" not in control_tools
+    assert "workspace_list" not in control_tools
+    assert "workspace_list_archives" not in control_tools
+    assert "workspace_extract_archive" not in control_tools
     assert "workspace_checkout" not in control_tools
     assert "workspace_submit" not in control_tools
     assert "runtime_execute_fixture" not in control_tools
 
 
-def test_run_mcp_control_readonly_workspace_and_permission_gates(tmp_path: Path) -> None:
+def test_run_mcp_control_permission_gates(tmp_path: Path) -> None:
     class FakeWorkspaceRPCServer:
         def __init__(self) -> None:
             self.requests = []
@@ -1074,18 +1177,6 @@ def test_run_mcp_control_readonly_workspace_and_permission_gates(tmp_path: Path)
         permissions=["status"],
     )
 
-    read = handle._readonly_workspace_request(
-        scope,
-        "read",
-        {"area": "reports", "path": "summary.md"},
-    )
-    assert read["ok"] is True
-    assert workspace_rpc.requests[-1]["command"] == "read"
-    assert workspace_rpc.requests[-1]["token"] == "workspace-token"
-    assert workspace_rpc.requests[-1]["args"]["owner"] == "gulicode"
-
-    with pytest.raises(PermissionError):
-        handle._readonly_workspace_request(scope, "submit", {})
     with pytest.raises(PermissionError):
         asyncio.run(
             handle._control_request(
@@ -1648,17 +1739,10 @@ def test_blueprint_service_live_mode_prestarts_all_agents_with_private_context(
         assert worker.adapter_options["codex_home"] == str(private / "codex_home")
         assert worker.adapter_options["diagnostics_dir"] == str(private / "logs" / "codex")
         assert "prompt_execution_context" in worker.adapter_options
-        assert "workspace_api" in worker.adapter_options["prompt_execution_context"]
-        workspace_api_command = workspace_api_base_command()
-        assert worker.adapter_options["execution_context"]["workspace_api"]["command"] == workspace_api_command
-        assert (
-            worker.adapter_options["prompt_execution_context"]["workspace_api"]["command"]
-            == workspace_api_command
-        )
-        assert (
-            worker.adapter_options["execution_context"]["code_workspace"]["submit_command"]
-            == f"{workspace_api_command} submit"
-        )
+        assert "workspace_api" not in worker.adapter_options["prompt_execution_context"]
+        assert "submit_command" not in worker.adapter_options["prompt_execution_context"]["code_workspace"]
+        assert "workspace_api" in worker.adapter_options["execution_context"]
+        assert "submit_command" in worker.adapter_options["execution_context"]["code_workspace"]
         assert worker.extra_env["MULTI_AGENT_WORKSPACE_CONTEXT"] == str(
             private / "workspace_api_context.json"
         )
@@ -1759,6 +1843,12 @@ def test_live_blueprint_mcp_workspace_dispatch_flow_with_agent_backend(
         ):
             worker = self.worker_configs[str(worker_id)]
             if str(worker_id) == "agent-planner":
+                project_context = Path(
+                    worker.adapter_options["execution_context"]["code_workspace"]["project_context"]
+                )
+                assert (
+                    project_context / "src" / "mcp_probe.txt"
+                ).read_text(encoding="utf-8") == "base mcp probe\n"
                 await call_tool(worker, "workspace_checkout", {"paths": ["src/mcp_probe.txt"]})
                 probe = Path(worker.cwd) / "src" / "mcp_probe.txt"
                 probe.write_text(
@@ -1810,20 +1900,19 @@ def test_live_blueprint_mcp_workspace_dispatch_flow_with_agent_backend(
                         "target_node_id": "reviewer",
                         "body": {
                             "prompt": (
-                                "Read reports/mcp-live-report.md through MCP and include "
-                                f"{reviewer_marker} plus {marker}."
+                                "Read mcp-live-report.md directly from shared_workspace.reports "
+                                f"and include {reviewer_marker} plus {marker}."
                             )
                         },
                     },
                 )
                 return {"type": "message", "body": {"ok": True, "text": f"{marker} dispatched"}}
 
-            read = await call_tool(
-                worker,
-                "workspace_read",
-                {"area": "reports", "path": "mcp-live-report.md"},
+            shared_reports = Path(
+                worker.adapter_options["execution_context"]["shared_workspace"]["reports"]
             )
-            assert marker in json.dumps(read, ensure_ascii=False)
+            read = (shared_reports / "mcp-live-report.md").read_text(encoding="utf-8")
+            assert marker in read
             return {
                 "type": "message",
                 "body": {"ok": True, "text": f"{reviewer_marker} {marker}"},
@@ -1897,7 +1986,7 @@ def test_live_blueprint_mcp_workspace_dispatch_flow_with_agent_backend(
         "user_goal": "Verify deterministic MCP workspace and dispatch behavior.",
         "agent_descriptions": {
             "planner": "Uses MCP tools for workspace changes and dispatch.",
-            "reviewer": "Reads planner's published report through MCP.",
+            "reviewer": "Reads planner's published report directly from the shared workspace.",
         },
         "start_nodes": ["planner"],
         "tasks": {
@@ -1949,7 +2038,6 @@ def test_live_blueprint_mcp_workspace_dispatch_flow_with_agent_backend(
             "workspace_publish",
             "workspace_publish_file",
             "agent_dispatch",
-            "workspace_read",
         ]
         missing_mcp_tools = [item for item in expected_mcp_tools if item not in mcp_tools]
         assert not missing_mcp_tools, json.dumps(
@@ -1974,7 +2062,7 @@ def test_live_blueprint_mcp_workspace_dispatch_flow_with_agent_backend(
             item["command"]
             for item in _workspace_manifest_entries(workspace_run, "workspace_api_call")
         ]
-        for expected in ["checkout", "status", "diff", "submit", "publish", "publish-file", "read"]:
+        for expected in ["checkout", "status", "diff", "submit", "publish", "publish-file"]:
             assert expected in workspace_commands, workspace_commands
 
         assert probe.read_text(encoding="utf-8").count(marker) == 1
@@ -2059,6 +2147,7 @@ def test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow(
     run_id = "run-real-mcp-live"
     marker = "REAL_MCP_WORKSPACE_SUBMIT_SUCCESS"
     reviewer_marker = "REAL_MCP_REVIEWER_READ_OK"
+    project_read_marker = "REAL_MCP_PROJECT_DIRECT_READ_OK"
     codex_options = {
         "model": "gpt-5.5",
         "timeout_sec": 420.0,
@@ -2109,36 +2198,38 @@ def test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow(
         "tools exposed by framework_ordinary; do not run `python -m "
         "multi_agent_tcp.workspace_api`.\n\n"
         "Required sequence:\n"
-        "1. Call `mcp__framework_ordinary__workspace_checkout` for path "
+        "1. Read `src/mcp_probe.txt` directly from `code_workspace.project_context` "
+        f"in the Codex Execution Context and remember {project_read_marker}.\n"
+        "2. Call `mcp__framework_ordinary__workspace_checkout` for path "
         "`src/mcp_probe.txt`.\n"
-        "2. Use shell only inside the current private checkout to append these "
+        "3. Use shell only inside the current private checkout to append these "
         f"three lines to src/mcp_probe.txt: {marker}, "
         "REAL_MCP_BUSINESS_SKILL_SEEN, REAL_MCP_BUSINESS_RULE_SEEN. Also create "
         "private-direct-ok.txt in the current private checkout containing "
         "REAL_MCP_PRIVATE_WRITE_ALLOWED.\n"
-        "3. Call `mcp__framework_ordinary__workspace_status`.\n"
-        "4. Call `mcp__framework_ordinary__workspace_diff`.\n"
-        "5. Call `mcp__framework_ordinary__workspace_submit` with task_id "
+        "4. Call `mcp__framework_ordinary__workspace_status`.\n"
+        "5. Call `mcp__framework_ordinary__workspace_diff`.\n"
+        "6. Call `mcp__framework_ordinary__workspace_submit` with task_id "
         "`real-mcp-live-submit` and summary `live mcp accepted`.\n"
-        "6. Call `mcp__framework_ordinary__workspace_publish` for area `reports`, "
+        "7. Call `mcp__framework_ordinary__workspace_publish` for area `reports`, "
         "path `mcp-live-report.md`, and text containing the submit marker plus "
         "both skill/rule markers.\n"
-        "7. Call `mcp__framework_ordinary__workspace_publish_file` for area "
+        "8. Call `mcp__framework_ordinary__workspace_publish_file` for area "
         "`artifacts`, path `private-direct-ok.txt`, and file_path "
         "`private-direct-ok.txt`.\n"
-        "8. Call `mcp__framework_ordinary__agent_dispatch` to target `reviewer` "
-        "with body JSON containing prompt `Use mcp__framework_ordinary__workspace_read "
-        "area reports path mcp-live-report.md and final answer must include "
+        "9. Call `mcp__framework_ordinary__agent_dispatch` to target `reviewer` "
+        "with body JSON containing prompt `Read mcp-live-report.md directly from "
+        "shared_workspace.reports in the Codex Execution Context and final answer must include "
         f"{reviewer_marker} plus {marker}.`\n\n"
         f"Your final answer must include {marker} REAL_MCP_CONTEXT_OK "
-        "REAL_MCP_BUSINESS_SKILL_SEEN REAL_MCP_BUSINESS_RULE_SEEN and "
+        f"{project_read_marker} REAL_MCP_BUSINESS_SKILL_SEEN REAL_MCP_BUSINESS_RULE_SEEN and "
         "agent_dispatch sent."
     )
     plan = {
         "user_goal": "Verify real Codex live MCP workspace and dispatch behavior.",
         "agent_descriptions": {
             "planner": "Uses MCP tools for workspace changes and dispatch.",
-            "reviewer": "Reads planner's published report through MCP.",
+            "reviewer": "Reads planner's published report directly from the shared workspace.",
         },
         "start_nodes": ["planner"],
         "tasks": {
@@ -2189,7 +2280,6 @@ def test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow(
             "workspace_publish",
             "workspace_publish_file",
             "agent_dispatch",
-            "workspace_read",
         ]
         missing_mcp_tools = [item for item in expected_mcp_tools if item not in mcp_tools]
         assert not missing_mcp_tools, json.dumps(
@@ -2214,13 +2304,14 @@ def test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow(
             item["command"]
             for item in _workspace_manifest_entries(workspace_run, "workspace_api_call")
         ]
-        for expected in ["checkout", "status", "diff", "submit", "publish", "publish-file", "read"]:
+        for expected in ["checkout", "status", "diff", "submit", "publish", "publish-file"]:
             assert expected in workspace_commands, workspace_commands
 
         probe_text = probe.read_text(encoding="utf-8")
         assert probe_text.count(marker) == 1
         assert "REAL_MCP_BUSINESS_SKILL_SEEN" in probe_text
         assert "REAL_MCP_BUSINESS_RULE_SEEN" in probe_text
+        assert project_read_marker in json.dumps(status["agent_stream_events"], ensure_ascii=False)
         report = workspace_run.shared_reports_dir / "mcp-live-report.md"
         assert marker in report.read_text(encoding="utf-8")
         artifact = workspace_run.shared_artifacts_dir / "private-direct-ok.txt"

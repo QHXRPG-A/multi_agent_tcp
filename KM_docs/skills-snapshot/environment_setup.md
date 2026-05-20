@@ -50,6 +50,31 @@ Notes:
 - `codemaker` is not currently on PATH. `python -m multi_agent_tcp doctor
   --json` reports `codex: true` and `codemaker: false`.
 
+## Cross-Machine Setup Checklist
+
+When bringing this repo up on another Windows computer, treat paths, console
+wrappers, PowerShell policy, and proxy state as machine-local. Before running
+MCP tests or GuLiCode desktop smoke:
+
+1. Install the checkout in editable mode with `python -m pip install -e .`.
+2. Prefer `python -m multi_agent_tcp <command>` over the generated
+   `multi-agent-tcp.exe` wrapper in automation.
+3. Use `codex.cmd` or the WindowsApps `codex.exe` path when PowerShell blocks
+   `codex.ps1`.
+4. Run `python -m multi_agent_tcp doctor --json` and confirm the expected
+   worker CLI reports `true`.
+5. Set localhost proxy bypass variables before MCP HTTP tests:
+
+```powershell
+$env:NO_PROXY = '127.0.0.1,localhost,::1'
+$env:no_proxy = $env:NO_PROXY
+```
+
+If another machine reports MCP `502 Bad Gateway`, `503 Service Unavailable`,
+empty HTTP bodies, or connection failures against `127.0.0.1:<random-port>`,
+check the proxy bypass first. Windows system proxy settings can be inherited by
+`httpx` even when `HTTP_PROXY` is not set in the shell.
+
 ## Python Runtime
 
 The repo has a real `pyproject.toml`. Install this checkout in editable mode:
@@ -90,7 +115,8 @@ Known current proxy requirement:
   `http://127.0.0.1:7897`. `httpx` reads that configuration when
   `trust_env=True`, even if no `HTTP_PROXY` environment variable is present.
   Without a localhost bypass, MCP tests that call `127.0.0.1:<random-port>` are
-  sent through that proxy and fail with empty-body `502 Bad Gateway`.
+  sent through that proxy and can fail with empty-body `502 Bad Gateway`,
+  `503 Service Unavailable`, or other proxy-originated connection errors.
 - Set localhost bypass variables before MCP HTTP tests or desktop MCP smoke:
 
 ```powershell

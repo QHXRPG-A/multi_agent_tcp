@@ -25,7 +25,8 @@ Current adapter priority override - 2026-05-18:
 - Highest related blocker status: desktop blueprint `live` now launches workers
   from the `GraphRuntime` materialized private Agent context, including private
   checkout cwd, private `CODEX_HOME`, `framework-agent-runtime`, `AGENTS.md`,
-  Workspace API env/prompt context, and authorized skill/rule materialization.
+  MCP tool context, direct-read project/shared roots, backend Workspace API
+  env, and authorized skill/rule materialization.
 - Codex is the active implementation path for live Agent output streaming.
 - Prioritize `cli_kind=codex`, `CodexAdapter`, `codex exec --json`, and Codex
   JSONL normalization into `AgentStreamEvent`.
@@ -33,14 +34,40 @@ Current adapter priority override - 2026-05-18:
   project phase unless the user explicitly re-opens that track.
 - Keep CodeMaker as a compatibility/fallback adapter behind `CLIWorkerBackend`.
 
+## 2026-05-20 Status Update - Agent Prompt Surface Simplification
+
+Completed:
+
+1. Ordinary Codex Agent prompt-facing context no longer exposes
+   `workspace_api` or CLI command recipes. The generated framework skill now
+   teaches MCP tools plus direct read-only project/shared paths.
+2. `workspace_api.py` remains as an internal/test/debug CLI over
+   `WorkspaceRPCServer`, but it is no longer part of the ordinary Agent mental
+   model.
+3. `prompt_execution_context` intentionally keeps direct-read roots:
+   `project_context`, `project_code_root`, `checkout_path`, and
+   `shared_workspace`, while omitting bearer/RPC tokens, private Codex home,
+   real skill source paths, and CLI command strings.
+4. The active Codex path remains MCP-first:
+   `workspace_checkout/status/diff/submit/sync/publish/publish_file`,
+   `agent_dispatch`, `agent_context`, and `join_contribute`.
+
+Current adapter guidance:
+
+- Treat CLI framework commands as backend/debug compatibility, not Agent UI.
+- Keep Codex streaming and Agent information panel continuity as the active
+  adapter quality focus.
+- Do not reintroduce CodeMaker streaming work unless explicitly requested.
+
 ## 2026-05-19 Status Update - Codex MCP Transport Hardening
 
 Completed:
 
 1. The opt-in real Codex MCP smoke now passes through the full
    `DesktopBlueprintService` live path: planner uses `framework_ordinary`
-   Workspace and dispatch tools, reviewer reads the shared report through MCP,
-   and both worker replies complete in `GraphRuntime`.
+   Workspace write/submit/publish and dispatch tools, reviewer reads the shared
+   report directly from `shared_workspace.reports`, and both worker replies
+   complete in `GraphRuntime`.
 2. Codex stderr live-stream forwarding is capped. Full stderr is still written
    to diagnostics, but noisy plugin/sandbox output no longer floods the broker
    stream channel.

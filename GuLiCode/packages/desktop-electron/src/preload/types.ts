@@ -48,6 +48,17 @@ export type BlueprintValidationResult = {
 
 export type BlueprintRunEndAction = "complete" | "cancel" | "fail" | "pause"
 
+export type BlueprintRelocateConflictPolicy = "overwrite" | "load_existing"
+
+export type BlueprintRelocateProjectWorkdirResult = {
+  ok: boolean
+  changed: boolean
+  projectDir: string
+  targetProjectDir: string
+  document: BlueprintDocument
+  conflict?: "target_exists"
+}
+
 export type ElectronAPI = {
   killSidecar: () => Promise<void>
   installCli: () => Promise<string>
@@ -79,6 +90,13 @@ export type ElectronAPI = {
   blueprintList: (projectDir: string) => Promise<BlueprintSummary[]>
   blueprintOpen: (projectDir: string, blueprintId: string) => Promise<BlueprintDocument>
   blueprintSave: (projectDir: string, document: BlueprintDocument) => Promise<BlueprintDocument>
+  blueprintRelocateProjectWorkdir: (
+    projectDir: string,
+    blueprintId: string,
+    document: BlueprintDocument,
+    targetProjectWorkdir: string,
+    conflictPolicy?: BlueprintRelocateConflictPolicy,
+  ) => Promise<BlueprintRelocateProjectWorkdirResult>
   blueprintValidate: (
     projectDir: string,
     blueprintId: string,

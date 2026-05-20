@@ -6,12 +6,16 @@ import { Dialog } from "@opencode-ai/ui/dialog"
 import { DropdownMenu } from "@opencode-ai/ui/dropdown-menu"
 import { Icon } from "@opencode-ai/ui/icon"
 import { IconButton } from "@opencode-ai/ui/icon-button"
+import { Markdown } from "@opencode-ai/ui/markdown"
 import { Popover } from "@opencode-ai/ui/popover"
 import { TextField, type TextFieldProps } from "@opencode-ai/ui/text-field"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount, splitProps, untrack, type JSX } from "solid-js"
+import { For, Index, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount, splitProps, untrack, type JSX } from "solid-js"
+import { useNavigate } from "@solidjs/router"
+import { base64Encode } from "@opencode-ai/shared/util/encode"
 import { createStore, reconcile, type SetStoreFunction } from "solid-js/store"
 import { useLanguage } from "@/context/language"
+import { useLayout } from "@/context/layout"
 import { Persist, persisted } from "@/utils/persist"
 import { decode64 } from "@/utils/base64"
 import { useSessionLayout } from "@/pages/session/session-layout"
@@ -61,7 +65,12 @@ import {
   type BlueprintTerminalKind,
 } from "@/pages/session/blueprint-model"
 import { createTestAgentPanelSnapshot } from "@/pages/session/blueprint-test-agent-snapshot"
-import { usePlatform, type BlueprintCatalogItem, type BlueprintRunEndAction } from "@/context/platform"
+import {
+  usePlatform,
+  type BlueprintCatalogItem,
+  type BlueprintRelocateConflictPolicy,
+  type BlueprintRunEndAction,
+} from "@/context/platform"
 
 const NODE_WIDTH = 172
 const NODE_HEIGHT = 72
@@ -69,12 +78,12 @@ const TERMINAL_WIDTH = 92
 const TERMINAL_HEIGHT = 44
 const MIN_ZOOM = 0.35
 const MAX_ZOOM = 1.8
-const AGENT_PANEL_LONG_PRESS_MS = 800
+const AGENT_PANEL_LONG_PRESS_MS = 500
 const AGENT_PANEL_LONG_PRESS_CANCEL_PX = 8
 const AGENT_PANEL_PROGRESS_RADIUS = 8
 const AGENT_PANEL_PROGRESS_CIRCUMFERENCE = 2 * Math.PI * AGENT_PANEL_PROGRESS_RADIUS
-const AGENT_PANEL_DEFAULT_WIDTH = 374
-const AGENT_PANEL_DEFAULT_HEIGHT = 410
+const AGENT_PANEL_DEFAULT_WIDTH = 420
+const AGENT_PANEL_DEFAULT_HEIGHT = 620
 const AGENT_PANEL_MIN_WIDTH = 320
 const AGENT_PANEL_MIN_HEIGHT = 300
 const AGENT_PANEL_MARGIN = 8
@@ -232,6 +241,11 @@ type AgentPanelDisplayEvent = {
   seq?: number
   status?: string
   text: string
+  tone?: "user" | "reply" | "reasoning" | "tool" | "error" | "event"
+  collapsible?: boolean
+  detail?: string
+  order?: number
+  toolItems?: AgentPanelDisplayEvent[]
 }
 
 type AgentPanelUserMessage = {
@@ -248,6 +262,17 @@ type AgentPanelUserMessage = {
   completed_at?: string
   failed_at?: string
   error?: string
+}
+
+type AgentPanelTimelineItem =
+  | { type: "user"; message: AgentPanelUserMessage; order: number; index: number }
+  | { type: "event"; event: AgentStreamEvent; order: number; index: number }
+
+type AgentPanelToolGroup = {
+  id: string
+  order: number
+  tools: AgentPanelDisplayEvent[]
+  toolIds: Set<string>
 }
 
 type AgentPanelEntry = {
@@ -485,6 +510,8 @@ type NodeItem =
 export function BlueprintSidePanel() {
   const language = useLanguage()
   const platform = usePlatform()
+  const layout = useLayout()
+  const navigate = useNavigate()
   const dialog = useDialog()
   const { params, view } = useSessionLayout()
   const projectDirectory = decode64(params.dir) ?? "global"
@@ -500,6 +527,7 @@ export function BlueprintSidePanel() {
   const [configIssues, setConfigIssues] = createSignal<BlueprintConfigValidationIssue[]>([])
   const [pythonDetecting, setPythonDetecting] = createSignal(false)
   const [pythonDetectFailed, setPythonDetectFailed] = createSignal(false)
+  const [projectWorkdirRelocating, setProjectWorkdirRelocating] = createSignal(false)
   const [catalog, setCatalog] = createSignal<CatalogState>({
     skillDir: "",
     ruleDir: "",
@@ -638,6 +666,12 @@ export function BlueprintSidePanel() {
     skill_dir: draft.config?.skill_dir ?? "",
     rule_dir: draft.config?.rule_dir ?? "",
   }))
+  const blueprintConfigLocked = createMemo(() => {
+    if (projectWorkdirRelocating() || runtime().loading || persistence().loading) return true
+    const runId = runtime().runId
+    if (!runId) return false
+    return !isTerminalRuntimeStatus(runtimeStatus(runtime().status))
+  })
   const headerStatus = createMemo<BlueprintHeaderStatusState | undefined>(() => {
     const state = persistence()
     if (state.loading) {
@@ -760,6 +794,74 @@ export function BlueprintSidePanel() {
     return draftSnapshotWithPythonPath(detectedPython)
   }
 
+  const openProjectSession = (targetProjectDir: string) => {
+    layout.projects.open(targetProjectDir)
+    navigate(`/${base64Encode(targetProjectDir)}/session`, { replace: true })
+  }
+
+  function showProjectWorkdirConflictDialog(targetProjectDir: string) {
+    dialog.show(() => (
+      <BlueprintProjectWorkdirConflictDialog
+        targetProjectDir={targetProjectDir}
+        onResolve={(policy) => void relocateProjectWorkdir(targetProjectDir, policy)}
+      />
+    ))
+  }
+
+  async function relocateProjectWorkdir(targetProjectWorkdir: string, conflictPolicy?: BlueprintRelocateConflictPolicy) {
+    const target = targetProjectWorkdir.trim()
+    if (!target) return
+    const relocate = platform.relocateBlueprintProjectWorkdir
+    if (!relocate) {
+      updateConfigField("project_workdir", target)
+      return
+    }
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+    }
+    setProjectWorkdirRelocating(true)
+    setPersistence((current) => ({ ...current, saving: true, error: undefined }))
+    try {
+      const document = toBlueprintDocument(draft, DEFAULT_BLUEPRINT_ID, DEFAULT_BLUEPRINT_NAME)
+      const result = await relocate(projectDirectory, DEFAULT_BLUEPRINT_ID, document, target, conflictPolicy)
+      if (result.conflict === "target_exists") {
+        setPersistence((current) => ({ ...current, saving: false, error: undefined }))
+        showProjectWorkdirConflictDialog(result.targetProjectDir || target)
+        return
+      }
+      if (!result.changed) {
+        applyingRemote = true
+        replaceDraft(fromBlueprintDocument(result.document as Parameters<typeof fromBlueprintDocument>[0], projectDirectory))
+        queueMicrotask(() => {
+          applyingRemote = false
+        })
+        setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+        return
+      }
+      openProjectSession(result.targetProjectDir || target)
+    } catch (error) {
+      setPersistence((current) => ({
+        ...current,
+        saving: false,
+        source: current.source,
+        error: readableError(error),
+      }))
+    } finally {
+      setProjectWorkdirRelocating(false)
+    }
+  }
+
+  async function pickProjectWorkdir(defaultPath?: string) {
+    if (blueprintConfigLocked()) return
+    const result = await platform.openDirectoryPickerDialog?.({
+      title: language.t("blueprint.directory.pickProject"),
+      multiple: false,
+      defaultPath,
+    })
+    if (typeof result === "string" && result.trim()) await relocateProjectWorkdir(result)
+  }
+
   const detectAndApplyPythonPath = async () => {
     if (pythonDetecting()) return
     setPythonDetecting(true)
@@ -876,6 +978,25 @@ export function BlueprintSidePanel() {
         })
       }
     })()
+  })
+
+  createEffect(() => {
+    if (blueprintConfigLocked() && globalConfigOpen()) setGlobalConfigOpen(false)
+  })
+
+  let projectWorkdirPromptShown = false
+  createEffect(() => {
+    if (projectWorkdirPromptShown) return
+    if (!draftReady() || !persistence().loaded || blueprintConfigLocked()) return
+    projectWorkdirPromptShown = true
+    queueMicrotask(() => {
+      dialog.show(() => (
+        <BlueprintProjectWorkdirConfirmDialog
+          currentProjectWorkdir={currentConfig().project_workdir || projectDirectory}
+          onConfirm={(target) => void relocateProjectWorkdir(target)}
+        />
+      ))
+    })
   })
 
   createEffect(() => {
@@ -1381,7 +1502,7 @@ export function BlueprintSidePanel() {
       const payload = asRecord(event.payload)
       const nodeId = stringValue(event.node_id) ?? stringValue(payload?.node_id)
       const runtimeMessageId = stringValue(payload?.message_id)
-      if (!nodeId || !runtimeMessageId || !isTestAgentNode(draft.graph.agent_nodes[nodeId])) continue
+      if (!nodeId || !runtimeMessageId) continue
       const eventType = stringValue(event.event_type)
       const runtimeStatus = stringValue(event.status) ?? stringValue(payload?.status)
       const error = stringValue(payload?.error)
@@ -1397,11 +1518,12 @@ export function BlueprintSidePanel() {
       }
       if (patch && updateAgentPanelUserMessageByRuntimeMessageId(nodeId, runtimeMessageId, patch)) changedNodes.add(nodeId)
     }
-    for (const nodeId of changedNodes) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+    for (const nodeId of changedNodes) {
+      if (isTestAgentNode(draft.graph.agent_nodes[nodeId])) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+    }
   }
 
   function syncAgentPanelUserMessageFromStreamEvent(nodeId: string, event: AgentStreamEvent) {
-    if (!isTestAgentNode(draft.graph.agent_nodes[nodeId])) return
     const runtimeMessageId = stringValue(event.message_id)
     if (!runtimeMessageId) return
     const kind = stringValue(event.kind)
@@ -1417,7 +1539,9 @@ export function BlueprintSidePanel() {
     } else if (agentState === "running" || agentState === "waiting_for_reply") {
       patch = { status: "running", runtimeStatus: agentState }
     }
-    if (patch) updateAgentPanelUserMessageByRuntimeMessageId(nodeId, runtimeMessageId, patch)
+    if (patch && updateAgentPanelUserMessageByRuntimeMessageId(nodeId, runtimeMessageId, patch)) {
+      if (isTestAgentNode(draft.graph.agent_nodes[nodeId])) scheduleTestAgentPanelPersist(nodeId)
+    }
   }
 
   async function sendAgentPanelMessage(nodeId: string) {
@@ -1427,16 +1551,16 @@ export function BlueprintSidePanel() {
     const text = panel.input
     const testAgent = isTestAgentNode(draft.graph.agent_nodes[nodeId])
     const messageId = `user-msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    appendAgentPanelUserMessage({
+      id: messageId,
+      runId,
+      nodeId,
+      mode: panel.mode,
+      text,
+      status: "queued",
+      created_at: new Date().toISOString(),
+    })
     if (testAgent) {
-      appendAgentPanelUserMessage({
-        id: messageId,
-        runId,
-        nodeId,
-        mode: panel.mode,
-        text,
-        status: "queued",
-        created_at: new Date().toISOString(),
-      })
       scheduleTestAgentPanelPersist(nodeId, { immediate: true })
     }
     setAgentPanel("panels", nodeId, "sending", true)
@@ -1444,26 +1568,26 @@ export function BlueprintSidePanel() {
     try {
       const queued = await platform.queueBlueprintAgentMessage(runId, nodeId, text, panel.mode)
       const runtimeMessageId = runtimeMessageIdFromQueueResponse(queued)
+      updateAgentPanelUserMessage(nodeId, messageId, {
+        status: "sent",
+        runtimeStatus: "queued",
+        runtimeMessageId,
+        sent_at: new Date().toISOString(),
+      })
+      syncAgentPanelUserMessagesFromRuntimeEvents(arrayOfRecords(asRecord(queued.status)?.recent_events))
       if (testAgent) {
-        updateAgentPanelUserMessage(nodeId, messageId, {
-          status: "sent",
-          runtimeStatus: "queued",
-          runtimeMessageId,
-          sent_at: new Date().toISOString(),
-        })
-        syncAgentPanelUserMessagesFromRuntimeEvents(arrayOfRecords(asRecord(queued.status)?.recent_events))
         scheduleTestAgentPanelPersist(nodeId, { immediate: true })
       }
       setAgentPanel("panels", nodeId, "input", "")
       void refreshBlueprintRuntime(runId, { quiet: true })
     } catch (error) {
       const message = readableError(error)
+      updateAgentPanelUserMessage(nodeId, messageId, {
+        status: "failed",
+        failed_at: new Date().toISOString(),
+        error: message,
+      })
       if (testAgent) {
-        updateAgentPanelUserMessage(nodeId, messageId, {
-          status: "failed",
-          failed_at: new Date().toISOString(),
-          error: message,
-        })
         scheduleTestAgentPanelPersist(nodeId, { immediate: true })
       }
       setAgentPanel("panels", nodeId, "error", message)
@@ -1929,8 +2053,15 @@ export function BlueprintSidePanel() {
               icon="blueprint"
               data-active={globalConfigOpen()}
               class="h-7 px-2"
+              disabled={blueprintConfigLocked()}
               aria-expanded={globalConfigOpen()}
+              title={
+                blueprintConfigLocked()
+                  ? language.t("blueprint.globalConfig.locked" as never)
+                  : language.t("blueprint.globalConfig.title")
+              }
               onClick={() => {
+                if (blueprintConfigLocked()) return
                 setAddMenuOpen(false)
                 setGlobalConfigOpen((open) => !open)
               }}
@@ -1942,10 +2073,12 @@ export function BlueprintSidePanel() {
                 class={`text-icon-weak transition-transform ${globalConfigOpen() ? "rotate-180" : ""}`}
               />
             </Button>
-            <Show when={globalConfigOpen()}>
+            <Show when={globalConfigOpen() && !blueprintConfigLocked()}>
               <BlueprintGlobalConfigPanel
                 config={currentConfig()}
                 onConfigChange={updateConfigField}
+                onProjectWorkdirBrowse={() => void pickProjectWorkdir(currentConfig().project_workdir)}
+                locked={blueprintConfigLocked()}
                 skillCount={catalog().skills.length}
                 ruleCount={catalog().rules.length}
                 skillError={catalog().skillError}
@@ -1965,7 +2098,7 @@ export function BlueprintSidePanel() {
               variant="ghost"
               icon="terminal"
               class="h-7 px-2"
-              disabled={runtime().loading || !persistence().loaded}
+              disabled={runtime().loading || projectWorkdirRelocating() || !persistence().loaded}
               onClick={() => void startBlueprintRuntime()}
             >
               <span class="hidden lg:inline">{language.t("blueprint.runtime.start")}</span>
@@ -2528,7 +2661,9 @@ function AgentInfoPanel(props: {
   const currentMessageId = createMemo(() => stringValue(statusField("current_message_id")) ?? stringValue(statusField("message_id")))
   const statusUpdatedAt = createMemo(() => formatAgentStreamEventTime(statusField("created_at")))
   const lastError = createMemo(() => stringValue(statusField("last_error")))
-  const visibleEvents = createMemo(() => visibleAgentPanelEvents(props.events))
+  const visibleEvents = createMemo<AgentPanelDisplayEvent[]>((previous) =>
+    stabilizeAgentPanelDisplayEvents(previous, visibleAgentPanelEvents(props.events, props.panel.userMessages ?? [])),
+  [])
   const statusDetails = createMemo(() =>
     [
       { label: "runId", value: stringValue(statusField("run_id")) ?? props.runId },
@@ -2541,6 +2676,12 @@ function AgentInfoPanel(props: {
   const sendDisabled = createMemo(() => testMode() || !live() || props.panel.sending || !props.panel.input.trim())
   const width = () => props.panel.width ?? AGENT_PANEL_DEFAULT_WIDTH
   const height = () => props.panel.height ?? AGENT_PANEL_DEFAULT_HEIGHT
+  const [statusDetailsOpen, setStatusDetailsOpen] = createSignal(false)
+  const [agentPanelEventOpen, setAgentPanelEventOpen] = createSignal<Record<string, boolean>>({})
+  const isAgentPanelEventOpen = (eventId: string) => Boolean(agentPanelEventOpen()[eventId])
+  const setAgentPanelEventOpenState = (eventId: string, open: boolean) => {
+    setAgentPanelEventOpen((current) => ({ ...current, [eventId]: open }))
+  }
 
   return (
     <div
@@ -2584,72 +2725,93 @@ function AgentInfoPanel(props: {
           />
         </div>
       </div>
-      <div class="grid grid-cols-4 gap-2 border-b border-[rgba(103,232,249,0.12)] p-3 text-11-regular">
-        <RuntimeMetric label="状态" value={state()} />
-        <RuntimeMetric label="队列" value={queueSize()} />
-        <RuntimeMetric label="消息" value={messagesSent()} />
-        <RuntimeMetric label="忙碌" value={busyCount()} />
+      <div data-agent-panel-status-summary class="shrink-0 border-b border-[rgba(103,232,249,0.12)] p-3 text-11-regular">
+        <div class="flex items-stretch gap-2">
+          <div class="grid min-w-0 flex-1 grid-cols-4 gap-2">
+            <RuntimeMetric label="状态" value={state()} />
+            <RuntimeMetric label="队列" value={queueSize()} />
+            <RuntimeMetric label="消息" value={messagesSent()} />
+            <RuntimeMetric label="忙碌" value={busyCount()} />
+          </div>
+          <Button
+            size="small"
+            variant="ghost"
+            class="h-[60px] w-8 shrink-0 px-0 text-[#d7f7ff]"
+            classList={{ "bg-[rgba(103,232,249,0.12)]": statusDetailsOpen() }}
+            onClick={() => setStatusDetailsOpen((open) => !open)}
+            aria-expanded={statusDetailsOpen()}
+            aria-label="toggle agent panel status details"
+            title={statusDetailsOpen() ? "收起状态详情" : "展开状态详情"}
+          >
+            <Icon
+              size="small"
+              name="chevron-down"
+              class={`text-[#8fb4c8] transition-transform ${statusDetailsOpen() ? "rotate-180" : ""}`}
+            />
+          </Button>
+        </div>
+        <Show when={statusDetailsOpen()}>
+          <div data-agent-panel-status-details class="mt-2 flex flex-col gap-2">
+            <div class="rounded-md border border-[rgba(103,232,249,0.14)] bg-[#08131f] p-2">
+              <div class="mb-2 text-10-medium uppercase text-[#67e8f9]">运行状态</div>
+              <div class="flex flex-col gap-1">
+                <AgentStatusRow label="当前状态" value={state()} />
+                <Show when={currentMessageId()}>
+                  {(value) => <AgentStatusRow label="当前消息" value={value()} mono />}
+                </Show>
+                <Show when={statusUpdatedAt()}>
+                  {(value) => <AgentStatusRow label="最后更新" value={value()} />}
+                </Show>
+                <Show when={lastError()}>
+                  {(value) => <AgentStatusRow label="最后错误" value={value()} tone="danger" />}
+                </Show>
+              </div>
+              <Show when={statusDetails().length}>
+                <Collapsible variant="ghost" class="mt-2">
+                  <Collapsible.Trigger class="flex w-full items-center justify-between rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] px-2 py-1.5 text-left text-11-medium text-[#d6e9f5]">
+                    <span>状态详情</span>
+                    <Collapsible.Arrow class="text-[#7fa4ba]" />
+                  </Collapsible.Trigger>
+                  <Collapsible.Content>
+                    <div class="mt-1 flex flex-col gap-1">
+                      <For each={statusDetails()}>
+                        {(item) => <AgentStatusRow label={item.label} value={item.value} mono />}
+                      </For>
+                    </div>
+                  </Collapsible.Content>
+                </Collapsible>
+              </Show>
+            </div>
+            <Show when={testAgentRecording()}>
+              <div class="rounded-md border border-[rgba(250,204,21,0.22)] bg-[rgba(250,204,21,0.06)] p-2">
+                <div class="mb-1 text-10-medium uppercase text-[#facc15]">JSON 位置</div>
+                <div class="break-all font-mono text-[11px] leading-4 text-[#fde68a]">
+                  {testJsonPath() ?? (props.panel.testJsonPending ? "写入中..." : "未生成")}
+                </div>
+                <Show when={props.panel.testJsonError}>
+                  {(error) => <div class="mt-1 break-all text-10-regular text-[#fca5a5]">JSON 保存失败: {error()}</div>}
+                </Show>
+              </div>
+            </Show>
+          </div>
+        </Show>
       </div>
-      <div class="min-h-0 flex-1 overflow-y-auto px-3 py-2" onWheel={(event) => event.stopPropagation()}>
-        <Show when={latestStatus() || currentMessageId() || statusUpdatedAt() || lastError()}>
-          <div class="mb-2 rounded-md border border-[rgba(103,232,249,0.14)] bg-[#08131f] p-2">
-            <div class="mb-2 text-10-medium uppercase text-[#67e8f9]">运行状态</div>
-            <div class="flex flex-col gap-1">
-              <Show when={currentMessageId()}>
-                {(value) => <AgentStatusRow label="当前消息" value={value()} mono />}
-              </Show>
-              <Show when={statusUpdatedAt()}>
-                {(value) => <AgentStatusRow label="最后更新" value={value()} />}
-              </Show>
-              <Show when={lastError()}>
-                {(value) => <AgentStatusRow label="最后错误" value={value()} tone="danger" />}
-              </Show>
-            </div>
-            <Show when={statusDetails().length}>
-              <Collapsible variant="ghost" class="mt-2">
-                <Collapsible.Trigger class="flex w-full items-center justify-between rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] px-2 py-1.5 text-left text-11-medium text-[#d6e9f5]">
-                  <span>状态详情</span>
-                  <Collapsible.Arrow class="text-[#7fa4ba]" />
-                </Collapsible.Trigger>
-                <Collapsible.Content>
-                  <div class="mt-1 flex flex-col gap-1">
-                    <For each={statusDetails()}>
-                      {(item) => <AgentStatusRow label={item.label} value={item.value} mono />}
-                    </For>
-                  </div>
-                </Collapsible.Content>
-              </Collapsible>
-            </Show>
-          </div>
-        </Show>
-        <Show when={testAgentRecording()}>
-          <div class="mb-2 rounded-md border border-[rgba(250,204,21,0.22)] bg-[rgba(250,204,21,0.06)] p-2">
-            <div class="mb-1 text-10-medium uppercase text-[#facc15]">JSON 位置</div>
-            <div class="break-all font-mono text-[11px] leading-4 text-[#fde68a]">
-              {testJsonPath() ?? (props.panel.testJsonPending ? "写入中..." : "未生成")}
-            </div>
-            <Show when={props.panel.testJsonError}>
-              {(error) => <div class="mt-1 break-all text-10-regular text-[#fca5a5]">JSON 保存失败: {error()}</div>}
-            </Show>
-          </div>
-        </Show>
+      <div class="min-h-0 flex-1 overflow-y-auto px-3 py-2 [overflow-anchor:none]" onWheel={(event) => event.stopPropagation()}>
         <Show
           when={visibleEvents().length}
           fallback={<div class="py-8 text-center text-11-regular text-[#7fa4ba]">暂无 agent 输出</div>}
         >
-          <For each={visibleEvents()}>
+          <Index each={visibleEvents()}>
             {(event) => (
-              <div class="mb-2 rounded-md border border-[rgba(103,232,249,0.12)] bg-[#071019] p-2">
-                <div class="mb-1 flex items-center justify-between gap-2 text-10-regular text-[#7fa4ba]">
-                  <span>{event.kind}</span>
-                  <span>#{String(event.seq ?? "—")}</span>
-                </div>
-                <pre class="select-text whitespace-pre-wrap break-words font-mono text-[11px] leading-4 text-[#d6e9f5]">
-                  {event.text}
-                </pre>
-              </div>
+              <AgentPanelDisplayEventRow
+                event={event()}
+                open={isAgentPanelEventOpen(event().id)}
+                onOpenChange={(open) => setAgentPanelEventOpenState(event().id, open)}
+                isEventOpen={isAgentPanelEventOpen}
+                onEventOpenChange={setAgentPanelEventOpenState}
+              />
             )}
-          </For>
+          </Index>
         </Show>
       </div>
       <div class="shrink-0 border-t border-[rgba(103,232,249,0.16)] p-3">
@@ -2700,6 +2862,108 @@ function AgentInfoPanel(props: {
         <span class="absolute bottom-1 right-1 h-2.5 w-2.5 border-b border-r border-current opacity-80" />
         <span class="absolute bottom-1 right-1 h-1.5 w-1.5 border-b border-r border-current opacity-60" />
       </button>
+    </div>
+  )
+}
+
+function AgentPanelDisplayEventBody(props: { event: AgentPanelDisplayEvent }) {
+  const markdownClass =
+    "select-text text-[12px] leading-[1.55] text-[#d6e9f5] [&_h1]:!mb-2 [&_h1]:!text-[12px] [&_h1]:!text-[#d6e9f5] [&_h2]:!mb-2 [&_h2]:!text-[12px] [&_h2]:!text-[#d6e9f5] [&_h3]:!mb-2 [&_h3]:!text-[12px] [&_h3]:!text-[#d6e9f5] [&_p]:mb-2 [&_ul]:my-2 [&_ol]:my-2 [&_li]:mb-1 [&_pre]:!my-2 [&_pre]:!bg-[#06101a] [&_.shiki]:!bg-[#06101a] [&_.shiki]:!p-2 [&_.shiki]:!text-[11px] [&_code]:text-[11px]"
+  return (
+    <Show
+      when={props.event.tone === "reply"}
+      fallback={
+        <pre class="select-text whitespace-pre-wrap break-words font-mono text-[11px] leading-4 text-[#d6e9f5]">
+          {props.event.text}
+        </pre>
+      }
+    >
+      <Markdown
+        text={props.event.text}
+        cacheKey={props.event.id}
+        streaming={props.event.status !== "completed"}
+        class={markdownClass}
+      />
+    </Show>
+  )
+}
+
+function AgentPanelDisplayEventRow(props: {
+  event: AgentPanelDisplayEvent
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  isEventOpen: (eventId: string) => boolean
+  onEventOpenChange: (eventId: string, open: boolean) => void
+  nested?: boolean
+}) {
+  const event = () => props.event
+  const compact = () => event().tone === "tool"
+  const nestedToolItems = () =>
+    event().tone === "tool" && (event().toolItems?.length ?? 0) > 1 ? (event().toolItems ?? []) : []
+  const hasNestedToolItems = () => nestedToolItems().length > 0
+  return (
+    <div
+      class={`${compact() ? "mb-1 px-2 py-1" : "mb-2 p-2"} rounded-md border`}
+      classList={{
+        "ml-8 border-[rgba(103,232,249,0.20)] bg-[rgba(103,232,249,0.08)]": event().tone === "user",
+        "border-[rgba(103,232,249,0.12)] bg-[#071019]": event().tone === "reply" || event().tone === "event" || !event().tone,
+        "border-[rgba(168,85,247,0.20)] bg-[rgba(88,28,135,0.14)]": event().tone === "reasoning",
+        "border-[rgba(34,197,94,0.20)] bg-[rgba(20,83,45,0.14)]": event().tone === "tool",
+        "border-[rgba(248,113,113,0.24)] bg-[rgba(127,29,29,0.22)]": event().tone === "error",
+      }}
+    >
+      <Show
+        when={event().collapsible}
+        fallback={
+          <>
+            <div class="mb-1 flex items-center justify-between gap-2 text-10-regular text-[#7fa4ba]">
+              <span>{event().kind}</span>
+              <span>{event().status ?? (event().seq ? `#${event().seq}` : "")}</span>
+            </div>
+            <AgentPanelDisplayEventBody event={event()} />
+          </>
+        }
+      >
+        <Collapsible variant="ghost" open={props.open} onOpenChange={props.onOpenChange}>
+          <Collapsible.Trigger
+            class={`flex w-full items-center justify-between gap-2 rounded-sm text-left text-11-medium text-[#d6e9f5] ${
+              compact() ? "!h-7 px-0 py-0" : "px-1 py-0.5"
+            }`}
+          >
+            <span class="min-w-0 truncate">{event().kind}</span>
+            <div class="flex shrink-0 items-center gap-2 text-10-regular text-[#7fa4ba]">
+              <Show when={event().status}>{(status) => <span>{status()}</span>}</Show>
+              <Collapsible.Arrow class="text-[#7fa4ba]" />
+            </div>
+          </Collapsible.Trigger>
+          <Collapsible.Content>
+            <Show when={event().detail}>
+              {(detail) => <div class="mb-1 break-all text-10-regular text-[#95afc4]">{detail()}</div>}
+            </Show>
+            <Show
+              when={hasNestedToolItems()}
+              fallback={
+                <AgentPanelDisplayEventBody event={event()} />
+              }
+            >
+              <div class="mt-1 flex flex-col gap-1">
+                <For each={nestedToolItems()}>
+                  {(tool) => (
+                    <AgentPanelDisplayEventRow
+                      event={tool}
+                      open={props.isEventOpen(tool.id)}
+                      onOpenChange={(open) => props.onEventOpenChange(tool.id, open)}
+                      isEventOpen={props.isEventOpen}
+                      onEventOpenChange={props.onEventOpenChange}
+                      nested
+                    />
+                  )}
+                </For>
+              </div>
+            </Show>
+          </Collapsible.Content>
+        </Collapsible>
+      </Show>
     </div>
   )
 }
@@ -3167,6 +3431,8 @@ export function BlueprintInspector(props: {
 function BlueprintGlobalConfigPanel(props: {
   config: BlueprintConfig
   onConfigChange: <K extends keyof BlueprintConfig>(field: K, value: BlueprintConfig[K]) => void
+  onProjectWorkdirBrowse: () => void
+  locked?: boolean
   skillCount: number
   ruleCount: number
   skillError?: string
@@ -3181,6 +3447,7 @@ function BlueprintGlobalConfigPanel(props: {
   const invalid = (field: BlueprintConfigField) => props.invalidFields.includes(field)
 
   const pickDirectory = async (field: keyof BlueprintConfig, title: string, defaultPath?: string) => {
+    if (props.locked) return
     const result = await platform.openDirectoryPickerDialog?.({
       title,
       multiple: false,
@@ -3190,6 +3457,7 @@ function BlueprintGlobalConfigPanel(props: {
   }
 
   const pickFile = async (field: keyof BlueprintConfig, title: string, defaultPath?: string) => {
+    if (props.locked) return
     const result = await platform.openFilePickerDialog?.({
       title,
       multiple: false,
@@ -3218,6 +3486,7 @@ function BlueprintGlobalConfigPanel(props: {
                 : undefined
           }
           invalid={invalid("python_path")}
+          disabled={props.locked}
           onChange={(value) => props.onConfigChange("python_path", value)}
           onBrowse={() => void pickFile("python_path", language.t("blueprint.directory.pickPython"), props.config.python_path)}
           onDetect={() => void props.onDetectPython()}
@@ -3230,10 +3499,9 @@ function BlueprintGlobalConfigPanel(props: {
           tip="projectWorkdir"
           value={props.config.project_workdir}
           invalid={invalid("project_workdir")}
-          onChange={(value) => props.onConfigChange("project_workdir", value)}
-          onBrowse={() =>
-            void pickDirectory("project_workdir", language.t("blueprint.directory.pickProject"), props.config.project_workdir)
-          }
+          readOnly
+          disabled={props.locked}
+          onBrowse={props.onProjectWorkdirBrowse}
         />
         <DirectoryConfigField
           label={language.t("blueprint.field.skillDir")}
@@ -3241,6 +3509,7 @@ function BlueprintGlobalConfigPanel(props: {
           value={props.config.skill_dir}
           note={props.skillError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.count", { count: props.skillCount })}
           invalid={invalid("skill_dir")}
+          disabled={props.locked}
           onChange={(value) => props.onConfigChange("skill_dir", value)}
           onBrowse={() => void pickDirectory("skill_dir", language.t("blueprint.directory.pickSkill"), props.config.skill_dir)}
         />
@@ -3250,6 +3519,7 @@ function BlueprintGlobalConfigPanel(props: {
           value={props.config.rule_dir}
           note={props.ruleError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.count", { count: props.ruleCount })}
           invalid={invalid("rule_dir")}
+          disabled={props.locked}
           onChange={(value) => props.onConfigChange("rule_dir", value)}
           onBrowse={() => void pickDirectory("rule_dir", language.t("blueprint.directory.pickRule"), props.config.rule_dir)}
         />
@@ -3287,14 +3557,122 @@ function BlueprintConfigRequiredDialog(props: { issues: BlueprintConfigValidatio
   )
 }
 
+function BlueprintProjectWorkdirConfirmDialog(props: {
+  currentProjectWorkdir: string
+  onConfirm: (targetProjectWorkdir: string) => void | Promise<void>
+}) {
+  const language = useLanguage()
+  const platform = usePlatform()
+  const dialog = useDialog()
+  const [value, setValue] = createSignal(props.currentProjectWorkdir)
+
+  const browse = async () => {
+    const result = await platform.openDirectoryPickerDialog?.({
+      title: language.t("blueprint.directory.pickProject"),
+      multiple: false,
+      defaultPath: value(),
+    })
+    if (typeof result === "string" && result.trim()) setValue(result)
+  }
+
+  const confirm = () => {
+    const target = value().trim()
+    if (!target) return
+    dialog.close()
+    void props.onConfirm(target)
+  }
+
+  return (
+    <Dialog title={language.t("blueprint.projectWorkdir.confirmTitle" as never)} action={<span aria-hidden="true" />} fit>
+      <div
+        data-blueprint-project-workdir-dialog
+        class="flex w-[460px] max-w-[calc(100vw-2rem)] flex-col gap-4 px-6 pb-4"
+      >
+        <div class="text-14-regular leading-6 text-text-base">
+          {language.t("blueprint.projectWorkdir.confirmDescription" as never)}
+        </div>
+        <div class="flex min-w-0 items-stretch gap-2">
+          <textarea
+            class="h-11 min-w-0 flex-1 resize-none rounded-md border border-border-weaker-base bg-background-stronger px-2 py-1 font-mono text-11-regular leading-4 text-text-strong opacity-80 outline-none"
+            value={value()}
+            title={value()}
+            readOnly
+            aria-label={language.t("blueprint.field.projectWorkdir")}
+            spellcheck={false}
+            wrap="soft"
+          />
+          <IconButton
+            icon="folder"
+            variant="secondary"
+            size="normal"
+            iconSize="small"
+            class="h-11 w-11 shrink-0"
+            onClick={() => void browse()}
+            aria-label={language.t("blueprint.directory.pickProject")}
+          />
+        </div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" size="large" onClick={() => dialog.close()}>
+            {language.t("common.cancel")}
+          </Button>
+          <Button variant="primary" size="large" onClick={confirm}>
+            {language.t("blueprint.projectWorkdir.confirmAction" as never)}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
+function BlueprintProjectWorkdirConflictDialog(props: {
+  targetProjectDir: string
+  onResolve: (policy: BlueprintRelocateConflictPolicy) => void | Promise<void>
+}) {
+  const language = useLanguage()
+  const dialog = useDialog()
+  const resolve = (policy: BlueprintRelocateConflictPolicy) => {
+    dialog.close()
+    void props.onResolve(policy)
+  }
+
+  return (
+    <Dialog title={language.t("blueprint.projectWorkdir.conflictTitle" as never)} action={<span aria-hidden="true" />} fit>
+      <div
+        data-blueprint-project-workdir-conflict-dialog
+        class="flex w-[480px] max-w-[calc(100vw-2rem)] flex-col gap-4 px-6 pb-4"
+      >
+        <div class="text-14-regular leading-6 text-text-base">
+          {language.t("blueprint.projectWorkdir.conflictDescription" as never, { path: props.targetProjectDir })}
+        </div>
+        <div class="rounded-md border border-border-weaker-base bg-background-stronger p-3 font-mono text-11-regular leading-5 text-text-strong">
+          {props.targetProjectDir}
+        </div>
+        <div class="flex flex-wrap justify-end gap-2">
+          <Button variant="ghost" size="large" onClick={() => dialog.close()}>
+            {language.t("common.cancel")}
+          </Button>
+          <Button variant="secondary" size="large" onClick={() => resolve("load_existing")}>
+            {language.t("blueprint.projectWorkdir.loadExisting" as never)}
+          </Button>
+          <Button variant="primary" size="large" onClick={() => resolve("overwrite")}>
+            {language.t("blueprint.projectWorkdir.overwrite" as never)}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
 function DirectoryConfigField(props: {
   label: string
   tip?: InspectorTipKey
   value: string
   note?: string
   invalid?: boolean
-  onChange: (value: string) => void
-  onBrowse: () => void
+  readOnly?: boolean
+  disabled?: boolean
+  onChange?: (value: string) => void
+  onBrowse?: () => void
   onDetect?: () => void
   detectLabel?: string
   detectText?: string
@@ -3311,19 +3689,24 @@ function DirectoryConfigField(props: {
       <InspectorFieldHeader label={props.label} tip={props.tip} placement="right-start" />
       <div class="flex min-w-0 items-stretch gap-2">
         <textarea
-          class={`h-11 min-w-0 flex-1 resize-none rounded-md border bg-[#06101a] px-2 py-1 font-mono text-[10.5px] leading-4 text-[#f8fdff] outline-none transition-colors placeholder:text-[#95afc4] ${
+          class={`h-11 min-w-0 flex-1 resize-none rounded-md border bg-[#06101a] px-2 py-1 font-mono text-[10.5px] leading-4 text-[#f8fdff] outline-none transition-colors placeholder:text-[#95afc4] disabled:cursor-not-allowed disabled:opacity-60 ${
             props.invalid ? "border-[#fb7185] focus:border-[#fb7185]" : "border-[rgba(103,232,249,0.22)] focus:border-[#67e8f9]"
-          }`}
+          } ${props.readOnly ? "cursor-default opacity-70" : ""}`}
           value={props.value}
           title={props.value}
           placeholder={language.t("blueprint.globalConfig.unset")}
           aria-label={props.label}
           spellcheck={false}
           wrap="soft"
+          readOnly={props.readOnly}
+          disabled={props.disabled}
           onKeyDown={(event) => {
             if (event.key === "Enter") event.preventDefault()
           }}
-          onInput={(event) => props.onChange(event.currentTarget.value.replace(/\r?\n/g, ""))}
+          onInput={(event) => {
+            if (props.readOnly || props.disabled) return
+            props.onChange?.(event.currentTarget.value.replace(/\r?\n/g, ""))
+          }}
         />
         <Show when={props.onDetect && props.detectLabel}>
           <Tooltip placement="top" value={props.detecting ? language.t("blueprint.python.detecting") : (props.detectLabel ?? "")}>
@@ -3332,7 +3715,7 @@ function DirectoryConfigField(props: {
               variant="secondary"
               size="small"
               class={detectButtonClass}
-              disabled={props.detecting}
+              disabled={props.detecting || props.disabled}
               onClick={() => props.onDetect?.()}
               aria-label={props.detectLabel ?? ""}
               data-blueprint-detect-python
@@ -3347,7 +3730,8 @@ function DirectoryConfigField(props: {
           size="normal"
           iconSize="small"
           class={sideButtonClass}
-          onClick={props.onBrowse}
+          disabled={props.disabled || !props.onBrowse}
+          onClick={() => props.onBrowse?.()}
           aria-label={props.label}
         />
       </div>
@@ -3736,63 +4120,287 @@ function latestAgentStatusEvent(events: AgentStreamEvent[]) {
   return undefined
 }
 
-function visibleAgentPanelEvents(events: AgentStreamEvent[]): AgentPanelDisplayEvent[] {
-  const replies = new Map<string, AgentPanelDisplayEvent>()
-  const display: AgentPanelDisplayEvent[] = []
+function stabilizeAgentPanelDisplayEvents(previous: AgentPanelDisplayEvent[], next: AgentPanelDisplayEvent[]) {
+  if (!previous.length) return next
+  const previousById = new Map(previous.map((event) => [event.id, event]))
+  let changed = previous.length !== next.length
+  const stable = next.map((event) => {
+    const current = previousById.get(event.id)
+    if (current && agentPanelDisplayEventEquals(current, event)) return current
+    changed = true
+    return event
+  })
+  return changed ? stable : previous
+}
 
-  for (const event of events) {
+function agentPanelDisplayEventEquals(left: AgentPanelDisplayEvent, right: AgentPanelDisplayEvent) {
+  return (
+    left.id === right.id &&
+    left.kind === right.kind &&
+    left.seq === right.seq &&
+    left.status === right.status &&
+    left.text === right.text &&
+    left.tone === right.tone &&
+    left.collapsible === right.collapsible &&
+    left.detail === right.detail &&
+    left.order === right.order
+  )
+}
+
+function visibleAgentPanelEvents(events: AgentStreamEvent[], userMessages: AgentPanelUserMessage[] = []): AgentPanelDisplayEvent[] {
+  const replies = new Map<string, AgentPanelDisplayEvent>()
+  const reasoning = new Map<string, AgentPanelDisplayEvent>()
+  const tools = new Map<string, AgentPanelDisplayEvent>()
+  const display: AgentPanelDisplayEvent[] = []
+  let currentToolGroup: AgentPanelToolGroup | undefined
+
+  const flushAgentPanelToolGroup = () => {
+    if (!currentToolGroup) return
+    display.push(agentPanelToolGroupDisplayEvent(currentToolGroup))
+    currentToolGroup = undefined
+  }
+
+  const appendAgentPanelTool = (key: string, entry: AgentPanelDisplayEvent, order: number) => {
+    if (!currentToolGroup) {
+      currentToolGroup = {
+        id: key,
+        order,
+        tools: [],
+        toolIds: new Set<string>(),
+      }
+    }
+    currentToolGroup.order = Math.min(currentToolGroup.order, order)
+    if (currentToolGroup.toolIds.has(key)) return
+    currentToolGroup.toolIds.add(key)
+    currentToolGroup.tools.push(entry)
+  }
+
+  for (const item of agentPanelTimelineItems(events, userMessages)) {
+    if (item.type === "user") {
+      flushAgentPanelToolGroup()
+      display.push({
+        id: `user-${item.message.id}`,
+        kind: "用户",
+        status: userMessageStatusLabel(item.message.status),
+        text: item.message.text,
+        tone: "user",
+        detail: item.message.mode === "top" ? "置顶消息" : undefined,
+        order: item.order,
+      })
+      continue
+    }
+
+    const event = item.event
     const kind = stringValue(event.kind) ?? "event"
+    const order = item.order
+    if (kind === "queue.updated") {
+      const status = stringValue(event.status)
+      const lastError = stringValue(event.last_error)
+      if (lastError || status === "failed" || status === "cancelled") {
+        flushAgentPanelToolGroup()
+        display.push(
+          agentPanelDisplayEventFromStream(event, "Agent error", lastError ?? `message ${status}`, undefined, {
+            tone: "error",
+            order,
+          }),
+        )
+      }
+      continue
+    }
     if (isHiddenAgentPanelStreamKind(kind)) continue
 
     if (kind === "part.delta" || kind === "message.completed") {
+      const partType = stringValue(event.part_type)
+      if (partType === "reasoning") {
+        const reasoningText = cleanAgentPanelReplyText(agentStreamEventContentText(event))
+        if (reasoningText) flushAgentPanelToolGroup()
+        upsertAgentPanelStreamingEntry({
+          map: reasoning,
+          display,
+          event,
+          keyPrefix: "reasoning",
+          title: "Agent 思考",
+          text: reasoningText,
+          tone: "reasoning",
+          collapsible: true,
+          order,
+        })
+        continue
+      }
       if (!isAgentReplyTextEvent(event, kind)) continue
       const text = cleanAgentPanelReplyText(agentStreamEventContentText(event))
-      const messageId = stringValue(event.message_id)
-      if (!messageId) {
-        if (text) display.push(agentPanelDisplayEventFromStream(event, kind, text))
-        continue
-      }
+      if (text) flushAgentPanelToolGroup()
+      upsertAgentPanelStreamingEntry({
+        map: replies,
+        display,
+        event,
+        keyPrefix: "reply",
+        title: "Agent 回复",
+        text,
+        tone: "reply",
+        order,
+      })
+      continue
+    }
 
-      const current = replies.get(messageId)
-      if (!text) {
-        if (current && kind === "message.completed") {
-          current.status = stringValue(event.status) ?? "completed"
-          current.seq = event.seq ?? current.seq
-        }
-        continue
-      }
-
+    if (kind === "tool.started" || kind === "tool.completed") {
+      const key = stringValue(event.part_id) ?? stringValue(event.message_id) ?? stringValue(event.event_id) ?? `tool-${event.seq ?? tools.size}`
+      const text = agentPanelToolEventText(event)
+      const title = `工具调用${agentPanelToolName(event) ? ` · ${agentPanelToolName(event)}` : ""}`
+      const current = tools.get(key)
       if (!current) {
-        const reply = agentPanelDisplayEventFromStream(event, "Agent 回复", text, `reply-${messageId}`)
-        replies.set(messageId, reply)
-        display.push(reply)
+        const entry = agentPanelDisplayEventFromStream(event, title, text, `tool-${key}`, {
+          tone: "tool",
+          collapsible: true,
+          detail: agentPanelToolDetail(event),
+          order,
+        })
+        tools.set(key, entry)
+        appendAgentPanelTool(key, entry, order)
         continue
       }
-
-      current.text =
-        kind === "message.completed" || shouldReplaceAgentReplyDraft(current.text, text)
-          ? text
-          : `${current.text}${text}`
+      current.kind = title
+      current.text = text || current.text
       current.status = stringValue(event.status) ?? current.status
       current.seq = event.seq ?? current.seq
+      current.detail = agentPanelToolDetail(event) ?? current.detail
+      appendAgentPanelTool(key, current, order)
       continue
     }
 
     const text = cleanAgentPanelReplyText(agentStreamEventContentText(event))
-    if (text) display.push(agentPanelDisplayEventFromStream(event, kind, text))
+    if (text) {
+      flushAgentPanelToolGroup()
+      display.push(
+        agentPanelDisplayEventFromStream(event, kind, text, undefined, {
+          tone: "event",
+          order,
+        }),
+      )
+    }
   }
 
-  return display
+  flushAgentPanelToolGroup()
+  return mergeAdjacentAgentPanelToolGroups(
+    display.sort((left, right) => (left.order ?? 0) - (right.order ?? 0) || (left.seq ?? 0) - (right.seq ?? 0)),
+  )
+}
+
+function agentPanelTimelineItems(events: AgentStreamEvent[], userMessages: AgentPanelUserMessage[]): AgentPanelTimelineItem[] {
+  const timeline: AgentPanelTimelineItem[] = [
+    ...userMessages.map((message, index) => ({
+      type: "user" as const,
+      message,
+      index,
+      order: agentPanelUserMessageOrder(message, index),
+    })),
+    ...events.map((event, index) => ({
+      type: "event" as const,
+      event,
+      index,
+      order: agentPanelStreamEventOrder(event),
+    })),
+  ]
+  return timeline.sort((left, right) => left.order - right.order || left.index - right.index)
+}
+
+function mergeAdjacentAgentPanelToolGroups(events: AgentPanelDisplayEvent[]) {
+  const merged: AgentPanelDisplayEvent[] = []
+  let currentToolGroup: AgentPanelToolGroup | undefined
+
+  const flush = () => {
+    if (!currentToolGroup) return
+    merged.push(agentPanelToolGroupDisplayEvent(currentToolGroup))
+    currentToolGroup = undefined
+  }
+
+  for (const event of events) {
+    if (event.tone !== "tool") {
+      flush()
+      merged.push(event)
+      continue
+    }
+    const toolItems = event.toolItems ?? [event]
+    for (const item of toolItems) {
+      if (!currentToolGroup) {
+        currentToolGroup = {
+          id: item.id,
+          order: item.order ?? event.order ?? 0,
+          tools: [],
+          toolIds: new Set<string>(),
+        }
+      }
+      const key = item.id
+      currentToolGroup.order = Math.min(currentToolGroup.order, item.order ?? event.order ?? currentToolGroup.order)
+      if (currentToolGroup.toolIds.has(key)) continue
+      currentToolGroup.toolIds.add(key)
+      currentToolGroup.tools.push(item)
+    }
+  }
+  flush()
+  return merged
+}
+
+function agentPanelToolGroupDisplayEvent(group: AgentPanelToolGroup): AgentPanelDisplayEvent {
+  const first = group.tools[0]
+  if (!first) {
+    return {
+      id: `tool-group-${group.id}`,
+      kind: "工具调用组",
+      text: "",
+      tone: "tool",
+      collapsible: true,
+      order: group.order,
+      toolItems: [],
+    }
+  }
+  if (group.tools.length === 1) {
+    return {
+      ...first,
+      id: `tool-group-${group.id}`,
+      order: group.order,
+      toolItems: [first],
+    }
+  }
+  return {
+    id: `tool-group-${group.id}`,
+    kind: `工具调用组 · ${group.tools.length} 个工具`,
+    seq: group.tools[group.tools.length - 1]?.seq,
+    status: agentPanelToolGroupStatus(group.tools),
+    text: group.tools.map(agentPanelToolGroupItemText).join("\n\n"),
+    tone: "tool",
+    collapsible: true,
+    detail: agentPanelToolGroupDetail(group.tools),
+    order: group.order,
+    toolItems: group.tools,
+  }
+}
+
+function agentPanelToolGroupItemText(tool: AgentPanelDisplayEvent, index: number) {
+  const name = tool.kind.replace(/^工具调用\s*·?\s*/, "") || tool.kind
+  const status = tool.status ? ` · ${tool.status}` : ""
+  const detail = tool.detail ? `\n${tool.detail}` : ""
+  const text = tool.text ? `\n${tool.text}` : ""
+  return `${index + 1}. ${name}${status}${detail}${text}`
+}
+
+function agentPanelToolGroupDetail(tools: AgentPanelDisplayEvent[]) {
+  const names = tools.map((tool) => tool.kind.replace(/^工具调用\s*·?\s*/, "")).filter(Boolean)
+  return names.length ? names.join(" · ") : undefined
+}
+
+function agentPanelToolGroupStatus(tools: AgentPanelDisplayEvent[]) {
+  if (tools.some((tool) => tool.status === "failed")) return "failed"
+  if (tools.some((tool) => tool.status === "cancelled")) return "cancelled"
+  if (tools.length > 0 && tools.every((tool) => tool.status === "completed")) return "completed"
+  for (let index = tools.length - 1; index >= 0; index -= 1) {
+    if (tools[index]?.status) return tools[index]?.status
+  }
+  return "running"
 }
 
 function isHiddenAgentPanelStreamKind(kind: string) {
-  return (
-    kind === "status" ||
-    kind === "message.started" ||
-    kind === "queue.updated" ||
-    kind === "tool.started" ||
-    kind === "tool.completed"
-  )
+  return kind === "status" || kind === "message.started" || kind === "queue.updated"
 }
 
 function isAgentReplyTextEvent(event: AgentStreamEvent, kind: string) {
@@ -3806,6 +4414,7 @@ function agentPanelDisplayEventFromStream(
   kind: string,
   text: string,
   fallbackId = `event-${event.seq ?? kind}`,
+  opts: Partial<AgentPanelDisplayEvent> = {},
 ): AgentPanelDisplayEvent {
   return {
     id: stringValue(event.event_id) ?? stringValue(event.part_id) ?? stringValue(event.message_id) ?? fallbackId,
@@ -3813,7 +4422,88 @@ function agentPanelDisplayEventFromStream(
     seq: event.seq,
     status: stringValue(event.status),
     text,
+    ...opts,
   }
+}
+
+function upsertAgentPanelStreamingEntry(input: {
+  map: Map<string, AgentPanelDisplayEvent>
+  display: AgentPanelDisplayEvent[]
+  event: AgentStreamEvent
+  keyPrefix: string
+  title: string
+  text: string | undefined
+  tone: AgentPanelDisplayEvent["tone"]
+  collapsible?: boolean
+  order: number
+}) {
+  const messageId = stringValue(input.event.message_id)
+  const partId = stringValue(input.event.part_id)
+  const key = messageId ?? partId ?? `${input.keyPrefix}-${input.event.seq ?? input.map.size}`
+  const current = input.map.get(key)
+  if (!current) {
+    if (!input.text) return
+    const entry = agentPanelDisplayEventFromStream(input.event, input.title, input.text, `${input.keyPrefix}-${key}`, {
+      tone: input.tone,
+      collapsible: input.collapsible,
+      order: input.order,
+    })
+    input.map.set(key, entry)
+    input.display.push(entry)
+    return
+  }
+  if (input.text) {
+    current.text =
+      stringValue(input.event.kind) === "message.completed" || shouldReplaceAgentReplyDraft(current.text, input.text)
+        ? input.text
+        : `${current.text}${input.text}`
+  }
+  current.status = stringValue(input.event.status) ?? current.status
+  current.seq = input.event.seq ?? current.seq
+}
+
+function userMessageStatusLabel(status: AgentPanelUserMessage["status"]) {
+  if (status === "queued") return "排队中"
+  if (status === "sent") return "已发送"
+  if (status === "dispatching") return "分发中"
+  if (status === "running") return "运行中"
+  if (status === "succeeded") return "已完成"
+  return "失败"
+}
+
+function agentPanelUserMessageOrder(message: AgentPanelUserMessage, index: number) {
+  const value = Date.parse(message.created_at || message.sent_at || message.completed_at || message.failed_at || "")
+  return Number.isFinite(value) ? value : index
+}
+
+function agentPanelStreamEventOrder(event: AgentStreamEvent) {
+  const createdAt = event.created_at
+  if (typeof createdAt === "number" && Number.isFinite(createdAt)) return createdAt > 10_000_000_000 ? createdAt : createdAt * 1000
+  if (typeof createdAt === "string" && createdAt.trim()) {
+    const parsed = Date.parse(createdAt)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return 10_000_000_000_000 + Number(event.seq ?? 0)
+}
+
+function agentPanelToolName(event: AgentStreamEvent) {
+  return stringValue(event.tool_name) ?? stringValue(event.tool_kind) ?? stringValue(event.part_id)
+}
+
+function agentPanelToolDetail(event: AgentStreamEvent) {
+  const values = [stringValue(event.tool_server), stringValue(event.tool_kind)].filter(Boolean)
+  return values.length ? values.join(" · ") : undefined
+}
+
+function agentPanelToolEventText(event: AgentStreamEvent) {
+  const input = agentStreamStructuredText(event["tool_input"])
+  const output = agentStreamStructuredText(event["tool_output"])
+  const error = agentStreamStructuredText(event["tool_error"])
+  const sections: string[] = []
+  if (input) sections.push(`输入\n${input}`)
+  if (output) sections.push(`输出\n${output}`)
+  if (error) sections.push(`错误\n${error}`)
+  return sections.join("\n\n") || agentStreamEventText(event)
 }
 
 function shouldReplaceAgentReplyDraft(current: string, next: string) {
@@ -3850,6 +4540,12 @@ function agentStreamEventContentText(event: AgentStreamEvent) {
   const text = event.delta ?? event.text ?? event["tool_output"] ?? event["tool_input"] ?? event.status
   if (typeof text === "string") return text
   if (text !== undefined) return JSON.stringify(text, null, 2)
+  return undefined
+}
+
+function agentStreamStructuredText(value: unknown) {
+  if (typeof value === "string") return value
+  if (value !== undefined && value !== null) return JSON.stringify(value, null, 2)
   return undefined
 }
 

@@ -129,7 +129,7 @@ Example:
 
 ## Proposed RPC/API Surface
 
-The existing `workspace_rpc.py` can grow from `publish/read/list` into a VCS-style API. The old shared-output commands can remain for artifacts and reports.
+The existing `workspace_rpc.py` can grow from publish-only shared outputs into a VCS-style API. Agents read project and current-run shared files directly from injected read-only filesystem paths; RPC remains the write/submit/publish control surface.
 
 ### `checkout`
 
@@ -351,22 +351,18 @@ Current agent-facing API:
 
 - `publish`
 - `publish-file`
-- `read`
-- `list`
 - `checkout`
 - `status`
 - `diff`
 - `submit`
 - `sync`
-- `list-archives`
-- `extract-archive`
 
 Current rules:
 
 - `publish` and `publish-file` are only for run-scope reports/artifacts.
 - Code changes use `checkout -> edit -> status/diff -> submit`.
 - The run `shared/code` tree is an integration area owned by the framework, not a direct shared write surface.
-- The long-term shared workspace is written by the framework as run archive zips. Agents read it with `list-archives` and `extract-archive`.
+- The long-term shared workspace is written by the framework as run archive zips. It is not exposed through Agent-facing read/list/archive commands.
 
 ## MVP Plan
 
