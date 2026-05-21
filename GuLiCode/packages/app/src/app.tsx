@@ -49,6 +49,7 @@ import { useCheckServerHealth } from "./utils/server-health"
 const HomeRoute = lazy(() => import("@/pages/home"))
 const loadSession = () => import("@/pages/session")
 const Session = lazy(loadSession)
+const BlueprintWindow = lazy(() => import("@/pages/session/blueprint-window"))
 const Loading = () => <div class="size-full" />
 
 if (typeof location === "object" && /\/session(?:\/|$)/.test(location.pathname)) {
@@ -62,6 +63,12 @@ const SessionRoute = () => (
 )
 
 const SessionIndexRoute = () => <Navigate href="session" />
+
+const BlueprintWindowRoute = () => (
+  <SessionProviders>
+    <BlueprintWindow />
+  </SessionProviders>
+)
 
 function UiI18nBridge(props: ParentProps) {
   const language = useLanguage()
@@ -86,7 +93,7 @@ function QueryProvider(props: ParentProps) {
   return <QueryClientProvider client={client}>{props.children}</QueryClientProvider>
 }
 
-function AppShellProviders(props: ParentProps) {
+function AppShellProviders(props: ParentProps<{ visualShell?: boolean }>) {
   return (
     <SettingsProvider>
       <PermissionProvider>
@@ -95,7 +102,9 @@ function AppShellProviders(props: ParentProps) {
             <ModelsProvider>
               <CommandProvider>
                 <HighlightsProvider>
-                  <Layout>{props.children}</Layout>
+                  <Show when={props.visualShell !== false} fallback={props.children}>
+                    <Layout>{props.children}</Layout>
+                  </Show>
                 </HighlightsProvider>
               </CommandProvider>
             </ModelsProvider>
@@ -118,9 +127,9 @@ function SessionProviders(props: ParentProps) {
   )
 }
 
-function RouterRoot(props: ParentProps<{ appChildren?: JSX.Element }>) {
+function RouterRoot(props: ParentProps<{ appChildren?: JSX.Element; visualShell?: boolean }>) {
   return (
-    <AppShellProviders>
+    <AppShellProviders visualShell={props.visualShell}>
       {/*<Suspense fallback={<Loading />}>*/}
       {props.appChildren}
       {props.children}
@@ -282,6 +291,7 @@ export function AppInterface(props: {
   servers?: Array<ServerConnection.Any>
   router?: Component<BaseRouterProps>
   disableHealthCheck?: boolean
+  visualShell?: boolean
 }) {
   return (
     <ServerProvider
@@ -296,12 +306,17 @@ export function AppInterface(props: {
               <GlobalSyncProvider>
                 <Dynamic
                   component={props.router ?? Router}
-                  root={(routerProps) => <RouterRoot appChildren={props.children}>{routerProps.children}</RouterRoot>}
+                  root={(routerProps) => (
+                    <RouterRoot appChildren={props.children} visualShell={props.visualShell}>
+                      {routerProps.children}
+                    </RouterRoot>
+                  )}
                 >
                   <Route path="/" component={HomeRoute} />
                   <Route path="/:dir" component={DirectoryLayout}>
                     <Route path="/" component={SessionIndexRoute} />
                     <Route path="/session/:id?" component={SessionRoute} />
+                    <Route path="/blueprint-window/:id?" component={BlueprintWindowRoute} />
                   </Route>
                 </Dynamic>
               </GlobalSyncProvider>

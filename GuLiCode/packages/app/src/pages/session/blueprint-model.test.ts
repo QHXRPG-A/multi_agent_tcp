@@ -32,7 +32,7 @@ describe("blueprint draft model", () => {
       skill_dir: DEFAULT_SKILL_DIR,
       rule_dir: "",
     })
-    expect(draft.graph.terminal_nodes).toEqual({ start: "start", end: "end" })
+    expect(draft.graph.terminal_nodes).toEqual({})
     expect(draft.graph.route_nodes).toEqual({})
     expect(Object.keys(draft.graph.agent_nodes)).toEqual(["planner", "coder", "review", "summary"])
     expect(draft.graph.agent_nodes.planner).toMatchObject({
@@ -47,11 +47,9 @@ describe("blueprint draft model", () => {
       skill_selection: { mode: "none" },
     })
     expect(draft.graph.edges.map((edge) => [edge.from, edge.output_port, edge.to, edge.input_port, edge.edge_type])).toEqual([
-      ["start", "out", "planner", "in", "exec"],
       ["planner", "out", "coder", "in", "exec"],
       ["coder", "out", "review", "in", "exec"],
       ["review", "out", "summary", "in", "exec"],
-      ["summary", "out", "end", "in", "exec"],
     ])
     expect(draft.inspector).toBeUndefined()
   })
@@ -108,7 +106,7 @@ describe("blueprint draft model", () => {
     expect(runtime.agent_nodes["test-agent"]?.timeout_sec).toBe(1800)
   })
 
-  test("adds route and terminal nodes", () => {
+  test("adds route nodes and keeps the legacy terminal helper available", () => {
     const withRoute = addRouteNode(createDefaultBlueprintDraft(), "parallel_reduce", {
       position: { x: 333, y: 123 },
     })
@@ -120,8 +118,8 @@ describe("blueprint draft model", () => {
     expect(withRoute.graph.route_nodes["parallel-reduce"]?.route_kind).toBe("parallel_reduce")
     expect(withRoute.graph.route_nodes["parallel-reduce"]?.reduce_prompt).toContain("{results}")
     expect(withRoute.layout.nodes["parallel-reduce"]).toEqual({ x: 336, y: 120 })
-    expect(withTerminal.graph.terminal_nodes["start-1"]).toBe("start")
-    expect(withTerminal.layout.nodes["start-1"]).toEqual({ x: 408, y: 120 })
+    expect(withTerminal.graph.terminal_nodes.start).toBe("start")
+    expect(withTerminal.layout.nodes.start).toEqual({ x: 408, y: 120 })
   })
 
   test("adds port-aware edges once and selects the edge", () => {
@@ -140,10 +138,8 @@ describe("blueprint draft model", () => {
   })
 
   test("deletes every node kind and cascades connected edges", () => {
-    const draft = deleteNode(
-      addRouteNode(addEdge(createDefaultBlueprintDraft(), "planner", "end"), "sequence", { node_id: "route" }),
-      "planner",
-    )
+    const withTerminal = addNode(createDefaultBlueprintDraft(), { kind: "start", node_id: "start" })
+    const draft = deleteNode(addRouteNode(addEdge(withTerminal, "planner", "start"), "sequence", { node_id: "route" }), "planner")
 
     expect(draft.graph.agent_nodes.planner).toBeUndefined()
     expect(draft.layout.nodes.planner).toBeUndefined()
@@ -203,8 +199,8 @@ describe("blueprint draft model", () => {
       reduce_prompt: undefined,
     })
     expect(graph.edges[0]).toEqual({
-      from: "start",
-      to: "planner",
+      from: "planner",
+      to: "coder",
       edge_type: "exec",
       output_port: "out",
       input_port: "in",
@@ -259,7 +255,7 @@ describe("blueprint draft model", () => {
       id: "default",
       name: "Default Blueprint",
       graph: {
-        terminal_nodes: { start: "start", end: "end" },
+        terminal_nodes: {},
       },
       ui: {
         config: {
@@ -276,11 +272,52 @@ describe("blueprint draft model", () => {
     expect(toRuntimeGraphDraft(restored).agent_nodes.planner.cwd).toBe("F:\\repo\\game")
   })
 
+  test("reads legacy terminal documents but filters terminals from export and runtime graphs", () => {
+    const restored = fromBlueprintDocument({
+      schema_version: 1,
+      id: "legacy",
+      name: "Legacy",
+      graph: {
+        terminal_nodes: { start: "start", end: "end" },
+        route_nodes: {},
+        agent_nodes: createDefaultBlueprintDraft().graph.agent_nodes,
+        edges: [
+          { from: "start", to: "planner", edge_type: "exec" },
+          { from: "planner", to: "coder", edge_type: "exec" },
+          { from: "summary", to: "end", edge_type: "exec" },
+        ],
+      },
+      ui: {
+        config: createDefaultBlueprintDraft().config,
+        nodes: {
+          start: { x: -120, y: 96 },
+          planner: { x: 0, y: 96 },
+          coder: { x: 240, y: 96 },
+          summary: { x: 720, y: 96 },
+          end: { x: 920, y: 96 },
+        },
+        viewport: { x: 0, y: 0, zoom: 1 },
+        selection: { type: "node", id: "start" },
+        inspector: { type: "edge", id: "summary:out->end:in:exec" },
+      },
+    })
+
+    expect(restored.graph.terminal_nodes).toEqual({ start: "start", end: "end" })
+    expect(toRuntimeGraphDraft(restored).terminal_nodes).toEqual({})
+    expect(toRuntimeGraphDraft(restored).edges.map((edge) => [edge.from, edge.to])).toEqual([["planner", "coder"]])
+    const document = toBlueprintDocument(restored)
+    expect(document.graph.terminal_nodes).toEqual({})
+    expect(document.ui.nodes.start).toBeUndefined()
+    expect(document.ui.nodes.end).toBeUndefined()
+    expect(document.ui.selection).toBeUndefined()
+    expect(document.ui.inspector).toBeUndefined()
+  })
+
   test("keeps supported CLI kinds explicit for inspector dropdowns", () => {
     expect(CLI_KIND_OPTIONS).toEqual(["codemaker", "codex"])
   })
 
-  test("derives a complete start plan from the default blueprint", () => {
+  test("creates an empty start plan unless start nodes are explicit", () => {
     const plan = createBlueprintStartPlan(createDefaultBlueprintDraft())
 
     expect(plan.common_config).toMatchObject({
@@ -293,26 +330,23 @@ describe("blueprint draft model", () => {
       review: "Review implementation output and identify required fixes.",
       summary: "Summarize the run and prepare final records.",
     })
-    expect(plan.start_nodes).toEqual(["planner"])
-    expect(Object.keys(plan.tasks)).toEqual(["planner"])
-    expect(plan.tasks.planner.goal).toContain("Break down")
-    expect(plan.tasks.planner.expected_output).toContain("AgentNode planner")
-    expect(plan.tasks.planner.acceptance).toContain("AgentNode planner")
+    expect(plan.start_nodes).toEqual([])
+    expect(plan.tasks).toEqual({})
     expect(plan.run_policy).toEqual({ allow_parallel: true, source: "blueprint-ui-derived" })
   })
 
-  test("derives start nodes through route nodes and multiple start terminals", () => {
+  test("creates start plan tasks from explicit start nodes and user task text", () => {
     let draft = createDefaultBlueprintDraft()
-    draft = addRouteNode(draft, "parallel", { node_id: "fanout" })
     draft = addAgentNode(draft, { node_id: "research" })
-    draft = addNode(draft, { kind: "start", node_id: "start-extra" })
-    draft.graph.edges = []
-    draft = addEdge(draft, "start", "fanout")
-    draft = addEdge(draft, "fanout", "planner")
-    draft = addEdge(draft, "fanout", "coder")
-    draft = addEdge(draft, "start-extra", "research")
+    const plan = createBlueprintStartPlan(draft, {
+      startNodes: ["planner", "coder", "planner", "missing", "research"],
+      taskText: "Build the requested feature.",
+    })
 
-    expect(createBlueprintStartPlan(draft).start_nodes).toEqual(["planner", "coder", "research"])
+    expect(plan.user_goal).toBe("Build the requested feature.")
+    expect(plan.start_nodes).toEqual(["planner", "coder", "research"])
+    expect(Object.keys(plan.tasks)).toEqual(["planner", "coder", "research"])
+    expect(plan.tasks.planner.goal).toBe("Build the requested feature.")
   })
 
   test("start plan has no tasks when no start terminal reaches an agent", () => {

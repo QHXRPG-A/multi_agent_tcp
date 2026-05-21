@@ -316,18 +316,6 @@ class GraphRuntimeControlPlane:
                 {"context": self.top_agent.organization_context(self.graph)},
             ).to_dict()
 
-        if command == "top_agent.start_session":
-            return asyncio.run(self.start_top_agent_session())
-
-        if command == "top_agent.ask":
-            return asyncio.run(
-                self.ask_top_agent(
-                    str(args.get("prompt", "")),
-                    include_status=bool(args.get("include_status", True)),
-                    recent_events_limit=int(args.get("recent_events_limit", 20)),
-                )
-            )
-
         if command == "top_agent.explain_status":
             return GraphControlResponse(
                 True,
@@ -615,63 +603,6 @@ class GraphRuntimeControlPlane:
             batch_id=batch_id,
         )
         return GraphControlResponse(True, {"batch": batch.to_dict()}).to_dict()
-
-    async def start_top_agent_session(self) -> Dict[str, Any]:
-        if "ask" not in self.top_agent.allowed_run_permissions:
-            raise PermissionError(f"top agent {self.top_agent.agent_id!r} is not allowed to chat")
-        node = self.top_agent.to_agent_node()
-        inst = await self.runtime.ensure_agent(node)
-        return GraphControlResponse(
-            True,
-            {
-                "top_agent": self.top_agent.to_dict(),
-                "session": {
-                    "node_id": node.node_id,
-                    "agent_id": inst.agent_id,
-                    "state": inst.state,
-                    "external": inst.external,
-                },
-            },
-        ).to_dict()
-
-    async def ask_top_agent(
-        self,
-        prompt: str,
-        *,
-        include_status: bool = True,
-        recent_events_limit: int = 20,
-    ) -> Dict[str, Any]:
-        if "ask" not in self.top_agent.allowed_run_permissions:
-            raise PermissionError(f"top agent {self.top_agent.agent_id!r} is not allowed to chat")
-        text = str(prompt).strip()
-        if not text:
-            raise ValueError("top_agent.ask prompt is required")
-        node = self.top_agent.to_agent_node()
-        context = self.top_agent.organization_context(self.graph)
-        if include_status:
-            context["status_explanation"] = self.runtime.explain_status(
-                graph=self.graph,
-                recent_events_limit=recent_events_limit,
-            )
-        reply = await self.runtime.send_agent_message(
-            node,
-            {
-                "type": "top_agent_user_message",
-                "prompt": text,
-                "context": context,
-            },
-            source_agent_id="user",
-        )
-        return GraphControlResponse(
-            True,
-            {
-                "top_agent": {
-                    "node_id": node.node_id,
-                    "agent_id": self.top_agent.agent_id,
-                },
-                "reply": reply,
-            },
-        ).to_dict()
 
     def top_agent_utterances(
         self,

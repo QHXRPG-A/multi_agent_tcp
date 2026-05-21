@@ -18,7 +18,34 @@ const DEFAULT_SIDEBAR_WIDTH = 344
 const DEFAULT_FILE_TREE_WIDTH = 200
 const DEFAULT_SESSION_WIDTH = 600
 const DEFAULT_TERMINAL_HEIGHT = 280
+const DEFAULT_BLUEPRINT_FLOATING_WIDTH = 980
+const DEFAULT_BLUEPRINT_FLOATING_HEIGHT = 680
+const BLUEPRINT_FLOATING_MARGIN = 8
+const BLUEPRINT_FLOATING_TOP_MARGIN = 40
 export type AvatarColorKey = (typeof AVATAR_COLOR_KEYS)[number]
+export type BlueprintFloatingRect = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (max < min) return min
+  return Math.min(Math.max(value, min), max)
+}
+
+function clampBlueprintFloatingRect(input?: Partial<BlueprintFloatingRect>): BlueprintFloatingRect {
+  const viewportWidth = typeof window === "undefined" ? 1280 : window.innerWidth
+  const viewportHeight = typeof window === "undefined" ? 800 : window.innerHeight
+  const maxWidth = Math.max(480, viewportWidth - BLUEPRINT_FLOATING_MARGIN * 2)
+  const maxHeight = Math.max(360, viewportHeight - BLUEPRINT_FLOATING_TOP_MARGIN - BLUEPRINT_FLOATING_MARGIN)
+  const width = clampNumber(input?.width ?? DEFAULT_BLUEPRINT_FLOATING_WIDTH, 480, maxWidth)
+  const height = clampNumber(input?.height ?? DEFAULT_BLUEPRINT_FLOATING_HEIGHT, 360, maxHeight)
+  const x = clampNumber(input?.x ?? Math.max(BLUEPRINT_FLOATING_MARGIN, (viewportWidth - width) / 2), BLUEPRINT_FLOATING_MARGIN, viewportWidth - width - BLUEPRINT_FLOATING_MARGIN)
+  const y = clampNumber(input?.y ?? BLUEPRINT_FLOATING_TOP_MARGIN + 16, BLUEPRINT_FLOATING_TOP_MARGIN, viewportHeight - height - BLUEPRINT_FLOATING_MARGIN)
+  return { x, y, width, height }
+}
 
 export function getAvatarColors(key?: string) {
   if (key && AVATAR_COLOR_KEYS.includes(key as AvatarColorKey)) {
@@ -158,6 +185,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
       })()
 
       const review = value.review
+      const blueprint = value.blueprint
       const fileTree = value.fileTree
       const migratedFileTree = (() => {
         if (!isRecord(fileTree)) return fileTree
@@ -180,6 +208,16 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         return {
           ...review,
           panelOpened: opened,
+        }
+      })()
+
+      const migratedBlueprint = (() => {
+        if (!isRecord(blueprint)) return blueprint
+        if (blueprint.floating === false && isRecord(blueprint.floatingRect)) return blueprint
+        return {
+          ...blueprint,
+          floating: false,
+          floatingRect: clampBlueprintFloatingRect(isRecord(blueprint.floatingRect) ? blueprint.floatingRect : undefined),
         }
       })()
 
@@ -211,6 +249,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
       if (
         migratedSidebar === sidebar &&
         migratedReview === review &&
+        migratedBlueprint === blueprint &&
         migratedFileTree === fileTree &&
         migratedSessionTabs === sessionTabs
       ) {
@@ -221,6 +260,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         ...value,
         sidebar: migratedSidebar,
         review: migratedReview,
+        blueprint: migratedBlueprint,
         fileTree: migratedFileTree,
         sessionTabs: migratedSessionTabs,
       }
@@ -246,6 +286,8 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         },
         blueprint: {
           panelOpened: false,
+          floating: false,
+          floatingRect: clampBlueprintFloatingRect(),
         },
         fileTree: {
           opened: false,
@@ -568,6 +610,19 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
       if (sessionTimer !== undefined) window.clearTimeout(sessionTimer)
     })
 
+    function setBlueprintState(patch: {
+      panelOpened?: boolean
+      floating?: boolean
+      floatingRect?: Partial<BlueprintFloatingRect>
+    }) {
+      const current = store.blueprint
+      setStore("blueprint", {
+        panelOpened: patch.panelOpened ?? current?.panelOpened ?? false,
+        floating: patch.floating ?? current?.floating ?? false,
+        floatingRect: clampBlueprintFloatingRect(patch.floatingRect ?? current?.floatingRect),
+      })
+    }
+
     return {
       ready,
       handoff: {
@@ -645,26 +700,25 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
       },
       blueprint: {
         opened: createMemo(() => store.blueprint?.panelOpened ?? false),
+        floating: createMemo(() => store.blueprint?.floating ?? false),
+        floatingRect: createMemo(() => clampBlueprintFloatingRect(store.blueprint?.floatingRect)),
         open() {
-          if (!store.blueprint) {
-            setStore("blueprint", { panelOpened: true })
-            return
-          }
-          setStore("blueprint", "panelOpened", true)
+          setBlueprintState({ panelOpened: true })
         },
         close() {
-          if (!store.blueprint) {
-            setStore("blueprint", { panelOpened: false })
-            return
-          }
-          setStore("blueprint", "panelOpened", false)
+          setBlueprintState({ panelOpened: false, floating: false })
         },
         toggle() {
-          if (!store.blueprint) {
-            setStore("blueprint", { panelOpened: true })
-            return
-          }
-          setStore("blueprint", "panelOpened", (x) => !x)
+          setBlueprintState({ panelOpened: !(store.blueprint?.panelOpened ?? false) })
+        },
+        float(rect?: Partial<BlueprintFloatingRect>) {
+          setBlueprintState({ panelOpened: true, floating: true, floatingRect: rect })
+        },
+        dock() {
+          setBlueprintState({ panelOpened: true, floating: false })
+        },
+        move(rect: Partial<BlueprintFloatingRect>) {
+          setBlueprintState({ floatingRect: rect })
         },
       },
       fileTree: {
@@ -778,6 +832,8 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         const terminalOpened = createMemo(() => store.terminal?.opened ?? false)
         const reviewPanelOpened = createMemo(() => store.review?.panelOpened ?? true)
         const blueprintPanelOpened = createMemo(() => store.blueprint?.panelOpened ?? false)
+        const blueprintPanelFloating = createMemo(() => store.blueprint?.floating ?? false)
+        const blueprintPanelFloatingRect = createMemo(() => clampBlueprintFloatingRect(store.blueprint?.floatingRect))
 
         function setTerminalOpened(next: boolean) {
           const current = store.terminal
@@ -804,15 +860,8 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         }
 
         function setBlueprintPanelOpened(next: boolean) {
-          const current = store.blueprint
-          if (!current) {
-            setStore("blueprint", { panelOpened: next })
-            return
-          }
-
-          const value = current.panelOpened ?? false
-          if (value === next) return
-          setStore("blueprint", "panelOpened", next)
+          if ((store.blueprint?.panelOpened ?? false) === next) return
+          setBlueprintState({ panelOpened: next })
         }
 
         return {
@@ -848,14 +897,25 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
           },
           blueprintPanel: {
             opened: blueprintPanelOpened,
+            floating: blueprintPanelFloating,
+            floatingRect: blueprintPanelFloatingRect,
             open() {
               setBlueprintPanelOpened(true)
             },
             close() {
-              setBlueprintPanelOpened(false)
+              setBlueprintState({ panelOpened: false, floating: false })
             },
             toggle() {
               setBlueprintPanelOpened(!blueprintPanelOpened())
+            },
+            float(rect?: Partial<BlueprintFloatingRect>) {
+              setBlueprintState({ panelOpened: true, floating: true, floatingRect: rect })
+            },
+            dock() {
+              setBlueprintState({ panelOpened: true, floating: false })
+            },
+            move(rect: Partial<BlueprintFloatingRect>) {
+              setBlueprintState({ floatingRect: rect })
             },
           },
           review: {

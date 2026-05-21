@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer } from "electron"
-import type { ElectronAPI, InitStep, SqliteMigrationProgress } from "./types"
+import type {
+  BlueprintWindowContext,
+  BlueprintWindowPlanningSubmitRequest,
+  ElectronAPI,
+  InitStep,
+  SqliteMigrationProgress,
+} from "./types"
 
 const api: ElectronAPI = {
   killSidecar: () => ipcRenderer.invoke("kill-sidecar"),
@@ -59,7 +65,28 @@ const api: ElectronAPI = {
   blueprintQueueAgentMessage: (runId, nodeId, text, mode) =>
     ipcRenderer.invoke("blueprint-queue-agent-message", runId, nodeId, text, mode),
   blueprintAgentStreamToken: (runId, cursor) => ipcRenderer.invoke("blueprint-agent-stream-token", runId, cursor),
+  blueprintPlanningEnsureContext: (projectDir, blueprintId, desktopSessionId) =>
+    ipcRenderer.invoke("blueprint-planning-ensure-context", projectDir, blueprintId, desktopSessionId),
+  blueprintPlanningAnswerQuestion: (sessionId, questionId, answers, opts) =>
+    ipcRenderer.invoke("blueprint-planning-answer-question", sessionId, questionId, answers, opts),
+  blueprintPlanningRejectPlan: (sessionId, reason) =>
+    ipcRenderer.invoke("blueprint-planning-reject-plan", sessionId, reason),
+  blueprintPlanningMarkPlanStarted: (sessionId, runId, started) =>
+    ipcRenderer.invoke("blueprint-planning-mark-plan-started", sessionId, runId, started),
+  blueprintPlanningStatus: (sessionId) => ipcRenderer.invoke("blueprint-planning-status", sessionId),
+  blueprintPlanningEndSession: (sessionId, reason) =>
+    ipcRenderer.invoke("blueprint-planning-end-session", sessionId, reason),
   blueprintSaveAgentPanelTest: (payload) => ipcRenderer.invoke("blueprint-save-agent-panel-test", payload),
+  getBlueprintWindowContext: () => ipcRenderer.invoke("blueprint-window-context"),
+  openBlueprintWindow: (projectDir, sessionId, rect) =>
+    ipcRenderer.invoke("blueprint-window-open", projectDir, sessionId, rect),
+  dockBlueprintWindow: (projectDir, sessionId) =>
+    ipcRenderer.invoke("blueprint-window-dock", projectDir, sessionId),
+  closeBlueprintWindow: () => ipcRenderer.invoke("blueprint-window-close"),
+  submitBlueprintWindowPlanning: (projectDir, sessionId, input) =>
+    ipcRenderer.invoke("blueprint-window-submit-planning", projectDir, sessionId, input),
+  respondBlueprintWindowPlanningSubmit: (requestId, accepted) =>
+    ipcRenderer.invoke("blueprint-window-planning-submit-response", requestId, accepted),
 
   getWindowCount: () => ipcRenderer.invoke("get-window-count"),
   onSqliteMigrationProgress: (cb) => {
@@ -76,6 +103,21 @@ const api: ElectronAPI = {
     const handler = (_: unknown, urls: string[]) => cb(urls)
     ipcRenderer.on("deep-link", handler)
     return () => ipcRenderer.removeListener("deep-link", handler)
+  },
+  onBlueprintWindowDock: (cb) => {
+    const handler = (_: unknown, context: BlueprintWindowContext) => cb(context)
+    ipcRenderer.on("blueprint-window-dock-request", handler)
+    return () => ipcRenderer.removeListener("blueprint-window-dock-request", handler)
+  },
+  onBlueprintWindowClosed: (cb) => {
+    const handler = (_: unknown, context: BlueprintWindowContext) => cb(context)
+    ipcRenderer.on("blueprint-window-closed", handler)
+    return () => ipcRenderer.removeListener("blueprint-window-closed", handler)
+  },
+  onBlueprintWindowPlanningSubmitRequest: (cb) => {
+    const handler = (_: unknown, request: BlueprintWindowPlanningSubmitRequest) => cb(request)
+    ipcRenderer.on("blueprint-window-planning-submit-request", handler)
+    return () => ipcRenderer.removeListener("blueprint-window-planning-submit-request", handler)
   },
 
   openDirectoryPicker: (opts) => ipcRenderer.invoke("open-directory-picker", opts),

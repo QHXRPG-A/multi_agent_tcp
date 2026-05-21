@@ -142,7 +142,7 @@ def test_organization_and_validate_start_cli(tmp_path: Path, capsys: Any) -> Non
     main(
         [
             "runtime",
-            "top-agent-context",
+            "planning-context",
             "--graph",
             str(graph_path),
             "--top-agent-profile",
@@ -573,27 +573,23 @@ def test_complex_blueprint_fixture_compiles_validates_and_starts(tmp_path: Path)
     assert runtime.status_snapshot()["run"]["message_journal"]["record_count"] == 1
 
 
-def test_top_agent_session_and_ask_use_long_lived_worker() -> None:
+def test_top_agent_start_and_ask_commands_are_not_control_plane_surface() -> None:
     graph = graph_definition_from_dict(_graph_dict())
     runtime = GraphRuntime(_FakeCluster())
     profile = GuLiCodeTopAgentProfile(agent_id="gu", external=False)
     control = GraphRuntimeControlPlane(runtime, graph, top_agent=profile)
 
-    started = control.handle_request({"command": "top_agent.start_session", "args": {}})
-    assert started["ok"] is True
-    assert started["session"]["agent_id"] == "gu"
-
-    asked = control.handle_request(
-        {
-            "command": "top_agent.ask",
-            "args": {"prompt": "What is happening?", "recent_events_limit": 3},
-        }
-    )
-    assert asked["ok"] is True
-    assert runtime.cluster.started == ["gu"]
-    assert runtime.cluster.sent[0][0] == "gu"
-    assert runtime.cluster.sent[0][1]["context"]["top_agent"]["agent_id"] == "gu"
-    assert "status_explanation" in runtime.cluster.sent[0][1]["context"]
+    with pytest.raises(ValueError):
+        control.handle_request({"command": "top_agent.start_session", "args": {}})
+    with pytest.raises(ValueError):
+        control.handle_request(
+            {
+                "command": "top_agent.ask",
+                "args": {"prompt": "What is happening?", "recent_events_limit": 3},
+            }
+        )
+    assert runtime.cluster.started == []
+    assert runtime.cluster.sent == []
 
 
 def test_top_agent_utterances_interface_is_top_agent_only() -> None:

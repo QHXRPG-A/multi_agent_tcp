@@ -146,6 +146,7 @@ class RunMCPTokenStore:
         agent_id: str,
         workspace_rpc_token: Optional[str] = None,
         permissions: Optional[Sequence[str]] = None,
+        allowed_tools: Optional[Sequence[str]] = None,
         ttl_sec: float = 24 * 60 * 60,
     ) -> MCPTokenScope:
         with self._lock:
@@ -161,7 +162,11 @@ class RunMCPTokenStore:
                 agent_id=agent_id,
                 workspace_rpc_token=workspace_rpc_token,
                 control_permissions=_normalized_control_permissions(permissions),
-                allowed_tools=_control_tools_for_permissions(permissions),
+                allowed_tools=(
+                    _normalized_control_tools(allowed_tools)
+                    if allowed_tools is not None
+                    else _control_tools_for_permissions(permissions)
+                ),
                 expires_at=float(self.now()) + float(ttl_sec),
             )
             self._scopes_by_token[token] = scope
@@ -359,6 +364,11 @@ class RunMCPRuntimeHandle:
         top_agent_node_id: Optional[str] = None,
         top_agent_id: Optional[str] = None,
         close_run_callback: Optional[Callable[..., Any]] = None,
+        request_user_input_callback: Optional[Callable[[list[dict[str, Any]]], Any]] = None,
+        stage_start_plan_callback: Optional[Callable[[dict[str, Any], str], Any]] = None,
+        control_command_callback: Optional[Callable[..., Any]] = None,
+        control_call_observer: Optional[Callable[..., Any]] = None,
+        control_allowed_tools: Optional[Sequence[str]] = None,
         now: Callable[[], float] = time.time,
     ) -> None:
         self.run_id = run_id
@@ -374,6 +384,15 @@ class RunMCPRuntimeHandle:
         self.top_agent_node_id = top_agent_node_id
         self.top_agent_id = top_agent_id
         self.close_run_callback = close_run_callback
+        self.request_user_input_callback = request_user_input_callback
+        self.stage_start_plan_callback = stage_start_plan_callback
+        self.control_command_callback = control_command_callback
+        self.control_call_observer = control_call_observer
+        self.control_allowed_tools = (
+            _normalized_control_tools(control_allowed_tools)
+            if control_allowed_tools is not None
+            else None
+        )
         self.token_store = RunMCPTokenStore(run_id, now=now)
         self._uvicorn_server: Any = None
         self._thread: Optional[threading.Thread] = None
@@ -478,6 +497,7 @@ class RunMCPRuntimeHandle:
                 agent_id=agent_id,
                 workspace_rpc_token=workspace_rpc_token,
                 permissions=self._top_agent_permissions(),
+                allowed_tools=self.control_allowed_tools,
             )
             return _mcp_private_context(
                 server_kind="control",
@@ -503,6 +523,30 @@ class RunMCPRuntimeHandle:
             token_env=ORDINARY_TOKEN_ENV,
             token=scope.token,
             tools=ORDINARY_TOOL_NAMES,
+        )
+
+    def provision_control_context(
+        self,
+        *,
+        agent_node_id: str = "desktop-blueprint-planning",
+        agent_id: str = "gulicode-desktop",
+        permissions: Optional[Sequence[str]] = None,
+        allowed_tools: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        scope = self.token_store.create_control_scope(
+            agent_node_id=str(agent_node_id),
+            agent_id=str(agent_id),
+            workspace_rpc_token=None,
+            permissions=permissions if permissions is not None else self._top_agent_permissions(),
+            allowed_tools=allowed_tools if allowed_tools is not None else self.control_allowed_tools,
+        )
+        return _mcp_private_context(
+            server_kind="control",
+            server_name=CONTROL_SERVER_NAME,
+            url=self.control_url,
+            token_env=CONTROL_TOKEN_ENV,
+            token=scope.token,
+            tools=scope.allowed_tools,
         )
 
     def refresh_message_context(self, event: Dict[str, Any]) -> None:
@@ -769,34 +813,6 @@ class RunMCPRuntimeHandle:
             return result
 
         @mcp.tool()
-        async def top_agent_start_session() -> Dict[str, Any]:
-            return await self._control_request(
-                _require_scope("control", "top_agent_start_session"),
-                tool_name="top_agent_start_session",
-                command="top_agent.start_session",
-                args={},
-                permission="ask",
-            )
-
-        @mcp.tool()
-        async def top_agent_ask(
-            prompt: str,
-            include_status: bool = True,
-            recent_events_limit: int = 20,
-        ) -> Dict[str, Any]:
-            return await self._control_request(
-                _require_scope("control", "top_agent_ask"),
-                tool_name="top_agent_ask",
-                command="top_agent.ask",
-                args={
-                    "prompt": prompt,
-                    "include_status": bool(include_status),
-                    "recent_events_limit": int(recent_events_limit),
-                },
-                permission="ask",
-            )
-
-        @mcp.tool()
         async def top_agent_explain_status(recent_events_limit: int = 20) -> Dict[str, Any]:
             return await self._control_request(
                 _require_scope("control", "top_agent_explain_status"),
@@ -853,6 +869,94 @@ class RunMCPRuntimeHandle:
                 args={"plan": plan},
                 permission="start",
             )
+
+        @mcp.tool()
+        async def top_agent_request_user_input(
+            questions: list[dict[str, Any]],
+        ) -> Dict[str, Any]:
+            scope = _require_scope("control", "top_agent_request_user_input")
+            _require_control_permission(scope, "ask")
+            clean_questions = [
+                dict(item)
+                for item in (questions or [])
+                if isinstance(item, dict)
+            ]
+            self._record_mcp_tool_call(
+                scope,
+                "top_agent_request_user_input",
+                {"questions": clean_questions},
+            )
+            if self.request_user_input_callback is None:
+                result = {
+                    "ok": False,
+                    "status": "unsupported",
+                    "error": "top-agent user input requests are not configured for this runtime",
+                }
+                await self._notify_control_call(
+                    scope,
+                    tool_name="top_agent_request_user_input",
+                    command="top_agent.request_user_input",
+                    args={"questions": clean_questions},
+                    result=result,
+                    error=None,
+                )
+                return result
+            result = await asyncio.to_thread(self.request_user_input_callback, clean_questions)
+            payload = dict(result) if isinstance(result, dict) else {"ok": True, "answers": result}
+            await self._notify_control_call(
+                scope,
+                tool_name="top_agent_request_user_input",
+                command="top_agent.request_user_input",
+                args={"questions": clean_questions},
+                result=payload,
+                error=None,
+            )
+            return payload
+
+        @mcp.tool()
+        async def top_agent_stage_start_plan(
+            plan: dict[str, Any],
+            plan_markdown: str = "",
+        ) -> Dict[str, Any]:
+            scope = _require_scope("control", "top_agent_stage_start_plan")
+            _require_control_permission(scope, "start")
+            clean_plan = dict(plan or {})
+            clean_markdown = str(plan_markdown or "")
+            self._record_mcp_tool_call(
+                scope,
+                "top_agent_stage_start_plan",
+                {"plan": clean_plan, "plan_markdown": clean_markdown},
+            )
+            if self.stage_start_plan_callback is None:
+                result = {
+                    "ok": False,
+                    "status": "unsupported",
+                    "error": "top-agent start plan staging is not configured for this runtime",
+                }
+                await self._notify_control_call(
+                    scope,
+                    tool_name="top_agent_stage_start_plan",
+                    command="top_agent.stage_start_plan",
+                    args={"plan": clean_plan, "plan_markdown": clean_markdown},
+                    result=result,
+                    error=None,
+                )
+                return result
+            result = await asyncio.to_thread(
+                self.stage_start_plan_callback,
+                clean_plan,
+                clean_markdown,
+            )
+            payload = dict(result) if isinstance(result, dict) else {"ok": True, "result": result}
+            await self._notify_control_call(
+                scope,
+                tool_name="top_agent_stage_start_plan",
+                command="top_agent.stage_start_plan",
+                args={"plan": clean_plan, "plan_markdown": clean_markdown},
+                result=payload,
+                error=None,
+            )
+            return payload
 
         @mcp.tool()
         async def runtime_start(
@@ -1039,7 +1143,7 @@ class RunMCPRuntimeHandle:
                 permission="start",
             )
 
-        allowed = set(_control_tools_for_permissions(self._top_agent_permissions()))
+        allowed = set(self.control_allowed_tools or _control_tools_for_permissions(self._top_agent_permissions()))
         for tool_name in CONTROL_TOOL_NAMES:
             if tool_name not in allowed:
                 mcp.remove_tool(tool_name)
@@ -1061,19 +1165,85 @@ class RunMCPRuntimeHandle:
             if value is not None
         }
         self._record_mcp_tool_call(scope, tool_name, clean_args)
-        return await self._dispatch_control_command(command, clean_args)
+        try:
+            result = await self._maybe_override_control_command(
+                scope,
+                tool_name=tool_name,
+                command=command,
+                args=clean_args,
+            )
+            if result is None:
+                result = await self._dispatch_control_command(command, clean_args)
+            payload = dict(result) if isinstance(result, dict) else {"ok": True, "result": result}
+            await self._notify_control_call(
+                scope,
+                tool_name=tool_name,
+                command=command,
+                args=clean_args,
+                result=payload,
+                error=None,
+            )
+            return payload
+        except Exception as exc:
+            await self._notify_control_call(
+                scope,
+                tool_name=tool_name,
+                command=command,
+                args=clean_args,
+                result=None,
+                error=str(exc),
+            )
+            raise
+
+    async def _maybe_override_control_command(
+        self,
+        scope: MCPTokenScope,
+        *,
+        tool_name: str,
+        command: str,
+        args: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        callback = self.control_command_callback
+        if callback is None:
+            return None
+        result = callback(
+            scope=scope,
+            tool_name=tool_name,
+            command=command,
+            args=dict(args),
+        )
+        if asyncio.iscoroutine(result):
+            result = await result
+        return dict(result) if isinstance(result, dict) else result
+
+    async def _notify_control_call(
+        self,
+        scope: MCPTokenScope,
+        *,
+        tool_name: str,
+        command: str,
+        args: Dict[str, Any],
+        result: Optional[Dict[str, Any]],
+        error: Optional[str],
+    ) -> None:
+        observer = self.control_call_observer
+        if observer is None:
+            return
+        try:
+            observed = observer(
+                scope=scope,
+                tool_name=tool_name,
+                command=command,
+                args=_safe_mcp_args(args),
+                result=dict(result) if isinstance(result, dict) else result,
+                error=error,
+            )
+            if asyncio.iscoroutine(observed):
+                await observed
+        except Exception:
+            return
 
     async def _dispatch_control_command(self, command: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        if command == "top_agent.start_session":
-            return await self._runtime_coro(lambda: self.control.start_top_agent_session())
-        if command == "top_agent.ask":
-            return await self._runtime_coro(
-                lambda: self.control.ask_top_agent(
-                    str(args.get("prompt", "")),
-                    include_status=bool(args.get("include_status", True)),
-                    recent_events_limit=int(args.get("recent_events_limit", 20)),
-                )
-            )
         if command == "run.start":
             from .graph_runtime import TopAgentStartPlan
 
@@ -1339,10 +1509,7 @@ ORDINARY_TOOL_NAMES = [
 DEFAULT_CONTROL_PERMISSIONS = ["ask", "start", "status", "end", "utterances"]
 
 CONTROL_TOOL_NAMES_BY_PERMISSION = {
-    "ask": [
-        "top_agent_start_session",
-        "top_agent_ask",
-    ],
+    "ask": [],
     "start": [
         "runtime_validate_start",
         "runtime_start",
@@ -1377,6 +1544,23 @@ CONTROL_TOOL_NAMES = [
     tool
     for permission in ["ask", "start", "status", "end", "utterances", "fixture"]
     for tool in CONTROL_TOOL_NAMES_BY_PERMISSION[permission]
+] + [
+    "top_agent_request_user_input",
+    "top_agent_stage_start_plan",
+]
+
+TOP_AGENT_PLANNING_CONTROL_TOOLS = [
+    "organization_read",
+    "top_agent_context",
+    "runtime_agent_context",
+    "top_agent_explain_status",
+    "runtime_explain_status",
+    "runtime_status",
+    "top_agent_utterances",
+    "runtime_top_agent_utterances",
+    "runtime_validate_start",
+    "top_agent_request_user_input",
+    "top_agent_stage_start_plan",
 ]
 
 
@@ -1401,6 +1585,19 @@ def _control_tools_for_permissions(permissions: Optional[Sequence[str]]) -> list
             if tool not in tools:
                 tools.append(tool)
     return tools
+
+
+def _normalized_control_tools(tools: Optional[Sequence[str]]) -> list[str]:
+    if tools is None:
+        return []
+    known = set(CONTROL_TOOL_NAMES)
+    normalized: list[str] = []
+    for item in tools:
+        value = str(item).strip()
+        if not value or value not in known or value in normalized:
+            continue
+        normalized.append(value)
+    return normalized
 
 
 def _require_allowed_tool(scope: MCPTokenScope, tool_name: str) -> None:

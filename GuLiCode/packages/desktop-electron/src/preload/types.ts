@@ -59,6 +59,30 @@ export type BlueprintRelocateProjectWorkdirResult = {
   conflict?: "target_exists"
 }
 
+export type BlueprintWindowRect = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export type BlueprintWindowContext = {
+  projectDir: string
+  sessionId?: string
+  rect?: BlueprintWindowRect
+}
+
+export type BlueprintWindowPlanningSubmitInput = {
+  task: string
+  startNodeIds: string[]
+  message: string
+}
+
+export type BlueprintWindowPlanningSubmitRequest = BlueprintWindowContext & {
+  requestId: string
+  input: BlueprintWindowPlanningSubmitInput
+}
+
 export type ElectronAPI = {
   killSidecar: () => Promise<void>
   installCli: () => Promise<string>
@@ -120,12 +144,44 @@ export type ElectronAPI = {
     mode: "default" | "top",
   ) => Promise<Record<string, unknown>>
   blueprintAgentStreamToken: (runId: string, cursor?: number) => Promise<Record<string, unknown>>
+  blueprintPlanningEnsureContext: (
+    projectDir: string,
+    blueprintId: string,
+    desktopSessionId: string,
+  ) => Promise<Record<string, unknown>>
+  blueprintPlanningAnswerQuestion: (
+    sessionId: string,
+    questionId: string,
+    answers: unknown,
+    opts?: { rejected?: boolean; reason?: string },
+  ) => Promise<Record<string, unknown>>
+  blueprintPlanningRejectPlan: (sessionId: string, reason?: string) => Promise<Record<string, unknown>>
+  blueprintPlanningMarkPlanStarted: (
+    sessionId: string,
+    runId: string,
+    started?: unknown,
+  ) => Promise<Record<string, unknown>>
+  blueprintPlanningStatus: (sessionId: string) => Promise<Record<string, unknown>>
+  blueprintPlanningEndSession: (sessionId: string, reason?: string) => Promise<Record<string, unknown>>
   blueprintSaveAgentPanelTest: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
+  getBlueprintWindowContext: () => Promise<BlueprintWindowContext | null>
+  openBlueprintWindow: (projectDir: string, sessionId?: string, rect?: BlueprintWindowRect) => Promise<void>
+  dockBlueprintWindow: (projectDir: string, sessionId?: string) => Promise<void>
+  closeBlueprintWindow: () => Promise<void>
+  submitBlueprintWindowPlanning: (
+    projectDir: string,
+    sessionId: string | undefined,
+    input: BlueprintWindowPlanningSubmitInput,
+  ) => Promise<{ accepted: boolean }>
+  respondBlueprintWindowPlanningSubmit: (requestId: string, accepted: boolean) => Promise<void>
 
   getWindowCount: () => Promise<number>
   onSqliteMigrationProgress: (cb: (progress: SqliteMigrationProgress) => void) => () => void
   onMenuCommand: (cb: (id: string) => void) => () => void
   onDeepLink: (cb: (urls: string[]) => void) => () => void
+  onBlueprintWindowDock: (cb: (context: BlueprintWindowContext) => void) => () => void
+  onBlueprintWindowClosed: (cb: (context: BlueprintWindowContext) => void) => () => void
+  onBlueprintWindowPlanningSubmitRequest: (cb: (request: BlueprintWindowPlanningSubmitRequest) => void) => () => void
 
   openDirectoryPicker: (opts?: {
     multiple?: boolean

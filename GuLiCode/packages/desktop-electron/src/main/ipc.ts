@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { BrowserWindow, Notification, app, clipboard, dialog, ipcMain, shell } from "electron"
@@ -6,6 +7,8 @@ import log from "electron-log/main.js"
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
 
 import type {
+  BlueprintWindowRect,
+  BlueprintWindowPlanningSubmitInput,
   InitStep,
   ServerReadyData,
   SqliteMigrationProgress,
@@ -21,7 +24,14 @@ import {
 } from "./blueprint-catalog"
 import type { BlueprintDocument, BlueprintRelocateConflictPolicy, BlueprintRunEndAction, BlueprintRuntime } from "./blueprint-runtime"
 import { getStore } from "./store"
-import { setTitlebar } from "./windows"
+import {
+  closeBlueprintWindow,
+  dockBlueprintWindow,
+  findBlueprintMainWindow,
+  getBlueprintWindowContext,
+  openBlueprintWindow,
+  setTitlebar,
+} from "./windows"
 
 const pickerFilters = (ext?: string[]) => {
   if (!ext || ext.length === 0) return undefined
@@ -32,6 +42,7 @@ const AGENT_PANEL_TEST_DIR = "agent-info-panel-tests"
 const AGENT_PANEL_TEST_FILE = "agent-panel-test.json"
 
 let agentPanelTestResetPromise: Promise<void> | undefined
+const pendingBlueprintPlanningSubmits = new Map<string, (accepted: boolean) => void>()
 
 type Deps = {
   killSidecar: () => void
@@ -54,6 +65,7 @@ type Deps = {
   installUpdate: () => Promise<void> | void
   setBackgroundColor: (color: string) => void
   blueprintRuntime: BlueprintRuntime
+  appId?: string
 }
 
 export function registerIpcHandlers(deps: Deps) {
@@ -192,8 +204,105 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("blueprint-agent-stream-token", (_event: IpcMainInvokeEvent, runId: string, cursor?: number) =>
     deps.blueprintRuntime.agentStreamToken(runId, cursor),
   )
+  ipcMain.handle(
+    "blueprint-planning-ensure-context",
+    (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string, desktopSessionId: string) =>
+      deps.blueprintRuntime.ensurePlanningContext(projectDir, blueprintId, desktopSessionId),
+  )
+  ipcMain.handle(
+    "blueprint-planning-answer-question",
+    (
+      _event: IpcMainInvokeEvent,
+      sessionId: string,
+      questionId: string,
+      answers: unknown,
+      opts?: { rejected?: boolean; reason?: string },
+    ) => deps.blueprintRuntime.answerPlanningQuestion(sessionId, questionId, answers, opts),
+  )
+  ipcMain.handle(
+    "blueprint-planning-reject-plan",
+    (_event: IpcMainInvokeEvent, sessionId: string, reason?: string) =>
+      deps.blueprintRuntime.rejectPlanningPlan(sessionId, reason),
+  )
+  ipcMain.handle(
+    "blueprint-planning-mark-plan-started",
+    (_event: IpcMainInvokeEvent, sessionId: string, runId: string, started?: unknown) =>
+      deps.blueprintRuntime.markPlanningPlanStarted(sessionId, runId, started),
+  )
+  ipcMain.handle("blueprint-planning-status", (_event: IpcMainInvokeEvent, sessionId: string) =>
+    deps.blueprintRuntime.planningStatus(sessionId),
+  )
+  ipcMain.handle("blueprint-planning-end-session", (_event: IpcMainInvokeEvent, sessionId: string, reason?: string) =>
+    deps.blueprintRuntime.endPlanningSession(sessionId, reason),
+  )
   ipcMain.handle("blueprint-save-agent-panel-test", (_event: IpcMainInvokeEvent, payload: Record<string, unknown>) =>
     saveAgentPanelTestSnapshot(recordValue(payload) ?? { value: payload }),
+  )
+  ipcMain.handle("blueprint-window-context", (event: IpcMainInvokeEvent) =>
+    getBlueprintWindowContext(BrowserWindow.fromWebContents(event.sender)),
+  )
+  ipcMain.handle(
+    "blueprint-window-open",
+    (event: IpcMainInvokeEvent, projectDir: string, sessionId?: string, rect?: Record<string, unknown>) => {
+      openBlueprintWindow(
+        {
+          projectDir,
+          sessionId,
+          rect: blueprintWindowRect(rect),
+        },
+        {
+          appId: deps.appId,
+          sourceWindow: BrowserWindow.fromWebContents(event.sender),
+        },
+      )
+    },
+  )
+  ipcMain.handle("blueprint-window-dock", (event: IpcMainInvokeEvent, projectDir: string, sessionId?: string) => {
+    dockBlueprintWindow(BrowserWindow.fromWebContents(event.sender), { projectDir, sessionId })
+  })
+  ipcMain.handle("blueprint-window-close", (event: IpcMainInvokeEvent) => {
+    closeBlueprintWindow(BrowserWindow.fromWebContents(event.sender))
+  })
+  ipcMain.handle(
+    "blueprint-window-submit-planning",
+    async (
+      event: IpcMainInvokeEvent,
+      projectDir: string,
+      sessionId: string | undefined,
+      input: BlueprintWindowPlanningSubmitInput,
+    ) => {
+      const sourceContext = getBlueprintWindowContext(BrowserWindow.fromWebContents(event.sender))
+      if (!sourceContext) return { accepted: false }
+      const target = findBlueprintMainWindow()
+      if (!target || target.isDestroyed()) return { accepted: false }
+      const requestId = randomUUID()
+      const accepted = await new Promise<boolean>((resolve) => {
+        const timeout = globalThis.setTimeout(() => {
+          pendingBlueprintPlanningSubmits.delete(requestId)
+          resolve(false)
+        }, 1000)
+        pendingBlueprintPlanningSubmits.set(requestId, (next) => {
+          globalThis.clearTimeout(timeout)
+          resolve(next)
+        })
+        target.webContents.send("blueprint-window-planning-submit-request", {
+          requestId,
+          projectDir,
+          sessionId,
+          input,
+        })
+      })
+      return { accepted }
+    },
+  )
+  ipcMain.handle(
+    "blueprint-window-planning-submit-response",
+    (_event: IpcMainInvokeEvent, requestId: string, accepted: boolean) => {
+      const resolve = pendingBlueprintPlanningSubmits.get(requestId)
+      if (!resolve) return
+      pendingBlueprintPlanningSubmits.delete(requestId)
+      resolve(accepted === true)
+    },
   )
 
   ipcMain.handle(
@@ -374,4 +483,18 @@ async function clearObsoleteAgentPanelTestJsonFiles(dir: string) {
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
+}
+
+function blueprintWindowRect(value: Record<string, unknown> | undefined): BlueprintWindowRect | undefined {
+  if (!value) return undefined
+  const x = finiteNumber(value.x)
+  const y = finiteNumber(value.y)
+  const width = finiteNumber(value.width)
+  const height = finiteNumber(value.height)
+  if (x === undefined || y === undefined || width === undefined || height === undefined) return undefined
+  return { x, y, width, height }
+}
+
+function finiteNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }

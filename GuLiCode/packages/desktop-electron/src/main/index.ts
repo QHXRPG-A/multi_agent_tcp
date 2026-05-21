@@ -287,6 +287,7 @@ registerIpcHandlers({
   installUpdate: async () => installUpdate(),
   setBackgroundColor: (color) => setBackgroundColor(color),
   blueprintRuntime,
+  appId,
 })
 
 function killSidecar() {

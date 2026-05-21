@@ -49,6 +49,19 @@ export type BlueprintRelocateProjectWorkdirResult = {
   conflict?: "target_exists"
 }
 
+export type BlueprintWindowRect = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export type BlueprintWindowPlanningSubmitInput = {
+  task: string
+  startNodeIds: string[]
+  message: string
+}
+
 export type Platform = {
   /** Platform discriminator */
   platform: "web" | "desktop"
@@ -159,8 +172,55 @@ export type Platform = {
   /** Return a one-time WebSocket URL for live blueprint agent stream events (desktop only) */
   blueprintAgentStreamToken?(runId: string, cursor?: number): Promise<Record<string, unknown>>
 
+  /** Ensure one desktop-session-scoped blueprint planning context (desktop only) */
+  ensureBlueprintPlanningContext?(
+    projectDir: string,
+    blueprintId: string,
+    desktopSessionId: string,
+  ): Promise<Record<string, unknown>>
+
+  /** Answer or reject a pending blueprint planning question (desktop only) */
+  answerBlueprintPlanningQuestion?(
+    sessionId: string,
+    questionId: string,
+    answers: unknown,
+    opts?: { rejected?: boolean; reason?: string },
+  ): Promise<Record<string, unknown>>
+
+  /** Reject a staged blueprint planning start plan without starting (desktop only) */
+  rejectBlueprintPlanningPlan?(sessionId: string, reason?: string): Promise<Record<string, unknown>>
+
+  /** Record that an app-mediated blueprint start consumed the staged plan (desktop only) */
+  markBlueprintPlanningPlanStarted?(
+    sessionId: string,
+    runId: string,
+    started?: unknown,
+  ): Promise<Record<string, unknown>>
+
+  /** Read the current desktop blueprint planning session snapshot (desktop only) */
+  blueprintPlanningStatus?(sessionId: string): Promise<Record<string, unknown>>
+
+  /** End the current desktop blueprint planning session (desktop only) */
+  endBlueprintPlanningSession?(sessionId: string, reason?: string): Promise<Record<string, unknown>>
+
   /** Save a local Agent info panel test snapshot beside desktop logs (desktop only) */
   saveBlueprintAgentPanelTest?(payload: Record<string, unknown>): Promise<Record<string, unknown>>
+
+  /** Open the blueprint panel in an independent desktop window (desktop only) */
+  openBlueprintWindow?(projectDir: string, sessionId?: string, rect?: BlueprintWindowRect): Promise<void>
+
+  /** Dock the current independent blueprint window back into the main sidebar (desktop only) */
+  dockBlueprintWindow?(projectDir: string, sessionId?: string): Promise<void>
+
+  /** Close the current independent blueprint window (desktop only) */
+  closeBlueprintWindow?(): Promise<void>
+
+  /** Forward a blueprint planning task from the independent window to the main session composer. */
+  submitBlueprintWindowPlanning?(
+    projectDir: string,
+    sessionId: string | undefined,
+    input: BlueprintWindowPlanningSubmitInput,
+  ): Promise<{ accepted: boolean }>
 
   /** Storage mechanism, defaults to localStorage */
   storage?: (name?: string) => SyncStorage | AsyncStorage

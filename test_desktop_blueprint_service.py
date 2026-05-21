@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from urllib import request
@@ -31,6 +32,7 @@ from multi_agent_tcp.agent_launch_context import (
     write_private_codex_mcp_config,
 )
 from multi_agent_tcp.client import AgentTCPClient
+from multi_agent_tcp.workspace_manager import DulwichWorkspaceManager
 
 
 def _document(project_dir: Path | None = None) -> dict:
@@ -182,6 +184,13 @@ def _stream_mcp_tool_calls(status: dict) -> list[dict]:
             }
         )
     return calls
+
+
+def _planning_control_scope(session) -> MCPTokenScope:
+    for scope in session.mcp.token_store._scopes_by_token.values():
+        if scope.server_kind == "control":
+            return scope
+    raise AssertionError("missing planning control MCP scope")
 
 
 def _mcp_url_from_private_codex_home(codex_home: Path, server_name: str) -> str:
@@ -377,7 +386,36 @@ def test_blueprint_service_rejects_invalid_id_and_invalid_graph(tmp_path: Path) 
     }
     validation = service.validate_blueprint(bad_graph)
     assert validation["ok"] is False
-    assert "directed path" in validation["errors"][0]
+    assert "requires at least one AgentNode" in validation["errors"][0]
+
+
+def test_blueprint_service_allows_graph_without_terminal_nodes_but_rejects_empty_start_plan(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+    project = tmp_path / "project"
+    project.mkdir()
+    document = _document(project)
+    document["graph"]["terminal_nodes"] = {}
+    document["graph"]["edges"] = []
+    try:
+        saved = service.save_blueprint(project, document)
+
+        assert service.validate_blueprint(saved) == {"ok": True, "errors": [], "warnings": []}
+        context = service.ensure_blueprint_planning_context(project, "default", "desktop-session")
+        assert context["sessionId"]
+
+        started = service.start_blueprint_run(project, "default", _plan(), execution_mode="status")
+        assert started["ok"] is True
+
+        invalid_plan = _plan()
+        invalid_plan["start_nodes"] = []
+        invalid_plan["tasks"] = {}
+        with pytest.raises(BlueprintServiceError) as exc:
+            service.start_blueprint_run(project, "default", invalid_plan, execution_mode="status")
+        assert exc.value.code == "START_PLAN_INVALID"
+        validation = exc.value.details["validation"]
+        assert "start_nodes must not be empty" in validation["errors"]
+    finally:
+        service.close()
 
 
 def test_blueprint_http_server_round_trip(tmp_path: Path) -> None:
@@ -1210,23 +1248,6 @@ def test_run_mcp_control_requests_cover_control_plane_commands(tmp_path: Path) -
             self.calls.append(("handle_request", payload))
             return {"ok": True, "command": payload["command"], "args": payload["args"]}
 
-        async def start_top_agent_session(self):
-            self.calls.append(("start_top_agent_session", {}))
-            return {"ok": True, "session": "started"}
-
-        async def ask_top_agent(self, prompt, *, include_status=True, recent_events_limit=20):
-            self.calls.append(
-                (
-                    "ask_top_agent",
-                    {
-                        "prompt": prompt,
-                        "include_status": include_status,
-                        "recent_events_limit": recent_events_limit,
-                    },
-                )
-            )
-            return {"ok": True, "asked": prompt}
-
         async def start_run(self, plan, *, manifest_path=None, prestart_all_agents=False):
             self.calls.append(
                 (
@@ -1324,20 +1345,6 @@ def test_run_mcp_control_requests_cover_control_plane_commands(tmp_path: Path) -
     async def scenario() -> None:
         await handle._control_request(
             scope,
-            tool_name="top_agent_start_session",
-            command="top_agent.start_session",
-            args={},
-            permission="ask",
-        )
-        await handle._control_request(
-            scope,
-            tool_name="top_agent_ask",
-            command="top_agent.ask",
-            args={"prompt": "status?", "include_status": False, "recent_events_limit": 3},
-            permission="ask",
-        )
-        await handle._control_request(
-            scope,
             tool_name="runtime_start",
             command="run.start",
             args={"plan": plan, "manifest_path": "manifests/start.json"},
@@ -1394,8 +1401,6 @@ def test_run_mcp_control_requests_cover_control_plane_commands(tmp_path: Path) -
     asyncio.run(scenario())
 
     call_names = [name for name, _payload in control.calls]
-    assert "start_top_agent_session" in call_names
-    assert "ask_top_agent" in call_names
     assert "start_run" in call_names
     assert "execute_fixture_to_archive" in call_names
     assert "_create_message_batch" in call_names
@@ -1408,7 +1413,7 @@ def test_run_mcp_control_requests_cover_control_plane_commands(tmp_path: Path) -
     assert "message.stage" in handled
     assert "join.create" in handled
     assert "join.contribute" in handled
-    start_payload = dict(control.calls[2][1])
+    start_payload = next(dict(payload) for name, payload in control.calls if name == "start_run")
     assert Path(start_payload["manifest_path"]).resolve().is_relative_to(FakeRun.shared_dir.resolve())
 
 
@@ -1625,6 +1630,238 @@ def test_blueprint_service_live_mode_starts_tick_and_streams_agent_events(tmp_pa
     assert ended["status"]["run"]["final_status"] == "cancelled"
     assert service._runs[started["runId"]].mcp.token_store.closed is True
     assert FakeLiveBackend.instances[-1].stopped is True
+    service.close()
+
+
+def test_blueprint_service_desktop_planning_context_plan_flow(tmp_path: Path, monkeypatch) -> None:
+    class FakeLiveBackend:
+        instances = []
+        create_calls = []
+
+        def __init__(self, workers) -> None:
+            self.workers = workers
+            self.worker_configs = {}
+            self.stopped = False
+            FakeLiveBackend.instances.append(self)
+
+        @classmethod
+        async def create(cls, workers, *, port=9140, verbose=False, allow_empty=False):
+            cls.create_calls.append({"workers": list(workers), "allow_empty": allow_empty})
+            return cls(workers)
+
+        async def ensure_worker(self, worker) -> None:
+            self.worker_configs[str(worker.agent_id)] = worker
+
+        async def run_single(self, worker_id, body, *, timeout_sec=600.0, _skip_skill_inject=False, meta=None, stream_callback=None):
+            return {
+                "type": "message",
+                "body": {"codex": {"final_text": f"reply from {worker_id}"}},
+            }
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr("multi_agent_tcp.desktop_blueprint_service.CLIWorkerBackend", FakeLiveBackend)
+    service = DesktopBlueprintService()
+    project = tmp_path / "project"
+    project.mkdir()
+    service.save_blueprint(project, _document(project))
+    stale_run_id = service._planning_session_id(project, "default", "desktop-session-1")
+    DulwichWorkspaceManager.open_or_init(project).create_run(
+        run_id=stale_run_id,
+        code_mode="project_reference",
+    )
+
+    ensured = service.handle_request(
+        {
+            "command": "blueprint.planning.ensureContext",
+            "args": {
+                "projectDir": str(project),
+                "blueprintId": "default",
+                "desktopSessionId": "desktop-session-1",
+            },
+        }
+    )
+    session_id = ensured["sessionId"]
+    ensured_again = service.handle_request(
+        {
+            "command": "blueprint.planning.ensureContext",
+            "args": {
+                "projectDir": str(project),
+                "blueprintId": "default",
+                "desktopSessionId": "desktop-session-1",
+            },
+        }
+    )
+    assert ensured_again["sessionId"] == session_id
+    assert len(FakeLiveBackend.instances) == 0
+
+    session = service._planning_sessions[session_id]
+    assert ensured["mcpContext"]["server_name"] == "framework_control"
+    assert "GuLiCode Desktop Blueprint Planning Mode" in ensured["frameworkSystem"]
+    assert "separate bottom Top Agent CLI/worker" in ensured["frameworkSystem"]
+
+    control_scopes = session.mcp.token_store.summary()["controlScopes"]
+    assert control_scopes
+    tools = set(control_scopes[-1]["allowed_tools"])
+    assert "top_agent_request_user_input" in tools
+    assert "top_agent_stage_start_plan" in tools
+    assert "runtime_validate_start" in tools
+    assert "runtime_start" not in tools
+    assert "top_agent_ask" not in tools
+    assert "top_agent_start_session" not in tools
+
+    question_results: list[dict] = []
+
+    def ask_question() -> None:
+        question_results.append(
+            service._handle_top_agent_request_user_input(
+                session_id,
+                [{"id": "scope", "question": "Which scope?"}],
+            )
+        )
+
+    thread = threading.Thread(target=ask_question)
+    thread.start()
+    deadline = time.monotonic() + 5
+    pending_question = None
+    while time.monotonic() < deadline:
+        status = service.handle_request(
+            {"command": "blueprint.planning.status", "args": {"sessionId": session_id}}
+        )
+        pending_question = status["pendingQuestion"]
+        if pending_question:
+            break
+        time.sleep(0.05)
+    assert pending_question is not None
+    service.handle_request(
+        {
+            "command": "blueprint.planning.answerQuestion",
+            "args": {
+                "sessionId": session_id,
+                "questionId": pending_question["questionId"],
+                "answers": {"scope": "all"},
+            },
+        }
+    )
+    thread.join(timeout=5)
+    assert question_results == [
+        {
+            "ok": True,
+            "questionId": pending_question["questionId"],
+            "answers": {"scope": "all"},
+        }
+    ]
+
+    staged = service._handle_top_agent_stage_start_plan(session_id, _plan(), "Run planner first.")
+    assert staged["ok"] is True
+    assert staged["pendingPlan"]["validation"]["ok"] is True
+    rejected = service.handle_request(
+        {
+            "command": "blueprint.planning.rejectPlan",
+            "args": {"sessionId": session_id, "reason": "try again"},
+        }
+    )
+    assert rejected["pendingPlan"] is None
+    assert len(FakeLiveBackend.instances) == 0
+
+    service._handle_top_agent_stage_start_plan(session_id, _plan(), "Run planner first.")
+    status = service.handle_request(
+        {"command": "blueprint.planning.status", "args": {"sessionId": session_id}}
+    )
+    scope = _planning_control_scope(session)
+    fallback_mcp_status = asyncio.run(
+        session.mcp._control_request(
+            scope,
+            tool_name="runtime_status",
+            command="run.status",
+            args={"recent_events_limit": 20},
+            permission="status",
+        )
+    )
+    assert fallback_mcp_status["status_source"]["selected"] == "planning_context"
+    assert fallback_mcp_status["source_run_id"] is None
+    started = service.handle_request(
+        {
+            "command": "blueprint.start",
+            "args": {
+                "projectDir": str(project),
+                "blueprintId": "default",
+                "plan": status["pendingPlan"]["plan"],
+                "executionMode": "live",
+            },
+        }
+    )
+    diagnostics_dir = Path(started["run"]["diagnostics"]["path"])
+    assert diagnostics_dir == project / ".multi_agent_workspace" / "runs" / "active" / started["runId"] / "shared" / "logs" / "blueprint-diagnostics"
+    assert (diagnostics_dir / "snapshot.json").is_file()
+    assert (diagnostics_dir / "events.jsonl").is_file()
+    marked = service.handle_request(
+        {
+            "command": "blueprint.planning.markPlanStarted",
+            "args": {
+                "sessionId": session_id,
+                "runId": started["runId"],
+                "started": started,
+            },
+        }
+    )
+    assert started["run"]["executionMode"] == "live"
+    assert marked["activeRun"]["runId"] == started["runId"]
+    assert marked["pendingPlan"] is None
+    assert marked["statusSource"]["selected"] == "active_live_run"
+    assert marked["statusSource"]["mismatch"] is True
+    mcp_status = asyncio.run(
+        session.mcp._control_request(
+            scope,
+            tool_name="runtime_status",
+            command="run.status",
+            args={"recent_events_limit": 20},
+            permission="status",
+        )
+    )
+    assert mcp_status["source_run_id"] == started["runId"]
+    assert mcp_status["planning_session_id"] == session_id
+    assert mcp_status["status_source"]["selected"] == "active_live_run"
+    assert "planner" in mcp_status["status"]["agents"]
+    mcp_explanation = asyncio.run(
+        session.mcp._control_request(
+            scope,
+            tool_name="top_agent_explain_status",
+            command="top_agent.explain_status",
+            args={"recent_events_limit": 20},
+            permission="status",
+        )
+    )
+    assert mcp_explanation["source_run_id"] == started["runId"]
+    mcp_utterances = asyncio.run(
+        session.mcp._control_request(
+            scope,
+            tool_name="runtime_top_agent_utterances",
+            command="top_agent.utterances",
+            args={},
+            permission="utterances",
+        )
+    )
+    assert mcp_utterances["source_run_id"] == started["runId"]
+    assert isinstance(mcp_utterances["utterances"], list)
+    events = [
+        json.loads(line)
+        for line in (diagnostics_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    event_types = [event["type"] for event in events]
+    assert "blueprint_run_started" in event_types
+    assert "planning_active_run_linked" in event_types
+    assert "planning_status_snapshot" in event_types
+    assert "planning_mcp_control_call" in event_types
+    assert "planning_status_source_mismatch" in event_types
+    snapshot = json.loads((diagnostics_dir / "snapshot.json").read_text(encoding="utf-8"))
+    assert snapshot["kind"] == "gulicode.blueprint.diagnostics"
+    assert snapshot["focus"] == "planning_status_source"
+    assert snapshot["current"]["statusSource"]["selected"] == "active_live_run"
+    assert len(FakeLiveBackend.instances) == 1
+    assert "agent-planner" in FakeLiveBackend.instances[-1].worker_configs
     service.close()
 
 

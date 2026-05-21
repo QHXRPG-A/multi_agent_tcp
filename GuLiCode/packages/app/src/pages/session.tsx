@@ -1,4 +1,5 @@
 import type { Project, UserMessage } from "@opencode-ai/sdk/v2"
+import type { McpStatus } from "@opencode-ai/sdk/v2/client"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { createQuery, skipToken, useMutation, useQueryClient } from "@tanstack/solid-query"
 import {
@@ -14,13 +15,15 @@ import {
   onMount,
   untrack,
   createResource,
+  createSignal,
+  For,
 } from "solid-js"
 import { makeEventListener } from "@solid-primitives/event-listener"
 import { createMediaQuery } from "@solid-primitives/media"
 import { createResizeObserver } from "@solid-primitives/resize-observer"
 import { useLocal } from "@/context/local"
 import { selectionFromLines, useFile, type FileSelection, type SelectedLineRange } from "@/context/file"
-import { createStore } from "solid-js/store"
+import { createStore, unwrap } from "solid-js/store"
 import { ResizeHandle } from "@opencode-ai/ui/resize-handle"
 import { Select } from "@opencode-ai/ui/select"
 import { Tabs } from "@opencode-ai/ui/tabs"
@@ -37,11 +40,17 @@ import { useGlobalSync } from "@/context/global-sync"
 import { useLanguage } from "@/context/language"
 import { useLayout } from "@/context/layout"
 import { usePrompt } from "@/context/prompt"
+import { usePlatform } from "@/context/platform"
 import { useSDK } from "@/context/sdk"
 import { useSettings } from "@/context/settings"
 import { useSync } from "@/context/sync"
 import { useTerminal } from "@/context/terminal"
-import { type FollowupDraft, sendFollowupDraft } from "@/components/prompt-input/submit"
+import {
+  type BlueprintPlanningSubmitRequest,
+  type FollowupDraft,
+  type PromptSubmitOverrideInput,
+  sendFollowupDraft,
+} from "@/components/prompt-input/submit"
 import { createSessionComposerState, SessionComposerRegion } from "@/pages/session/composer"
 import {
   createOpenReviewFile,
@@ -69,6 +78,200 @@ const emptyUserMessages: UserMessage[] = []
 type FollowupItem = FollowupDraft & { id: string }
 type FollowupEdit = Pick<FollowupItem, "id" | "prompt" | "context">
 const emptyFollowups: FollowupItem[] = []
+
+type BlueprintPlanningEvent = Record<string, unknown> & {
+  id?: string
+  type?: string
+  role?: string
+  text?: string
+  createdAt?: string
+}
+
+type BlueprintPlanningQuestion = {
+  questionId: string
+  questions: { id?: string; question?: string; options?: { label?: string; description?: string }[] }[]
+  status?: string
+}
+
+type BlueprintPlanningPlan = {
+  planId?: string
+  plan?: Record<string, unknown>
+  planMarkdown?: string
+  validation?: { ok?: boolean; errors?: string[]; warnings?: string[] }
+  createdAt?: string
+}
+
+const DEFAULT_BLUEPRINT_ID = "default"
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function isMcpStatus(value: unknown): value is McpStatus {
+  return isRecord(value) && typeof value.status === "string"
+}
+
+function blueprintPlanningMcpStatusMap(value: unknown, name: string): Record<string, McpStatus> {
+  if (isMcpStatus(value)) return { [name]: value }
+  if (!isRecord(value)) return {}
+  const statuses: Record<string, McpStatus> = {}
+  for (const [key, status] of Object.entries(value)) {
+    if (isMcpStatus(status)) statuses[key] = status
+  }
+  return statuses
+}
+
+function blueprintPlanningMcpStatusError(value: McpStatus | undefined): string {
+  const error = (value as { error?: unknown } | undefined)?.error
+  return typeof error === "string" ? error : ""
+}
+
+function cloneBlueprintPlanningPayload<T>(value: T): T {
+  return JSON.parse(JSON.stringify(unwrap(value))) as T
+}
+
+function blueprintPlanningEvents(value: unknown): BlueprintPlanningEvent[] {
+  return Array.isArray(value) ? value.filter(isRecord) : []
+}
+
+function blueprintPlanningQuestion(value: unknown): BlueprintPlanningQuestion | undefined {
+  if (!isRecord(value)) return undefined
+  const questionId = typeof value.questionId === "string" ? value.questionId : undefined
+  if (!questionId || !Array.isArray(value.questions)) return undefined
+  return {
+    questionId,
+    questions: value.questions.filter(isRecord).map((item) => ({
+      id: typeof item.id === "string" ? item.id : undefined,
+      question: typeof item.question === "string" ? item.question : "",
+      options: Array.isArray(item.options)
+        ? item.options.filter(isRecord).map((option) => ({
+            label: typeof option.label === "string" ? option.label : "",
+            description: typeof option.description === "string" ? option.description : undefined,
+          }))
+        : [],
+    })),
+    status: typeof value.status === "string" ? value.status : undefined,
+  }
+}
+
+function blueprintPlanningPlan(value: unknown): BlueprintPlanningPlan | undefined {
+  if (!isRecord(value)) return undefined
+  return {
+    planId: typeof value.planId === "string" ? value.planId : undefined,
+    plan: isRecord(value.plan) ? value.plan : undefined,
+    planMarkdown: typeof value.planMarkdown === "string" ? value.planMarkdown : undefined,
+    validation: isRecord(value.validation)
+      ? {
+          ok: value.validation.ok === true,
+          errors: Array.isArray(value.validation.errors) ? value.validation.errors.map(String) : [],
+          warnings: Array.isArray(value.validation.warnings) ? value.validation.warnings.map(String) : [],
+        }
+      : undefined,
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : undefined,
+  }
+}
+
+function BlueprintPlanningQuestionDock(props: {
+  question: BlueprintPlanningQuestion
+  disabled?: boolean
+  onAnswer: (answers: Record<string, string>) => void
+  onReject: () => void
+}) {
+  const [answers, setAnswers] = createSignal<Record<string, string>>({})
+  const setAnswer = (id: string, value: string) => setAnswers((current) => ({ ...current, [id]: value }))
+  const keyFor = (index: number, question: { id?: string }) => question.id || `q${index + 1}`
+
+  return (
+    <div class="mb-2 rounded-md border border-border-weak-base bg-background-base p-3 shadow-sm">
+      <div class="text-12-semibold uppercase tracking-wide text-text-muted">蓝图规划问题</div>
+      <div class="mt-3 flex flex-col gap-3">
+        <For each={props.question.questions}>
+          {(question, index) => {
+            const key = keyFor(index(), question)
+            return (
+              <label class="flex flex-col gap-2">
+                <span class="text-14-medium text-text-base">{question.question || "Question"}</span>
+                <Show when={(question.options?.length ?? 0) > 0}>
+                  <div class="flex flex-wrap gap-2">
+                    <For each={question.options}>
+                      {(option) => (
+                        <button
+                          type="button"
+                          class="rounded-md border border-border-weak-base px-2 py-1 text-13-regular text-text-base hover:bg-background-strong"
+                          disabled={props.disabled}
+                          onClick={() => setAnswer(key, option.label ?? "")}
+                        >
+                          {option.label}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+                <textarea
+                  class="min-h-18 resize-y rounded-md border border-border-weak-base bg-background-strong px-3 py-2 text-14-regular text-text-base outline-none focus:border-border-strong"
+                  value={answers()[key] ?? ""}
+                  disabled={props.disabled}
+                  onInput={(event) => setAnswer(key, event.currentTarget.value)}
+                />
+              </label>
+            )
+          }}
+        </For>
+      </div>
+      <div class="mt-3 flex justify-end gap-2">
+        <Button variant="ghost" size="large" disabled={props.disabled} onClick={props.onReject}>
+          Dismiss
+        </Button>
+        <Button variant="primary" size="large" disabled={props.disabled} onClick={() => props.onAnswer(answers())}>
+          Submit
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function BlueprintPlanningPlanConfirmationDock(props: {
+  plan: BlueprintPlanningPlan
+  disabled?: boolean
+  onApprove: () => void
+  onReject: () => void
+}) {
+  const markdown = () =>
+    props.plan.planMarkdown?.trim() ||
+    (props.plan.plan ? JSON.stringify(props.plan.plan, null, 2) : "蓝图规划已生成启动计划。")
+
+  return (
+    <div class="mb-2 rounded-md border border-border-weak-base bg-background-base p-3 shadow-sm">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <div class="text-12-semibold uppercase tracking-wide text-text-muted">Start plan</div>
+          <div class="text-13-regular text-text-muted">
+            {props.plan.validation?.ok ? "Validated and ready for approval" : "Validation needs attention"}
+          </div>
+        </div>
+        <Show when={(props.plan.validation?.warnings?.length ?? 0) > 0}>
+          <div class="text-12-regular text-amber-600">{props.plan.validation?.warnings?.length} warning(s)</div>
+        </Show>
+      </div>
+      <div class="mt-3 max-h-52 overflow-auto rounded-md bg-background-strong px-3 py-2 text-13-regular text-text-base whitespace-pre-wrap">
+        {markdown()}
+      </div>
+      <Show when={(props.plan.validation?.errors?.length ?? 0) > 0}>
+        <div class="mt-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-13-regular text-red-600">
+          {(props.plan.validation?.errors ?? []).join("\n")}
+        </div>
+      </Show>
+      <div class="mt-3 flex justify-end gap-2">
+        <Button variant="ghost" size="large" disabled={props.disabled} onClick={props.onReject}>
+          Reject
+        </Button>
+        <Button variant="primary" size="large" disabled={props.disabled || !props.plan.validation?.ok} onClick={props.onApprove}>
+          Approve and start
+        </Button>
+      </div>
+    </div>
+  )
+}
 
 type ChangeMode = "git" | "branch" | "turn"
 type VcsMode = "git" | "branch"
@@ -327,6 +530,7 @@ export default function Page() {
   const queryClient = useQueryClient()
   const dialog = useDialog()
   const language = useLanguage()
+  const platform = usePlatform()
   const sdk = useSDK()
   const settings = useSettings()
   const prompt = usePrompt()
@@ -358,6 +562,251 @@ export default function Page() {
   })
 
   const composer = createSessionComposerState()
+
+  const [blueprintPlanning, setBlueprintPlanning] = createStore({
+    desktopSessionId: undefined as string | undefined,
+    sessionId: undefined as string | undefined,
+    events: [] as BlueprintPlanningEvent[],
+    pendingQuestion: undefined as BlueprintPlanningQuestion | undefined,
+    pendingPlan: undefined as BlueprintPlanningPlan | undefined,
+    activeRun: undefined as Record<string, unknown> | undefined,
+    mcpRegisteredSessionId: undefined as string | undefined,
+    preparing: false,
+    answering: false,
+    approving: false,
+    rejecting: false,
+  })
+  const [blueprintPlanningSubmitRequest, setBlueprintPlanningSubmitRequest] =
+    createSignal<BlueprintPlanningSubmitRequest>()
+
+  const blueprintPlanningAvailable = () =>
+    platform.platform === "desktop" &&
+    !!platform.ensureBlueprintPlanningContext
+
+  const applyBlueprintPlanningSnapshot = (snapshot: Record<string, unknown>, desktopSessionId?: string) => {
+    batch(() => {
+      setBlueprintPlanning("desktopSessionId", desktopSessionId ?? blueprintPlanning.desktopSessionId)
+      setBlueprintPlanning(
+        "sessionId",
+        typeof snapshot.sessionId === "string" ? snapshot.sessionId : blueprintPlanning.sessionId,
+      )
+      setBlueprintPlanning("events", blueprintPlanningEvents(snapshot.events))
+      setBlueprintPlanning("pendingQuestion", blueprintPlanningQuestion(snapshot.pendingQuestion))
+      setBlueprintPlanning("pendingPlan", blueprintPlanningPlan(snapshot.pendingPlan))
+      setBlueprintPlanning("activeRun", isRecord(snapshot.activeRun) ? snapshot.activeRun : undefined)
+    })
+  }
+
+  const registerBlueprintPlanningMcp = async (snapshot: Record<string, unknown>, sessionId: string) => {
+    if (blueprintPlanning.mcpRegisteredSessionId === sessionId) return
+    const mcp = isRecord(snapshot.mcpContext) ? snapshot.mcpContext : undefined
+    const url = typeof mcp?.url === "string" ? mcp.url : undefined
+    const token = typeof mcp?.bearer_token === "string" ? mcp.bearer_token : undefined
+    const name = typeof mcp?.server_name === "string" ? mcp.server_name : "framework_control"
+    if (!url || !token) throw new Error("Blueprint planning MCP context is incomplete")
+    const config = {
+      type: "remote" as const,
+      url,
+      enabled: true,
+      headers: { Authorization: `Bearer ${token}` },
+      oauth: false as const,
+      timeout: 600000,
+    }
+    const added = await sdk.client.mcp.add({
+      directory: sdk.directory,
+      name,
+      config,
+    }, { throwOnError: true })
+    const statuses = blueprintPlanningMcpStatusMap(added.data, name)
+    const current = statuses[name]
+    if (current?.status !== "connected") {
+      const error = blueprintPlanningMcpStatusError(current)
+      const reason = error ? `: ${error}` : ""
+      throw new Error(`Blueprint planning MCP server ${name} is not connected${reason}`)
+    }
+    sync.set("mcp", { ...sync.data.mcp, ...statuses })
+    sync.set("mcp_ready", true)
+    setBlueprintPlanning("mcpRegisteredSessionId", sessionId)
+  }
+
+  const ensureBlueprintPlanning = async (input: PromptSubmitOverrideInput) => {
+    if (!platform.ensureBlueprintPlanningContext) throw new Error("Blueprint planning API is not available")
+    const desktopSessionId = input.draft.sessionID
+    if (blueprintPlanning.sessionId && blueprintPlanning.desktopSessionId === desktopSessionId) {
+      const snapshot = await platform.blueprintPlanningStatus?.(blueprintPlanning.sessionId)
+      if (snapshot) {
+        applyBlueprintPlanningSnapshot(snapshot, desktopSessionId)
+        await registerBlueprintPlanningMcp(snapshot, blueprintPlanning.sessionId)
+        return snapshot
+      }
+    }
+    const snapshot = await platform.ensureBlueprintPlanningContext(
+      input.projectDirectory,
+      DEFAULT_BLUEPRINT_ID,
+      desktopSessionId,
+    )
+    applyBlueprintPlanningSnapshot(snapshot, desktopSessionId)
+    const sessionId = typeof snapshot.sessionId === "string" ? snapshot.sessionId : undefined
+    if (!sessionId) throw new Error("Blueprint planning context did not return a sessionId")
+    await registerBlueprintPlanningMcp(snapshot, sessionId)
+    return snapshot
+  }
+
+  const prepareBlueprintPlanningMessage = async (input: PromptSubmitOverrideInput) => {
+    if (!blueprintPlanningAvailable()) return false
+    if (isChildSession()) return false
+    if (input.images.length > 0) throw new Error("蓝图规划模式暂不支持图片附件")
+    const text = input.text.trim()
+    if (!text) return false
+    setBlueprintPlanning({ desktopSessionId: input.draft.sessionID, preparing: true })
+    try {
+      const snapshot = await ensureBlueprintPlanning(input)
+      const frameworkSystem = typeof snapshot.frameworkSystem === "string" ? snapshot.frameworkSystem : ""
+      if (!frameworkSystem.trim()) throw new Error("Blueprint planning framework system prompt is missing")
+      input.draft.system = frameworkSystem
+      return false
+    } finally {
+      setBlueprintPlanning("preparing", false)
+    }
+  }
+
+  const showBlueprintPlanningSubmitBlocked = () => {
+    showToast({
+      variant: "error",
+      title: language.t("blueprint.runtime.submitBlockedTitle" as never),
+      description: language.t("blueprint.runtime.submitBlockedDescription" as never),
+    })
+  }
+
+  const requestBlueprintPlanningSubmit = (input: { message: string }) => {
+    if (!blueprintPlanningAvailable() || isChildSession() || composer.blocked() || !prompt.ready()) {
+      showBlueprintPlanningSubmitBlocked()
+      return false
+    }
+    const currentText = prompt
+      .current()
+      .map((part) => ("content" in part ? part.content : ""))
+      .join("")
+      .trim()
+    if (currentText || prompt.context.items().length > 0) {
+      showBlueprintPlanningSubmitBlocked()
+      return false
+    }
+    setBlueprintPlanningSubmitRequest({
+      id: Date.now(),
+      text: input.message,
+      onBlocked: showBlueprintPlanningSubmitBlocked,
+    })
+    return true
+  }
+
+  createEffect(() => {
+    const sessionId = blueprintPlanning.sessionId
+    if (!sessionId || blueprintPlanning.desktopSessionId !== params.id || !platform.blueprintPlanningStatus) return
+    if (
+      (sync.data.session_status[params.id ?? ""]?.type ?? "idle") === "idle" &&
+      !blueprintPlanning.pendingQuestion &&
+      !blueprintPlanning.pendingPlan
+    )
+      return
+    const timer = window.setInterval(() => {
+      void platform
+        .blueprintPlanningStatus?.(sessionId)
+        .then((snapshot) => applyBlueprintPlanningSnapshot(snapshot))
+        .catch(() => undefined)
+    }, 1000)
+    onCleanup(() => window.clearInterval(timer))
+  })
+
+  const answerBlueprintPlanningQuestion = async (answers: Record<string, string>, rejected = false) => {
+    if (!blueprintPlanning.sessionId || !blueprintPlanning.pendingQuestion || !platform.answerBlueprintPlanningQuestion)
+      return
+    setBlueprintPlanning("answering", true)
+    try {
+      const snapshot = await platform.answerBlueprintPlanningQuestion(
+        blueprintPlanning.sessionId,
+        blueprintPlanning.pendingQuestion.questionId,
+        answers,
+        { rejected, reason: rejected ? "dismissed" : undefined },
+      )
+      applyBlueprintPlanningSnapshot(snapshot)
+    } catch (err) {
+      showToast({
+        variant: "error",
+        title: language.t("common.requestFailed"),
+        description: formatServerError(err, language.t),
+      })
+    } finally {
+      setBlueprintPlanning("answering", false)
+    }
+  }
+
+  const approveBlueprintPlanningPlan = async () => {
+    if (!blueprintPlanning.sessionId || !platform.startBlueprintRun || !platform.markBlueprintPlanningPlanStarted) return
+    const plan = blueprintPlanning.pendingPlan?.plan
+    if (!plan || blueprintPlanning.pendingPlan?.validation?.ok !== true) return
+    setBlueprintPlanning("approving", true)
+    try {
+      const startPlan = cloneBlueprintPlanningPayload(plan)
+      const started = cloneBlueprintPlanningPayload(
+        await platform.startBlueprintRun(sdk.directory, DEFAULT_BLUEPRINT_ID, startPlan, "live"),
+      )
+      const runId = typeof started.runId === "string" ? started.runId : ""
+      if (!runId) throw new Error("Blueprint start did not return a runId")
+      const snapshot = await platform.markBlueprintPlanningPlanStarted(blueprintPlanning.sessionId, runId, started)
+      applyBlueprintPlanningSnapshot(snapshot)
+    } catch (err) {
+      showToast({
+        variant: "error",
+        title: language.t("common.requestFailed"),
+        description: formatServerError(err, language.t),
+      })
+    } finally {
+      setBlueprintPlanning("approving", false)
+    }
+  }
+
+  const rejectBlueprintPlanningPlan = async () => {
+    if (!blueprintPlanning.sessionId || !platform.rejectBlueprintPlanningPlan) return
+    setBlueprintPlanning("rejecting", true)
+    try {
+      const snapshot = await platform.rejectBlueprintPlanningPlan(blueprintPlanning.sessionId, "rejected by user")
+      applyBlueprintPlanningSnapshot(snapshot)
+    } catch (err) {
+      showToast({
+        variant: "error",
+        title: language.t("common.requestFailed"),
+        description: formatServerError(err, language.t),
+      })
+    } finally {
+      setBlueprintPlanning("rejecting", false)
+    }
+  }
+
+  const blueprintPlanningDock = () => (
+    <>
+      <Show when={blueprintPlanning.desktopSessionId === params.id && blueprintPlanning.pendingQuestion} keyed>
+        {(question) => (
+          <BlueprintPlanningQuestionDock
+            question={question}
+            disabled={blueprintPlanning.answering}
+            onAnswer={(answers) => void answerBlueprintPlanningQuestion(answers)}
+            onReject={() => void answerBlueprintPlanningQuestion({}, true)}
+          />
+        )}
+      </Show>
+      <Show when={blueprintPlanning.desktopSessionId === params.id && blueprintPlanning.pendingPlan} keyed>
+        {(plan) => (
+          <BlueprintPlanningPlanConfirmationDock
+            plan={plan}
+            disabled={blueprintPlanning.approving || blueprintPlanning.rejecting}
+            onApprove={() => void approveBlueprintPlanningPlan()}
+            onReject={() => void rejectBlueprintPlanningPlan()}
+          />
+        )}
+      </Show>
+    </>
+  )
 
   const workspaceKey = createMemo(() => params.dir ?? "")
   const workspaceTabs = createMemo(() => layout.tabs(workspaceKey))
@@ -401,7 +850,9 @@ export default function Page() {
   const isDesktop = createMediaQuery("(min-width: 768px)")
   const size = createSizing()
   const desktopReviewOpen = createMemo(() => isDesktop() && view().reviewPanel.opened())
-  const desktopBlueprintOpen = createMemo(() => isDesktop() && view().blueprintPanel.opened())
+  const desktopBlueprintOpen = createMemo(
+    () => isDesktop() && view().blueprintPanel.opened() && !view().blueprintPanel.floating(),
+  )
   const desktopFileTreeOpen = createMemo(() => isDesktop() && layout.fileTree.opened())
   const desktopSidePanelOpen = createMemo(() => desktopReviewOpen() || desktopBlueprintOpen() || desktopFileTreeOpen())
   const sessionPanelWidth = createMemo(() => {
@@ -1777,8 +2228,43 @@ export default function Page() {
     ),
   )
 
+  const blueprintWindowEventDetail = (event: Event) =>
+    event instanceof CustomEvent && isRecord(event.detail) ? event.detail : undefined
+
+  const blueprintWindowEventMatchesSession = (detail: Record<string, unknown> | undefined) => {
+    if (!detail) return false
+    if (detail.projectDir !== sdk.directory) return false
+    const sessionId = typeof detail.sessionId === "string" ? detail.sessionId : undefined
+    return !sessionId || sessionId === params.id
+  }
+
+  const handleBlueprintWindowDock = (event: Event) => {
+    const detail = blueprintWindowEventDetail(event)
+    if (!blueprintWindowEventMatchesSession(detail)) return
+    view().blueprintPanel.dock()
+  }
+
+  const handleBlueprintWindowClosed = (event: Event) => {
+    const detail = blueprintWindowEventDetail(event)
+    if (!blueprintWindowEventMatchesSession(detail)) return
+    view().blueprintPanel.close()
+  }
+
+  const handleBlueprintWindowPlanningSubmit = (event: Event) => {
+    const detail = blueprintWindowEventDetail(event)
+    if (!blueprintWindowEventMatchesSession(detail)) return
+    const input = isRecord(detail?.input) ? detail.input : undefined
+    const message = typeof input?.message === "string" ? input.message : ""
+    const respond = typeof detail?.respond === "function" ? detail.respond : undefined
+    if (!message || !respond) return
+    respond(requestBlueprintPlanningSubmit({ message }))
+  }
+
   onMount(() => {
     makeEventListener(document, "keydown", handleKeyDown)
+    makeEventListener(window, "gulicode:blueprint-window-dock", handleBlueprintWindowDock)
+    makeEventListener(window, "gulicode:blueprint-window-closed", handleBlueprintWindowClosed)
+    makeEventListener(window, "gulicode:blueprint-planning-submit", handleBlueprintWindowPlanningSubmit)
   })
 
   onCleanup(() => {
@@ -1837,7 +2323,14 @@ export default function Page() {
           <div class="flex-1 min-h-0 overflow-hidden">
             <Switch>
               <Match when={params.id}>
-                <Show when={messagesReady()}>
+                <Show
+                  when={messagesReady()}
+                  fallback={
+                    <div class="size-full flex items-center justify-center text-14-regular text-text-muted">
+                      正在加载会话...
+                    </div>
+                  }
+                >
                   <MessageTimeline
                     mobileChanges={mobileChanges()}
                     mobileFallback={reviewContent({
@@ -1900,6 +2393,9 @@ export default function Page() {
               resumeScroll()
             }}
             onResponseSubmit={resumeScroll}
+            submitOverride={prepareBlueprintPlanningMessage}
+            blueprintPlanningSubmitRequest={blueprintPlanningSubmitRequest()}
+            blueprintPlanningDock={blueprintPlanningDock}
             followup={
               params.id && !isChildSession()
                 ? {
@@ -1964,6 +2460,7 @@ export default function Page() {
           focusReviewDiff={focusReviewDiff}
           reviewSnap={ui.reviewSnap}
           size={size}
+          onBlueprintPlanningSubmit={requestBlueprintPlanningSubmit}
         />
       </div>
 

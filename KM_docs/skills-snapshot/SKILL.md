@@ -48,6 +48,209 @@ F:\src\Package\Script\Python\multi_agent_tcp
 
 Historical paths such as `D:\agents\multi_agent_tcp` or `F:\src\ryven_demo` may appear in archives. Do not use them as current defaults unless the user's machine actually has that path.
 
+## Fast Handoff - 2026-05-21 Blueprint Popout Window + Endpoint Visibility
+
+When the next task is blueprint window behavior, sidebar docking, Electron
+window lifecycle, or canvas endpoint visibility, start from this state:
+
+1. Blueprint "drag out" is a real independent Electron `BrowserWindow`, not an
+   in-app fixed overlay. The old `data-blueprint-floating-panel` path in
+   `session.tsx` is removed.
+2. Embedded sidebar blueprint title-bar dragging calls
+   `platform.openBlueprintWindow(projectDir, sessionId, rect)` after the
+   threshold and marks the session blueprint panel as `floating` so the right
+   side panel no longer occupies layout width.
+3. The popout renderer uses the normal app provider stack without the visual
+   app shell through `AppInterface visualShell={false}` and the dedicated
+   route `/:dir/blueprint-window/:id?`.
+4. Electron `windows.ts` owns popout lifecycle with `blueprintWindowContexts`.
+   Popouts are de-duplicated by `projectDir + sessionId`; drag-out focuses an
+   existing matching popout.
+5. The popout keeps the "dock back to sidebar" button. Docking sends
+   `blueprint-window-dock-request` to the main renderer, focuses the main
+   window, and closes the popout without also emitting the normal close event.
+6. Closing the popout sends `blueprint-window-closed`; the main session clears
+   the blueprint floating/open state.
+7. Popout runtime task submit is forwarded to the main session through
+   `blueprint-window-submit-planning`, then the main chat blueprint-planning
+   handoff accepts or rejects it.
+8. Node port visibility is edge-directed: no incoming edge hides the input
+   port by default, and no outgoing edge hides the output port by default.
+   Hover, selected state, and active connection drag reveal the necessary
+   ports for editing.
+9. Use the Electron dev server that was relaunched after this pass:
+   renderer `http://localhost:5173/`, sidecar `http://127.0.0.1:9484`,
+   desktop log `GuLiCode/logs/gulicode-desktop-direct.log`.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-side-panel.test.ts ./src/i18n/parity.test.ts
+bun run typecheck
+
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
+bun test ./src/main/ipc-blueprint-runtime.test.ts
+bun run typecheck
+
+cd F:\src\Package\Script\Python\multi_agent_tcp
+git diff --check
+```
+
+Observed result: app tests passed, desktop IPC tests passed, both typechecks
+passed, and `git diff --check` reported only CRLF conversion warnings.
+
+Current follow-ups:
+
+1. Manual desktop smoke: drag blueprint out, move independent OS window, dock
+   back to sidebar, and close the popout.
+2. Manual popout runtime smoke: submit a runtime task from the popout and
+   verify it is accepted by the main chat `blueprintPlanning` flow.
+3. Manual node port smoke: isolated nodes hide ports by default, while
+   hover/selection/connection drag still makes ports usable.
+
+Detailed archive:
+
+- [`archive/blueprint_popout_window_ports_2026-05-21.md`](archive/blueprint_popout_window_ports_2026-05-21.md)
+
+## Fast Handoff - 2026-05-21 Blueprint Runtime Task Entry
+
+When the next task is GuLiCode blueprint Runtime panel entry behavior, manual
+start UX, start-node selection, terminal node compatibility, or draggable
+runtime panels, start from this state:
+
+1. New desktop blueprints no longer create or expose product-facing start/end
+   terminal nodes. Legacy `terminal_nodes` are still accepted on import, but
+   are hidden from the canvas/inspector and filtered from runtime/export paths.
+2. Add Node contains Agent and Route choices only. Do not reintroduce Start/End
+   as normal product UI choices unless the product direction changes.
+3. Runtime/start graph conversion no longer relies on terminal traversal.
+   `createBlueprintStartPlan` requires explicit `startNodes`; when none are
+   provided it emits empty `start_nodes` and lets backend start-plan validation
+   return the expected error.
+4. `blueprint.validate`, `blueprint.start`, and
+   `blueprint.planning.ensureContext` use desktop graph DAG/reference
+   validation instead of terminal-based `validate_runnable()`. The stricter
+   `TopAgentStartPlan` validation still requires non-empty unique AgentNode
+   `start_nodes` and tasks covering all start nodes.
+5. The Runtime panel has a top task-planning block: multi-select AgentNode
+   start selector, large task textarea, and Submit button. Empty start
+   selection means Top Agent chooses during planning; empty task blocks submit.
+6. Manual runtime submit does not directly call `startBlueprintRun`. It sends a
+   real user-side message to the main chat, switches the composer into
+   `blueprintPlanning`, and runs the existing planning submit override.
+7. The toolbar Start button and runtime header start icon now focus the task
+   planning block instead of bypassing the task requirement.
+8. The main chat handoff is one-shot and refuses to overwrite an existing main
+   composer draft/context; the user must clear or send the draft first.
+9. The automatic "confirm project workdir" prompt is once per app lifetime.
+   Manual directory selection and conflict dialogs are unaffected.
+10. Runtime top-level panels are reorderable by the thick handle above each
+    panel. During drag, the original panel becomes a dashed placeholder and a
+    detached dashed ghost follows the pointer until drop.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts ./src/pages/session/blueprint-planning-session.test.ts ./src/components/prompt-input/submit.test.ts ./src/i18n/parity.test.ts
+bun run typecheck
+
+cd F:\src\Package\Script\Python\multi_agent_tcp
+python -m pytest -q test_desktop_blueprint_service.py
+python -m py_compile desktop_blueprint_service.py graph_runtime.py graph_control.py test_desktop_blueprint_service.py
+```
+
+Drag refinement follow-up verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+bun run typecheck
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-side-panel.test.ts ./src/i18n/parity.test.ts
+```
+
+Current follow-ups:
+
+1. Manual desktop smoke the full task-panel path:
+   submit task -> main chat user message -> `blueprintPlanning` mode ->
+   staged plan -> approve -> live run.
+2. Visual smoke the narrow Runtime panel layout, including start-node
+   multi-select, textarea, long action buttons, panel drag ghost, and dashed
+   placeholder.
+3. Decide whether runtime panel order should persist beyond the current panel
+   session.
+
+Detailed archive:
+
+- [`archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
+
+## Fast Handoff - 2026-05-21 Desktop Blueprint Planning Mode
+
+When the next task is GuLiCode desktop blueprint planning mode, Top Agent
+status/explain behavior, or `framework_control` MCP registration from the
+desktop composer, start from this state:
+
+1. Product decision: GuLiCode desktop/current chat session is the Top Agent
+   role. Do not start a separate bottom Top Agent worker, private Top Agent
+   `CODEX_HOME`, or Top Agent CLI session.
+2. The composer agent dropdown has a virtual "blueprint planning" mode. Only
+   this mode provisions planning context/MCP and attaches the framework system
+   prompt. Build/Plan/ordinary agents stay normal chat.
+3. Backend planning entry is `DesktopBlueprintPlanningSession`, keyed by
+   `projectDir + blueprintId + desktopSessionId`. It loads the current graph
+   and creates a no-op runtime/control plane for organization, validation,
+   question, and staged-plan storage.
+4. Planning MCP exposes only the desktop planning subset:
+   organization/status/explain/utterances, `runtime_validate_start`,
+   `top_agent_request_user_input`, and `top_agent_stage_start_plan`. It must
+   not expose `runtime_start`, `top_agent_ask`, or
+   `top_agent_start_session`.
+5. App-facing API is `blueprint.planning.*`; approve is app-mediated through
+   existing `startBlueprintRun(..., "live")`, followed by
+   `markBlueprintPlanningPlanStarted`.
+6. Dynamic MCP registration must trust `mcp.add`'s returned status. Do not use
+   `mcp.status()` as the connection oracle for runtime-injected
+   `framework_control`, because status only enumerates persistent MCP config.
+7. Known fixed bugs in this pass: wrong `sessionDirectory` passed to
+   `ensureContext`, stale `runs/active/planning-*` workspace collisions after
+   debug restart, Solid store clone failure on approve/start, and false
+   `framework_control not connected` after dynamic MCP add.
+8. P0 status-source mismatch is fixed. Planning MCP status/explain/utterance
+   calls now select the active live `DesktopBlueprintRun` when one is linked
+   or discoverable for the same `projectDir + blueprintId`; otherwise they
+   fall back to the planning context no-op runtime.
+9. Live runs now write compact diagnostics under
+   `shared/logs/blueprint-diagnostics/{snapshot.json,events.jsonl}`. Use
+   `statusSource.selected` to tell whether Top Agent was grounded in
+   `active_live_run` or `planning_context`; `mismatch=true` is expected when
+   the no-op planning runtime differs from the active live run.
+10. Next follow-ups: smoke the Runtime task-panel submit path with an existing
+    planning context, consider throttling duplicate mismatch diagnostics during
+    polling, and optionally expose the diagnostics path in debug UI.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp
+pytest -q test_desktop_blueprint_service.py::test_blueprint_service_desktop_planning_context_plan_flow -q
+python -m py_compile desktop_blueprint_service.py blueprint_mcp_runtime.py test_desktop_blueprint_service.py
+python -m pytest -q test_desktop_blueprint_service.py
+
+cd GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-planning-session.test.ts ./src/components/prompt-input/submit.test.ts
+bun run typecheck
+
+cd ..\desktop-electron
+bun test ./src/main/blueprint-runtime.test.ts ./src/main/ipc-blueprint-runtime.test.ts
+bun run typecheck
+```
+
+Detailed archive:
+
+- [`archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
+- [`archive/blueprint_planning_mode_no_bottom_top_agent_2026-05-21.md`](archive/blueprint_planning_mode_no_bottom_top_agent_2026-05-21.md)
+- [`archive/blueprint_planning_status_source_diagnostics_2026-05-21.md`](archive/blueprint_planning_status_source_diagnostics_2026-05-21.md)
+
 ## Fast Handoff - 2026-05-20 Agent Info Panel Stream UI
 
 When the next task is Agent information panel transcript quality, status
@@ -536,9 +739,9 @@ When the next task is blueprint UI or GuLiCode desktop bring-up, start here:
    `{ terminal_nodes, agent_nodes, route_nodes, edges }`. It has route nodes,
    port-aware edges, add-node dropdown/drop-to-canvas, node ports, right-click
    canvas pan, node context menu, double-click inspector, keyboard deletion,
-   grid snapping, expanded Agent/Route/Terminal/Edge inspector fields,
-   per-field inspector tip buttons, and the current dark/technology/minimal
-   visual pass. Inspector labels, "?" buttons, select options, and
+   grid snapping, expanded Agent/Route/Edge inspector fields, legacy terminal
+   import compatibility, per-field inspector tip buttons, and the current
+   dark/technology/minimal visual pass. Inspector labels, "?" buttons, select options, and
    `nonblocking` / `非阻塞` text are expected to stay legible on the dark
    panel background.
 4. The blueprint config boundary has been adjusted:
@@ -720,6 +923,7 @@ Historical change records only. Do not use archive content as current behavior u
 
 - [`archive/guli_desktop_ui_archive.md`](archive/guli_desktop_ui_archive.md)
 - [`archive/blueprint_integration_archive.md`](archive/blueprint_integration_archive.md)
+- [`archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
 - [`archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md`](archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md)
 - [`archive/blueprint_run_mcp_runtime_2026-05-19.md`](archive/blueprint_run_mcp_runtime_2026-05-19.md)
 - [`archive/agent_info_panel_live_runtime_2026-05-18.md`](archive/agent_info_panel_live_runtime_2026-05-18.md)

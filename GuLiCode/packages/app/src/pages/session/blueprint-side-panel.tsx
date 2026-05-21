@@ -10,12 +10,13 @@ import { Markdown } from "@opencode-ai/ui/markdown"
 import { Popover } from "@opencode-ai/ui/popover"
 import { TextField, type TextFieldProps } from "@opencode-ai/ui/text-field"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
+import { showToast } from "@opencode-ai/ui/toast"
 import { For, Index, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount, splitProps, untrack, type JSX } from "solid-js"
 import { useNavigate } from "@solidjs/router"
 import { base64Encode } from "@opencode-ai/shared/util/encode"
 import { createStore, reconcile, type SetStoreFunction } from "solid-js/store"
 import { useLanguage } from "@/context/language"
-import { useLayout } from "@/context/layout"
+import { useLayout, type BlueprintFloatingRect } from "@/context/layout"
 import { Persist, persisted } from "@/utils/persist"
 import { decode64 } from "@/utils/base64"
 import { useSessionLayout } from "@/pages/session/session-layout"
@@ -29,7 +30,6 @@ import {
   DEFAULT_BLUEPRINT_ID,
   DEFAULT_BLUEPRINT_NAME,
   TEST_AGENT_NODE_FLAG,
-  createBlueprintStartPlan,
   createDefaultBlueprintDraft,
   defaultCommandForCliKind,
   defaultModelForCliKind,
@@ -37,7 +37,6 @@ import {
   deleteNode,
   deleteSelection,
   jsonText,
-  nodeIds,
   nodeKind,
   parseJsonObject,
   parseScopeText,
@@ -87,6 +86,8 @@ const AGENT_PANEL_DEFAULT_HEIGHT = 620
 const AGENT_PANEL_MIN_WIDTH = 320
 const AGENT_PANEL_MIN_HEIGHT = 300
 const AGENT_PANEL_MARGIN = 8
+const BLUEPRINT_FLOAT_DRAG_THRESHOLD = 8
+let projectWorkdirAutoPromptShownThisApp = false
 const BLUEPRINT_THEME = {
   "--background-base": "#0b111b",
   "--background-strong": "#0e1724",
@@ -211,6 +212,42 @@ type BlueprintHeaderStatusState = {
 }
 
 type RuntimePanelMode = "runtime" | "inspector"
+
+export type BlueprintPlanningSubmitInput = {
+  task: string
+  startNodeIds: string[]
+  message: string
+}
+
+type BlueprintRuntimeStartNodeOption = {
+  id: string
+  label: string
+  description: string
+}
+
+type RuntimePanelId = "planning" | "status" | "overview" | "agents" | "queues" | "outgoing" | "workspace" | "events"
+
+const DEFAULT_RUNTIME_PANEL_ORDER: RuntimePanelId[] = [
+  "planning",
+  "status",
+  "overview",
+  "agents",
+  "queues",
+  "outgoing",
+  "workspace",
+  "events",
+]
+
+type RuntimePanelDragState = {
+  id: RuntimePanelId
+  pointerId: number
+  x: number
+  y: number
+  offsetX: number
+  offsetY: number
+  width: number
+  height: number
+}
 
 type BlueprintRuntimeState = {
   runId?: string
@@ -507,7 +544,14 @@ type NodeItem =
       node: BlueprintAgentNode
     }
 
-export function BlueprintSidePanel() {
+export function BlueprintSidePanel(props: {
+  floating?: boolean
+  floatingRect?: BlueprintFloatingRect
+  onFloat?: (rect?: Partial<BlueprintFloatingRect>) => void
+  onDock?: () => void
+  onFloatingRectChange?: (rect: Partial<BlueprintFloatingRect>) => void
+  onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => boolean | Promise<boolean>
+} = {}) {
   const language = useLanguage()
   const platform = usePlatform()
   const layout = useLayout()
@@ -550,13 +594,18 @@ export function BlueprintSidePanel() {
     events: [],
     loading: false,
   })
+  const [runtimeTask, setRuntimeTask] = createSignal("")
+  const [runtimeStartNodeIds, setRuntimeStartNodeIds] = createSignal<string[]>([])
   const [agentPanel, setAgentPanel] = createStore<AgentPanelState>({
     panels: {},
     streamEvents: {},
     streamCursor: 0,
   })
-  const [panelMode, setPanelMode] = createSignal<RuntimePanelMode>("runtime")
+  const [panelMode, setPanelMode] = createSignal<RuntimePanelMode | undefined>("runtime")
+  const runtimePanelOpen = () => panelMode() === "runtime"
+  let rootRef: HTMLDivElement | undefined
   let canvasRef: HTMLDivElement | undefined
+  let runtimeTaskInputRef: HTMLTextAreaElement | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
   const testAgentPersistTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {}
   const testAgentPersistRunning: Record<string, boolean | undefined> = {}
@@ -605,24 +654,9 @@ export function BlueprintSidePanel() {
       label: language.t("blueprint.node.route.parallelReduce"),
       description: language.t("blueprint.add.route.parallelReduce.description"),
     },
-    {
-      kind: "start" as const,
-      label: language.t("blueprint.node.start"),
-      description: language.t("blueprint.add.start.description"),
-    },
-    {
-      kind: "end" as const,
-      label: language.t("blueprint.node.end"),
-      description: language.t("blueprint.add.end.description"),
-    },
   ])
 
   const nodes = createMemo<NodeItem[]>(() => [
-    ...Object.entries(draft.graph.terminal_nodes).map(([id, kind]) => ({
-      id,
-      kind,
-      type: "terminal" as const,
-    })),
     ...Object.entries(draft.graph.route_nodes ?? {}).map(([id, node]) => ({
       id,
       node,
@@ -634,12 +668,13 @@ export function BlueprintSidePanel() {
       type: "agent" as const,
     })),
   ])
+  const visibleNodeIds = createMemo(() => new Set(nodes().map((node) => node.id)))
+  const visibleEdges = createMemo(() =>
+    draft.graph.edges.filter((edge) => visibleNodeIds().has(edge.from) && visibleNodeIds().has(edge.to)),
+  )
+  const incomingNodeIds = createMemo(() => new Set(visibleEdges().map((edge) => edge.to)))
+  const outgoingNodeIds = createMemo(() => new Set(visibleEdges().map((edge) => edge.from)))
 
-  const selectedNodeId = createMemo(() => (draft.selection?.type === "node" ? draft.selection.id : undefined))
-  const selectedEdge = createMemo(() => {
-    if (draft.selection?.type !== "edge") return
-    return draft.graph.edges.find((edge) => edge.id === draft.selection?.id)
-  })
   const inspectedAgent = createMemo(() => {
     if (draft.inspector?.type !== "node") return
     return draft.graph.agent_nodes[draft.inspector.id]
@@ -648,17 +683,12 @@ export function BlueprintSidePanel() {
     if (draft.inspector?.type !== "node") return
     return draft.graph.route_nodes?.[draft.inspector.id]
   })
-  const inspectedTerminal = createMemo(() => {
-    if (draft.inspector?.type !== "node") return
-    return draft.graph.terminal_nodes[draft.inspector.id]
-  })
+  const inspectedTerminal = createMemo(() => undefined as BlueprintTerminalKind | undefined)
   const inspectedEdge = createMemo(() => {
     if (draft.inspector?.type !== "edge") return
-    return draft.graph.edges.find((edge) => edge.id === draft.inspector?.id)
+    return visibleEdges().find((edge) => edge.id === draft.inspector?.id)
   })
-  const inspectorOpen = createMemo(
-    () => !!inspectedAgent() || !!inspectedRoute() || !!inspectedTerminal() || !!inspectedEdge(),
-  )
+  const inspectorOpen = createMemo(() => !!inspectedAgent() || !!inspectedRoute() || !!inspectedEdge())
   const runtimeGraph = createMemo(() => toRuntimeGraphDraft(draft))
   const currentConfig = createMemo(() => ({
     python_path: draft.config?.python_path ?? "",
@@ -666,6 +696,19 @@ export function BlueprintSidePanel() {
     skill_dir: draft.config?.skill_dir ?? "",
     rule_dir: draft.config?.rule_dir ?? "",
   }))
+  const runtimeStartNodeOptions = createMemo<BlueprintRuntimeStartNodeOption[]>(() =>
+    Object.entries(draft.graph.agent_nodes).map(([id, node]) => {
+      const agentName = node.agent_id?.trim()
+      return {
+        id,
+        label: agentName ? `${agentName} (${id})` : id,
+        description: node.prompt?.trim() || id,
+      }
+    }),
+  )
+  const runtimeBusy = createMemo(
+    () => runtime().loading || (!!runtime().runId && !isTerminalRuntimeStatus(runtimeStatus(runtime().status))),
+  )
   const blueprintConfigLocked = createMemo(() => {
     if (projectWorkdirRelocating() || runtime().loading || persistence().loading) return true
     const runId = runtime().runId
@@ -984,11 +1027,10 @@ export function BlueprintSidePanel() {
     if (blueprintConfigLocked() && globalConfigOpen()) setGlobalConfigOpen(false)
   })
 
-  let projectWorkdirPromptShown = false
   createEffect(() => {
-    if (projectWorkdirPromptShown) return
+    if (projectWorkdirAutoPromptShownThisApp) return
     if (!draftReady() || !persistence().loaded || blueprintConfigLocked()) return
-    projectWorkdirPromptShown = true
+    projectWorkdirAutoPromptShownThisApp = true
     queueMicrotask(() => {
       dialog.show(() => (
         <BlueprintProjectWorkdirConfirmDialog
@@ -997,6 +1039,11 @@ export function BlueprintSidePanel() {
         />
       ))
     })
+  })
+
+  createEffect(() => {
+    const available = new Set(runtimeStartNodeOptions().map((option) => option.id))
+    setRuntimeStartNodeIds((current) => current.filter((nodeId) => available.has(nodeId)))
   })
 
   createEffect(() => {
@@ -1053,8 +1100,8 @@ export function BlueprintSidePanel() {
     if (!inspector) return
     const valid =
       inspector.type === "node"
-        ? nodeIds(draft).includes(inspector.id)
-        : draft.graph.edges.some((edge) => edge.id === inspector.id)
+        ? visibleNodeIds().has(inspector.id)
+        : visibleEdges().some((edge) => edge.id === inspector.id)
     if (!valid) replaceDraft(setInspector(draft, undefined))
   })
 
@@ -1150,8 +1197,158 @@ export function BlueprintSidePanel() {
     }
   }
 
-  async function startBlueprintRuntime() {
-    if (!platform.saveBlueprint || !platform.startBlueprintRun) {
+  function openRuntimePlanningPanel() {
+    setPanelMode("runtime")
+    requestAnimationFrame(() => runtimeTaskInputRef?.focus())
+  }
+
+  function currentBlueprintFloatingRect(): BlueprintFloatingRect {
+    const rect = rootRef?.getBoundingClientRect()
+    return {
+      x: rect?.left ?? props.floatingRect?.x ?? 96,
+      y: rect?.top ?? props.floatingRect?.y ?? 64,
+      width: rect?.width ?? props.floatingRect?.width ?? 980,
+      height: rect?.height ?? props.floatingRect?.height ?? 680,
+    }
+  }
+
+  async function floatBlueprintToWindow(rect: BlueprintFloatingRect) {
+    if (!platform.openBlueprintWindow) {
+      ;(props.onFloat ?? view().blueprintPanel.float)(rect)
+      return
+    }
+    view().blueprintPanel.float(rect)
+    try {
+      await platform.openBlueprintWindow(projectDirectory, params.id, rect)
+    } catch (error) {
+      view().blueprintPanel.dock()
+      showToast({
+        variant: "error",
+        title: language.t("common.requestFailed"),
+        description: readableError(error),
+      })
+    }
+  }
+
+  async function dockBlueprintWindow() {
+    if (props.floating && platform.dockBlueprintWindow) {
+      await platform.dockBlueprintWindow(projectDirectory, params.id)
+      return
+    }
+    ;(props.onDock ?? view().blueprintPanel.dock)()
+  }
+
+  async function closeBlueprintPanel() {
+    if (props.floating && platform.closeBlueprintWindow) {
+      await platform.closeBlueprintWindow()
+      return
+    }
+    view().blueprintPanel.close()
+  }
+
+  function handleBlueprintHeaderPointerDown(event: PointerEvent) {
+    if (props.floating) return
+    if (!platform.openBlueprintWindow && !props.onFloat) return
+    if (event.button !== 0) return
+    const target = event.target
+    if (
+      target instanceof HTMLElement &&
+      target.closest("button,a,input,textarea,select,[role='button'],[data-blueprint-header-status-trigger]")
+    ) {
+      return
+    }
+    const handle = event.currentTarget
+    if (!(handle instanceof HTMLElement)) return
+    event.preventDefault()
+    const origin = props.floatingRect ?? currentBlueprintFloatingRect()
+    const offsetX = event.clientX - origin.x
+    const offsetY = event.clientY - origin.y
+    const startClientX = event.clientX
+    const startClientY = event.clientY
+    let dragging = false
+    handle.setPointerCapture?.(event.pointerId)
+
+    const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return
+      const dx = moveEvent.clientX - startClientX
+      const dy = moveEvent.clientY - startClientY
+      if (!dragging) {
+        if (Math.hypot(dx, dy) < BLUEPRINT_FLOAT_DRAG_THRESHOLD) return
+        dragging = true
+        const next = {
+          ...origin,
+          x: moveEvent.clientX - offsetX,
+          y: moveEvent.clientY - offsetY,
+        }
+        cleanup()
+        void floatBlueprintToWindow(next)
+        return
+      }
+      ;(props.onFloatingRectChange ?? view().blueprintPanel.move)({
+        ...origin,
+        x: moveEvent.clientX - offsetX,
+        y: moveEvent.clientY - offsetY,
+      })
+    }
+    const end = (endEvent: PointerEvent) => {
+      if (endEvent.pointerId !== event.pointerId) return
+      cleanup()
+    }
+    const cleanup = () => {
+      window.removeEventListener("pointermove", move)
+      window.removeEventListener("pointerup", end)
+      window.removeEventListener("pointercancel", end)
+    }
+    window.addEventListener("pointermove", move)
+    window.addEventListener("pointerup", end)
+    window.addEventListener("pointercancel", end)
+  }
+
+  function toggleRuntimeStartNode(nodeId: string) {
+    setRuntimeStartNodeIds((current) => {
+      if (current.includes(nodeId)) return current.filter((id) => id !== nodeId)
+      return [...current, nodeId]
+    })
+  }
+
+  function buildBlueprintPlanningMessage(task: string, startNodeIds: string[]) {
+    const startConstraint = startNodeIds.length
+      ? [
+          "请使用以下 AgentNode 作为最终 start_nodes：",
+          ...startNodeIds.map((nodeId) => {
+            const node = draft.graph.agent_nodes[nodeId]
+            const agentName = node?.agent_id?.trim()
+            const prompt = node?.prompt?.trim()
+            return `- ${nodeId}${agentName ? ` (${agentName})` : ""}${prompt ? `：${prompt}` : ""}`
+          }),
+        ].join("\n")
+      : "未手动选择开始 AgentNode，请由 Top Agent 根据当前蓝图组织视图选择；最终 staged plan 的 start_nodes 必须非空。"
+
+    return [
+      "请为当前蓝图规划一次运行。",
+      "",
+      "用户任务：",
+      task,
+      "",
+      "开始节点约束：",
+      startConstraint,
+      "",
+      "请先基于当前蓝图组织视图规划任务，调用 runtime_validate_start 验证候选 start plan，通过后再 stage start plan；不要直接启动运行。",
+    ].join("\n")
+  }
+
+  async function submitBlueprintPlanningTask() {
+    const task = runtimeTask().trim()
+    if (!task) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.taskRequired" as never) }))
+      openRuntimePlanningPanel()
+      return
+    }
+    if (runtimeBusy()) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.busy" as never) }))
+      return
+    }
+    if (!platform.saveBlueprint || !props.onBlueprintPlanningSubmit) {
       setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
       return
     }
@@ -1159,6 +1356,7 @@ export function BlueprintSidePanel() {
     const configIssues = validateBlueprintConfigForStart(startDraft)
     if (configIssues.length) {
       setConfigIssues(configIssues)
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.configMissing" as never) }))
       dialog.show(() => <BlueprintConfigRequiredDialog issues={configIssues} />)
       return
     }
@@ -1169,35 +1367,23 @@ export function BlueprintSidePanel() {
     }
     setPanelMode("runtime")
     setPersistence((current) => ({ ...current, saving: true, error: undefined }))
-    setRuntime((current) => ({ ...current, loading: true, action: "start", error: undefined }))
+    setRuntime((current) => ({ ...current, loading: true, action: "plan", error: undefined }))
     try {
       await platform.configureBlueprintRuntime?.(startDraft.config.python_path)
       await persistProjectDraft(startDraft)
       setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
-      const started = await platform.startBlueprintRun(
-        projectDirectory,
-        DEFAULT_BLUEPRINT_ID,
-        createBlueprintStartPlan(startDraft),
-        "live",
-      )
-      const runId = typeof started.runId === "string" ? started.runId : undefined
-      setRuntime((current) => ({
-        ...current,
-        runId,
-        runs: mergeRuntimeRunsWithStatus(current.runs, started),
-        status: asRecord(started.status),
-        events: arrayOfRecords(asRecord(started.status)?.recent_events),
-        loading: false,
-        action: undefined,
-        error: undefined,
-        lastUpdatedAt: Date.now(),
-      }))
-      scheduleOpenTestAgentPanelPersists()
-      if (platform.listBlueprintRuns) {
-        const runs = await platform.listBlueprintRuns(projectDirectory, DEFAULT_BLUEPRINT_ID)
-        setRuntime((current) => ({ ...current, runs }))
+      const startNodeIds = runtimeStartNodeIds().slice()
+      const accepted = await props.onBlueprintPlanningSubmit({
+        task,
+        startNodeIds,
+        message: buildBlueprintPlanningMessage(task, startNodeIds),
+      })
+      if (!accepted) {
+        setRuntime((current) => ({ ...current, loading: false, action: undefined }))
+        return
       }
-      if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
+      setRuntimeTask("")
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: undefined }))
     } catch (error) {
       const message = readableError(error)
       setPersistence((current) => ({ ...current, saving: false, error: message }))
@@ -1972,6 +2158,7 @@ export function BlueprintSidePanel() {
 
   return (
     <div
+      ref={rootRef}
       id="blueprint-panel"
       class="size-full min-w-0 h-full flex flex-col bg-background-base"
       style={BLUEPRINT_THEME}
@@ -1979,8 +2166,13 @@ export function BlueprintSidePanel() {
       onKeyDown={handleKeyDown}
     >
       <div
+        data-blueprint-float-handle
         class="h-10 shrink-0 flex items-center justify-between gap-3 border-b border-border-weaker-base bg-background-strong px-3"
+        classList={{
+          "cursor-grab active:cursor-grabbing": !props.floating,
+        }}
         style={BLUEPRINT_CHROME_THEME}
+        onPointerDown={handleBlueprintHeaderPointerDown}
       >
         <div class="flex min-w-0 items-center gap-2">
           <Icon size="small" name="blueprint" class="text-[var(--blueprint-edge-active)]" />
@@ -1994,15 +2186,33 @@ export function BlueprintSidePanel() {
             {(status) => <BlueprintHeaderStatus status={status()} />}
           </Show>
         </div>
-        <Tooltip placement="bottom" value={language.t("common.close")}>
-          <IconButton
-            icon="close-small"
-            variant="ghost"
-            class="h-6 w-6 shrink-0"
-            onClick={() => view().blueprintPanel.close()}
-            aria-label={language.t("common.close")}
-          />
-        </Tooltip>
+        <div class="flex items-center gap-1 shrink-0">
+          <Show when={props.floating}>
+            <Tooltip placement="bottom" value={language.t("blueprint.window.dock" as never)}>
+              <IconButton
+                data-blueprint-dock-button
+                icon="layout-right"
+                variant="ghost"
+                class="h-6 w-6 shrink-0"
+                onClick={() => {
+                  void dockBlueprintWindow()
+                }}
+                aria-label={language.t("blueprint.window.dock" as never)}
+              />
+            </Tooltip>
+          </Show>
+          <Tooltip placement="bottom" value={language.t("common.close")}>
+            <IconButton
+              icon="close-small"
+              variant="ghost"
+              class="h-6 w-6 shrink-0"
+              onClick={() => {
+                void closeBlueprintPanel()
+              }}
+              aria-label={language.t("common.close")}
+            />
+          </Tooltip>
+        </div>
       </div>
 
       <div
@@ -2092,18 +2302,6 @@ export function BlueprintSidePanel() {
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-1">
-          <Tooltip placement="bottom" value={language.t("blueprint.runtime.start")}>
-            <Button
-              size="small"
-              variant="ghost"
-              icon="terminal"
-              class="h-7 px-2"
-              disabled={runtime().loading || projectWorkdirRelocating() || !persistence().loaded}
-              onClick={() => void startBlueprintRuntime()}
-            >
-              <span class="hidden lg:inline">{language.t("blueprint.runtime.start")}</span>
-            </Button>
-          </Tooltip>
           <Tooltip placement="bottom" value={language.t("blueprint.runtime.refresh")}>
             <IconButton
               icon="reset"
@@ -2114,13 +2312,18 @@ export function BlueprintSidePanel() {
               aria-label={language.t("blueprint.runtime.refresh")}
             />
           </Tooltip>
-          <Tooltip placement="bottom" value={language.t("blueprint.runtime.panel")}>
+          <Tooltip
+            placement="bottom"
+            value={language.t(runtimePanelOpen() ? ("blueprint.runtime.collapse" as never) : ("blueprint.runtime.expand" as never))}
+          >
             <IconButton
+              data-blueprint-runtime-toggle
               icon="status"
-              variant={panelMode() === "runtime" ? "secondary" : "ghost"}
+              variant={runtimePanelOpen() ? "secondary" : "ghost"}
               class="h-7 w-7"
-              onClick={() => setPanelMode("runtime")}
-              aria-label={language.t("blueprint.runtime.panel")}
+              onClick={() => setPanelMode(runtimePanelOpen() ? undefined : "runtime")}
+              aria-label={language.t(runtimePanelOpen() ? ("blueprint.runtime.collapse" as never) : ("blueprint.runtime.expand" as never))}
+              aria-expanded={runtimePanelOpen()}
             />
           </Tooltip>
           <div class="hidden xl:block text-11-regular text-text-weaker">
@@ -2185,7 +2388,7 @@ export function BlueprintSidePanel() {
             }}
           >
             <svg class="absolute left-0 top-0 overflow-visible" width="1" height="1" aria-hidden="true">
-              <For each={draft.graph.edges}>
+              <For each={visibleEdges()}>
                 {(edge) => {
                   const path = () => edgePath(draft, edge)
                   const selected = () => draft.selection?.type === "edge" && draft.selection.id === edge.id
@@ -2251,6 +2454,9 @@ export function BlueprintSidePanel() {
                   selected={draft.selection?.type === "node" && draft.selection.id === item.id}
                   inspecting={draft.inspector?.type === "node" && draft.inspector.id === item.id}
                   connecting={connection()?.source === item.id}
+                  hasIncomingEdge={incomingNodeIds().has(item.id)}
+                  hasOutgoingEdge={outgoingNodeIds().has(item.id)}
+                  isConnectTargetVisible={!!connection() && connection()?.source !== item.id}
                   agentPanelProgress={agentPanelPress()?.nodeId === item.id ? (agentPanelPress()?.progress ?? 0) : 0}
                   layout={draft.layout.nodes[item.id]}
                   onPointerDown={(event) => handleNodePointerDown(event, item)}
@@ -2284,7 +2490,7 @@ export function BlueprintSidePanel() {
           </For>
         </div>
 
-        <Show when={panelMode() === "runtime" || inspectorOpen()}>
+        <Show when={runtimePanelOpen() || (panelMode() === "inspector" && inspectorOpen())}>
           <div
             class="w-[340px] max-w-[44%] min-w-[282px] shrink-0 border-l border-[rgba(103,232,249,0.16)] bg-[#071019] shadow-[-20px_0_48px_rgba(0,0,0,0.42)]"
             style={BLUEPRINT_INSPECTOR_THEME}
@@ -2293,7 +2499,17 @@ export function BlueprintSidePanel() {
               <Match when={panelMode() === "runtime"}>
                 <BlueprintRuntimePanel
                   state={runtime()}
-                  onStart={() => void startBlueprintRuntime()}
+                  startNodeOptions={runtimeStartNodeOptions()}
+                  selectedStartNodeIds={runtimeStartNodeIds()}
+                  task={runtimeTask()}
+                  taskDisabled={runtimeBusy() || projectWorkdirRelocating() || !persistence().loaded || !props.onBlueprintPlanningSubmit}
+                  submitDisabled={runtimeBusy() || projectWorkdirRelocating() || !persistence().loaded || !props.onBlueprintPlanningSubmit}
+                  taskInputRef={(el) => {
+                    runtimeTaskInputRef = el
+                  }}
+                  onTaskInput={setRuntimeTask}
+                  onStartNodeToggle={toggleRuntimeStartNode}
+                  onSubmitPlanningTask={() => void submitBlueprintPlanningTask()}
                   onRefresh={() => void refreshBlueprintRuntime()}
                   onEnd={(action) => void endBlueprintRuntime(action)}
                 />
@@ -2379,7 +2595,15 @@ function BlueprintHeaderStatus(props: { status: BlueprintHeaderStatusState }) {
 
 function BlueprintRuntimePanel(props: {
   state: BlueprintRuntimeState
-  onStart: () => void
+  startNodeOptions: BlueprintRuntimeStartNodeOption[]
+  selectedStartNodeIds: string[]
+  task: string
+  taskDisabled: boolean
+  submitDisabled: boolean
+  taskInputRef: (el: HTMLTextAreaElement) => void
+  onTaskInput: (value: string) => void
+  onStartNodeToggle: (nodeId: string) => void
+  onSubmitPlanningTask: () => void
   onRefresh: () => void
   onEnd: (action: BlueprintRunEndAction) => void
 }) {
@@ -2398,20 +2622,97 @@ function BlueprintRuntimePanel(props: {
   const summary = createMemo(() => asRecord(explanation()?.summary))
   const runStatus = createMemo(() => runtimeStatus(props.state.status) || "idle")
   const terminal = createMemo(() => isTerminalRuntimeStatus(runStatus()))
+  const [runtimePanelOrder, setRuntimePanelOrder] = createSignal<RuntimePanelId[]>([...DEFAULT_RUNTIME_PANEL_ORDER])
+  const [draggedRuntimePanel, setDraggedRuntimePanel] = createSignal<RuntimePanelId>()
+  const [runtimePanelDrag, setRuntimePanelDrag] = createSignal<RuntimePanelDragState>()
+  let runtimePanelListRef: HTMLDivElement | undefined
+
+  const moveRuntimePanelAtPointer = (dragging: RuntimePanelId, clientY: number) => {
+    if (!runtimePanelListRef) return
+    const panels = Array.from(runtimePanelListRef.querySelectorAll<HTMLElement>("[data-blueprint-runtime-panel]"))
+      .map((element) => ({
+        id: element.dataset.blueprintRuntimePanel as RuntimePanelId | undefined,
+        rect: element.getBoundingClientRect(),
+      }))
+      .filter((item): item is { id: RuntimePanelId; rect: DOMRect } => !!item.id && item.id !== dragging)
+      .sort((left, right) => left.rect.top - right.rect.top)
+    if (!panels.length) return
+    const before = panels.find((panel) => clientY < panel.rect.top + panel.rect.height / 2)
+    setRuntimePanelOrder((current) =>
+      before
+        ? reorderRuntimePanels(current, dragging, before.id, false)
+        : reorderRuntimePanels(current, dragging, panels[panels.length - 1]!.id, true),
+    )
+  }
+
+  const handleRuntimePanelPointerDown = (id: RuntimePanelId, event: PointerEvent) => {
+    if (event.button !== 0) return
+    const handle = event.currentTarget
+    if (!(handle instanceof HTMLElement)) return
+    const panel = handle.closest<HTMLElement>("[data-blueprint-runtime-panel]")
+    if (!panel) return
+    const rect = panel.getBoundingClientRect()
+    event.preventDefault()
+    handle.setPointerCapture?.(event.pointerId)
+    setDraggedRuntimePanel(id)
+    setRuntimePanelDrag({
+      id,
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      width: rect.width,
+      height: rect.height,
+    })
+  }
+
+  createEffect(() => {
+    const dragging = draggedRuntimePanel()
+    if (!dragging) return
+    const handleMove = (event: PointerEvent) => {
+      setRuntimePanelDrag((current) => {
+        if (!current || current.pointerId !== event.pointerId) return current
+        return { ...current, x: event.clientX, y: event.clientY }
+      })
+      moveRuntimePanelAtPointer(dragging, event.clientY)
+    }
+    const handleEnd = (event: PointerEvent) => {
+      const current = runtimePanelDrag()
+      if (current && current.pointerId !== event.pointerId) return
+      setDraggedRuntimePanel(undefined)
+      setRuntimePanelDrag(undefined)
+    }
+    const handleBlur = () => {
+      setDraggedRuntimePanel(undefined)
+      setRuntimePanelDrag(undefined)
+    }
+    window.addEventListener("pointermove", handleMove)
+    window.addEventListener("pointerup", handleEnd)
+    window.addEventListener("pointercancel", handleEnd)
+    window.addEventListener("blur", handleBlur)
+    onCleanup(() => {
+      window.removeEventListener("pointermove", handleMove)
+      window.removeEventListener("pointerup", handleEnd)
+      window.removeEventListener("pointercancel", handleEnd)
+      window.removeEventListener("blur", handleBlur)
+    })
+  })
+
+  const runtimePanelShellProps = (id: RuntimePanelId) => ({
+    id,
+    order: runtimePanelOrder().indexOf(id),
+    dragging: draggedRuntimePanel() === id,
+    dragHeight: runtimePanelDrag()?.id === id ? runtimePanelDrag()?.height : undefined,
+    ariaLabel: language.t("blueprint.runtime.dragPanel" as never),
+    onPointerDown: (event: PointerEvent) => handleRuntimePanelPointerDown(id, event),
+  })
 
   return (
     <div class="size-full min-h-0 flex flex-col bg-[#071019] text-[#d6e9f5]">
       <div class="h-10 shrink-0 flex items-center justify-between border-b border-[rgba(103,232,249,0.14)] bg-[#0b1522] px-3">
         <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.runtime.panel")}</div>
         <div class="flex shrink-0 items-center gap-1">
-          <IconButton
-            icon="terminal"
-            variant="ghost"
-            class="h-6 w-6 text-[#f8fdff]"
-            disabled={props.state.loading}
-            onClick={props.onStart}
-            aria-label={language.t("blueprint.runtime.start")}
-          />
           <IconButton
             icon="reset"
             variant="ghost"
@@ -2423,7 +2724,47 @@ function BlueprintRuntimePanel(props: {
         </div>
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto p-3">
-        <div class="flex flex-col gap-3">
+        <div
+          ref={(el) => {
+            runtimePanelListRef = el
+          }}
+          class="flex flex-col gap-3"
+        >
+          <RuntimePanelShell {...runtimePanelShellProps("planning")}>
+          <RuntimeSection title={language.t("blueprint.runtime.planning" as never)}>
+            <RuntimeStartNodeSelect
+              options={props.startNodeOptions}
+              selectedIds={props.selectedStartNodeIds}
+              disabled={props.taskDisabled}
+              onToggle={props.onStartNodeToggle}
+            />
+            <label class="flex min-w-0 flex-col gap-1">
+              <span class="text-11-medium text-[#f8fdff]">{language.t("blueprint.runtime.task" as never)}</span>
+              <textarea
+                ref={props.taskInputRef}
+                data-blueprint-runtime-task-input
+                class="min-h-32 w-full min-w-0 resize-y rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#06101a] px-3 py-2 text-12-regular leading-5 text-[#f8fdff] outline-none transition-colors placeholder:text-[#557086] focus:border-[#67e8f9] disabled:cursor-not-allowed disabled:opacity-55"
+                value={props.task}
+                disabled={props.taskDisabled}
+                placeholder={language.t("blueprint.runtime.taskPlaceholder" as never)}
+                onInput={(event) => props.onTaskInput(event.currentTarget.value)}
+              />
+            </label>
+            <div class="flex justify-end">
+              <Button
+                data-blueprint-runtime-task-submit
+                size="small"
+                variant="secondary"
+                class="h-8 px-3"
+                disabled={props.submitDisabled || !props.task.trim()}
+                onClick={props.onSubmitPlanningTask}
+              >
+                {language.t("common.submit")}
+              </Button>
+            </div>
+          </RuntimeSection>
+          </RuntimePanelShell>
+          <RuntimePanelShell {...runtimePanelShellProps("status")}>
           <div class="rounded-md border border-[rgba(103,232,249,0.18)] bg-[#06101a] p-3">
             <div class="flex min-w-0 items-center justify-between gap-2">
               <div class="min-w-0">
@@ -2454,14 +2795,36 @@ function BlueprintRuntimePanel(props: {
                 </div>
               )}
             </Show>
-            <div class="mt-3 grid grid-cols-4 gap-1">
-              <RuntimeActionButton label={language.t("blueprint.runtime.complete")} disabled={!props.state.runId || props.state.loading} onClick={() => props.onEnd("complete")} />
-              <RuntimeActionButton label={language.t("blueprint.runtime.pause")} disabled={!props.state.runId || props.state.loading || terminal()} onClick={() => props.onEnd("pause")} />
-              <RuntimeActionButton label={language.t("blueprint.runtime.cancel")} disabled={!props.state.runId || props.state.loading || terminal()} onClick={() => props.onEnd("cancel")} />
-              <RuntimeActionButton label={language.t("blueprint.runtime.fail")} disabled={!props.state.runId || props.state.loading || terminal()} onClick={() => props.onEnd("fail")} />
+            <div class="mt-3 flex flex-col gap-2">
+              <RuntimeActionButton
+                label={language.t("blueprint.runtime.complete")}
+                description={language.t("blueprint.runtime.completeDescription")}
+                disabled={!props.state.runId || props.state.loading}
+                onClick={() => props.onEnd("complete")}
+              />
+              <RuntimeActionButton
+                label={language.t("blueprint.runtime.pause")}
+                description={language.t("blueprint.runtime.pauseDescription")}
+                disabled={!props.state.runId || props.state.loading || terminal()}
+                onClick={() => props.onEnd("pause")}
+              />
+              <RuntimeActionButton
+                label={language.t("blueprint.runtime.cancel")}
+                description={language.t("blueprint.runtime.cancelDescription")}
+                disabled={!props.state.runId || props.state.loading || terminal()}
+                onClick={() => props.onEnd("cancel")}
+              />
+              <RuntimeActionButton
+                label={language.t("blueprint.runtime.fail")}
+                description={language.t("blueprint.runtime.failDescription")}
+                disabled={!props.state.runId || props.state.loading || terminal()}
+                onClick={() => props.onEnd("fail")}
+              />
             </div>
           </div>
+          </RuntimePanelShell>
 
+          <RuntimePanelShell {...runtimePanelShellProps("overview")}>
           <RuntimeSection title={language.t("blueprint.runtime.overview")}>
             <div class="grid grid-cols-3 gap-2">
               <RuntimeMetric label={language.t("blueprint.runtime.agents")} value={agents().length} />
@@ -2475,7 +2838,9 @@ function BlueprintRuntimePanel(props: {
               {(value) => <RuntimeJsonPreview value={value()} />}
             </Show>
           </RuntimeSection>
+          </RuntimePanelShell>
 
+          <RuntimePanelShell {...runtimePanelShellProps("agents")}>
           <RuntimeSection title={language.t("blueprint.runtime.agents")}>
             <RuntimeEmpty when={agents().length === 0} />
             <For each={agents()}>
@@ -2488,7 +2853,9 @@ function BlueprintRuntimePanel(props: {
               )}
             </For>
           </RuntimeSection>
+          </RuntimePanelShell>
 
+          <RuntimePanelShell {...runtimePanelShellProps("queues")}>
           <RuntimeSection title={language.t("blueprint.runtime.queues")}>
             <RuntimeEmpty when={pendingMessages().length === 0 && queueByAgent().length === 0} />
             <For each={queueByAgent()}>
@@ -2500,7 +2867,9 @@ function BlueprintRuntimePanel(props: {
               {([id, message]) => <RuntimeRow title={id} meta={String(message.status ?? "")} detail={String(message.node_id ?? "")} />}
             </For>
           </RuntimeSection>
+          </RuntimePanelShell>
 
+          <RuntimePanelShell {...runtimePanelShellProps("outgoing")}>
           <RuntimeSection title={language.t("blueprint.runtime.outgoing")}>
             <RuntimeEmpty when={outgoing().length === 0 && joins().length === 0 && jobs().length === 0} />
             <For each={outgoing()}>
@@ -2513,7 +2882,9 @@ function BlueprintRuntimePanel(props: {
               {([id, job]) => <RuntimeRow title={id} meta={String(job.status ?? "")} detail={String(job.node_id ?? "")} />}
             </For>
           </RuntimeSection>
+          </RuntimePanelShell>
 
+          <RuntimePanelShell {...runtimePanelShellProps("workspace")}>
           <RuntimeSection title={language.t("blueprint.runtime.workspace")}>
             <div class="grid grid-cols-3 gap-2">
               <RuntimeMetric label={language.t("blueprint.runtime.changes")} value={arrayOfRecords(workspace()?.changesets).length} />
@@ -2522,7 +2893,9 @@ function BlueprintRuntimePanel(props: {
             </div>
             <RuntimeJsonPreview value={workspace() ?? {}} />
           </RuntimeSection>
+          </RuntimePanelShell>
 
+          <RuntimePanelShell {...runtimePanelShellProps("events")}>
           <RuntimeSection title={language.t("blueprint.runtime.events")}>
             <RuntimeEmpty when={props.state.events.length === 0} />
             <For each={props.state.events}>
@@ -2535,21 +2908,175 @@ function BlueprintRuntimePanel(props: {
               )}
             </For>
           </RuntimeSection>
+          </RuntimePanelShell>
         </div>
       </div>
+      <Show when={runtimePanelDrag()}>
+        {(drag) => (
+          <div
+            data-blueprint-runtime-panel-ghost={drag().id}
+            class="pointer-events-none fixed z-[9999] rounded-md border border-dashed border-[#67e8f9] bg-[rgba(103,232,249,0.08)] shadow-[0_18px_42px_rgba(0,0,0,0.36)]"
+            style={{
+              left: `${drag().x - drag().offsetX}px`,
+              top: `${drag().y - drag().offsetY}px`,
+              width: `${drag().width}px`,
+              height: `${drag().height}px`,
+            }}
+          >
+            <div class="m-3 h-1 rounded-full bg-[#67e8f9] shadow-[0_0_12px_rgba(103,232,249,0.4)]" />
+          </div>
+        )}
+      </Show>
     </div>
   )
 }
 
-function RuntimeActionButton(props: { label: string; disabled: boolean; onClick: () => void }) {
+function RuntimePanelShell(props: {
+  id: RuntimePanelId
+  order: number
+  dragging: boolean
+  dragHeight?: number
+  ariaLabel: string
+  children: JSX.Element
+  onPointerDown: (event: PointerEvent) => void
+}) {
+  return (
+    <div
+      data-blueprint-runtime-panel={props.id}
+      class="flex min-w-0 flex-col gap-1"
+      style={{ order: props.order }}
+    >
+      <Show
+        when={props.dragging}
+        fallback={
+          <>
+            <div
+              role="button"
+              tabindex={0}
+              data-blueprint-runtime-panel-handle={props.id}
+              aria-label={props.ariaLabel}
+              class="group flex h-3 cursor-grab touch-none items-center px-4 active:cursor-grabbing"
+              onPointerDown={props.onPointerDown}
+            >
+              <div class="h-1 w-full rounded-full bg-[rgba(103,232,249,0.92)] shadow-[0_0_10px_rgba(103,232,249,0.24)] transition-colors group-hover:bg-[#67e8f9]" />
+            </div>
+            {props.children}
+          </>
+        }
+      >
+        <div
+          data-blueprint-runtime-panel-placeholder={props.id}
+          class="rounded-md border border-dashed border-[rgba(103,232,249,0.68)] bg-[rgba(103,232,249,0.05)]"
+          style={{ height: `${props.dragHeight ?? 72}px` }}
+        />
+      </Show>
+    </div>
+  )
+}
+
+function reorderRuntimePanels(order: RuntimePanelId[], source: RuntimePanelId, target: RuntimePanelId, insertAfter: boolean) {
+  if (source === target) return order
+  const withoutSource = order.filter((id) => id !== source)
+  const targetIndex = withoutSource.indexOf(target)
+  if (targetIndex === -1) return order
+  const insertIndex = targetIndex + (insertAfter ? 1 : 0)
+  const next = [...withoutSource.slice(0, insertIndex), source, ...withoutSource.slice(insertIndex)]
+  return next.every((id, index) => id === order[index]) ? order : next
+}
+
+function RuntimeStartNodeSelect(props: {
+  options: BlueprintRuntimeStartNodeOption[]
+  selectedIds: string[]
+  disabled: boolean
+  onToggle: (nodeId: string) => void
+}) {
+  const language = useLanguage()
+  const selected = () => new Set(props.selectedIds)
+  const selectedOptions = () => props.options.filter((option) => selected().has(option.id))
+  const label = () => {
+    if (props.selectedIds.length === 0) return language.t("blueprint.runtime.startNodesTopAgent" as never)
+    if (props.selectedIds.length === 1) return selectedOptions()[0]?.label ?? props.selectedIds[0]
+    return language.t("blueprint.runtime.startNodesSelected" as never, { count: props.selectedIds.length } as never)
+  }
+
+  return (
+    <div class="flex min-w-0 flex-col gap-2">
+      <div class="text-11-medium text-[#f8fdff]">{language.t("blueprint.runtime.startNodes" as never)}</div>
+      <DropdownMenu placement="bottom-start">
+        <DropdownMenu.Trigger
+          data-blueprint-runtime-start-node-select
+          disabled={props.disabled}
+          class="flex h-8 min-w-0 items-center justify-between gap-2 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#06101a] px-2 text-left text-12-regular text-[#f8fdff] outline-none transition-colors hover:border-[rgba(103,232,249,0.34)] focus:border-[#67e8f9] disabled:cursor-not-allowed disabled:opacity-55"
+        >
+          <span class="min-w-0 truncate">{label()}</span>
+          <Icon name="chevron-down" size="small" class="shrink-0 text-[#d7f7ff]" />
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content
+            class="max-h-64 w-72 overflow-y-auto border-[rgba(103,232,249,0.26)] bg-[#101a28] text-[#f8fdff] shadow-[0_18px_48px_rgba(0,0,0,0.42)] [&_[data-slot=dropdown-menu-checkbox-item]]:items-start"
+            style={BLUEPRINT_THEME}
+          >
+            <Show
+              when={props.options.length > 0}
+              fallback={<div class="px-2 py-2 text-12-regular text-[#95afc4]">{language.t("blueprint.runtime.noStartNodes" as never)}</div>}
+            >
+              <For each={props.options}>
+                {(option) => (
+                  <DropdownMenu.CheckboxItem
+                    checked={selected().has(option.id)}
+                    onChange={() => props.onToggle(option.id)}
+                    class="gap-2"
+                  >
+                    <DropdownMenu.ItemIndicator>
+                      <Icon name="check-small" size="small" class="mt-0.5 text-[#67e8f9]" />
+                    </DropdownMenu.ItemIndicator>
+                    <div class="min-w-0">
+                      <DropdownMenu.ItemLabel class="truncate text-12-medium">{option.label}</DropdownMenu.ItemLabel>
+                      <DropdownMenu.ItemDescription class="line-clamp-2 text-11-regular text-[#95afc4]">
+                        {option.description}
+                      </DropdownMenu.ItemDescription>
+                    </div>
+                  </DropdownMenu.CheckboxItem>
+                )}
+              </For>
+            </Show>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu>
+      <Show when={selectedOptions().length > 0}>
+        <div class="flex flex-wrap gap-1.5">
+          <For each={selectedOptions()}>
+            {(option) => (
+              <button
+                type="button"
+                disabled={props.disabled}
+                class="max-w-full rounded-sm border border-[rgba(103,232,249,0.24)] bg-[rgba(103,232,249,0.08)] px-2 py-1 text-10-medium text-[#d7f7ff] disabled:cursor-not-allowed disabled:opacity-55"
+                onClick={() => props.onToggle(option.id)}
+                title={option.label}
+              >
+                <span class="inline-block max-w-48 truncate align-bottom">{option.label}</span>
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+    </div>
+  )
+}
+
+function RuntimeActionButton(props: { label: string; description: string; disabled: boolean; onClick: () => void }) {
   return (
     <button
       type="button"
       disabled={props.disabled}
-      class="h-7 min-w-0 rounded-sm border border-[rgba(103,232,249,0.22)] px-1 text-10-medium text-[#d6e9f5] transition-colors hover:border-[#67e8f9] disabled:cursor-not-allowed disabled:opacity-45"
+      class="min-h-11 w-full min-w-0 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[rgba(8,19,31,0.72)] px-3 py-2 text-left transition-colors hover:border-[#67e8f9] hover:bg-[rgba(103,232,249,0.08)] disabled:cursor-not-allowed disabled:opacity-45"
       onClick={props.onClick}
+      title={`${props.label}: ${props.description}`}
     >
-      <span class="block truncate">{props.label}</span>
+      <span class="flex min-w-0 items-center justify-between gap-3">
+        <span class="shrink-0 text-13-medium text-[#f8fdff]">{props.label}</span>
+        <span class="min-w-0 flex-1 text-right text-10-regular leading-4 text-[#95afc4]">{props.description}</span>
+      </span>
     </button>
   )
 }
@@ -2975,6 +3502,9 @@ function BlueprintNodeView(props: {
   selected: boolean
   inspecting: boolean
   connecting: boolean
+  hasIncomingEdge: boolean
+  hasOutgoingEdge: boolean
+  isConnectTargetVisible: boolean
   agentPanelProgress: number
   layout?: BlueprintNodeLayout
   onPointerDown: (event: PointerEvent) => void
@@ -2986,10 +3516,14 @@ function BlueprintNodeView(props: {
   onInputPointerUp: (event: PointerEvent) => void
 }) {
   const language = useLanguage()
+  const [hovering, setHovering] = createSignal(false)
   const width = () => (props.item.type === "terminal" ? TERMINAL_WIDTH : NODE_WIDTH)
   const height = () => (props.item.type === "terminal" ? TERMINAL_HEIGHT : NODE_HEIGHT)
-  const showInput = () => props.item.type !== "terminal" || props.item.kind === "end"
-  const showOutput = () => props.item.type !== "terminal" || props.item.kind === "start"
+  const interactive = () => props.selected || props.inspecting || props.connecting || hovering()
+  const supportsInput = () => props.item.type !== "terminal" || props.item.kind === "end"
+  const supportsOutput = () => props.item.type !== "terminal" || props.item.kind === "start"
+  const showInput = () => supportsInput() && (props.hasIncomingEdge || props.isConnectTargetVisible || interactive())
+  const showOutput = () => supportsOutput() && (props.hasOutgoingEdge || interactive())
   const agentPanelProgress = () => clamp(props.agentPanelProgress, 0, 1)
   const nodeTone = createMemo(() => {
     if (props.item.type === "terminal") {
@@ -3053,6 +3587,8 @@ function BlueprintNodeView(props: {
               : "0 10px 28px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.06)",
           }}
           onPointerDown={props.onPointerDown}
+          onPointerEnter={() => setHovering(true)}
+          onPointerLeave={() => setHovering(false)}
           onDblClick={(event) => {
             event.stopPropagation()
             props.onDoubleClick()

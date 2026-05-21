@@ -56,16 +56,27 @@ describe("blueprint project persistence source", () => {
 })
 
 describe("blueprint runtime source", () => {
-  test("starts by saving the project document and then calling runtime APIs", async () => {
+  test("submits runtime tasks through blueprint planning after saving the project document", async () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
 
     expect(source).toContain("const startDraft = await ensureDetectedPythonPath()")
-    expect(source).toContain("createBlueprintStartPlan(startDraft)")
     expect(source).toContain("validateBlueprintConfigForStart(startDraft)")
     expect(source).toContain("BlueprintConfigRequiredDialog")
     expect(source).toContain("await persistProjectDraft(startDraft)")
-    expect(source).toContain("platform.startBlueprintRun(")
-    expect(source).toContain('"live"')
+    expect(source).toContain("buildBlueprintPlanningMessage(task, startNodeIds)")
+    expect(source).toContain("props.onBlueprintPlanningSubmit")
+    expect(source).toContain("data-blueprint-runtime-start-node-select")
+    expect(source).toContain("data-blueprint-runtime-task-input")
+    expect(source).toContain("data-blueprint-runtime-task-submit")
+    expect(source).toContain("data-blueprint-runtime-toggle")
+    expect(source).toContain("data-blueprint-runtime-panel-handle")
+    expect(source).toContain("data-blueprint-runtime-panel-ghost")
+    expect(source).toContain("data-blueprint-runtime-panel-placeholder")
+    expect(source).toContain("reorderRuntimePanels")
+    expect(source).toContain("runtimePanelShellProps")
+    expect(source).not.toContain("createBlueprintStartPlan(startDraft)")
+    expect(source).not.toContain("platform.startBlueprintRun(")
+    expect(source).not.toContain("onStart={openRuntimePlanningPanel}")
     expect(source).toContain("platform.blueprintRunStatus(runId)")
     expect(source).toContain("platform.blueprintRecentEvents?.(runId, 50)")
     expect(source).toContain("platform.blueprintAgentStreamToken")
@@ -95,6 +106,61 @@ describe("blueprint runtime source", () => {
     expect(source).toContain('isTerminalRuntimeStatus(status)')
     expect(source).toContain('setInterval(() =>')
     expect(source).toContain('platform.endBlueprintRun(runId, action, `blueprint UI ${action}`)')
+  })
+
+  test("opens blueprint panels in an independent desktop window with a dock action", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const sessionSource = await Bun.file(new URL("../session.tsx", import.meta.url)).text()
+    const blueprintWindowSource = await Bun.file(new URL("./blueprint-window.tsx", import.meta.url)).text()
+    const sidePanelSource = await Bun.file(new URL("./session-side-panel.tsx", import.meta.url)).text()
+    const layoutSource = await Bun.file(new URL("../../context/layout.tsx", import.meta.url)).text()
+    const appSource = await Bun.file(new URL("../../app.tsx", import.meta.url)).text()
+
+    expect(source).toContain("data-blueprint-float-handle")
+    expect(source).toContain("data-blueprint-dock-button")
+    expect(source).toContain("BLUEPRINT_FLOAT_DRAG_THRESHOLD")
+    expect(source).toContain("platform.openBlueprintWindow")
+    expect(source).toContain("platform.dockBlueprintWindow")
+    expect(source).toContain("platform.closeBlueprintWindow")
+    expect(source).toContain("view().blueprintPanel.float(rect)")
+    expect(source).toContain("await platform.openBlueprintWindow(projectDirectory, params.id, rect)")
+    expect(sessionSource).toContain('"gulicode:blueprint-window-dock"')
+    expect(sessionSource).toContain('"gulicode:blueprint-window-closed"')
+    expect(sessionSource).toContain('"gulicode:blueprint-planning-submit"')
+    expect(sessionSource).not.toContain("data-blueprint-floating-panel")
+    expect(sessionSource).not.toContain("desktopBlueprintFloatingOpen")
+    expect(blueprintWindowSource).toContain("data-blueprint-popout-window")
+    expect(blueprintWindowSource).toContain("submitBlueprintWindowPlanning")
+    expect(appSource).toContain('path="/blueprint-window/:id?"')
+    expect(appSource).toContain("visualShell")
+    expect(sidePanelSource).toContain("!view().blueprintPanel.floating()")
+    expect(layoutSource).toContain("floatingRect")
+    expect(layoutSource).toContain("clampBlueprintFloatingRect")
+  })
+
+  test("shows node ports from edge direction with interactive editing fallbacks", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const nodeView = source.slice(source.indexOf("function BlueprintNodeView"), source.indexOf("function PortButton"))
+
+    expect(source).toContain("const incomingNodeIds")
+    expect(source).toContain("const outgoingNodeIds")
+    expect(source).toContain("hasIncomingEdge={incomingNodeIds().has(item.id)}")
+    expect(source).toContain("hasOutgoingEdge={outgoingNodeIds().has(item.id)}")
+    expect(source).toContain("isConnectTargetVisible={!!connection() && connection()?.source !== item.id}")
+    expect(nodeView).toContain("props.hasIncomingEdge || props.isConnectTargetVisible || interactive()")
+    expect(nodeView).toContain("props.hasOutgoingEdge || interactive()")
+    expect(nodeView).toContain("onPointerEnter={() => setHovering(true)}")
+  })
+
+  test("hides terminal nodes from new blueprint interactions", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const addOptions = source.slice(source.indexOf("const addOptions"), source.indexOf("const nodes"))
+    const nodes = source.slice(source.indexOf("const nodes"), source.indexOf("const visibleNodeIds"))
+
+    expect(addOptions).not.toContain('kind: "start" as const')
+    expect(addOptions).not.toContain('kind: "end" as const')
+    expect(nodes).not.toContain("draft.graph.terminal_nodes")
+    expect(source).toContain("projectWorkdirAutoPromptShownThisApp")
   })
 
   test("renders common config help buttons with inspector tip behavior", async () => {

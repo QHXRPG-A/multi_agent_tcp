@@ -287,4 +287,43 @@ describe("blueprint runtime bridge", () => {
       await rm(projectDir, { recursive: true, force: true })
     }
   })
+
+  test("includes service error details in thrown runtime errors", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "gulicode-blueprint-"))
+    const runtime = new BlueprintRuntime()
+    const originalFetch = globalThis.fetch
+    try {
+      ;(runtime as unknown as { ready: Promise<{ ok: true; url: string; token: string }> }).ready = Promise.resolve({
+        ok: true,
+        url: "http://127.0.0.1:1/blueprint",
+        token: "secret",
+      })
+      globalThis.fetch = (() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: false,
+              code: "BLUEPRINT_PLANNING_CONTEXT_FAILED",
+              error: "failed to prepare desktop blueprint planning context",
+              details: { error: "project directory does not contain a default blueprint" },
+            }),
+            {
+              status: 500,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+        )) as typeof fetch
+
+      await expect(runtime.ensurePlanningContext(projectDir, "default", "session-1")).rejects.toMatchObject({
+        code: "BLUEPRINT_PLANNING_CONTEXT_FAILED",
+        message:
+          "BLUEPRINT_PLANNING_CONTEXT_FAILED: failed to prepare desktop blueprint planning context: project directory does not contain a default blueprint",
+        details: { error: "project directory does not contain a default blueprint" },
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+      runtime.close()
+      await rm(projectDir, { recursive: true, force: true })
+    }
+  })
 })

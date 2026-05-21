@@ -157,6 +157,41 @@ export class BlueprintRuntime {
     )
   }
 
+  ensurePlanningContext(projectDir: string, blueprintId: string, desktopSessionId: string) {
+    return this.request("blueprint.planning.ensureContext", { projectDir, blueprintId, desktopSessionId })
+  }
+
+  answerPlanningQuestion(
+    sessionId: string,
+    questionId: string,
+    answers: unknown,
+    opts: { rejected?: boolean; reason?: string } = {},
+  ) {
+    return this.request("blueprint.planning.answerQuestion", {
+      sessionId,
+      questionId,
+      answers,
+      rejected: opts.rejected ?? false,
+      reason: opts.reason,
+    })
+  }
+
+  rejectPlanningPlan(sessionId: string, reason?: string) {
+    return this.request("blueprint.planning.rejectPlan", { sessionId, reason })
+  }
+
+  markPlanningPlanStarted(sessionId: string, runId: string, started?: unknown) {
+    return this.request("blueprint.planning.markPlanStarted", { sessionId, runId, started })
+  }
+
+  planningStatus(sessionId: string) {
+    return this.request("blueprint.planning.status", { sessionId })
+  }
+
+  endPlanningSession(sessionId: string, reason?: string) {
+    return this.request("blueprint.planning.endSession", { sessionId, reason })
+  }
+
   close() {
     this.child?.kill()
     this.child = undefined
@@ -181,9 +216,13 @@ export class BlueprintRuntime {
     const payload = (await response.json()) as Record<string, unknown>
     if (!response.ok || payload.ok === false) {
       const code = typeof payload.code === "string" ? payload.code : undefined
-      const message = String(payload.error ?? `blueprint runtime request failed: ${command}`)
+      const details = payload.details && typeof payload.details === "object" ? payload.details as Record<string, unknown> : undefined
+      const detailError = typeof details?.error === "string" && details.error.trim() ? details.error.trim() : undefined
+      const baseMessage = String(payload.error ?? `blueprint runtime request failed: ${command}`)
+      const message = detailError ? `${baseMessage}: ${detailError}` : baseMessage
       const error = new Error(code ? `${code}: ${message}` : message)
       ;(error as Error & { code?: string }).code = code
+      ;(error as Error & { details?: Record<string, unknown> }).details = details
       throw error
     }
     return payload

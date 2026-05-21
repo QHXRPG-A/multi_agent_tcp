@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import secrets
+import shutil
 import socket
 import sys
 import threading
@@ -28,7 +29,7 @@ from typing import Any, Callable, Dict, Optional, Sequence
 from urllib.parse import parse_qs, urlparse
 
 from .cluster import CLIWorkerBackend
-from .blueprint_mcp_runtime import RunMCPRuntimeHandle
+from .blueprint_mcp_runtime import RunMCPRuntimeHandle, TOP_AGENT_PLANNING_CONTROL_TOOLS
 from .graph_control import GraphRuntimeControlPlane, graph_definition_from_dict
 from .graph_runtime import GraphRuntime, GuLiCodeTopAgentProfile, TopAgentStartPlan
 from .skill_space import SkillRecord
@@ -39,6 +40,22 @@ BLUEPRINT_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)")
 DEFAULT_BLUEPRINT_ID = "default"
 DEFAULT_BLUEPRINT_NAME = "Default Blueprint"
+BLUEPRINT_DIAGNOSTICS_SCHEMA_VERSION = 1
+BLUEPRINT_DIAGNOSTICS_KIND = "gulicode.blueprint.diagnostics"
+BLUEPRINT_DIAGNOSTICS_FOCUS = "planning_status_source"
+BLUEPRINT_DIAGNOSTICS_DIR = "blueprint-diagnostics"
+PLANNING_STATUS_SOURCE_COMMANDS = {
+    "run.status",
+    "top_agent.explain_status",
+    "top_agent.utterances",
+}
+TERMINAL_RUN_STATUSES = {"completed", "cancelled", "failed"}
+
+
+def validate_desktop_blueprint_graph(graph: Any) -> None:
+    graph.validate_dag()
+    if not graph.agent_nodes:
+        raise ValueError("blueprint graph requires at least one AgentNode")
 
 
 class BlueprintServiceError(ValueError):
@@ -132,6 +149,7 @@ class DesktopBlueprintRun:
     updated_at: float
     backend: Any = None
     mcp: Any = None
+    diagnostics_dir: Optional[Path] = None
     stream_condition: Any = field(default_factory=threading.Condition)
 
     def summary(self) -> Dict[str, Any]:
@@ -143,8 +161,83 @@ class DesktopBlueprintRun:
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
         }
+        if self.diagnostics_dir is not None:
+            data["diagnostics"] = {
+                "path": str(self.diagnostics_dir),
+                "snapshot": str(self.diagnostics_dir / "snapshot.json"),
+                "events": str(self.diagnostics_dir / "events.jsonl"),
+            }
         if self.mcp is not None:
             data["mcp"] = self.mcp.summary()
+        return data
+
+
+@dataclass
+class DesktopBlueprintPlanningQuestion:
+    question_id: str
+    questions: list[Dict[str, Any]]
+    created_at: float
+    status: str = "pending"
+    answers: Any = None
+    reason: str = ""
+    answered_at: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "questionId": self.question_id,
+            "questions": list(self.questions),
+            "createdAt": _iso_time(self.created_at),
+            "status": self.status,
+        }
+        if self.answers is not None:
+            data["answers"] = self.answers
+        if self.reason:
+            data["reason"] = self.reason
+        if self.answered_at is not None:
+            data["answeredAt"] = _iso_time(self.answered_at)
+        return data
+
+
+@dataclass
+class DesktopBlueprintPlanningSession:
+    """One desktop conversation's blueprint planning control context."""
+
+    session_id: str
+    desktop_session_id: str
+    project_dir: Path
+    blueprint_id: str
+    document: Dict[str, Any]
+    graph: Any
+    runtime: GraphRuntime
+    control: GraphRuntimeControlPlane
+    created_at: float
+    updated_at: float
+    framework_system: str = ""
+    mcp_context: Optional[Dict[str, Any]] = None
+    mcp: Any = None
+    status: str = "ready"
+    pending_question: Optional[DesktopBlueprintPlanningQuestion] = None
+    pending_plan: Optional[Dict[str, Any]] = None
+    active_run_id: Optional[str] = None
+    events: list[Dict[str, Any]] = field(default_factory=list)
+    condition: Any = field(default_factory=threading.Condition, repr=False)
+
+    def summary(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "sessionId": self.session_id,
+            "desktopSessionId": self.desktop_session_id,
+            "projectDir": str(self.project_dir),
+            "blueprintId": self.blueprint_id,
+            "status": self.status,
+            "createdAt": _iso_time(self.created_at),
+            "updatedAt": _iso_time(self.updated_at),
+        }
+        if self.active_run_id:
+            data["activeRunId"] = self.active_run_id
+        if self.mcp is not None:
+            data["mcp"] = self.mcp.summary()
+        if self.mcp_context is not None:
+            data["mcpContext"] = dict(self.mcp_context)
         return data
 
 
@@ -227,6 +320,7 @@ class DesktopBlueprintService:
     now: Any = time.time
     _lock: Any = field(default_factory=threading.RLock, init=False, repr=False)
     _runs: Dict[str, DesktopBlueprintRun] = field(default_factory=dict, init=False, repr=False)
+    _planning_sessions: Dict[str, DesktopBlueprintPlanningSession] = field(default_factory=dict, init=False, repr=False)
     _async_loop: DesktopAsyncLoop = field(default_factory=DesktopAsyncLoop, init=False, repr=False)
     _stream_tokens: Dict[str, Dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
 
@@ -330,6 +424,38 @@ class DesktopBlueprintService:
                 request_run_id(args),
                 base_url=str(args.get("baseUrl", "")),
                 cursor=args.get("cursor"),
+            )
+        if command == "blueprint.planning.ensureContext":
+            return self.ensure_blueprint_planning_context(
+                request_project_dir(args),
+                str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
+                str(args.get("desktopSessionId", "")).strip(),
+            )
+        if command == "blueprint.planning.answerQuestion":
+            return self.answer_blueprint_planning_question(
+                str(args.get("sessionId", "")).strip(),
+                str(args.get("questionId", "")).strip(),
+                args.get("answers"),
+                rejected=bool(args.get("rejected", False)),
+                reason=str(args.get("reason", "")),
+            )
+        if command == "blueprint.planning.rejectPlan":
+            return self.reject_blueprint_planning_plan(
+                str(args.get("sessionId", "")).strip(),
+                reason=str(args.get("reason", "")),
+            )
+        if command == "blueprint.planning.markPlanStarted":
+            return self.mark_blueprint_planning_plan_started(
+                str(args.get("sessionId", "")).strip(),
+                str(args.get("runId", "")).strip(),
+                started=args.get("started"),
+            )
+        if command == "blueprint.planning.status":
+            return self.blueprint_planning_status(str(args.get("sessionId", "")).strip())
+        if command == "blueprint.planning.endSession":
+            return self.end_blueprint_planning_session(
+                str(args.get("sessionId", "")).strip(),
+                reason=str(args.get("reason", "")),
             )
 
         raise BlueprintServiceError("UNKNOWN_COMMAND", f"unsupported desktop blueprint command: {command!r}")
@@ -445,7 +571,7 @@ class DesktopBlueprintService:
         try:
             normalized = normalize_document(document)
             graph = graph_definition_from_dict(dict(normalized["graph"]))
-            graph.validate_runnable()
+            validate_desktop_blueprint_graph(graph)
         except Exception as exc:
             errors.append(str(exc))
         return {"ok": not errors, "errors": errors, "warnings": warnings}
@@ -502,7 +628,7 @@ class DesktopBlueprintService:
         document = document_with_common_config_paths(document)
         try:
             graph = graph_definition_from_dict(dict(document["graph"]))
-            graph.validate_runnable()
+            validate_desktop_blueprint_graph(graph)
         except Exception as exc:
             raise BlueprintServiceError(
                 "INVALID_BLUEPRINT_GRAPH",
@@ -527,8 +653,9 @@ class DesktopBlueprintService:
         with self._lock:
             run_id = self._generate_run_id_locked()
 
+        diagnostics_dir = None
         if execution_mode == "live":
-            backend, runtime, control, mcp, started = self._async_loop.run(
+            backend, runtime, control, mcp, started, diagnostics_dir = self._async_loop.run(
                 self._start_live_runtime(run_id, validate_project_dir(project_dir), document, graph, plan)
             )
         else:
@@ -570,10 +697,18 @@ class DesktopBlueprintService:
                 updated_at=now,
                 backend=backend,
                 mcp=mcp,
+                diagnostics_dir=diagnostics_dir,
             )
             self._attach_stream_notification(run)
             self._runs[run.run_id] = run
         status = self._runtime_call(run, lambda: runtime.status_snapshot(graph=graph))
+        self._append_blueprint_diagnostics_event(
+            run,
+            "blueprint_run_started",
+            status=_compact_runtime_status(status),
+            validation=_compact_validation(started.get("validation")),
+            queuedMessageCount=len(started.get("queued_messages", []) or []),
+        )
         return {
             "ok": True,
             "runId": run.run_id,
@@ -618,7 +753,7 @@ class DesktopBlueprintService:
         document: Dict[str, Any],
         graph: Any,
         plan: TopAgentStartPlan,
-    ) -> tuple[Any, GraphRuntime, GraphRuntimeControlPlane, Optional[RunMCPRuntimeHandle], Dict[str, Any]]:
+    ) -> tuple[Any, GraphRuntime, GraphRuntimeControlPlane, Optional[RunMCPRuntimeHandle], Dict[str, Any], Path]:
         backend = None
         runtime = None
         rpc_server = None
@@ -650,6 +785,7 @@ class DesktopBlueprintService:
             backend = await CLIWorkerBackend.create([], port=_free_tcp_port(), allow_empty=True)
             manager = DulwichWorkspaceManager.open_or_init(project_dir)
             workspace_run = manager.create_run(run_id=run_id, code_mode="project_reference")
+            diagnostics_dir = _reset_blueprint_diagnostics_dir(workspace_run.shared_dir / "logs" / BLUEPRINT_DIAGNOSTICS_DIR)
             rpc_server = WorkspaceRPCServer(manager, workspace_run)
             rpc_server.start()
             runtime = GraphRuntime(
@@ -663,7 +799,6 @@ class DesktopBlueprintService:
             )
             runtime.agent_stream_run_id = run_id
             control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
-            top_agent_node = control.top_agent.to_agent_node()
             mcp = RunMCPRuntimeHandle(
                 run_id=run_id,
                 runtime=runtime,
@@ -673,8 +808,8 @@ class DesktopBlueprintService:
                 manager=manager,
                 workspace_run=workspace_run,
                 runtime_loop=self._async_loop,
-                top_agent_node_id=top_agent_node.node_id,
-                top_agent_id=top_agent_node.runtime_agent_id,
+                top_agent_node_id="desktop-blueprint-planning",
+                top_agent_id="gulicode-desktop",
                 close_run_callback=lambda **kwargs: self._end_live_run_from_mcp(run_id, **kwargs),
             )
             mcp.start()
@@ -683,7 +818,7 @@ class DesktopBlueprintService:
             started = await control.start_run(plan, prestart_all_agents=True)
             if started.get("ok"):
                 runtime.start_tick_loop()
-            return backend, runtime, control, mcp, started
+            return backend, runtime, control, mcp, started, diagnostics_dir
         except BlueprintServiceError:
             await cleanup()
             raise
@@ -871,6 +1006,194 @@ class DesktopBlueprintService:
         ws_url = f"{scheme}://{host}/agent-stream?streamToken={token}&cursor={int(cursor or 0)}"
         return {"ok": True, "runId": run_id, "streamToken": token, "wsUrl": ws_url}
 
+    def ensure_blueprint_planning_context(
+        self,
+        project_dir: Path,
+        blueprint_id: str = DEFAULT_BLUEPRINT_ID,
+        desktop_session_id: str = "",
+    ) -> Dict[str, Any]:
+        desktop_session_id = str(desktop_session_id).strip()
+        if not desktop_session_id:
+            raise BlueprintServiceError("BAD_REQUEST", "desktopSessionId must be a non-empty string")
+        project_dir = validate_project_dir(project_dir)
+        blueprint_id = validate_blueprint_id(blueprint_id)
+        session_id = self._planning_session_id(project_dir, blueprint_id, desktop_session_id)
+        with self._lock:
+            existing = self._planning_sessions.get(session_id)
+        if existing is not None and existing.status not in {"ended", "failed"}:
+            return self._blueprint_planning_snapshot(existing)
+
+        document = self.open_blueprint(project_dir, blueprint_id)
+        try:
+            graph = graph_definition_from_dict(dict(document["graph"]))
+            validate_desktop_blueprint_graph(graph)
+        except Exception as exc:
+            raise BlueprintServiceError(
+                "INVALID_BLUEPRINT_GRAPH",
+                str(exc),
+                details={"blueprintId": str(document["id"])},
+            ) from exc
+
+        runtime, control, mcp, mcp_context, prepared = self._async_loop.run(
+            self._start_blueprint_planning_context(session_id, project_dir, document, graph),
+            timeout=60,
+        )
+        now = float(self.now())
+        session = DesktopBlueprintPlanningSession(
+            session_id=session_id,
+            desktop_session_id=desktop_session_id,
+            project_dir=project_dir,
+            blueprint_id=str(document["id"]),
+            document=document,
+            graph=graph,
+            runtime=runtime,
+            control=control,
+            created_at=now,
+            updated_at=now,
+            framework_system=self._blueprint_planning_system(control, graph),
+            mcp_context=mcp_context,
+            mcp=mcp,
+        )
+        with self._lock:
+            self._planning_sessions[session_id] = session
+        self._append_blueprint_planning_event(
+            session,
+            "context_ready",
+            summary="Blueprint planning context is ready",
+            details={"prepared": prepared},
+        )
+        return self._blueprint_planning_snapshot(session)
+
+    def answer_blueprint_planning_question(
+        self,
+        session_id: str,
+        question_id: str,
+        answers: Any,
+        *,
+        rejected: bool = False,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        session = self._get_blueprint_planning_session(session_id)
+        with session.condition:
+            question = session.pending_question
+            if question is None or question.question_id != question_id or question.status != "pending":
+                raise BlueprintServiceError(
+                    "BLUEPRINT_PLANNING_QUESTION_NOT_FOUND",
+                    "pending blueprint planning question was not found",
+                    status=404,
+                )
+            question.status = "rejected" if rejected else "answered"
+            question.answers = None if rejected else answers
+            question.reason = str(reason or "")
+            question.answered_at = float(self.now())
+            session.pending_question = None
+            session.updated_at = float(self.now())
+            session.condition.notify_all()
+        self._append_blueprint_planning_event(
+            session,
+            "question_rejected" if rejected else "question_answered",
+            questionId=question_id,
+            answers=None if rejected else answers,
+            reason=str(reason or ""),
+        )
+        return self._blueprint_planning_snapshot(session)
+
+    def reject_blueprint_planning_plan(self, session_id: str, *, reason: str = "") -> Dict[str, Any]:
+        session = self._get_blueprint_planning_session(session_id)
+        with session.condition:
+            pending = session.pending_plan
+            if pending is None:
+                raise BlueprintServiceError("BLUEPRINT_PLANNING_PLAN_NOT_FOUND", "no staged blueprint planning plan is pending")
+            plan_id = str(pending.get("planId", ""))
+            session.pending_plan = None
+            session.updated_at = float(self.now())
+        self._append_blueprint_planning_event(
+            session,
+            "plan_rejected",
+            planId=plan_id,
+            reason=str(reason or ""),
+        )
+        return self._blueprint_planning_snapshot(session)
+
+    def mark_blueprint_planning_plan_started(
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        started: Any = None,
+    ) -> Dict[str, Any]:
+        session = self._get_blueprint_planning_session(session_id)
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            raise BlueprintServiceError("BAD_REQUEST", "runId must be a non-empty string")
+        with session.condition:
+            pending = session.pending_plan
+            if pending is None:
+                raise BlueprintServiceError("BLUEPRINT_PLANNING_PLAN_NOT_FOUND", "no staged blueprint planning plan is pending")
+            plan_id = str(pending.get("planId", ""))
+            session.pending_plan = None
+            session.active_run_id = run_id
+            session.updated_at = float(self.now())
+        self._append_blueprint_planning_event(
+            session,
+            "run_started",
+            runId=run_id,
+            planId=plan_id,
+            started=started if isinstance(started, dict) else None,
+        )
+        try:
+            run = self._get_run(run_id)
+        except Exception:
+            run = None
+        if run is not None:
+            status_source = self._planning_status_source_summary(
+                session,
+                active_run=run if run.execution_mode == "live" else None,
+                planning_status=self._planning_runtime_status(session),
+                active_status=self._run_runtime_status(run),
+            )
+            self._append_blueprint_diagnostics_event(
+                run,
+                "planning_active_run_linked",
+                planningSessionId=session.session_id,
+                planId=plan_id,
+                statusSource=status_source,
+                started=_compact_start_response(started),
+            )
+        return self._blueprint_planning_snapshot(session)
+
+    def blueprint_planning_status(self, session_id: str) -> Dict[str, Any]:
+        return self._blueprint_planning_snapshot(self._get_blueprint_planning_session(session_id))
+
+    def end_blueprint_planning_session(self, session_id: str, *, reason: str = "") -> Dict[str, Any]:
+        session = self._get_blueprint_planning_session(session_id)
+        should_close = False
+        with session.condition:
+            if session.status not in {"ended", "failed"}:
+                session.status = "ending"
+                session.updated_at = float(self.now())
+                should_close = True
+            if session.pending_question is not None and session.pending_question.status == "pending":
+                session.pending_question.status = "rejected"
+                session.pending_question.reason = str(reason or "session ended")
+                session.pending_question.answered_at = float(self.now())
+                session.pending_question = None
+                session.condition.notify_all()
+        if should_close:
+            try:
+                self._async_loop.run(self._close_blueprint_planning_context(session), timeout=10)
+            finally:
+                with session.condition:
+                    session.status = "ended"
+                    session.updated_at = float(self.now())
+                    session.condition.notify_all()
+                self._append_blueprint_planning_event(
+                    session,
+                    "session_ended",
+                    reason=str(reason or ""),
+                )
+        return self._blueprint_planning_snapshot(session)
+
     def accept_stream_token(self, token: str) -> str:
         with self._lock:
             data = self._stream_tokens.pop(str(token), None)
@@ -909,6 +1232,640 @@ class DesktopBlueprintService:
         if run.execution_mode == "live":
             return self._async_loop.call(fn)
         return fn()
+
+    async def _start_blueprint_planning_context(
+        self,
+        session_id: str,
+        project_dir: Path,
+        document: Dict[str, Any],
+        graph: Any,
+    ) -> tuple[GraphRuntime, GraphRuntimeControlPlane, RunMCPRuntimeHandle, Dict[str, Any], Dict[str, Any]]:
+        runtime = None
+        rpc_server = None
+        mcp = None
+
+        async def cleanup() -> None:
+            if mcp is not None:
+                try:
+                    mcp.close()
+                except Exception:
+                    pass
+            if runtime is not None:
+                try:
+                    await runtime.close()
+                except Exception:
+                    pass
+            elif rpc_server is not None:
+                try:
+                    rpc_server.close()
+                except Exception:
+                    pass
+
+        try:
+            manager = DulwichWorkspaceManager.open_or_init(project_dir)
+            workspace_run_id = f"{session_id}-ctx-{uuid.uuid4().hex[:8]}"
+            workspace_run = manager.create_run(run_id=workspace_run_id, code_mode="project_reference")
+            rpc_server = WorkspaceRPCServer(manager, workspace_run)
+            rpc_server.start()
+            runtime = GraphRuntime(
+                DesktopBlueprintNoopBackend(),
+                enforce_private_agent_context=True,
+                private_context_manager=manager,
+                private_context_run=workspace_run,
+                private_context_rpc_server=rpc_server,
+                skill_space=_desktop_skill_catalog_from_document(document, project_dir),
+                message_journal_path=workspace_run.shared_dir / "logs" / "message_journal.jsonl",
+            )
+            runtime.agent_stream_run_id = session_id
+            control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
+            mcp = RunMCPRuntimeHandle(
+                run_id=session_id,
+                runtime=runtime,
+                control=control,
+                graph=graph,
+                workspace_rpc_server=rpc_server,
+                manager=manager,
+                workspace_run=workspace_run,
+                runtime_loop=self._async_loop,
+                top_agent_node_id="desktop-blueprint-planning",
+                top_agent_id="gulicode-desktop",
+                request_user_input_callback=lambda questions: self._handle_top_agent_request_user_input(
+                    session_id,
+                    questions,
+                ),
+                stage_start_plan_callback=lambda plan, markdown: self._handle_top_agent_stage_start_plan(
+                    session_id,
+                    plan,
+                    markdown,
+                ),
+                control_command_callback=lambda **kwargs: self._handle_planning_control_command(
+                    session_id,
+                    **kwargs,
+                ),
+                control_call_observer=lambda **kwargs: self._record_planning_mcp_control_call(
+                    session_id,
+                    **kwargs,
+                ),
+                control_allowed_tools=TOP_AGENT_PLANNING_CONTROL_TOOLS,
+            )
+            mcp.start()
+            mcp_context = mcp.provision_control_context(
+                agent_node_id="desktop-blueprint-planning",
+                agent_id="gulicode-desktop",
+                permissions=control.top_agent.allowed_run_permissions,
+                allowed_tools=TOP_AGENT_PLANNING_CONTROL_TOOLS,
+            )
+            prepared = {
+                "organization": graph.agent_organization_summary(),
+                "mcp": {
+                    "server": mcp_context.get("server_name"),
+                    "url": mcp_context.get("url"),
+                    "tools": mcp_context.get("tools", []),
+                },
+                "workspaceRunId": workspace_run.run_id,
+            }
+            return runtime, control, mcp, mcp_context, prepared
+        except BlueprintServiceError:
+            await cleanup()
+            raise
+        except Exception as exc:
+            await cleanup()
+            raise BlueprintServiceError(
+                "BLUEPRINT_PLANNING_CONTEXT_FAILED",
+                "failed to prepare desktop blueprint planning context",
+                details={"error": str(exc)},
+            ) from exc
+
+    def _handle_planning_control_command(
+        self,
+        session_id: str,
+        *,
+        scope: Any,
+        tool_name: str,
+        command: str,
+        args: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if str(command) not in PLANNING_STATUS_SOURCE_COMMANDS:
+            return None
+        session = self._get_blueprint_planning_session(session_id)
+        active_run = self._active_live_run_for_planning_session(session)
+        planning_status = self._planning_runtime_status(session)
+        active_status = self._run_runtime_status(active_run) if active_run is not None else None
+        status_source = self._planning_status_source_summary(
+            session,
+            active_run=active_run,
+            planning_status=planning_status,
+            active_status=active_status,
+        )
+        if active_run is not None:
+            result = self._planning_control_response_for_run(active_run, command, args)
+            self._record_planning_status_mismatch(
+                active_run,
+                status_source=status_source,
+                planning_status=planning_status,
+                active_status=active_status,
+            )
+        else:
+            result = session.control.handle_request({"command": command, "args": args})
+        payload = dict(result)
+        payload["status_source"] = status_source
+        payload["source_run_id"] = active_run.run_id if active_run is not None else None
+        payload["planning_session_id"] = session.session_id
+        return payload
+
+    def _record_planning_mcp_control_call(
+        self,
+        session_id: str,
+        *,
+        scope: Any,
+        tool_name: str,
+        command: str,
+        args: Dict[str, Any],
+        result: Optional[Dict[str, Any]],
+        error: Optional[str],
+    ) -> None:
+        try:
+            session = self._get_blueprint_planning_session(session_id)
+        except BlueprintServiceError:
+            return
+        source_run_id = None
+        status_source = None
+        if isinstance(result, dict):
+            source_run_id = result.get("source_run_id")
+            status_source = result.get("status_source")
+        run = None
+        if source_run_id:
+            try:
+                run = self._get_run(str(source_run_id))
+            except Exception:
+                run = None
+        if run is None:
+            run = self._active_live_run_for_planning_session(session)
+        if run is None:
+            return
+        self._append_blueprint_diagnostics_event(
+            run,
+            "planning_mcp_control_call",
+            planningSessionId=session.session_id,
+            toolName=str(tool_name),
+            command=str(command),
+            args=dict(args or {}),
+            statusSource=status_source,
+            output=_compact_control_result(result),
+            error=error,
+        )
+
+    def _handle_top_agent_request_user_input(
+        self,
+        session_id: str,
+        questions: list[dict[str, Any]],
+    ) -> Dict[str, Any]:
+        session = self._get_blueprint_planning_session(session_id)
+        clean_questions = [
+            dict(item)
+            for item in (questions or [])
+            if isinstance(item, dict)
+        ]
+        if not clean_questions:
+            clean_questions = [{"id": "question", "question": "Please provide the missing information."}]
+        question = DesktopBlueprintPlanningQuestion(
+            question_id=f"question-{uuid.uuid4().hex[:12]}",
+            questions=clean_questions,
+            created_at=float(self.now()),
+        )
+        with session.condition:
+            if session.pending_question is not None and session.pending_question.status == "pending":
+                return {
+                    "ok": False,
+                    "status": "rejected",
+                    "error": "another Top Agent question is already pending",
+                }
+            session.pending_question = question
+            session.updated_at = float(self.now())
+            session.condition.notify_all()
+        self._append_blueprint_planning_event(
+            session,
+            "question_requested",
+            question=question.to_dict(),
+        )
+        with session.condition:
+            while (
+                session.pending_question is question
+                and question.status == "pending"
+                and session.status not in {"ended", "failed"}
+            ):
+                session.condition.wait(timeout=15.0)
+            if question.status == "answered":
+                return {
+                    "ok": True,
+                    "questionId": question.question_id,
+                    "answers": question.answers,
+                }
+            return {
+                "ok": False,
+                "questionId": question.question_id,
+                "status": "rejected",
+                "reason": question.reason or "question was rejected",
+            }
+
+    def _handle_top_agent_stage_start_plan(
+        self,
+        session_id: str,
+        plan_data: dict[str, Any],
+        plan_markdown: str,
+    ) -> Dict[str, Any]:
+        session = self._get_blueprint_planning_session(session_id)
+        try:
+            plan = TopAgentStartPlan.from_dict(dict(plan_data or {}))
+            validation = session.control.top_agent.validate_start_plan(session.graph, plan).to_dict()
+        except Exception as exc:
+            validation = {
+                "ok": False,
+                "errors": [str(exc)],
+                "warnings": [],
+            }
+            plan = None
+
+        pending: Optional[Dict[str, Any]] = None
+        if validation.get("ok") and plan is not None:
+            pending = {
+                "planId": f"plan-{uuid.uuid4().hex[:12]}",
+                "plan": dict(validation.get("normalized_plan") or plan.to_dict()),
+                "planMarkdown": str(plan_markdown or ""),
+                "validation": validation,
+                "proposedBy": "top_agent",
+                "createdAt": _iso_time(float(self.now())),
+                "status": "pending",
+            }
+            with session.condition:
+                session.pending_plan = pending
+                session.updated_at = float(self.now())
+                session.condition.notify_all()
+            self._append_blueprint_planning_event(
+                session,
+                "plan_staged",
+                pendingPlan=pending,
+            )
+        else:
+            self._append_blueprint_planning_event(
+                session,
+                "plan_validation_failed",
+                validation=validation,
+            )
+        return {
+            "ok": bool(validation.get("ok")),
+            "validation": validation,
+            "pendingPlan": pending,
+        }
+
+    async def _close_blueprint_planning_context(self, session: DesktopBlueprintPlanningSession) -> None:
+        if session.mcp is not None:
+            session.mcp.close()
+        await session.runtime.close()
+
+    def _planning_session_id(self, project_dir: Path, blueprint_id: str, desktop_session_id: str) -> str:
+        key = "|".join(
+            [
+                str(Path(project_dir).expanduser().resolve()).lower(),
+                str(blueprint_id),
+                str(desktop_session_id),
+            ]
+        )
+        return f"planning-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}"
+
+    def _get_blueprint_planning_session(self, session_id: str) -> DesktopBlueprintPlanningSession:
+        value = str(session_id).strip()
+        if not value:
+            raise BlueprintServiceError("BAD_REQUEST", "sessionId must be a non-empty string")
+        with self._lock:
+            session = self._planning_sessions.get(value)
+        if session is None:
+            raise BlueprintServiceError(
+                "BLUEPRINT_PLANNING_SESSION_NOT_FOUND",
+                f"Blueprint planning session was not found: {value}",
+                status=404,
+            )
+        return session
+
+    def _active_live_run_for_planning_session(
+        self,
+        session: DesktopBlueprintPlanningSession,
+    ) -> Optional[DesktopBlueprintRun]:
+        with self._lock:
+            if session.active_run_id:
+                linked = self._runs.get(session.active_run_id)
+                if linked is not None and linked.execution_mode == "live":
+                    return linked
+            candidates = [
+                run
+                for run in self._runs.values()
+                if run.execution_mode == "live"
+                and run.project_dir == session.project_dir
+                and run.blueprint_id == session.blueprint_id
+            ]
+        for run in sorted(candidates, key=lambda item: item.updated_at, reverse=True):
+            try:
+                run_status = self._runtime_call(run, lambda: run.runtime.status_snapshot()["run"])
+            except Exception:
+                continue
+            if str(run_status.get("status") or "") not in TERMINAL_RUN_STATUSES:
+                return run
+        return None
+
+    def _planning_runtime_status(self, session: DesktopBlueprintPlanningSession) -> Optional[Dict[str, Any]]:
+        try:
+            return session.runtime.status_snapshot(graph=session.graph, recent_events_limit=20)
+        except Exception:
+            return None
+
+    def _run_runtime_status(self, run: Optional[DesktopBlueprintRun]) -> Optional[Dict[str, Any]]:
+        if run is None:
+            return None
+        try:
+            return self._runtime_call(run, lambda: run.runtime.status_snapshot(graph=run.graph, recent_events_limit=20))
+        except Exception:
+            return None
+
+    def _planning_status_source_summary(
+        self,
+        session: DesktopBlueprintPlanningSession,
+        *,
+        active_run: Optional[DesktopBlueprintRun],
+        planning_status: Optional[Dict[str, Any]],
+        active_status: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        selected = "active_live_run" if active_run is not None else "planning_context"
+        mismatch = (
+            active_run is not None
+            and active_status is not None
+            and planning_status is not None
+            and _runtime_status_comparison_key(active_status) != _runtime_status_comparison_key(planning_status)
+        )
+        reason = (
+            "linked active live run is available"
+            if active_run is not None and session.active_run_id == active_run.run_id
+            else "latest matching live run is available"
+            if active_run is not None
+            else "no active live run is linked to this planning session"
+        )
+        return {
+            "selected": selected,
+            "planningSessionId": session.session_id,
+            "activeRunId": active_run.run_id if active_run is not None else session.active_run_id,
+            "mismatch": bool(mismatch),
+            "reason": reason,
+        }
+
+    def _planning_control_response_for_run(
+        self,
+        run: DesktopBlueprintRun,
+        command: str,
+        args: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if command == "run.status":
+            return {
+                "ok": True,
+                "status": self._runtime_call(
+                    run,
+                    lambda: run.runtime.status_snapshot(
+                        graph=run.graph,
+                        recent_events_limit=int(args.get("recent_events_limit", 20)),
+                    ),
+                ),
+            }
+        if command == "top_agent.explain_status":
+            return {
+                "ok": True,
+                "explanation": self._runtime_call(
+                    run,
+                    lambda: run.runtime.explain_status(
+                        graph=run.graph,
+                        recent_events_limit=int(args.get("recent_events_limit", 20)),
+                    ),
+                ),
+            }
+        if command == "top_agent.utterances":
+            return self._runtime_call(
+                run,
+                lambda: run.control.top_agent_utterances(
+                    task_id=(
+                        str(args["task_id"])
+                        if args.get("task_id") is not None
+                        else None
+                    ),
+                    agent_id=(
+                        str(args["agent_id"])
+                        if args.get("agent_id") is not None
+                        else None
+                    ),
+                    node_id=(
+                        str(args["node_id"])
+                        if args.get("node_id") is not None
+                        else None
+                    ),
+                ),
+            )
+        return self._runtime_call(run, lambda: run.control.handle_request({"command": command, "args": args}))
+
+    def _record_planning_status_mismatch(
+        self,
+        run: DesktopBlueprintRun,
+        *,
+        status_source: Dict[str, Any],
+        planning_status: Optional[Dict[str, Any]],
+        active_status: Optional[Dict[str, Any]],
+    ) -> None:
+        if not status_source.get("mismatch"):
+            return
+        self._append_blueprint_diagnostics_event(
+            run,
+            "planning_status_source_mismatch",
+            statusSource=status_source,
+            planningStatus=_compact_runtime_status(planning_status),
+            activeRunStatus=_compact_runtime_status(active_status),
+        )
+
+    def _append_blueprint_diagnostics_event(
+        self,
+        run: DesktopBlueprintRun,
+        event_type: str,
+        **data: Any,
+    ) -> Optional[Dict[str, Any]]:
+        diagnostics_dir = run.diagnostics_dir
+        if diagnostics_dir is None:
+            return None
+        event = {
+            "id": f"diag-{uuid.uuid4().hex[:12]}",
+            "type": str(event_type),
+            "createdAt": _iso_time(float(self.now())),
+            **_compact_dict(data),
+        }
+        try:
+            diagnostics_dir.mkdir(parents=True, exist_ok=True)
+            events_path = diagnostics_dir / "events.jsonl"
+            with events_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+            _write_blueprint_diagnostics_snapshot(
+                run,
+                current={
+                    "lastEvent": event,
+                    **_diagnostic_current_from_event(event),
+                },
+                saved_at=_iso_time(float(self.now())),
+            )
+        except Exception:
+            return None
+        return event
+
+    def _append_blueprint_planning_event(
+        self,
+        session: DesktopBlueprintPlanningSession,
+        event_type: str,
+        **data: Any,
+    ) -> Dict[str, Any]:
+        event = {
+            "id": f"evt-{uuid.uuid4().hex[:12]}",
+            "type": event_type,
+            "createdAt": _iso_time(float(self.now())),
+            **_compact_dict(data),
+        }
+        with session.condition:
+            session.events.append(event)
+            if len(session.events) > 500:
+                session.events = session.events[-500:]
+            session.updated_at = float(self.now())
+            session.condition.notify_all()
+        return event
+
+    def _blueprint_planning_snapshot(self, session: DesktopBlueprintPlanningSession) -> Dict[str, Any]:
+        with session.condition:
+            pending_question = (
+                session.pending_question.to_dict()
+                if session.pending_question is not None
+                else None
+            )
+            pending_plan = dict(session.pending_plan) if session.pending_plan is not None else None
+            events = [dict(event) for event in session.events]
+            summary = session.summary()
+            active_run_id = session.active_run_id
+            framework_system = session.framework_system
+            mcp_context = dict(session.mcp_context) if session.mcp_context is not None else None
+        runtime_status = None
+        runtime_explanation = None
+        try:
+            runtime_status = session.runtime.status_snapshot(graph=session.graph, recent_events_limit=20)
+            runtime_explanation = session.runtime.explain_status(graph=session.graph, recent_events_limit=20)
+        except Exception:
+            runtime_status = None
+            runtime_explanation = None
+        active_run_obj = self._active_live_run_for_planning_session(session)
+        active_run_status = None
+        active_run = None
+        if active_run_obj is not None:
+            try:
+                active_run_status = self._runtime_call(
+                    active_run_obj,
+                    lambda: active_run_obj.runtime.status_snapshot(graph=active_run_obj.graph),
+                )
+                active_run = {
+                    "runId": active_run_obj.run_id,
+                    "run": active_run_obj.summary(),
+                    "status": active_run_status,
+                }
+            except Exception:
+                active_run = {"runId": active_run_obj.run_id, "status": None}
+        elif active_run_id:
+            try:
+                run = self._get_run(active_run_id)
+                active_run_status = self._runtime_call(run, lambda: run.runtime.status_snapshot(graph=run.graph))
+                active_run = {
+                    "runId": run.run_id,
+                    "run": run.summary(),
+                    "status": active_run_status,
+                }
+            except Exception:
+                active_run = {"runId": active_run_id, "status": None}
+        status_source = self._planning_status_source_summary(
+            session,
+            active_run=active_run_obj,
+            planning_status=runtime_status,
+            active_status=active_run_status,
+        )
+        response = {
+            "ok": True,
+            "sessionId": session.session_id,
+            "session": summary,
+            "events": events,
+            "pendingQuestion": pending_question,
+            "pendingPlan": pending_plan,
+            "frameworkSystem": framework_system,
+            "mcpContext": mcp_context,
+            "runtimeStatus": runtime_status,
+            "runtimeExplanation": runtime_explanation,
+            "activeRun": active_run,
+            "statusSource": status_source,
+        }
+        if active_run_obj is not None:
+            self._append_blueprint_diagnostics_event(
+                active_run_obj,
+                "planning_status_snapshot",
+                planningSessionId=session.session_id,
+                statusSource=status_source,
+                planningStatus=_compact_runtime_status(runtime_status),
+                activeRunStatus=_compact_runtime_status(active_run_status),
+                pendingQuestionStatus=(
+                    pending_question.get("status")
+                    if isinstance(pending_question, dict)
+                    else None
+                ),
+                pendingPlanStatus=(
+                    pending_plan.get("status")
+                    if isinstance(pending_plan, dict)
+                    else None
+                ),
+            )
+            self._record_planning_status_mismatch(
+                active_run_obj,
+                status_source=status_source,
+                planning_status=runtime_status,
+                active_status=active_run_status,
+            )
+        return response
+
+    def _blueprint_planning_system(
+        self,
+        control: GraphRuntimeControlPlane,
+        graph: Any,
+    ) -> str:
+        profile = control.top_agent
+        context = {
+            "role": "GuLiCode desktop blueprint planning mode",
+            "desktop_is_top_agent": True,
+            "no_bottom_top_agent_worker": True,
+            "organization": graph.agent_organization_summary(),
+            "mcp_server": "framework_control",
+            "mcp_tools": [
+                f"framework_control_{tool_name}"
+                for tool_name in TOP_AGENT_PLANNING_CONTROL_TOOLS
+            ],
+        }
+        return "\n\n".join(
+            [
+                "# GuLiCode Desktop Blueprint Planning Mode",
+                "You are operating inside the GuLiCode desktop app. The desktop app/current chat session is the Top Agent; do not assume or start a separate Top Agent CLI or worker.",
+                "You must use the injected framework_control MCP tool calls for organization/status/explanation/user-question/start-plan staging. The available tool names are prefixed as framework_control_*. Do not describe them as direct APIs.",
+                "If those framework_control_* tools are not visible in the current turn, say the blueprint planning MCP is not connected and stop instead of inventing a plan or claiming you can use direct framework APIs.",
+                "Do not call runtime_start; the desktop app starts blueprints only after user confirmation.",
+                "Do not modify or persist blueprint graph structure in this mode.",
+                "When the plan depends on missing user choices, call framework_control_top_agent_request_user_input. When a valid start plan is ready, call framework_control_top_agent_stage_start_plan.",
+                "## Framework Rule",
+                profile.rule_text(),
+                "## Framework Skill",
+                profile.skill_text(),
+                "## Desktop Planning Context",
+                json.dumps(context, ensure_ascii=False, indent=2),
+            ]
+        )
 
     async def _close_live_run(self, run: DesktopBlueprintRun) -> None:
         if run.mcp is not None:
@@ -971,6 +1928,7 @@ class DesktopBlueprintService:
     def close(self) -> None:
         with self._lock:
             runs = list(self._runs.values())
+            planning_sessions = list(self._planning_sessions.values())
         for run in runs:
             if run.execution_mode == "live":
                 try:
@@ -979,6 +1937,14 @@ class DesktopBlueprintService:
                     pass
             with run.stream_condition:
                 run.stream_condition.notify_all()
+        for session in planning_sessions:
+            try:
+                self._async_loop.run(self._close_blueprint_planning_context(session), timeout=10)
+            except Exception:
+                pass
+            with session.condition:
+                session.status = "ended"
+                session.condition.notify_all()
         self._async_loop.close()
 
     def _generate_run_id_locked(self) -> str:
@@ -1170,6 +2136,180 @@ def _workspace_api_calls_for_agent(run: DesktopBlueprintRun, node_id: str, agent
     return calls
 
 
+def _reset_blueprint_diagnostics_dir(path: Path) -> Path:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "events.jsonl").write_text("", encoding="utf-8")
+    return path
+
+
+def _write_blueprint_diagnostics_snapshot(
+    run: DesktopBlueprintRun,
+    *,
+    current: Dict[str, Any],
+    saved_at: Optional[str],
+) -> None:
+    if run.diagnostics_dir is None:
+        return
+    snapshot = {
+        "schema_version": BLUEPRINT_DIAGNOSTICS_SCHEMA_VERSION,
+        "kind": BLUEPRINT_DIAGNOSTICS_KIND,
+        "focus": BLUEPRINT_DIAGNOSTICS_FOCUS,
+        "runId": run.run_id,
+        "projectDir": str(run.project_dir),
+        "blueprintId": run.blueprint_id,
+        "saved_at": saved_at,
+        "current": current,
+    }
+    (run.diagnostics_dir / "snapshot.json").write_text(
+        json.dumps(snapshot, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _diagnostic_current_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    event_type = str(event.get("type") or "")
+    current: Dict[str, Any] = {}
+    if "statusSource" in event:
+        current["statusSource"] = event.get("statusSource")
+    if event_type == "blueprint_run_started":
+        current["runtimeStatus"] = event.get("status")
+    elif event_type == "planning_status_snapshot":
+        current["planningStatus"] = event.get("planningStatus")
+        current["activeRunStatus"] = event.get("activeRunStatus")
+    elif event_type == "planning_mcp_control_call":
+        current["lastMcpControlCall"] = {
+            "toolName": event.get("toolName"),
+            "command": event.get("command"),
+            "args": event.get("args"),
+            "statusSource": event.get("statusSource"),
+            "output": event.get("output"),
+            "error": event.get("error"),
+        }
+    elif event_type == "planning_status_source_mismatch":
+        current["planningStatus"] = event.get("planningStatus")
+        current["activeRunStatus"] = event.get("activeRunStatus")
+    return _compact_dict(current)
+
+
+def _compact_runtime_status(status: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(status, dict):
+        return None
+    run = _record_dict(status.get("run"))
+    message_journal = _record_dict(run.get("message_journal"))
+    agents: Dict[str, Any] = {}
+    raw_agents = status.get("agents")
+    if isinstance(raw_agents, dict):
+        for node_id, raw_agent in sorted(raw_agents.items()):
+            agent = _record_dict(raw_agent)
+            agents[str(node_id)] = _compact_dict(
+                {
+                    "agent_id": agent.get("agent_id"),
+                    "state": agent.get("state"),
+                    "busy_count": agent.get("busy_count"),
+                    "queue_size": agent.get("queue_size"),
+                    "current_message_id": agent.get("current_message_id"),
+                    "last_error": agent.get("last_error"),
+                }
+            )
+    return {
+        "run": _compact_dict(
+            {
+                "status": run.get("status"),
+                "final_status": run.get("final_status"),
+                "message_journal": _compact_dict(
+                    {
+                        "path": message_journal.get("path"),
+                        "record_count": message_journal.get("record_count"),
+                    }
+                ),
+            }
+        ),
+        "agents": agents,
+    }
+
+
+def _runtime_status_comparison_key(status: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    compact = _compact_runtime_status(status) or {}
+    agents = compact.get("agents") if isinstance(compact.get("agents"), dict) else {}
+    return {
+        "run": _record_dict(compact.get("run")).get("status"),
+        "agents": {
+            str(node_id): {
+                "state": _record_dict(agent).get("state"),
+                "busy_count": _record_dict(agent).get("busy_count"),
+                "queue_size": _record_dict(agent).get("queue_size"),
+                "current_message_id": _record_dict(agent).get("current_message_id"),
+                "last_error": _record_dict(agent).get("last_error"),
+            }
+            for node_id, agent in sorted(agents.items())
+        },
+    }
+
+
+def _compact_control_result(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(result, dict):
+        return None
+    compact: Dict[str, Any] = {
+        "ok": result.get("ok"),
+        "status_source": result.get("status_source"),
+        "source_run_id": result.get("source_run_id"),
+        "planning_session_id": result.get("planning_session_id"),
+    }
+    if isinstance(result.get("status"), dict):
+        compact["status"] = _compact_runtime_status(result.get("status"))
+    if isinstance(result.get("explanation"), dict):
+        explanation = _record_dict(result.get("explanation"))
+        compact["explanation"] = _compact_dict(
+            {
+                "summary": explanation.get("summary"),
+                "observations": list(explanation.get("observations", []))[:10]
+                if isinstance(explanation.get("observations"), list)
+                else None,
+                "warnings": list(explanation.get("warnings", []))[:10]
+                if isinstance(explanation.get("warnings"), list)
+                else None,
+            }
+        )
+    if isinstance(result.get("utterances"), list):
+        compact["utterance_count"] = len(result["utterances"])
+        compact["filters"] = result.get("filters")
+    if "error" in result:
+        compact["error"] = result.get("error")
+    return _compact_dict(compact)
+
+
+def _compact_validation(validation: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(validation, dict):
+        return None
+    return _compact_dict(
+        {
+            "ok": validation.get("ok"),
+            "errorCount": len(validation.get("errors", []) or []),
+            "warningCount": len(validation.get("warnings", []) or []),
+            "errors": list(validation.get("errors", []))[:10]
+            if isinstance(validation.get("errors"), list)
+            else None,
+            "warnings": list(validation.get("warnings", []))[:10]
+            if isinstance(validation.get("warnings"), list)
+            else None,
+        }
+    )
+
+
+def _compact_start_response(started: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(started, dict):
+        return None
+    return _compact_dict(
+        {
+            "ok": started.get("ok"),
+            "queuedMessageCount": len(started.get("queuedMessages", started.get("queued_messages", [])) or []),
+            "runId": started.get("runId"),
+        }
+    )
+
+
 def _project_message_record(record: Dict[str, Any]) -> Dict[str, Any]:
     metadata = _record_dict(record.get("metadata"))
     projected = {
@@ -1234,6 +2374,60 @@ def _message_summary(value: Any) -> Optional[str]:
     if isinstance(body, dict):
         return _message_summary(body)
     return None
+
+
+def _agent_reply_text(reply: Any) -> str:
+    if isinstance(reply, dict):
+        body = reply.get("body")
+        if isinstance(body, dict):
+            codex = body.get("codex")
+            if isinstance(codex, dict):
+                for key in ("final_text", "last_message", "text"):
+                    value = codex.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+            codemaker = body.get("codemaker")
+            if isinstance(codemaker, dict):
+                stdout = codemaker.get("stdout")
+                if isinstance(stdout, str) and stdout.strip():
+                    try:
+                        from .cluster import extract_final_text
+
+                        text = extract_final_text(stdout)
+                    except Exception:
+                        text = ""
+                    if text.strip():
+                        return text.strip()
+            for key in ("answer", "result", "text", "message"):
+                value = body.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        for key in ("answer", "result", "text", "message"):
+            value = reply.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return json.dumps(reply, ensure_ascii=False)
+    return str(reply)
+
+
+def _compact_top_agent_result(result: Any) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"type": type(result).__name__}
+    compact: Dict[str, Any] = {}
+    for key in ("ok", "top_agent"):
+        if key in result:
+            compact[key] = result[key]
+    reply = result.get("reply")
+    if isinstance(reply, dict):
+        compact["reply"] = {
+            "type": reply.get("type"),
+            "bodyKeys": sorted(str(item) for item in reply.get("body", {}).keys())
+            if isinstance(reply.get("body"), dict)
+            else [],
+        }
+    elif reply is not None:
+        compact["reply"] = {"type": type(reply).__name__}
+    return compact
 
 
 def _iso_time(value: Any) -> Optional[str]:

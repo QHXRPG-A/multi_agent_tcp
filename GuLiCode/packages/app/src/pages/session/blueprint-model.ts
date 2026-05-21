@@ -177,6 +177,12 @@ export type BlueprintStartPlan = {
   }
 }
 
+export type BlueprintStartPlanInput = {
+  startNodes?: string[]
+  userGoal?: string
+  taskText?: string
+}
+
 const DEFAULT_VIEWPORT: BlueprintViewport = {
   x: 48,
   y: 96,
@@ -233,10 +239,7 @@ export function createDefaultBlueprintDraft(projectWorkdir = DEFAULT_PROJECT_WOR
     schema_version: 1,
     config: createDefaultBlueprintConfig(projectWorkdir),
     graph: {
-      terminal_nodes: {
-        start: "start",
-        end: "end",
-      },
+      terminal_nodes: {},
       route_nodes: {},
       agent_nodes: {
         planner: agentNode({
@@ -266,21 +269,17 @@ export function createDefaultBlueprintDraft(projectWorkdir = DEFAULT_PROJECT_WOR
         }),
       },
       edges: [
-        createEdge("start", "planner"),
         createEdge("planner", "coder"),
         createEdge("coder", "review"),
         createEdge("review", "summary"),
-        createEdge("summary", "end"),
       ],
     },
     layout: {
       nodes: {
-        start: { x: 0, y: 120 },
-        planner: { x: 192, y: 96 },
-        coder: { x: 432, y: 96 },
-        review: { x: 672, y: 96 },
-        summary: { x: 912, y: 96 },
-        end: { x: 1152, y: 120 },
+        planner: { x: 0, y: 96 },
+        coder: { x: 240, y: 96 },
+        review: { x: 480, y: 96 },
+        summary: { x: 720, y: 96 },
       },
       viewport: { ...DEFAULT_VIEWPORT },
     },
@@ -322,10 +321,10 @@ export function toBlueprintDocument(
     graph: toRuntimeGraphDraft(draft),
     ui: {
       config: normalizeBlueprintConfig(draft.config),
-      nodes: Object.fromEntries(Object.entries(draft.layout.nodes).map(([nodeId, layout]) => [nodeId, { ...layout }])),
+      nodes: visibleLayoutNodes(draft),
       viewport: { ...draft.layout.viewport },
-      selection: draft.selection ? { ...draft.selection } : undefined,
-      inspector: draft.inspector ? { ...draft.inspector } : undefined,
+      selection: visibleInspectable(draft, draft.selection),
+      inspector: visibleInspectable(draft, draft.inspector),
     },
   }
 }
@@ -742,8 +741,9 @@ export function snapPosition(position: BlueprintNodeLayout, gridSize = GRID_SIZE
 
 export function toRuntimeGraphDraft(draft: BlueprintDraft): RuntimeGraphDraft {
   const config = normalizeBlueprintConfig(draft.config)
+  const runtimeNodeIds = visibleNodeIdSet(draft)
   return {
-    terminal_nodes: { ...draft.graph.terminal_nodes },
+    terminal_nodes: {},
     route_nodes: Object.fromEntries(
       Object.entries(draft.graph.route_nodes ?? {}).map(([id, node]) => [id, normalizeRouteNode(id, node)]),
     ),
@@ -753,30 +753,33 @@ export function toRuntimeGraphDraft(draft: BlueprintDraft): RuntimeGraphDraft {
         normalizeAgentNodeForRuntime(id, node, config),
       ]),
     ),
-    edges: draft.graph.edges.map((edge) => {
-      const out: RuntimeGraphDraft["edges"][number] = {
-        from: edge.from,
-        to: edge.to,
-        edge_type: edge.edge_type || "exec",
-      }
-      if (edge.output_port) out.output_port = edge.output_port
-      if (edge.input_port) out.input_port = edge.input_port
-      return out
-    }),
+    edges: draft.graph.edges
+      .filter((edge) => runtimeNodeIds.has(edge.from) && runtimeNodeIds.has(edge.to))
+      .map((edge) => {
+        const out: RuntimeGraphDraft["edges"][number] = {
+          from: edge.from,
+          to: edge.to,
+          edge_type: edge.edge_type || "exec",
+        }
+        if (edge.output_port) out.output_port = edge.output_port
+        if (edge.input_port) out.input_port = edge.input_port
+        return out
+      }),
   }
 }
 
-export function createBlueprintStartPlan(draft: BlueprintDraft): BlueprintStartPlan {
+export function createBlueprintStartPlan(draft: BlueprintDraft, input: BlueprintStartPlanInput = {}): BlueprintStartPlan {
   const common_config = normalizeBlueprintConfig(draft.config)
   const agentNodes = Object.entries(draft.graph.agent_nodes)
-  const startNodes = deriveStartAgentNodes(draft)
+  const startNodes = normalizeStartNodes(input.startNodes, draft)
+  const userGoal = input.userGoal?.trim() || input.taskText?.trim() || "Run the current GuLiCode blueprint."
   const agent_descriptions = Object.fromEntries(
     agentNodes.map(([id, node]) => [id, node.prompt.trim() || `AgentNode ${id}`]),
   )
   const tasks = Object.fromEntries(
     startNodes.map((nodeId) => {
       const node = draft.graph.agent_nodes[nodeId]
-      const goal = node?.prompt.trim() || `Run AgentNode ${nodeId}.`
+      const goal = input.taskText?.trim() || node?.prompt.trim() || `Run AgentNode ${nodeId}.`
       return [
         nodeId,
         {
@@ -795,7 +798,7 @@ export function createBlueprintStartPlan(draft: BlueprintDraft): BlueprintStartP
 
   return {
     common_config,
-    user_goal: "Run the current GuLiCode blueprint.",
+    user_goal: userGoal,
     agent_descriptions,
     start_nodes: startNodes,
     tasks,
@@ -806,43 +809,43 @@ export function createBlueprintStartPlan(draft: BlueprintDraft): BlueprintStartP
   }
 }
 
-function deriveStartAgentNodes(draft: BlueprintDraft): string[] {
+function normalizeStartNodes(startNodes: string[] | undefined, draft: BlueprintDraft): string[] {
   const agentIds = new Set(Object.keys(draft.graph.agent_nodes))
-  const routeIds = new Set(Object.keys(draft.graph.route_nodes ?? {}))
-  const terminalIds = new Set(Object.keys(draft.graph.terminal_nodes))
-  const startTerminalIds = Object.entries(draft.graph.terminal_nodes)
-    .filter(([, kind]) => kind === "start")
-    .map(([id]) => id)
   const result: string[] = []
   const added = new Set<string>()
-
-  for (const startId of startTerminalIds) {
-    const queued = outgoingExecTargets(draft, startId)
-    const visited = new Set<string>([startId])
-    while (queued.length) {
-      const nodeId = queued.shift()
-      if (!nodeId || visited.has(nodeId)) continue
-      visited.add(nodeId)
-      if (agentIds.has(nodeId)) {
-        if (!added.has(nodeId)) {
-          result.push(nodeId)
-          added.add(nodeId)
-        }
-        continue
-      }
-      if (routeIds.has(nodeId) || terminalIds.has(nodeId)) {
-        queued.push(...outgoingExecTargets(draft, nodeId))
-      }
-    }
+  for (const rawNodeId of startNodes ?? []) {
+    const nodeId = String(rawNodeId).trim()
+    if (!nodeId || !agentIds.has(nodeId) || added.has(nodeId)) continue
+    result.push(nodeId)
+    added.add(nodeId)
   }
-
   return result
 }
 
-function outgoingExecTargets(draft: BlueprintDraft, nodeId: string): string[] {
-  return draft.graph.edges
-    .filter((edge) => edge.from === nodeId && (edge.edge_type || "exec") === "exec")
-    .map((edge) => edge.to)
+function visibleNodeIdSet(draft: BlueprintDraft) {
+  return new Set([...Object.keys(draft.graph.route_nodes ?? {}), ...Object.keys(draft.graph.agent_nodes)])
+}
+
+function visibleLayoutNodes(draft: BlueprintDraft): Record<string, BlueprintNodeLayout> {
+  const visible = visibleNodeIdSet(draft)
+  return Object.fromEntries(
+    Object.entries(draft.layout.nodes)
+      .filter(([nodeId]) => visible.has(nodeId))
+      .map(([nodeId, layout]) => [nodeId, { ...layout }]),
+  )
+}
+
+function visibleInspectable<T extends BlueprintSelection | BlueprintInspectable | undefined>(
+  draft: BlueprintDraft,
+  value: T,
+): T | undefined {
+  if (!value) return undefined
+  if (value.type === "edge") {
+    const visible = visibleNodeIdSet(draft)
+    const edge = draft.graph.edges.find((item) => item.id === value.id)
+    return edge && visible.has(edge.from) && visible.has(edge.to) ? { ...value } : undefined
+  }
+  return visibleNodeIdSet(draft).has(value.id) ? { ...value } : undefined
 }
 
 function createAgentNode(input: {

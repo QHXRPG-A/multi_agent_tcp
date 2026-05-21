@@ -14,7 +14,7 @@ import { SessionFollowupDock } from "@/pages/session/composer/session-followup-d
 import { SessionRevertDock } from "@/pages/session/composer/session-revert-dock"
 import type { SessionComposerState } from "@/pages/session/composer/session-composer-state"
 import { SessionTodoDock } from "@/pages/session/composer/session-todo-dock"
-import type { FollowupDraft } from "@/components/prompt-input/submit"
+import type { BlueprintPlanningSubmitRequest, FollowupDraft, PromptSubmitOverrideInput } from "@/components/prompt-input/submit"
 import { createResizeObserver } from "@solid-primitives/resize-observer"
 
 export function SessionComposerRegion(props: {
@@ -26,6 +26,9 @@ export function SessionComposerRegion(props: {
   onNewSessionWorktreeReset: () => void
   onSubmit: () => void
   onResponseSubmit: () => void
+  submitOverride?: (input: PromptSubmitOverrideInput) => Promise<boolean> | boolean
+  blueprintPlanningSubmitRequest?: BlueprintPlanningSubmitRequest
+  blueprintPlanningDock?: () => any
   followup?: {
     queue: () => boolean
     items: { id: string; text: string }[]
@@ -155,6 +158,8 @@ export function SessionComposerRegion(props: {
           )}
         </Show>
 
+        {props.blueprintPlanningDock?.()}
+
         <Show when={props.state.permissionRequest()} keyed>
           {(request) => (
             <div>
@@ -260,6 +265,8 @@ export function SessionComposerRegion(props: {
                       onQueue={props.followup?.onQueue}
                       onAbort={props.followup?.onAbort}
                       onSubmit={props.onSubmit}
+                      submitOverride={props.submitOverride}
+                      blueprintPlanningSubmitRequest={props.blueprintPlanningSubmitRequest}
                     />
                   </Show>
                 }

@@ -19,6 +19,14 @@ import { buildRequestParts } from "./build-request-parts"
 import { setCursorPosition } from "./editor-dom"
 import { formatServerError } from "@/utils/server-errors"
 
+export type PromptInputMode = "normal" | "shell" | "blueprintPlanning"
+
+export type BlueprintPlanningSubmitRequest = {
+  id: number
+  text: string
+  onBlocked?: () => void
+}
+
 type PendingPrompt = {
   abort: AbortController
   cleanup: VoidFunction
@@ -34,6 +42,19 @@ export type FollowupDraft = {
   agent: string
   model: { providerID: string; modelID: string }
   variant?: string
+  system?: string
+}
+
+export type PromptSubmitOverrideInput = {
+  draft: FollowupDraft
+  text: string
+  images: ImageAttachmentPart[]
+  mode: PromptInputMode
+  projectDirectory: string
+  sessionDirectory: string
+  clearInput: () => void
+  clearContext: () => void
+  restoreInput: () => void
 }
 
 type FollowupSendInput = {
@@ -159,6 +180,7 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
       messageID,
       parts: requestParts,
       variant: input.draft.variant,
+      system: input.draft.system,
     })
     return true
   } catch (err) {
@@ -175,14 +197,14 @@ type PromptSubmitInput = {
   imageAttachments: Accessor<ImageAttachmentPart[]>
   commentCount: Accessor<number>
   autoAccept: Accessor<boolean>
-  mode: Accessor<"normal" | "shell">
+  mode: Accessor<PromptInputMode>
   working: Accessor<boolean>
   editor: () => HTMLDivElement | undefined
   queueScroll: () => void
   promptLength: (prompt: Prompt) => number
-  addToHistory: (prompt: Prompt, mode: "normal" | "shell") => void
+  addToHistory: (prompt: Prompt, mode: PromptInputMode) => void
   resetHistoryNavigation: () => void
-  setMode: (mode: "normal" | "shell") => void
+  setMode: (mode: PromptInputMode) => void
   setPopover: (popover: "at" | "slash" | null) => void
   newSessionWorktree?: Accessor<string | undefined>
   onNewSessionWorktreeReset?: () => void
@@ -190,6 +212,7 @@ type PromptSubmitInput = {
   onQueue?: (draft: FollowupDraft) => void
   onAbort?: () => void
   onSubmit?: () => void
+  submitOverride?: (input: PromptSubmitOverrideInput) => Promise<boolean> | boolean
 }
 
 type CommentItem = {
@@ -407,7 +430,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
 
     const clearInput = () => {
       prompt.reset()
-      input.setMode("normal")
+      input.setMode(mode === "blueprintPlanning" ? "blueprintPlanning" : "normal")
       input.setPopover(null)
     }
 
@@ -429,6 +452,35 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       clearContext()
       clearInput()
       return
+    }
+
+    if (mode === "blueprintPlanning" && !text.startsWith("/") && input.submitOverride) {
+      let handled = false
+      try {
+        handled = await input.submitOverride({
+          draft,
+          text,
+          images,
+          mode,
+          projectDirectory,
+          sessionDirectory,
+          clearInput,
+          clearContext,
+          restoreInput,
+        })
+      } catch (err) {
+        showToast({
+          title: language.t("prompt.toast.promptSendFailed.title"),
+          description: errorMessage(err),
+        })
+        return
+      }
+      if (handled) {
+        input.onSubmit?.()
+        clearContext()
+        clearInput()
+        return
+      }
     }
 
     input.onSubmit?.()

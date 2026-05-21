@@ -22,6 +22,10 @@ WORKSPACE_API_CONTEXT_ENV = "MULTI_AGENT_WORKSPACE_CONTEXT"
 CODEX_RUNTIME_STATE_FILES = ("config.toml", "auth.json", "models_cache.json")
 
 
+def is_framework_top_agent_node(node: AgentNode) -> bool:
+    return str(node.node_id).startswith("top-agent-")
+
+
 def workspace_api_base_command() -> str:
     python_exe = str(Path(sys.executable).expanduser())
     if os.name == "nt":
@@ -149,6 +153,25 @@ def framework_agent_rules() -> str:
     )
 
 
+def framework_top_agent_rules() -> str:
+    return "\n".join(
+        [
+            "# GuLiCode Desktop Top Agent Rules",
+            "",
+            "- You are operating inside GuLiCode desktop blueprint planning mode; the desktop app/current chat session is the Top Agent.",
+            "- Do not assume, start, or ask for a separate bottom Top Agent CLI/worker.",
+            "- Treat the desktop app as the authority for plan confirmation, runtime start, permissions, and audit.",
+            "- Use only the injected `framework_control` MCP tools for organization, status, explanation, utterance inspection, user questions, and start-plan staging.",
+            "- Ask missing blocking questions with `top_agent_request_user_input`; do not simulate user confirmation.",
+            "- Validate a complete `TopAgentStartPlan` with `runtime_validate_start`, then stage it with `top_agent_stage_start_plan`.",
+            "- Do not call `runtime_start`; the app calls `blueprint.start` only after the user approves the staged plan.",
+            "- Do not modify, persist, or rewrite blueprint graph structure in v1.",
+            "- Do not expose MCP tokens, private workspace paths, or framework internals to the user or ordinary agents.",
+            "- Explain validation failures and runtime status directly and concisely.",
+        ]
+    )
+
+
 def framework_agent_skill() -> str:
     return "\n".join(
         [
@@ -185,6 +208,36 @@ def framework_agent_skill() -> str:
             "For downstream messages, use the `agent_dispatch` MCP tool. The target must be listed in the current message's "
             "`framework_context.message_envelope.required_outgoing_targets`.",
             "If a target has no work, dispatch `\"\"` or `0` for that target; the framework records it as no-op and does not queue a downstream task.",
+        ]
+    )
+
+
+def framework_top_agent_skill() -> str:
+    return "\n".join(
+        [
+            "---",
+            "name: framework-top-agent-runtime",
+            "description: GuLiCode desktop Top Agent runtime-control planning workflow.",
+            "---",
+            "# GuLiCode Desktop Top Agent Runtime",
+            "",
+            "Use this skill when handling GuLiCode desktop blueprint planning mode. "
+            "The desktop app/current chat session is the Top Agent; there is no separate bottom Top Agent CLI/worker. "
+            "Your role is to understand the user's intent, inspect the current blueprint organization, ask any required questions, and stage a valid start plan for desktop confirmation.",
+            "",
+            "Workflow:",
+            "- Inspect organization and status through `framework_control` before proposing a start plan.",
+            "- If required choices or constraints are missing, call `top_agent_request_user_input(questions)` and wait for the desktop answer.",
+            "- Build a complete `TopAgentStartPlan` with `user_goal`, `agent_descriptions`, `start_nodes`, `tasks`, and `run_policy`.",
+            "- Call `runtime_validate_start(plan)` and fix validation errors before staging.",
+            "- Call `top_agent_stage_start_plan(plan, plan_markdown)` when the proposal is ready for the user confirmation card.",
+            "- After staging, summarize the plan and wait for the app/user confirmation flow.",
+            "",
+            "Boundaries:",
+            "- Never call `runtime_start`; GuLiCode desktop starts the run after explicit approval.",
+            "- Do not edit or save blueprint graph structure in v1.",
+            "- Do not use ordinary worker workspace submit/publish APIs as a completion path.",
+            "- Keep user-facing replies focused on questions, plan rationale, validation issues, and observed status.",
         ]
     )
 
@@ -232,14 +285,23 @@ def materialize_codex_skill_selection(
     skills_root.mkdir(parents=True, exist_ok=True)
     catalog: list[Dict[str, str]] = []
 
-    framework_dir = skills_root / "framework-agent-runtime"
+    is_top_agent = is_framework_top_agent_node(node)
+    framework_name = "framework-top-agent-runtime" if is_top_agent else "framework-agent-runtime"
+    framework_dir = skills_root / framework_name
     framework_dir.mkdir(parents=True, exist_ok=True)
     framework_md = framework_dir / "SKILL.md"
-    _write_text_no_bom(framework_md, framework_agent_skill())
+    _write_text_no_bom(
+        framework_md,
+        framework_top_agent_skill() if is_top_agent else framework_agent_skill(),
+    )
     catalog.append(
         {
-            "name": "framework-agent-runtime",
-            "description": "Baseline multi-agent runtime, MCP tools, dispatch, and private context workflow.",
+            "name": framework_name,
+            "description": (
+                "GuLiCode desktop Top Agent runtime-control planning workflow."
+                if is_top_agent
+                else "Baseline multi-agent runtime, MCP tools, dispatch, and private context workflow."
+            ),
             "skill_md_path": str(framework_md),
             "source": "framework",
         }
@@ -445,7 +507,7 @@ def build_private_agents_md(
     business_rule_catalog: Optional[Sequence[Dict[str, str]]] = None,
 ) -> str:
     sections = [
-        framework_agent_rules(),
+        framework_top_agent_rules() if is_framework_top_agent_node(node) else framework_agent_rules(),
         "",
         "# Private Agent Workspace",
         "",
@@ -459,7 +521,11 @@ def build_private_agents_md(
         f"- Shared manifest: `{shared_workspace['manifest']}`",
         f"- Shared logs: `{shared_workspace['logs']}`",
         "",
-        "Read project and shared files directly when you need context. Edit code only in the private checkout and submit it through the framework.",
+        (
+            "Use the control MCP for planning and status. Do not edit code or save blueprint graph structure from the Top Agent session."
+            if is_framework_top_agent_node(node)
+            else "Read project and shared files directly when you need context. Edit code only in the private checkout and submit it through the framework."
+        ),
         "",
     ]
     if business_rule_catalog:
@@ -548,21 +614,37 @@ def materialize_private_agent_context(
     data["write_scope"] = list(node.write_scope)
     data["artifact_scope"] = list(node.artifact_scope)
 
-    preamble = (
-        "You are running inside a framework-managed three-zone workspace. "
-        "The project directory is the authoritative code source and final code target; read it directly as read-only context, but do not edit it directly. "
-        "Your private checkout is your personal workbench: fetch only the task-relevant code into it, edit there, and submit code changes as a changeset. "
-        "The temporary shared workspace is read-only filesystem context for reports, artifacts, manifest.json, and logs; publish new reports and artifacts through the framework instead of writing shared files directly.\n\n"
-        "Workspace paths:\n"
-        f"- Read-only project_context: `{project_context}`\n"
-        f"- Read-only project_code_root: `{manager.project_root}`\n"
-        f"- Editable checkout_path: `{checkout.checkout_dir}`\n"
-        f"- Read-only shared_workspace: `{shared_workspace['root']}`\n"
-        f"- Shared reports: `{shared_workspace['reports']}`\n"
-        f"- Shared artifacts: `{shared_workspace['artifacts']}`\n"
-        f"- Shared manifest: `{shared_workspace['manifest']}`\n"
-        f"- Shared logs: `{shared_workspace['logs']}`"
-    )
+    if is_framework_top_agent_node(node):
+        preamble = (
+            "You are the GuLiCode desktop session Top Agent. "
+            "Use the injected framework_control MCP for organization/status inspection, user questions, validation, and start-plan staging. "
+            "Do not call runtime_start and do not edit or save blueprint graph structure; the desktop app starts runs only after user approval.\n\n"
+            "Workspace paths are read-only context for planning:\n"
+            f"- Read-only project_context: `{project_context}`\n"
+            f"- Read-only project_code_root: `{manager.project_root}`\n"
+            f"- Private checkout path: `{checkout.checkout_dir}`\n"
+            f"- Read-only shared_workspace: `{shared_workspace['root']}`\n"
+            f"- Shared reports: `{shared_workspace['reports']}`\n"
+            f"- Shared artifacts: `{shared_workspace['artifacts']}`\n"
+            f"- Shared manifest: `{shared_workspace['manifest']}`\n"
+            f"- Shared logs: `{shared_workspace['logs']}`"
+        )
+    else:
+        preamble = (
+            "You are running inside a framework-managed three-zone workspace. "
+            "The project directory is the authoritative code source and final code target; read it directly as read-only context, but do not edit it directly. "
+            "Your private checkout is your personal workbench: fetch only the task-relevant code into it, edit there, and submit code changes as a changeset. "
+            "The temporary shared workspace is read-only filesystem context for reports, artifacts, manifest.json, and logs; publish new reports and artifacts through the framework instead of writing shared files directly.\n\n"
+            "Workspace paths:\n"
+            f"- Read-only project_context: `{project_context}`\n"
+            f"- Read-only project_code_root: `{manager.project_root}`\n"
+            f"- Editable checkout_path: `{checkout.checkout_dir}`\n"
+            f"- Read-only shared_workspace: `{shared_workspace['root']}`\n"
+            f"- Shared reports: `{shared_workspace['reports']}`\n"
+            f"- Shared artifacts: `{shared_workspace['artifacts']}`\n"
+            f"- Shared manifest: `{shared_workspace['manifest']}`\n"
+            f"- Shared logs: `{shared_workspace['logs']}`"
+        )
     adapter_options = dict(data.get("adapter_options", {}))
     if node.cli_kind == "codex" and not adapter_options.get("sandbox"):
         adapter_options["sandbox"] = "workspace-write"

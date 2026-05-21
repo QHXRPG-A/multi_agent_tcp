@@ -15,7 +15,7 @@ import {
   useCommand,
 } from "@opencode-ai/app"
 import type { AsyncStorage } from "@solid-primitives/storage"
-import { MemoryRouter } from "@solidjs/router"
+import { createMemoryHistory, MemoryRouter, type BaseRouterProps } from "@solidjs/router"
 import { createEffect, createResource, onCleanup, onMount, Show } from "solid-js"
 import { render } from "solid-js/web"
 import pkg from "../../package.json"
@@ -32,6 +32,15 @@ if (import.meta.env.DEV && !(root instanceof HTMLElement)) {
 void initI18n()
 
 const deepLinkEvent = "opencode:deep-link"
+const blueprintWindowDockEvent = "gulicode:blueprint-window-dock"
+const blueprintWindowClosedEvent = "gulicode:blueprint-window-closed"
+const blueprintWindowPlanningSubmitEvent = "gulicode:blueprint-planning-submit"
+
+function base64Encode(value: string) {
+  const bytes = new TextEncoder().encode(value)
+  const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("")
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "")
+}
 
 const emitDeepLinks = (urls: string[]) => {
   if (urls.length === 0) return
@@ -179,7 +188,31 @@ const createPlatform = (): Platform => {
 
     blueprintAgentStreamToken: (runId, cursor) => window.api.blueprintAgentStreamToken(runId, cursor),
 
+    ensureBlueprintPlanningContext: (projectDir, blueprintId, desktopSessionId) =>
+      window.api.blueprintPlanningEnsureContext(projectDir, blueprintId, desktopSessionId),
+
+    answerBlueprintPlanningQuestion: (sessionId, questionId, answers, opts) =>
+      window.api.blueprintPlanningAnswerQuestion(sessionId, questionId, answers, opts),
+
+    rejectBlueprintPlanningPlan: (sessionId, reason) => window.api.blueprintPlanningRejectPlan(sessionId, reason),
+
+    markBlueprintPlanningPlanStarted: (sessionId, runId, started) =>
+      window.api.blueprintPlanningMarkPlanStarted(sessionId, runId, started),
+
+    blueprintPlanningStatus: (sessionId) => window.api.blueprintPlanningStatus(sessionId),
+
+    endBlueprintPlanningSession: (sessionId, reason) => window.api.blueprintPlanningEndSession(sessionId, reason),
+
     saveBlueprintAgentPanelTest: (payload) => window.api.blueprintSaveAgentPanelTest(payload),
+
+    openBlueprintWindow: (projectDir, sessionId, rect) => window.api.openBlueprintWindow(projectDir, sessionId, rect),
+
+    dockBlueprintWindow: (projectDir, sessionId) => window.api.dockBlueprintWindow(projectDir, sessionId),
+
+    closeBlueprintWindow: () => window.api.closeBlueprintWindow(),
+
+    submitBlueprintWindowPlanning: (projectDir, sessionId, input) =>
+      window.api.submitBlueprintWindowPlanning(projectDir, sessionId, input),
 
     openLink(url: string) {
       window.api.openLink(url)
@@ -295,10 +328,29 @@ window.api.onMenuCommand((id) => {
   menuTrigger?.(id)
 })
 listenForDeepLinks()
+window.api.onBlueprintWindowDock((context) => {
+  window.dispatchEvent(new CustomEvent(blueprintWindowDockEvent, { detail: context }))
+})
+window.api.onBlueprintWindowClosed((context) => {
+  window.dispatchEvent(new CustomEvent(blueprintWindowClosedEvent, { detail: context }))
+})
+window.api.onBlueprintWindowPlanningSubmitRequest((request) => {
+  let responded = false
+  const respond = (accepted: boolean) => {
+    if (responded) return
+    responded = true
+    void window.api.respondBlueprintWindowPlanningSubmit(request.requestId, accepted)
+  }
+  window.dispatchEvent(new CustomEvent(blueprintWindowPlanningSubmitEvent, { detail: { ...request, respond } }))
+  queueMicrotask(() => {
+    if (!responded) respond(false)
+  })
+})
 
 render(() => {
   const platform = createPlatform()
   const [windowConfig] = createResource(() => window.api.getWindowConfig().catch(() => ({ updaterEnabled: false })))
+  const [blueprintWindowContext] = createResource(() => window.api.getBlueprintWindowContext().catch(() => null))
   const loadLocale = async () => {
     const current = await platform.storage?.("opencode.global.dat").getItem("language")
     const legacy = current ? undefined : await platform.storage?.().getItem("language.v1")
@@ -381,15 +433,28 @@ render(() => {
             !sidecar.loading &&
             !windowConfig.loading &&
             !windowCount.loading &&
+            !blueprintWindowContext.loading &&
             !locale.loading
           }
         >
           {(_) => {
+            const context = blueprintWindowContext.latest
+            const history = createMemoryHistory()
+            if (context) {
+              const session = context.sessionId ? `/${context.sessionId}` : ""
+              history.set({
+                value: `/${base64Encode(context.projectDir)}/blueprint-window${session}`,
+                replace: true,
+                scroll: false,
+              })
+            }
+            const Router = (props: BaseRouterProps) => <MemoryRouter {...props} history={history} />
             return (
               <AppInterface
                 defaultServer={defaultServer.latest ?? ServerConnection.Key.make("sidecar")}
                 servers={servers()}
-                router={MemoryRouter}
+                router={Router}
+                visualShell={!context}
               >
                 <Inner />
               </AppInterface>

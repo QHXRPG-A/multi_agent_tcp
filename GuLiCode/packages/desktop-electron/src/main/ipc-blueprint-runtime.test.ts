@@ -21,6 +21,11 @@ beforeAll(() => {
   }))
   mock.module("./windows", () => ({
     setTitlebar: () => {},
+    openBlueprintWindow: () => {},
+    dockBlueprintWindow: () => true,
+    closeBlueprintWindow: () => true,
+    getBlueprintWindowContext: () => null,
+    findBlueprintMainWindow: () => null,
   }))
   mock.module("./store", () => ({
     getStore: () => ({
@@ -75,6 +80,23 @@ afterAll(async () => {
 })
 
 describe("blueprint runtime IPC handlers", () => {
+  test("exposes independent blueprint window IPC hooks", async () => {
+    const ipcSource = await Bun.file(new URL("./ipc.ts", import.meta.url)).text()
+    const preloadSource = await Bun.file(new URL("../preload/index.ts", import.meta.url)).text()
+    const windowsSource = await Bun.file(new URL("./windows.ts", import.meta.url)).text()
+
+    expect(ipcSource).toContain('"blueprint-window-open"')
+    expect(ipcSource).toContain('"blueprint-window-dock"')
+    expect(ipcSource).toContain('"blueprint-window-close"')
+    expect(ipcSource).toContain('"blueprint-window-submit-planning"')
+    expect(preloadSource).toContain("openBlueprintWindow")
+    expect(preloadSource).toContain("onBlueprintWindowDock")
+    expect(preloadSource).toContain("onBlueprintWindowPlanningSubmitRequest")
+    expect(windowsSource).toContain("new BrowserWindow")
+    expect(windowsSource).toContain("blueprintWindowContexts")
+    expect(windowsSource).toContain('"blueprint-window-dock-request"')
+  })
+
   test("route renderer blueprint calls to the runtime facade", async () => {
     const calls: string[] = []
     const blueprintRuntime = {
@@ -144,6 +166,35 @@ describe("blueprint runtime IPC handlers", () => {
         calls.push(`agent-stream:${runId}:${cursor}`)
         return { wsUrl: "ws://localhost/agent" }
       },
+      ensurePlanningContext: (projectDir: string, blueprintId: string, desktopSessionId: string) => {
+        calls.push(`planning-ensure:${projectDir}:${blueprintId}:${desktopSessionId}`)
+        return { sessionId: "planning-1" }
+      },
+      answerPlanningQuestion: (
+        sessionId: string,
+        questionId: string,
+        answers: unknown,
+        opts?: { rejected?: boolean; reason?: string },
+      ) => {
+        calls.push(`planning-answer:${sessionId}:${questionId}:${JSON.stringify(answers)}:${opts?.rejected ?? false}`)
+        return { ok: true }
+      },
+      rejectPlanningPlan: (sessionId: string, reason?: string) => {
+        calls.push(`planning-reject:${sessionId}:${reason ?? ""}`)
+        return { ok: true }
+      },
+      markPlanningPlanStarted: (sessionId: string, runId: string, started?: unknown) => {
+        calls.push(`planning-started:${sessionId}:${runId}:${typeof started === "object"}`)
+        return { ok: true }
+      },
+      planningStatus: (sessionId: string) => {
+        calls.push(`planning-status:${sessionId}`)
+        return { sessionId }
+      },
+      endPlanningSession: (sessionId: string, reason?: string) => {
+        calls.push(`planning-end:${sessionId}:${reason ?? ""}`)
+        return { ok: true }
+      },
     }
     const { registerIpcHandlers } = await import("./ipc")
     registerIpcHandlers({
@@ -191,6 +242,18 @@ describe("blueprint runtime IPC handlers", () => {
     await handlers.get("blueprint-agent-info")?.({}, "run-1", "coder")
     await handlers.get("blueprint-queue-agent-message")?.({}, "run-1", "coder", "hello", "top")
     await handlers.get("blueprint-agent-stream-token")?.({}, "run-1", 18)
+    await handlers.get("blueprint-planning-ensure-context")?.({}, "C:\\repo", "default", "session-1")
+    await handlers.get("blueprint-planning-answer-question")?.(
+      {},
+      "planning-1",
+      "question-1",
+      { scope: "all" },
+      { rejected: false },
+    )
+    await handlers.get("blueprint-planning-reject-plan")?.({}, "planning-1", "no")
+    await handlers.get("blueprint-planning-mark-plan-started")?.({}, "planning-1", "run-2", { ok: true })
+    await handlers.get("blueprint-planning-status")?.({}, "planning-1")
+    await handlers.get("blueprint-planning-end-session")?.({}, "planning-1", "done")
     const saved = (await handlers.get("blueprint-save-agent-panel-test")?.(
       {},
       { nodeId: "test-agent", streamEvents: [{ seq: 1 }] },
@@ -239,6 +302,12 @@ describe("blueprint runtime IPC handlers", () => {
       "agent-info:run-1:coder",
       "agent-message:run-1:coder:hello:top",
       "agent-stream:run-1:18",
+      "planning-ensure:C:\\repo:default:session-1",
+      'planning-answer:planning-1:question-1:{"scope":"all"}:false',
+      "planning-reject:planning-1:no",
+      "planning-started:planning-1:run-2:true",
+      "planning-status:planning-1",
+      "planning-end:planning-1:done",
     ])
   })
 })

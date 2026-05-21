@@ -1,0 +1,36 @@
+import { describe, expect, test } from "bun:test"
+
+describe("session blueprint planning source", () => {
+  test("keeps normal chat on the normal path and gates planning behind blueprint mode", async () => {
+    const sessionSource = await Bun.file(new URL("../session.tsx", import.meta.url)).text()
+    const promptInputSource = await Bun.file(new URL("../../components/prompt-input.tsx", import.meta.url)).text()
+    const submitSource = await Bun.file(new URL("../../components/prompt-input/submit.ts", import.meta.url)).text()
+
+    expect(promptInputSource).toContain('"blueprintPlanning"')
+    expect(promptInputSource).toContain('"蓝图规划"')
+    expect(submitSource).toContain('mode === "blueprintPlanning"')
+    expect(submitSource).not.toContain('mode === "normal" && !text.startsWith("/") && input.submitOverride')
+
+    expect(sessionSource).toContain("ensureBlueprintPlanningContext")
+    expect(sessionSource).toContain("input.projectDirectory,\n      DEFAULT_BLUEPRINT_ID")
+    expect(sessionSource).toContain("sdk.client.mcp.add")
+    expect(sessionSource).toContain("directory: sdk.directory")
+    expect(sessionSource).toContain("blueprintPlanningMcpStatusMap(added.data, name)")
+    expect(sessionSource).not.toContain("sdk.client.mcp.status")
+    expect(sessionSource).not.toContain("sdk.client.mcp.connect")
+    expect(sessionSource).toContain("current?.status !== \"connected\"")
+    expect(sessionSource).toContain("answerBlueprintPlanningQuestion")
+    expect(sessionSource).toContain("rejectBlueprintPlanningPlan")
+    expect(sessionSource).toContain("markBlueprintPlanningPlanStarted")
+    expect(sessionSource).toContain("cloneBlueprintPlanningPayload(plan)")
+    expect(sessionSource).toContain("startBlueprintRun(sdk.directory, DEFAULT_BLUEPRINT_ID, startPlan, \"live\")")
+    expect(sessionSource).toContain("requestBlueprintPlanningSubmit")
+    expect(sessionSource).toContain("setBlueprintPlanningSubmitRequest")
+    expect(sessionSource).toContain("blueprintPlanningSubmitRequest={blueprintPlanningSubmitRequest()}")
+    expect(promptInputSource).toContain("props.blueprintPlanningSubmitRequest")
+    expect(promptInputSource).toContain('setMode("blueprintPlanning")')
+    expect(promptInputSource).toContain("void handleSubmit(new Event(\"submit\", { cancelable: true }))")
+    expect(sessionSource).not.toContain("sendBlueprintTopAgentMessage")
+    expect(sessionSource).not.toContain("TopAgentTimeline")
+  })
+})

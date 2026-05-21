@@ -47,7 +47,13 @@ import {
   type PromptHistoryStoredEntry,
   promptLength,
 } from "./prompt-input/history"
-import { createPromptSubmit, type FollowupDraft } from "./prompt-input/submit"
+import {
+  createPromptSubmit,
+  type BlueprintPlanningSubmitRequest,
+  type FollowupDraft,
+  type PromptInputMode,
+  type PromptSubmitOverrideInput,
+} from "./prompt-input/submit"
 import { PromptPopover, type AtOption, type SlashCommand } from "./prompt-input/slash-popover"
 import { PromptContextItems } from "./prompt-input/context-items"
 import { PromptImageAttachments } from "./prompt-input/image-attachments"
@@ -68,6 +74,8 @@ interface PromptInputProps {
   onQueue?: (draft: FollowupDraft) => void
   onAbort?: () => void
   onSubmit?: () => void
+  submitOverride?: (input: PromptSubmitOverrideInput) => Promise<boolean> | boolean
+  blueprintPlanningSubmitRequest?: BlueprintPlanningSubmitRequest
 }
 
 const EXAMPLES = [
@@ -255,7 +263,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     savedPrompt: PromptHistoryEntry | null
     placeholder: number
     draggingType: "image" | "@mention" | null
-    mode: "normal" | "shell"
+    mode: PromptInputMode
     applyingHistory: boolean
   }>({
     popover: null,
@@ -267,7 +275,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     applyingHistory: false,
   })
 
-  const buttonsSpring = useSpring(() => (store.mode === "normal" ? 1 : 0), { visualDuration: 0.2, bounce: 0 })
+  const buttonsSpring = useSpring(() => (store.mode !== "shell" ? 1 : 0), { visualDuration: 0.2, bounce: 0 })
   const motion = (value: number) => ({
     opacity: value,
     transform: `scale(${0.95 + value * 0.05})`,
@@ -441,7 +449,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
 
   const pick = () => fileInputRef?.click()
 
-  const setMode = (mode: "normal" | "shell") => {
+  const setMode = (mode: PromptInputMode) => {
     setStore("mode", mode)
     setStore("popover", null)
     requestAnimationFrame(() => editorRef?.focus())
@@ -474,6 +482,13 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
       keybind: normalModeKey,
       disabled: store.mode === "normal",
       onSelect: () => setMode("normal"),
+    },
+    {
+      id: "prompt.mode.blueprintPlanning",
+      title: "蓝图规划",
+      category: language.t("command.category.session"),
+      disabled: store.mode === "blueprintPlanning",
+      onSelect: () => setMode("blueprintPlanning"),
     },
   ])
 
@@ -562,7 +577,12 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
       .filter((agent) => !agent.hidden && agent.mode !== "primary")
       .map((agent): AtOption => ({ type: "agent", name: agent.name, display: agent.name })),
   )
+  const BLUEPRINT_PLANNING_AGENT_OPTION = "__blueprint_planning__"
   const agentNames = createMemo(() => local.agent.list().map((agent) => agent.name))
+  const agentSelectOptions = createMemo(() => [...agentNames(), BLUEPRINT_PLANNING_AGENT_OPTION])
+  const currentAgentOption = createMemo(() =>
+    store.mode === "blueprintPlanning" ? BLUEPRINT_PLANNING_AGENT_OPTION : (local.agent.current()?.name ?? ""),
+  )
 
   const handleAtSelect = (option: AtOption | undefined) => {
     if (!option) return
@@ -984,7 +1004,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     return true
   }
 
-  const addToHistory = (prompt: Prompt, mode: "normal" | "shell") => {
+  const addToHistory = (prompt: Prompt, mode: PromptInputMode) => {
     const currentHistory = mode === "shell" ? shellHistory : history
     const setCurrentHistory = mode === "shell" ? setShellHistory : setHistory
     const next = prependHistoryEntry(currentHistory.entries, prompt, mode === "shell" ? [] : historyComments())
@@ -1088,6 +1108,33 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     onQueue: props.onQueue,
     onAbort: props.onAbort,
     onSubmit: props.onSubmit,
+    submitOverride: props.submitOverride,
+  })
+
+  let handledBlueprintPlanningSubmitRequestId = 0
+  createEffect(() => {
+    const request = props.blueprintPlanningSubmitRequest
+    if (!request || request.id === handledBlueprintPlanningSubmitRequestId) return
+    handledBlueprintPlanningSubmitRequestId = request.id
+    const text = request.text.trim()
+    if (!text) return
+    const currentText = prompt
+      .current()
+      .map((part) => ("content" in part ? part.content : ""))
+      .join("")
+      .trim()
+    if (currentText || imageAttachments().length > 0 || prompt.context.items().length > 0 || commentCount() > 0) {
+      request.onBlocked?.()
+      return
+    }
+    setMode("blueprintPlanning")
+    setEditorText(text)
+    prompt.set([{ type: "text", content: text, start: 0, end: text.length }], text.length)
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        void handleSubmit(new Event("submit", { cancelable: true }))
+      })
+    })
   })
 
   const handleKeyDown = (event: KeyboardEvent) => {
@@ -1344,9 +1391,9 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
               aria-multiline="true"
               aria-label={placeholder()}
               contenteditable="true"
-              autocapitalize={store.mode === "normal" ? "sentences" : "off"}
-              autocorrect={store.mode === "normal" ? "on" : "off"}
-              spellcheck={store.mode === "normal"}
+              autocapitalize={store.mode === "shell" ? "off" : "sentences"}
+              autocorrect={store.mode === "shell" ? "off" : "on"}
+              spellcheck={store.mode !== "shell"}
               inputMode="text"
               // @ts-expect-error
               autocomplete="off"
@@ -1403,8 +1450,8 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                 <IconButton
                   data-action="prompt-submit"
                   type="submit"
-                  disabled={store.mode !== "normal" || (!working() && blank())}
-                  tabIndex={store.mode === "normal" ? undefined : -1}
+                  disabled={store.mode === "shell" || (!working() && blank())}
+                  tabIndex={store.mode !== "shell" ? undefined : -1}
                   icon={stopping() ? "stop" : "arrow-up"}
                   variant="primary"
                   class="size-8"
@@ -1446,7 +1493,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
           </div>
         </div>
       </DockShellForm>
-      <Show when={store.mode === "normal" || store.mode === "shell"}>
+      <Show when={store.mode === "normal" || store.mode === "shell" || store.mode === "blueprintPlanning"}>
         <DockTray attach="top">
           <div class="px-1.75 pt-5.5 pb-2 flex items-center gap-2 min-w-0">
             <div class="flex items-center gap-1.5 min-w-0 flex-1 relative">
@@ -1474,10 +1521,17 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                     >
                       <Select
                         size="normal"
-                        options={agentNames()}
-                        current={local.agent.current()?.name ?? ""}
+                        options={agentSelectOptions()}
+                        current={currentAgentOption()}
+                        label={(value) => (value === BLUEPRINT_PLANNING_AGENT_OPTION ? "蓝图规划" : value)}
                         onSelect={(value) => {
+                          if (value === BLUEPRINT_PLANNING_AGENT_OPTION) {
+                            setMode("blueprintPlanning")
+                            restoreFocus()
+                            return
+                          }
                           local.agent.set(value)
+                          setMode("normal")
                           restoreFocus()
                         }}
                         class="capitalize max-w-[160px] text-text-base"

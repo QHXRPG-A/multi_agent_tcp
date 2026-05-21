@@ -3,7 +3,7 @@ import { app, BrowserWindow, net, nativeImage, nativeTheme, protocol, screen } f
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import log from "electron-log/main.js"
-import type { TitlebarTheme } from "../preload/types"
+import type { BlueprintWindowContext, BlueprintWindowRect, TitlebarTheme } from "../preload/types"
 
 const root = dirname(fileURLToPath(import.meta.url))
 const rendererRoot = join(root, "../renderer")
@@ -22,6 +22,8 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 let backgroundColor: string | undefined
+const blueprintWindowContexts = new Map<number, BlueprintWindowContext>()
+const blueprintWindowDocking = new Set<number>()
 
 type ManagedWindowState = ReturnType<typeof windowState>
 
@@ -37,6 +39,11 @@ function overlapSize(startA: number, sizeA: number, startB: number, sizeB: numbe
   const endA = startA + sizeA
   const endB = startB + sizeB
   return Math.max(0, Math.min(endA, endB) - Math.max(startA, startB))
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (max < min) return min
+  return Math.min(Math.max(value, min), max)
 }
 
 function isWindowStateVisible(state: ManagedWindowState) {
@@ -137,7 +144,15 @@ function overlay(theme: Partial<TitlebarTheme> = {}) {
 
 export function setTitlebar(win: BrowserWindow, theme: Partial<TitlebarTheme> = {}) {
   if (process.platform !== "win32") return
-  win.setTitleBarOverlay(overlay(theme))
+  if (getBlueprintWindowContext(win)) return
+  try {
+    win.setTitleBarOverlay(overlay(theme))
+  } catch (error) {
+    log.warn("failed to set titlebar overlay", {
+      windowId: win.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }
 
 export function setDockIcon() {
@@ -186,18 +201,7 @@ export function createMainWindow(appId?: string) {
   })
   applyWindowsTaskbarDetails(win, appId)
 
-  win.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
-    const { requestHeaders } = details
-    upsertKeyValue(requestHeaders, "Access-Control-Allow-Origin", ["*"])
-    callback({ requestHeaders })
-  })
-
-  win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
-    const { responseHeaders = {} } = details
-    upsertKeyValue(responseHeaders, "Access-Control-Allow-Origin", ["*"])
-    upsertKeyValue(responseHeaders, "Access-Control-Allow-Headers", ["*"])
-    callback({ responseHeaders })
-  })
+  wireRendererRequestHeaders(win)
   win.webContents.on("did-fail-load", (_event, code, description, validatedURL, isMainFrame) => {
     log.error("main window webContents: did-fail-load", {
       code,
@@ -224,6 +228,98 @@ export function createMainWindow(appId?: string) {
   }, 3000)
 
   return win
+}
+
+export function openBlueprintWindow(
+  context: BlueprintWindowContext,
+  opts: { appId?: string; sourceWindow?: BrowserWindow | null } = {},
+) {
+  const existing = findBlueprintWindow(context)
+  if (existing) {
+    existing.show()
+    existing.focus()
+    return existing
+  }
+
+  const rect = clampBlueprintWindowRect(toScreenRect(context.rect, opts.sourceWindow))
+  const windowIcon = readWindowIcon() ?? undefined
+  const win = new BrowserWindow({
+    x: rect.x,
+    y: rect.y,
+    width: rect.width,
+    height: rect.height,
+    minWidth: 640,
+    minHeight: 420,
+    show: false,
+    title: "GuLiCode Blueprint",
+    icon: windowIcon,
+    backgroundColor,
+    webPreferences: {
+      preload: join(root, "../preload/index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+  blueprintWindowContexts.set(win.id, {
+    projectDir: context.projectDir,
+    sessionId: context.sessionId,
+  })
+  applyWindowsTaskbarDetails(win, opts.appId)
+  wireRendererRequestHeaders(win)
+  wireBlueprintWindowDiagnostics(win)
+  loadWindow(win, "index.html")
+  wireZoom(win)
+
+  win.once("ready-to-show", () => {
+    win.show()
+    win.focus()
+  })
+  win.on("closed", () => {
+    const closedContext = blueprintWindowContexts.get(win.id)
+    blueprintWindowContexts.delete(win.id)
+    if (!closedContext || blueprintWindowDocking.delete(win.id)) return
+    sendToMainWindow("blueprint-window-closed", closedContext)
+  })
+  globalThis.setTimeout(() => {
+    if (win.isDestroyed() || win.isVisible()) return
+    log.warn("blueprint window fallback show after timeout")
+    win.show()
+  }, 3000)
+
+  return win
+}
+
+export function getBlueprintWindowContext(win: BrowserWindow | null | undefined) {
+  if (!win) return null
+  return blueprintWindowContexts.get(win.id) ?? null
+}
+
+export function findBlueprintMainWindow() {
+  return BrowserWindow.getAllWindows().find((win) => !win.isDestroyed() && !getBlueprintWindowContext(win)) ?? null
+}
+
+export function dockBlueprintWindow(win: BrowserWindow | null | undefined, fallbackContext?: BlueprintWindowContext) {
+  const context = getBlueprintWindowContext(win) ?? fallbackContext
+  if (!context) return false
+  sendToMainWindow("blueprint-window-dock-request", context)
+  const target = findBlueprintMainWindow()
+  if (target) {
+    target.show()
+    target.focus()
+  }
+  if (win && !win.isDestroyed()) {
+    blueprintWindowDocking.add(win.id)
+    win.close()
+  }
+  return true
+}
+
+export function closeBlueprintWindow(win: BrowserWindow | null | undefined) {
+  if (!win || win.isDestroyed()) return false
+  if (!getBlueprintWindowContext(win)) return false
+  win.close()
+  return true
 }
 
 export function createLoadingWindow(appId?: string) {
@@ -257,6 +353,80 @@ export function createLoadingWindow(appId?: string) {
   loadWindow(win, "loading.html")
 
   return win
+}
+
+function findBlueprintWindow(context: BlueprintWindowContext) {
+  return BrowserWindow.getAllWindows().find((win) => {
+    const current = getBlueprintWindowContext(win)
+    return (
+      !win.isDestroyed() &&
+      current?.projectDir === context.projectDir &&
+      (current.sessionId ?? "") === (context.sessionId ?? "")
+    )
+  })
+}
+
+function sendToMainWindow(channel: string, context: BlueprintWindowContext) {
+  const target = findBlueprintMainWindow()
+  if (!target || target.isDestroyed()) return false
+  target.webContents.send(channel, context)
+  return true
+}
+
+function wireRendererRequestHeaders(win: BrowserWindow) {
+  win.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
+    const { requestHeaders } = details
+    upsertKeyValue(requestHeaders, "Access-Control-Allow-Origin", ["*"])
+    callback({ requestHeaders })
+  })
+
+  win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    const { responseHeaders = {} } = details
+    upsertKeyValue(responseHeaders, "Access-Control-Allow-Origin", ["*"])
+    upsertKeyValue(responseHeaders, "Access-Control-Allow-Headers", ["*"])
+    callback({ responseHeaders })
+  })
+}
+
+function wireBlueprintWindowDiagnostics(win: BrowserWindow) {
+  win.webContents.on("did-fail-load", (_event, code, description, validatedURL, isMainFrame) => {
+    log.error("blueprint window webContents: did-fail-load", {
+      code,
+      description,
+      validatedURL,
+      isMainFrame,
+    })
+  })
+  win.webContents.on("render-process-gone", (_event, details) => {
+    log.error("blueprint window webContents: render-process-gone", details)
+  })
+}
+
+function toScreenRect(rect: BlueprintWindowRect | undefined, sourceWindow?: BrowserWindow | null): BlueprintWindowRect | undefined {
+  if (!rect) return undefined
+  if (!sourceWindow || sourceWindow.isDestroyed()) return rect
+  const bounds = sourceWindow.getBounds()
+  return {
+    ...rect,
+    x: bounds.x + rect.x,
+    y: bounds.y + rect.y,
+  }
+}
+
+function clampBlueprintWindowRect(rect?: BlueprintWindowRect): BlueprintWindowRect {
+  const width = clampNumber(rect?.width ?? 980, 640, Math.max(640, screen.getPrimaryDisplay().workArea.width))
+  const height = clampNumber(rect?.height ?? 680, 420, Math.max(420, screen.getPrimaryDisplay().workArea.height))
+  const point = {
+    x: rect?.x ?? screen.getPrimaryDisplay().workArea.x + Math.round((screen.getPrimaryDisplay().workArea.width - width) / 2),
+    y: rect?.y ?? screen.getPrimaryDisplay().workArea.y + Math.round((screen.getPrimaryDisplay().workArea.height - height) / 2),
+  }
+  const workArea = screen.getDisplayNearestPoint(point).workArea
+  return {
+    width: Math.min(width, workArea.width),
+    height: Math.min(height, workArea.height),
+    x: clampNumber(point.x, workArea.x, workArea.x + workArea.width - width),
+    y: clampNumber(point.y, workArea.y, workArea.y + workArea.height - height),
+  }
 }
 
 export function registerRendererProtocol() {

@@ -27,7 +27,7 @@ import { FileTabContent } from "@/pages/session/file-tabs"
 import { createOpenSessionFileTab, createSessionTabs, getTabReorderIndex, type Sizing } from "@/pages/session/helpers"
 import { setSessionHandoff } from "@/pages/session/handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
-import { BlueprintSidePanel } from "@/pages/session/blueprint-side-panel"
+import { BlueprintSidePanel, type BlueprintPlanningSubmitInput } from "@/pages/session/blueprint-side-panel"
 
 export function SessionSidePanel(props: {
   canReview: () => boolean
@@ -41,6 +41,7 @@ export function SessionSidePanel(props: {
   focusReviewDiff: (path: string) => void
   reviewSnap: boolean
   size: Sizing
+  onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => boolean
 }) {
   const layout = useLayout()
   const platform = usePlatform()
@@ -61,7 +62,7 @@ export function SessionSidePanel(props: {
   )
 
   const reviewOpen = createMemo(() => isDesktop() && view().reviewPanel.opened())
-  const blueprintOpen = createMemo(() => isDesktop() && view().blueprintPanel.opened())
+  const blueprintOpen = createMemo(() => isDesktop() && view().blueprintPanel.opened() && !view().blueprintPanel.floating())
   const fileOpen = createMemo(() => isDesktop() && shown() && layout.fileTree.opened())
   const mainOpen = createMemo(() => reviewOpen() || blueprintOpen())
   const open = createMemo(() => mainOpen() || fileOpen())
@@ -229,7 +230,7 @@ export function SessionSidePanel(props: {
             <div class="size-full min-w-0 h-full bg-background-base">
               <Switch>
                 <Match when={blueprintOpen()}>
-                  <BlueprintSidePanel />
+                  <BlueprintSidePanel onBlueprintPlanningSubmit={props.onBlueprintPlanningSubmit} />
                 </Match>
                 <Match when={true}>
                   <DragDropProvider

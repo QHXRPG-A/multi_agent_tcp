@@ -639,7 +639,7 @@ def _cmd_runtime(args: argparse.Namespace) -> None:
         _write_result(result, args.output)
         return
 
-    if command == "top-agent-context":
+    if command == "planning-context":
         from .graph_control import load_graph_definition, load_top_agent_profile
         from .graph_runtime import GuLiCodeTopAgentProfile
 
@@ -670,16 +670,6 @@ def _cmd_runtime(args: argparse.Namespace) -> None:
     elif command == "explain-status":
         rpc_command = "top_agent.explain_status"
         rpc_args = {"recent_events_limit": args.recent_events_limit}
-    elif command == "top-agent-start-session":
-        rpc_command = "top_agent.start_session"
-        rpc_args = {}
-    elif command == "top-agent-ask":
-        rpc_command = "top_agent.ask"
-        rpc_args = {
-            "prompt": args.prompt,
-            "include_status": not args.no_status,
-            "recent_events_limit": args.recent_events_limit,
-        }
     elif command == "top-agent-utterances":
         rpc_command = "top_agent.utterances"
         rpc_args = {
@@ -1160,8 +1150,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     p_validate.add_argument("-o", "--output", type=Path, help="write JSON to file")
 
     p_top_context = runtime_sub.add_parser(
-        "top-agent-context",
-        help="render top-agent rule/skill plus graph organization context",
+        "planning-context",
+        help="render desktop planning rule/skill plus graph organization context",
     )
     p_top_context.add_argument("--graph", type=Path, required=True)
     p_top_context.add_argument("--top-agent-profile", type=Path, help="JSON GuLiCode top-agent profile")
@@ -1187,21 +1177,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     _add_runtime_rpc_args(p_rt_explain)
     p_rt_explain.add_argument("--recent-events-limit", type=int, default=20)
-
-    p_top_start = runtime_sub.add_parser(
-        "top-agent-start-session",
-        help="bind the long-lived GuLiCode top-agent worker",
-    )
-    _add_runtime_rpc_args(p_top_start)
-
-    p_top_ask = runtime_sub.add_parser(
-        "top-agent-ask",
-        help="send a user message to the long-lived GuLiCode top-agent worker",
-    )
-    _add_runtime_rpc_args(p_top_ask)
-    p_top_ask.add_argument("--prompt", required=True)
-    p_top_ask.add_argument("--no-status", action="store_true", help="omit status explanation context")
-    p_top_ask.add_argument("--recent-events-limit", type=int, default=20)
 
     p_top_utterances = runtime_sub.add_parser(
         "top-agent-utterances",
