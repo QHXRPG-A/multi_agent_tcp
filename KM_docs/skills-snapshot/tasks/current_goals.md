@@ -202,6 +202,26 @@ internal traversal logs.
 
 ## Active Priorities
 
+2026-05-21 GuLiCode desktop bottom Top Agent capability planning:
+
+New task, concrete strategy TBD:
+
+1. Define how GuLiCode desktop should expose Top Agent as a first-class
+   governance/control capability at the desktop/runtime layer, not as an
+   unrestricted root executor.
+2. Shape the product loop around:
+   user demand -> Top Agent console -> organization/status context ->
+   validated `TopAgentStartPlan` -> optional plan confirmation ->
+   `run.start` -> runtime status/explain/end.
+3. Keep `GraphRuntimeControlPlane` / `GraphRuntime` authoritative for
+   scheduling, workspace writes, agent dispatch, archive, conflict handling,
+   and final run status.
+4. Decide the concrete strategy later: UI entry placement, lazy vs persistent
+   Top Agent session lifecycle, permission gates, plan confirmation UX,
+   manifest/audit records, and whether any event-driven follow-up is allowed.
+5. Avoid always-on automatic intervention until the policy and user-visible
+   controls are explicit.
+
 2026-05-20 Agent information panel stream UI update:
 
 Closed in this pass:

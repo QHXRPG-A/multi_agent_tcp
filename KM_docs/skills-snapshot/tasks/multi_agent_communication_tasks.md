@@ -46,6 +46,14 @@ Next required work:
    installed in the active desktop runtime.
 3. Expose top-agent/operator control and utterance audit in GuLiCode UI without
    giving ordinary Agents global control tools.
+4. Define the GuLiCode desktop-bottom Top Agent capability strategy (TBD):
+   expose Top Agent as a desktop/runtime governance surface for demand intake,
+   planning, status explanation, and controlled lifecycle requests, while
+   keeping `GraphRuntimeControlPlane` / `GraphRuntime` as the authority for
+   validation, scheduling, workspace writes, dispatch, archive, and final
+   status. Decide later whether this is a lazy Top Agent console, a persistent
+   session, or an event-driven operator surface; do not make it an unrestricted
+   root executor.
 
 短期推进范围只聚焦框架掌握 Agent 间通信和调度权：
 
