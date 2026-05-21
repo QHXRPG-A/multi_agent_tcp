@@ -2,9 +2,13 @@ import { describe, expect, test } from "bun:test"
 
 describe("session blueprint planning source", () => {
   test("keeps normal chat on the normal path and gates planning behind blueprint mode", async () => {
-    const sessionSource = await Bun.file(new URL("../session.tsx", import.meta.url)).text()
-    const promptInputSource = await Bun.file(new URL("../../components/prompt-input.tsx", import.meta.url)).text()
-    const submitSource = await Bun.file(new URL("../../components/prompt-input/submit.ts", import.meta.url)).text()
+    const sessionSource = (await Bun.file(new URL("../session.tsx", import.meta.url)).text()).replaceAll("\r\n", "\n")
+    const promptInputSource = (
+      await Bun.file(new URL("../../components/prompt-input.tsx", import.meta.url)).text()
+    ).replaceAll("\r\n", "\n")
+    const submitSource = (
+      await Bun.file(new URL("../../components/prompt-input/submit.ts", import.meta.url)).text()
+    ).replaceAll("\r\n", "\n")
 
     expect(promptInputSource).toContain('"blueprintPlanning"')
     expect(promptInputSource).toContain('"蓝图规划"')

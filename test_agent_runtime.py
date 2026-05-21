@@ -2027,7 +2027,12 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert (checkout / "AGENTS.md").is_file()
         assert (private / "state" / "base" / "AGENTS.md").is_file()
         assert manager.status_checkout(run, manager.open_agent_checkout(run, "agent-cx")) == []
-        assert "Business Review Rule" in (checkout / "AGENTS.md").read_text(encoding="utf-8")
+        agents_md = (checkout / "AGENTS.md").read_text(encoding="utf-8")
+        assert "Business Review Rule" in agents_md
+        assert "`framework_context.message_envelope.outgoing_batch_id`" in agents_md
+        assert "Upstream/source batch ids" in agents_md
+        assert "leaf work" in agents_md
+        assert "out-*` are not join ids" in agents_md
         assert (private / "rules" / "01-business-rule.md").is_file()
         assert (codex_home / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
         framework_skill = (
@@ -2035,6 +2040,10 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         ).read_text(encoding="utf-8")
         assert "framework-private utterance record" in framework_skill
         assert "not a communication channel to other AgentNodes" in framework_skill
+        assert "call `agent_context({})` with no explicit batch_id" in framework_skill
+        assert "source/audit labels and must not be passed" in framework_skill
+        assert "`framework_context.message_envelope.required_outgoing_targets` is empty" in framework_skill
+        assert "Outgoing batch ids such as `out-*` are not join ids" in framework_skill
         copied_skills = list((codex_home / "skills").glob(f"{rec.skill_hash}-biz-skill/SKILL.md"))
         assert copied_skills
         assert not (codex_home / "skills" / "biz-skill").exists()

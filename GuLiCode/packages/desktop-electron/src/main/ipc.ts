@@ -39,7 +39,8 @@ const pickerFilters = (ext?: string[]) => {
 }
 
 const AGENT_PANEL_TEST_DIR = "agent-info-panel-tests"
-const AGENT_PANEL_TEST_FILE = "agent-panel-test.json"
+const AGENT_PANEL_TEST_FILE_PREFIX = "agent-panel-test-"
+const AGENT_PANEL_TEST_FILE_EXT = ".json"
 
 let agentPanelTestResetPromise: Promise<void> | undefined
 const pendingBlueprintPlanningSubmits = new Map<string, (accepted: boolean) => void>()
@@ -420,8 +421,7 @@ async function saveAgentPanelTestSnapshot(payload: Record<string, unknown>) {
   const dir = agentPanelTestDirectory()
   await mkdir(dir, { recursive: true })
   const now = new Date()
-  await clearObsoleteAgentPanelTestJsonFiles(dir)
-  const path = join(dir, AGENT_PANEL_TEST_FILE)
+  const path = join(dir, agentPanelTestSnapshotFileName(payload))
   const document = {
     schema_version: 2,
     kind: "gulicode.agent_info_panel_test",
@@ -434,6 +434,12 @@ async function saveAgentPanelTestSnapshot(payload: Record<string, unknown>) {
   }
   await writeFile(path, JSON.stringify(document, null, 2), "utf8")
   return { ok: true, path }
+}
+
+function agentPanelTestSnapshotFileName(payload: Record<string, unknown>) {
+  const rawNodeId = typeof payload.nodeId === "string" ? payload.nodeId.trim() : ""
+  const safeNodeId = rawNodeId ? rawNodeId.replace(/[^A-Za-z0-9._-]/g, "-") : "unknown"
+  return `${AGENT_PANEL_TEST_FILE_PREFIX}${safeNodeId}${AGENT_PANEL_TEST_FILE_EXT}`
 }
 
 async function resetAgentPanelTestDirectory() {
@@ -468,15 +474,6 @@ async function clearAgentPanelTestJsonFiles(dir: string) {
   await Promise.all(
     entries
       .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
-      .map((entry) => rm(join(dir, entry.name), { force: true })),
-  )
-}
-
-async function clearObsoleteAgentPanelTestJsonFiles(dir: string) {
-  const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
-  await Promise.all(
-    entries
-      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json") && entry.name !== AGENT_PANEL_TEST_FILE)
       .map((entry) => rm(join(dir, entry.name), { force: true })),
   )
 }

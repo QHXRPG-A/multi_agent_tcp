@@ -143,8 +143,13 @@ def framework_agent_rules() -> str:
             "- If a direct project/shared write is denied by the sandbox, treat that as boundary enforcement and continue through checkout/submit/publish instead of stopping.",
             "- Communicate with other AgentNodes through framework messages and shared references, not by copying project source trees into shared space.",
             "- Your natural-language worker reply is a framework-private utterance record; it is not delivered to other AgentNodes.",
+            "- The only current batch you may read or dispatch for this message is `framework_context.message_envelope.outgoing_batch_id`.",
+            "- Upstream/source batch ids mentioned in message text are provenance/audit labels; do not pass them to `agent_context(batch_id=...)`.",
+            "- To inspect the current readable batch, call `agent_context({})` with no explicit batch_id.",
             "- To provide information to another AgentNode, use `agent_dispatch` for the current batch.",
             "- Sending an empty string `\"\"` or numeric `0` through `agent_dispatch` means this target has no task and should not receive a downstream message.",
+            "- When `framework_context.message_envelope.required_outgoing_targets` is empty, this is leaf work: do not call `agent_dispatch` or `join_contribute`; process the message and publish durable results through `workspace_publish` / `workspace_publish_file`.",
+            "- Use `join_contribute` only when the framework or task explicitly provides a real `join_id`; outgoing batch ids such as `out-*` are not join ids.",
             "- To provide durable results to the framework, use assigned framework MCP tools.",
             "- Do not request or depend on top-agent-only utterance inspection APIs.",
             "- Framework rules and skills are materialized once when your private worker context is prepared; per-message updates arrive only through `framework_context`.",
@@ -183,6 +188,9 @@ def framework_agent_skill() -> str:
             "",
             "Use the injected `framework_context` for your current message envelope, "
             "including `outgoing_batch_id`, required downstream targets, and `agent_dispatch` usage.",
+            "`framework_context.message_envelope.outgoing_batch_id` is the current batch available to this Agent. "
+            "If you need the current batch context, call `agent_context({})` with no explicit batch_id. "
+            "Batch ids in the message body from upstream Agents are source/audit labels and must not be passed to `agent_context(batch_id=...)`.",
             "The framework runtime skill is stable for the worker context; per-message state changes are provided through `framework_context`.",
             "",
             "If Codex lists a framework MCP server such as `framework_ordinary`, use those MCP tools first. "
@@ -203,11 +211,18 @@ def framework_agent_skill() -> str:
             "",
             "For reports and artifacts, publish through `workspace_publish` / `workspace_publish_file` "
             "as shared run context. Use summaries, file paths, versions, and changeset ids when another AgentNode needs code context. "
-            "If you need a current shared path version, read the shared `manifest.json` file directly.",
+            "If you need a current shared path version, read the shared `manifest.json` file directly. "
+            "When `framework_context.message_envelope.required_outgoing_targets` is empty, treat the message as leaf work: "
+            "do not call `agent_dispatch` or `join_contribute`; process the message and publish the result or receipt as a shared report.",
             "",
             "For downstream messages, use the `agent_dispatch` MCP tool. The target must be listed in the current message's "
             "`framework_context.message_envelope.required_outgoing_targets`.",
             "If a target has no work, dispatch `\"\"` or `0` for that target; the framework records it as no-op and does not queue a downstream task.",
+            "If `required_outgoing_targets` is empty, there is no downstream dispatch to perform.",
+            "",
+            "Use `join_contribute` only when the framework or task explicitly provides a real `join_id`. "
+            "Outgoing batch ids such as `out-*` are not join ids. "
+            "For leaf results, receipts, or simple status reporting, publish a shared report instead.",
         ]
     )
 

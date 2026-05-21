@@ -345,6 +345,84 @@ def _safe_mcp_args(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _message_context_summary(context: Optional[MCPCurrentMessageContext]) -> str:
+    if context is None:
+        return (
+            "current_message_id=None, current_outgoing_batch_id=None, "
+            "required_outgoing_targets=[]"
+        )
+    return (
+        f"current_message_id={context.current_message_id!r}, "
+        f"current_outgoing_batch_id={context.outgoing_batch_id!r}, "
+        f"required_outgoing_targets={list(context.required_outgoing_targets)!r}"
+    )
+
+
+def _agent_context_wrong_batch_message(
+    batch_id: str,
+    context: Optional[MCPCurrentMessageContext],
+) -> str:
+    return (
+        "ordinary agent_context cannot read another message batch. "
+        f"requested_batch_id={batch_id!r}; {_message_context_summary(context)}. "
+        "For this Agent, the readable current batch is "
+        "`framework_context.message_envelope.outgoing_batch_id`; message-body or "
+        "upstream batch_id values are source/audit labels and must not be passed "
+        "to `agent_context(batch_id=...)`. Call `agent_context({})` without "
+        "batch_id to read the current batch. If current_outgoing_batch_id is "
+        "None, handle the received message and publish a shared report with "
+        "`workspace_publish` / `workspace_publish_file`."
+    )
+
+
+def _agent_dispatch_no_context_message() -> str:
+    return (
+        "agent_dispatch requires an active message context. "
+        f"{_message_context_summary(None)}. Read the current `framework_context` "
+        "from the delivered message. If this Agent has no assigned downstream "
+        "targets, publish a shared report with `workspace_publish` / "
+        "`workspace_publish_file` instead of dispatching."
+    )
+
+
+def _agent_dispatch_no_batch_message(context: Optional[MCPCurrentMessageContext]) -> str:
+    return (
+        "agent_dispatch has no current outgoing_batch_id. "
+        f"{_message_context_summary(context)}. This is a leaf/no-dispatch path: "
+        "do not call `agent_dispatch` or `join_contribute`; process the message "
+        "and publish a shared report with `workspace_publish` / "
+        "`workspace_publish_file`."
+    )
+
+
+def _agent_dispatch_target_not_required_message(
+    target_node_id: str,
+    context: Optional[MCPCurrentMessageContext],
+) -> str:
+    return (
+        f"agent_dispatch target {target_node_id!r} is not in the current "
+        f"required_outgoing_targets. {_message_context_summary(context)}. "
+        "Dispatch only to targets listed in "
+        "`framework_context.message_envelope.required_outgoing_targets`. If this "
+        "Agent has no listed downstream target to notify, publish a shared "
+        "report with `workspace_publish` / `workspace_publish_file`."
+    )
+
+
+def _join_contribute_guidance_message(
+    join_id: str,
+    context: Optional[MCPCurrentMessageContext],
+) -> str:
+    return (
+        f"join_contribute cannot find a join barrier for join_id={join_id!r}. "
+        f"{_message_context_summary(context)}. `join_contribute` requires a real "
+        "`join_id` explicitly provided by the framework or task; outgoing batch "
+        "ids such as `out-*` are not join ids. This is not a join flow; publish "
+        "leaf results or receipts with `workspace_publish` / "
+        "`workspace_publish_file`."
+    )
+
+
 class RunMCPRuntimeHandle:
     """One ASGI/uvicorn MCP adapter instance for one live blueprint run."""
 
@@ -1335,7 +1413,7 @@ class RunMCPRuntimeHandle:
         if context is not None and context.expires_at < float(self.token_store.now()):
             raise PermissionError("active message context has expired")
         if batch_id is not None and context is not None and batch_id != context.outgoing_batch_id:
-            raise PermissionError("ordinary agent_context cannot read another message batch")
+            raise PermissionError(_agent_context_wrong_batch_message(batch_id, context))
         effective_batch_id = batch_id or (context.outgoing_batch_id if context is not None else None)
         args = {"source_node_id": scope.agent_node_id, "batch_id": effective_batch_id}
         self._record_mcp_tool_call(scope, "agent_context", args)
@@ -1380,9 +1458,14 @@ class RunMCPRuntimeHandle:
             "metadata": metadata or {},
         }
         self._record_mcp_tool_call(scope, "join_contribute", args)
-        return await self._runtime_call(
-            lambda: self.control.handle_request({"command": "join.contribute", "args": args})
-        )
+        try:
+            return await self._runtime_call(
+                lambda: self.control.handle_request({"command": "join.contribute", "args": args})
+            )
+        except KeyError as exc:
+            raise PermissionError(
+                _join_contribute_guidance_message(join_id, scope.current_message_context)
+            ) from exc
 
     def _record_mcp_tool_call(
         self,
@@ -1454,15 +1537,15 @@ class RunMCPRuntimeHandle:
             raise PermissionError("ordinary MCP token cannot dispatch as another AgentNode")
         context = scope.current_message_context
         if context is None:
-            raise PermissionError("agent_dispatch requires an active message context")
+            raise PermissionError(_agent_dispatch_no_context_message())
         if context.expires_at < float(self.token_store.now()):
             raise PermissionError("active message context has expired")
         effective_batch_id = str(batch_id or context.outgoing_batch_id or "").strip()
         if not effective_batch_id:
-            raise PermissionError("agent_dispatch requires the current outgoing batch_id")
+            raise PermissionError(_agent_dispatch_no_batch_message(context))
         target = str(target_node_id).strip()
         if target not in context.required_outgoing_targets:
-            raise PermissionError("target is not in current required_outgoing_targets")
+            raise PermissionError(_agent_dispatch_target_not_required_message(target, context))
         self._record_mcp_tool_call(
             scope,
             "agent_dispatch",

@@ -790,7 +790,7 @@ def test_run_mcp_agent_dispatch_uses_active_message_scope() -> None:
     )
 
     async def scenario() -> None:
-        with pytest.raises(PermissionError):
+        with pytest.raises(PermissionError) as no_context_error:
             await handle._agent_dispatch(
                 scope,
                 target_node_id="reviewer",
@@ -798,6 +798,28 @@ def test_run_mcp_agent_dispatch_uses_active_message_scope() -> None:
                 batch_id=None,
                 source_node_id=None,
             )
+        assert "agent_dispatch requires an active message context" in str(no_context_error.value)
+        assert "workspace_publish" in str(no_context_error.value)
+        handle.token_store.update_message_context(
+            agent_node_id="planner",
+            agent_id="agent-planner",
+            current_message_id="msg-leaf",
+            outgoing_batch_id=None,
+            required_outgoing_targets=[],
+            timeout_sec=60,
+        )
+        with pytest.raises(PermissionError) as no_batch_error:
+            await handle._agent_dispatch(
+                scope,
+                target_node_id="reviewer",
+                body={"prompt": "review"},
+                batch_id=None,
+                source_node_id=None,
+            )
+        no_batch_message = str(no_batch_error.value)
+        assert "agent_dispatch has no current outgoing_batch_id" in no_batch_message
+        assert "leaf/no-dispatch path" in no_batch_message
+        assert "join_contribute" in no_batch_message
         handle.token_store.update_message_context(
             agent_node_id="planner",
             agent_id="agent-planner",
@@ -806,7 +828,7 @@ def test_run_mcp_agent_dispatch_uses_active_message_scope() -> None:
             required_outgoing_targets=["reviewer"],
             timeout_sec=60,
         )
-        with pytest.raises(PermissionError):
+        with pytest.raises(PermissionError) as wrong_target_error:
             await handle._agent_dispatch(
                 scope,
                 target_node_id="coder",
@@ -814,6 +836,10 @@ def test_run_mcp_agent_dispatch_uses_active_message_scope() -> None:
                 batch_id=None,
                 source_node_id=None,
             )
+        wrong_target_message = str(wrong_target_error.value)
+        assert "target 'coder' is not in the current required_outgoing_targets" in wrong_target_message
+        assert "current_message_id='msg-1'" in wrong_target_message
+        assert "workspace_publish" in wrong_target_message
         with pytest.raises(PermissionError):
             await handle._agent_dispatch(
                 scope,
@@ -852,6 +878,11 @@ def test_run_mcp_ordinary_agent_context_and_join_contribute_are_scope_bound() ->
 
         def handle_request(self, payload):
             self.requests.append(payload)
+            if (
+                payload.get("command") == "join.contribute"
+                and payload.get("args", {}).get("join_id") == "out-batch"
+            ):
+                raise KeyError("unknown join barrier: out-batch")
             return {"ok": True, "payload": payload}
 
     control = FakeControl()
@@ -888,8 +919,14 @@ def test_run_mcp_ordinary_agent_context_and_join_contribute_are_scope_bound() ->
     assert control.requests[-1]["command"] == "agent.context"
     assert control.requests[-1]["args"] == {"source_node_id": "planner", "batch_id": "batch-1"}
 
-    with pytest.raises(PermissionError):
+    with pytest.raises(PermissionError) as wrong_batch_error:
         asyncio.run(handle._ordinary_agent_context(scope, batch_id="other-batch"))
+    wrong_batch_message = str(wrong_batch_error.value)
+    assert "ordinary agent_context cannot read another message batch" in wrong_batch_message
+    assert "requested_batch_id='other-batch'" in wrong_batch_message
+    assert "current_outgoing_batch_id='batch-1'" in wrong_batch_message
+    assert "agent_context({})" in wrong_batch_message
+    assert "upstream batch_id values are source/audit labels" in wrong_batch_message
     with pytest.raises(PermissionError):
         asyncio.run(
             handle._ordinary_join_contribute(
@@ -907,6 +944,28 @@ def test_run_mcp_ordinary_agent_context_and_join_contribute_are_scope_bound() ->
                 metadata=None,
             )
         )
+    with pytest.raises(PermissionError) as unknown_join_error:
+        asyncio.run(
+            handle._ordinary_join_contribute(
+                scope,
+                join_id="out-batch",
+                status="completed",
+                result={"ok": True},
+                source_node_id=None,
+                source_agent_id=None,
+                accepted_changesets=None,
+                conflicts=None,
+                artifacts=None,
+                reports=None,
+                test_results=None,
+                metadata=None,
+            )
+        )
+    unknown_join_message = str(unknown_join_error.value)
+    assert "join_contribute cannot find a join barrier" in unknown_join_message
+    assert "out-*` are not join ids" in unknown_join_message
+    assert "current_message_id='msg-1'" in unknown_join_message
+    assert "workspace_publish" in unknown_join_message
 
     joined = asyncio.run(
         handle._ordinary_join_contribute(

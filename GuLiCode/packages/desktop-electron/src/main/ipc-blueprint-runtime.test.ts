@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test"
-import { readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -254,38 +254,58 @@ describe("blueprint runtime IPC handlers", () => {
     await handlers.get("blueprint-planning-mark-plan-started")?.({}, "planning-1", "run-2", { ok: true })
     await handlers.get("blueprint-planning-status")?.({}, "planning-1")
     await handlers.get("blueprint-planning-end-session")?.({}, "planning-1", "done")
-    const saved = (await handlers.get("blueprint-save-agent-panel-test")?.(
+    const savedFirst = (await handlers.get("blueprint-save-agent-panel-test")?.(
       {},
-      { nodeId: "test-agent", streamEvents: [{ seq: 1 }] },
+      { nodeId: "test-agent-1", streamEvents: [{ seq: 1 }] },
     )) as Record<string, unknown>
-    await writeFile(join(testLogDir, "agent-info-panel-tests", "agent-panel-test-test-agent-legacy.json"), "{}", "utf8")
-    const updated = (await handlers.get("blueprint-save-agent-panel-test")?.(
+    const savedSecond = (await handlers.get("blueprint-save-agent-panel-test")?.(
       {},
       {
         schema_version: 2,
         kind: "gulicode.blueprint.test_agent_messages",
-        nodeId: "test-agent",
-        jsonPath: saved.path,
+        nodeId: "test-agent-2",
+        agentReplies: [],
+        userMessages: [{ text: "second", status: "sent" }],
+        frameworkMessages: [],
+      },
+    )) as Record<string, unknown>
+    const updatedFirst = (await handlers.get("blueprint-save-agent-panel-test")?.(
+      {},
+      {
+        schema_version: 2,
+        kind: "gulicode.blueprint.test_agent_messages",
+        nodeId: "test-agent-1",
+        jsonPath: savedFirst.path,
         agentReplies: [],
         userMessages: [{ text: "hello", status: "sent" }],
         frameworkMessages: [],
       },
     )) as Record<string, unknown>
-    const savedDocument = JSON.parse(await readFile(String(saved.path), "utf8")) as Record<string, unknown>
-    const savedPayload = savedDocument.payload as Record<string, unknown>
-    const testJsonFiles = await readdir(join(testLogDir, "agent-info-panel-tests"))
+    const firstDocument = JSON.parse(await readFile(String(updatedFirst.path), "utf8")) as Record<string, unknown>
+    const secondDocument = JSON.parse(await readFile(String(savedSecond.path), "utf8")) as Record<string, unknown>
+    const firstPayload = firstDocument.payload as Record<string, unknown>
+    const secondPayload = secondDocument.payload as Record<string, unknown>
+    const testJsonFiles = (await readdir(join(testLogDir, "agent-info-panel-tests"))).sort()
 
-    expect(saved.ok).toBe(true)
-    expect(String(saved.path)).toContain("agent-info-panel-tests")
-    expect(String(saved.path).endsWith("agent-panel-test.json")).toBe(true)
-    expect(updated.path).toBe(saved.path)
-    expect(savedDocument.schema_version).toBe(2)
-    expect(savedDocument.kind).toBe("gulicode.agent_info_panel_test")
-    expect(savedDocument.path).toBe(saved.path)
-    expect(savedPayload.schema_version).toBe(2)
-    expect(savedPayload.kind).toBe("gulicode.blueprint.test_agent_messages")
-    expect(JSON.stringify(savedDocument)).toContain("hello")
-    expect(testJsonFiles).toEqual(["agent-panel-test.json"])
+    expect(savedFirst.ok).toBe(true)
+    expect(savedSecond.ok).toBe(true)
+    expect(String(savedFirst.path)).toContain("agent-info-panel-tests")
+    expect(String(savedFirst.path).endsWith("agent-panel-test-test-agent-1.json")).toBe(true)
+    expect(String(savedSecond.path).endsWith("agent-panel-test-test-agent-2.json")).toBe(true)
+    expect(updatedFirst.path).toBe(savedFirst.path)
+    expect(firstDocument.schema_version).toBe(2)
+    expect(firstDocument.kind).toBe("gulicode.agent_info_panel_test")
+    expect(firstDocument.path).toBe(updatedFirst.path)
+    expect(firstPayload.schema_version).toBe(2)
+    expect(firstPayload.kind).toBe("gulicode.blueprint.test_agent_messages")
+    expect(firstPayload.nodeId).toBe("test-agent-1")
+    expect(firstPayload.jsonPath).toBe(updatedFirst.path)
+    expect(secondDocument.path).toBe(savedSecond.path)
+    expect(secondPayload.nodeId).toBe("test-agent-2")
+    expect(secondPayload.jsonPath).toBe(savedSecond.path)
+    expect(JSON.stringify(firstDocument)).toContain("hello")
+    expect(JSON.stringify(secondDocument)).toContain("second")
+    expect(testJsonFiles).toEqual(["agent-panel-test-test-agent-1.json", "agent-panel-test-test-agent-2.json"])
     expect(calls).toEqual([
       "list:C:\\repo",
       "open:C:\\repo:default",

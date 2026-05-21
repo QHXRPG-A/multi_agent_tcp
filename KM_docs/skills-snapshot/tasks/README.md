@@ -1,5 +1,13 @@
 # 短期任务目录
 
+2026-05-22 priority override:
+
+1. Test Agents communication validation is the highest current task. Read
+   `current_goals.md` first, then `multi_agent_communication_tasks.md`.
+2. Top Agent product planning, desktop UI polish, and adapter expansion are
+   secondary until the Test Agent fan-out/current-batch/leaf-report loop is
+   stable.
+
 本目录用于记录 `multi_agent_tcp` skill 相关的近期目标、任务拆解与阶段性推进事项。
 
 约定：
