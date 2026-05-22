@@ -1,123 +1,157 @@
 # multi_agent_tcp
 
-A multi-agent runtime substrate for the current **GuLiCode desktop app + blueprint system** direction. The main line is: GuLiCode / UI submits a structured plan, `GraphRuntimeControlPlane` validates it, `GraphRuntime` schedules `AgentNode` queues, outgoing batches, fan-in joins, workspace state and events, and a pluggable execution backend runs the actual CLI worker when an AgentNode needs model work.
-
-The low-level TCP worker path still exists, but it is now best understood as a backend adapter:
+`multi_agent_tcp` 是 GuLiCode 桌面多 Agent 蓝图系统的 Python 运行时底座。当前项目中心不是底层 TCP worker，也不是旧的 Ryven 编辑器，而是：
 
 ```text
-GraphRuntime
+GuLiCode 桌面 / Top Agent / 蓝图工作台
+  -> GraphRuntimeControlPlane
+  -> GraphRuntime
+  -> AgentNode 队列、消息分发、汇聚等待、Workspace、事件
   -> CLIWorkerBackend
-  -> AgentTCPClient
-  -> Broker
-  -> Worker Agent process
-  -> CLIAdapter
+  -> Codex / CodeMaker 等 CLI worker
 ```
 
-`CLIWorkerBackend` is the new semantic name for the old `CodeMakerCluster` concept. `CodeMakerCluster` remains as a backward-compatible alias, but new code and documentation should prefer `CLIWorkerBackend`.
+GuLiCode 桌面负责用户入口、蓝图编排体验和 Top Agent 规划；`GraphRuntimeControlPlane` 与 `GraphRuntime` 负责框架事实、调度和生命周期；`CLIWorkerBackend` 只是执行适配层，用来在需要模型工作时启动具体 CLI worker。
 
-## Architecture Diagrams
+## 架构图
 
-The current communication model is summarized in the main overview diagram:
+### 蓝图框架分层
 
-![Multi-agent communication overview](docs/diagrams/multi_agents_communication/01_overview.svg)
+![蓝图框架分层图](docs/diagrams/blueprint_framework_layers.png)
 
-### Agents 协同与工作区流转
+这张图说明每一层的职责边界：产品入口在 GuLiCode 桌面和蓝图工作台，调度事实在 Python runtime，底层 CLI worker 不拥有产品调度语义。
 
-![Agents collaboration and workspace flow](docs/diagrams/agents_collaboration_workspace_flow.svg)
+### Agents 三区协同办公
 
-中文注释：这张图把协作拆成三层：上层是用户、总控 Agent 和框架调度；中层是多个普通 AgentNode 并行处理子任务，并通过框架消息和共享引用协作；下层是工程目录、Agent 私有区、临时共享区、changeset 管道和长期归档。当前 `project_reference` 模式下，工程目录是代码权威源和最终代码目标，run 启动不再整体复制工程代码到 `shared/code`；Agent 私有区只按需 `checkout --path` / `--scope-path` 物化任务相关文件；临时共享区只保存报告、产物、manifest 和 changeset 引用，不承载工程代码副本。
+![Agents 三区协同办公图](docs/diagrams/agents_collaboration_three_zones.png)
 
-More focused diagrams live in [`docs/diagrams/multi_agents_communication/`](docs/diagrams/multi_agents_communication/):
+这张图说明普通 Agents 如何围绕三个区协作：
 
-- [One-to-many outgoing batch dispatch](docs/diagrams/multi_agents_communication/02_fanout_dispatch.svg)
-- [Fan-in join aggregation](docs/diagrams/multi_agents_communication/03_fanin_join.svg)
-- [Appendix: CLIWorkerBackend TCP delivery path](docs/diagrams/multi_agents_communication/04_tcp_delivery.svg)
+- `工程目录`：权威代码源和最终代码目标。Agent 可以读取，但不能直接写。
+- `Agent 私有区`：每个 Agent 的可写 `checkout_path`，真实代码改动在这里完成。
+- `运行共享区`：保存 `reports`、`artifacts`、`manifest`、`changeset` 引用和事件记录。
 
-## Current Architecture Notes
+代码协作必须走 `checkout -> edit -> status/diff -> submit`。报告和产物通过框架工具发布到运行共享区。
 
-- `GraphRuntimeControlPlane` is the non-UI control surface for organization reads, top-agent context, run start/status/end, outgoing message batches, ordinary `agent.dispatch`, and join contribution commands.
-- `GraphRuntime` is the trusted scheduler. Agents do not directly message each other; they stage intent through framework APIs, and the runtime owns queueing, dispatch, reminders, join aggregation and event emission.
-- `CLIWorkerBackend` is not the center of the blueprint architecture. It is one execution backend used when a scheduled AgentNode needs to call a CLI worker through TCP.
-- In one-to-many dispatch, `stage_outgoing_message()` immediately returns `remaining_targets` to the caller after each `agent.dispatch`. Separately, `tick()` emits `AgentOutgoingTargetsReminder` only when the source Agent is idle/can accept messages and a staging batch still has missing targets. So the diagram concern about "should this wait for idle?" is a diagram wording issue, not a runtime bug: immediate return and idle reminder are two different feedback channels.
+## 当前核心能力
 
-## Run-Scoped MCP Layer
+- 蓝图工作台嵌入 GuLiCode 桌面：蓝图是项目级能力，运行在当前 project/workspace 语义下。
+- Top Agent 规划入口：GuLiCode 当前桌面会话承担 Top Agent 产品角色，负责理解目标、拆解任务、提交启动计划和解释状态。
+- 运行时控制面：`GraphRuntimeControlPlane` 提供组织读取、计划校验、启动、状态、结束、消息批次、Agent dispatch、join 等稳定接口。
+- 图调度运行时：`GraphRuntime` 负责 AgentNode 队列、消息投递、fan-out、fan-in、idle 提醒、事件、取消、归档和最终状态。
+- Workspace 三个区：工程目录只读给 Agent，Agent 私有区可写，运行共享区沉淀报告、产物、manifest、changeset 和冲突记录。
+- MCP 工具边界：live blueprint run 可启动 run-scoped MCP 服务，为普通 Agent 和 Top Agent 暴露不同工具集合。
+- Codex-first 适配：当前 live Agent 主线优先使用 Codex CLI；CodeMaker 保留为兼容和备选路径。
 
-Live blueprint runs can expose framework tools to Codex through a run-scoped
-MCP server. The desktop service starts one local ASGI/uvicorn MCP handle per
-live run with two tool boundaries:
+## 快速开始
 
-- `framework_ordinary`: for ordinary `AgentNode` execution. It exposes scoped
-  Workspace checkout/status/diff/submit/sync/publish/publish_file tools,
-  scoped `agent_context`, scoped `agent_dispatch`, and scoped
-  `join_contribute`. Ordinary Agents read the project directory and the current
-  run's temporary shared workspace directly from injected read-only filesystem
-  paths.
-- `framework_control`: for the Top Agent/control path. It exposes organization
-  and top-agent context, run lifecycle, message batch/stage, control-side
-  dispatch, join create/contribute, and utterance inspection.
+### Python 运行时
 
-Tool availability is also enforced server-side with permission gates. Top
-Agent does not receive Workspace write/submit/publish tools, and ordinary
-Agents do not receive global lifecycle, utterance, message-batch, or
-join-create tools.
+建议使用 Python 3.10+，在本仓库根目录安装 editable package：
 
-The older `python -m multi_agent_tcp.workspace_api ...` CLI remains available
-for framework internals, tests, and debugging, but it is not included in
-ordinary Agent prompt-facing context.
+```powershell
+python -m pip install -e .
+multi-agent-tcp doctor --json
+multi-agent-tcp show-registry
+```
 
-The full live Codex MCP smoke is opt-in because it launches the real Codex CLI
-and depends on local credentials/network/model availability:
+也可以从本目录的上一级用模块方式运行：
+
+```powershell
+python -m multi_agent_tcp show-registry
+python -m multi_agent_tcp organization --graph path\to\graph.json
+```
+
+### GuLiCode 桌面
+
+Windows 推荐入口：
+
+```powershell
+.\start-gulicode-desktop.cmd
+```
+
+跨平台终端入口：
+
+```powershell
+cd GuLiCode
+bun run desktop
+```
+
+打包烟测入口：
+
+```powershell
+.\start-gulicode-desktop.cmd --packaged
+```
+
+启动成功通常会看到 renderer dev server、Electron app started、sidecar server ready 等日志标记。详细桌面启动和打包注意事项见 `KM_docs/skills-snapshot/knowledge_base/gulicode_desktop.md`。
+
+## 开发与验证
+
+### Python runtime
+
+常用验证命令：
+
+```powershell
+python -m py_compile graph_runtime.py graph_control.py blueprint_mcp_runtime.py agent_launch_context.py desktop_blueprint_service.py
+pytest -q test_agent_runtime.py -k "not real_codex"
+pytest -q test_desktop_blueprint_service.py
+pytest -q test_workspace_api.py test_workspace_manager.py
+```
+
+真实 Codex smoke 依赖本机 Codex、模型、凭据和网络状态，默认不作为普通 CI 路径：
 
 ```powershell
 $env:MULTI_AGENT_TCP_RUN_REAL_CODEX_MCP = "1"
 python -m pytest -q test_desktop_blueprint_service.py::test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow -vv
 ```
 
-## Requirements
+### GuLiCode app
 
-- Python 3.10+
-- `merge3` Python package is recommended for Dulwich-powered three-way text merges in the workspace changeset flow (`python -m pip install merge3`).
-- MCP/live blueprint dependencies are declared in `pyproject.toml` and installed
-  by `python -m pip install -e .`: `mcp`, `uvicorn`, `starlette`, and `httpx`.
-- At least one supported agent CLI on `PATH`. Currently:
-  - `codemaker` (non-interactive `codemaker run` with `--format json`) — fully supported via `codemaker_bridge.py`.
-  - `codex` (non-interactive `codex exec --json`) is the current primary live
-    Agent path, including private `CODEX_HOME`, Workspace API/MCP tools, and
-    real-smoke coverage.
-  - Other CLIs require future adapter work in this repository.
-- Run with the **parent** of this folder on `PYTHONPATH`, or from a project that already imports `multi_agent_tcp` as a package.
+常用验证命令：
 
-For a durable command on PATH, install this checkout in editable mode:
-
-```bash
-python -m pip install -e .
-multi-agent-tcp doctor --json
-multi-agent-tcp show-registry
+```powershell
+cd GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-side-panel.test.ts ./src/i18n/parity.test.ts
+bun run typecheck
 ```
 
-Example from `Package/Script/Python` (one level above this directory):
+Electron 侧常用验证：
 
-```bash
-python -m multi_agent_tcp show-registry
-python -m multi_agent_tcp dispatch --tasks path/to/tasks.json
+```powershell
+cd GuLiCode\packages\desktop-electron
+bun test ./src/main/ipc-blueprint-runtime.test.ts
+bun run typecheck
 ```
 
-See [`examples/HOWTO.txt`](examples/HOWTO.txt) for low-level setup and [`GUIDE_FOR_AGENTS.md`](GUIDE_FOR_AGENTS.md) for the standard two-step workflow that any agent CLI or script can use to dispatch tasks to peer agents. Optional local reference [`codemaker_cli.md`](codemaker_cli.md) is **not** in the public repo (gitignored); keep your own copy beside this package if you use it.
+## 目录导览
 
-## Configuration
+| 路径 | 说明 |
+| --- | --- |
+| `GuLiCode/` | GuLiCode 桌面产品代码，包含 Electron shell、SolidJS app、OpenCode vendor 基线和桌面启动脚本。 |
+| `graph_runtime.py` | 核心运行时：AgentNode 队列、dispatch、join、workspace 状态、事件和最终状态。 |
+| `graph_control.py` | Runtime control-plane 包装层，提供组织读取、start/status/end、message batch、join 等接口。 |
+| `desktop_blueprint_service.py` | GuLiCode 桌面与 Python runtime 之间的服务外壳。 |
+| `blueprint_mcp_runtime.py` | live blueprint run 的 MCP 工具边界与 run-scoped MCP 服务。 |
+| `workspace_manager.py` / `workspace_api.py` / `workspace_rpc.py` | 三个区、private checkout、changeset、冲突检测、报告和产物发布。 |
+| `codex_bridge.py` / `codemaker_bridge.py` / `cluster.py` | CLI worker 适配和兼容层。新文档中优先使用 `CLIWorkerBackend` 这个语义名。 |
+| `docs/` | 设计文档、Workspace API 说明、蓝图 fixture、架构图。 |
+| `KM_docs/skills-snapshot/` | 当前 Codex skill 知识快照，记录近期架构方向、验证命令和交接状态。 |
+| `skill_list/` | 本地 Agent skill 目录，通常由 `python -m multi_agent_tcp.init_skill_list` 初始化。 |
+| `test_*.py` | Python runtime、workspace、desktop service、control-plane 的测试。 |
 
-- Edit [`agents_registry.json`](agents_registry.json) for agent ids, **`cwd` (use an absolute path to your repo root in practice)**, models, and skills. The committed file uses `"."` as a placeholder.
-- Run `python -m multi_agent_tcp.init_skill_list` to populate `skill_list/` (gitignored by default).
+## 当前边界
 
-## Documentation map
+- 不把低层 TCP worker 当作产品中心。它只是 `CLIWorkerBackend` 后面的一个执行路径。
+- 不恢复旧 Ryven/editor UI 作为主线。当前蓝图能力应嵌入 GuLiCode 桌面。
+- 普通 Agents 不直接互发消息。它们通过框架 API 暂存 dispatch 意图，由 `GraphRuntime` 校验并投递。
+- 普通 Agents 不直接写工程目录或运行共享区。代码改动进入私有 checkout，提交 changeset 后由框架校验、合并或返回冲突。
+- Top Agent 不直接改写 runtime 内部状态。它读取组织上下文、提交结构化计划、解释状态，并通过控制面请求生命周期动作。
+- UI 不复制调度语义。GuLiCode 前端消费 runtime/control-plane 状态，不重新实现队列、join、workspace 决策。
 
-| File | Purpose |
-|------|---------|
-| [`GUIDE_FOR_AGENTS.md`](GUIDE_FOR_AGENTS.md) | Standard two-step workflow for any agent CLI / script that wants to dispatch sub-tasks to peer agents. **Replaces** the legacy `GUIDE_FOR_CODEMAKER.md`. |
-| [`examples/HOWTO.txt`](examples/HOWTO.txt) | Low-level: `broker` / `agent` / `spawn` / orchestrate recipes / library API. |
-| [`KM_docs/skills-snapshot/`](KM_docs/skills-snapshot/) | Backup copy of the local `multi-agent-tcp` Codex skill snapshot. |
-| [`codemaker_cli.md`](codemaker_cli.md) | (Local-only, gitignored) CodeMaker CLI reference notes. |
+## 相关文档
 
-Latest focused MCP validation is tracked in
-[`KM_docs/skills-snapshot/archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md`](KM_docs/skills-snapshot/archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md).
-
+- `docs/workspace_api.md`：Workspace 三个区、checkout/status/diff/submit/publish 的当前契约。
+- `docs/gulicode_blueprint_workbench_design.md`：GuLiCode 蓝图工作台的产品和技术边界。
+- `KM_docs/skills-snapshot/knowledge_base/core_architecture.md`：当前核心架构快照。
+- `KM_docs/skills-snapshot/knowledge_base/dispatch_workflows.md`：runtime control-plane 和消息分发工作流。
+- `KM_docs/skills-snapshot/knowledge_base/gulicode_desktop.md`：GuLiCode 桌面启动、打包和本机验证规则。

@@ -6,31 +6,63 @@
 
 旧路径如 `F:\src\ryven_demo\多agents通信设计.md` 只代表早期材料来源，不应作为当前默认项目路径。
 
-## 2026-05-22 Highest Priority: Test Agents Communication
+## 2026-05-21 Desktop Blueprint Planning Update
 
-Current top priority is communication validation with Test Agents. Before new
-Top Agent product planning or broad UI work, keep the test loop focused on
-whether the framework can reliably fan out messages, scope each downstream
-Agent to its own current batch, and collect leaf receipts through shared
-reports.
+Completed:
 
-Acceptance target:
+1. The desktop app/current chat session is now the Top Agent product role for
+   blueprint planning mode. There is no separate bottom Top Agent worker,
+   private Top Agent `CODEX_HOME`, or user-runnable Top Agent CLI in this path.
+2. Planning mode is a virtual composer/dropdown mode named
+   `blueprintPlanning`; all other agent modes continue as ordinary chat.
+3. The backend planning context is `DesktopBlueprintPlanningSession`, keyed by
+   `projectDir + blueprintId + desktopSessionId`.
+4. Planning context uses a no-op `GraphRuntime` and
+   `GraphRuntimeControlPlane` for organization, validation, question
+   blocking, staged plans, and planning MCP.
+5. Planning MCP is the only tool path for planning control. It exposes the
+   desktop planning subset and filters `runtime_start`, `top_agent_ask`, and
+   `top_agent_start_session`.
+6. User approval still starts the real run through the app's existing
+   `blueprint.start(..., "live")` path, then records the started run with
+   `blueprint.planning.markPlanStarted`.
+7. Manual Runtime panel starts now enter through the same planning channel:
+   the panel requires task text, optionally constrains start AgentNodes, then
+   submits a real user message to the main chat in `blueprintPlanning` mode.
+8. New product-facing blueprints no longer depend on start/end terminal nodes.
+   Planning/start validation now treats final `TopAgentStartPlan.start_nodes`
+   as the authoritative start selection.
 
-1. One upstream Test Agent can dispatch to multiple downstream Test Agents,
-   and each downstream Agent receives a distinct readable current batch from
-   `framework_context.message_envelope.outgoing_batch_id`.
-2. Downstream Agents do not pass upstream/source `batch_id` values into
-   `agent_context(batch_id=...)`.
-3. Leaf Agents with empty `required_outgoing_targets` do not call
-   `agent_dispatch` or `join_contribute`; they publish receipts/results through
-   `workspace_publish` / `workspace_publish_file`.
-4. `join_contribute` is used only when a real framework/task `join_id` is
-   provided; outgoing batch ids such as `out-*` are not treated as join ids.
-5. Test Agent panel snapshots remain per node id so multi-Agent test logs do
-   not overwrite each other except for intentionally duplicated node names.
+P0 status-source fix completed:
 
-Recent supporting fixes are archived in
-[`../archive/test_agent_communication_priority_2026-05-22.md`](../archive/test_agent_communication_priority_2026-05-22.md).
+1. Planning MCP status/explain/utterance calls now select the active live
+   `DesktopBlueprintRun` when one is linked or discoverable for the same
+   `projectDir + blueprintId`; otherwise they fall back to the planning
+   context no-op runtime.
+2. Planning MCP responses add `status_source`, `source_run_id`, and
+   `planning_session_id` without changing the old top-level response shape.
+3. Live runs write compact status-source diagnostics under
+   `shared/logs/blueprint-diagnostics/`.
+4. Manual evidence from `run-cd9366eea7f2` showed
+   `planning_context=created/agents={}` and
+   `active_live_run=running/test-agent=idle`, with Top Agent MCP calls selecting
+   `active_live_run`.
+
+Highest priority next:
+
+1. Smoke Runtime task-panel submit with an already-open planning context:
+   panel submit -> main chat user message -> `blueprintPlanning` staged plan
+   -> approve -> live run, then confirm status-source lookup matches the
+   Runtime panel.
+2. Decide whether to throttle duplicate `planning_status_source_mismatch`
+   events emitted during polling.
+3. Optional debug UI: expose the diagnostics path from live run summaries.
+
+Detailed archive:
+
+- [`../archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](../archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
+- [`../archive/blueprint_planning_mode_no_bottom_top_agent_2026-05-21.md`](../archive/blueprint_planning_mode_no_bottom_top_agent_2026-05-21.md)
+- [`../archive/blueprint_planning_status_source_diagnostics_2026-05-21.md`](../archive/blueprint_planning_status_source_diagnostics_2026-05-21.md)
 
 ## 2026-05-19 MCP Full-Control Update
 

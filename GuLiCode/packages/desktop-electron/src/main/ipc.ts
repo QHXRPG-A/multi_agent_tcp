@@ -361,6 +361,10 @@ export function registerIpcHandlers(deps: Deps) {
     })
   })
 
+  ipcMain.handle("reveal-path-in-file-manager", (_event: IpcMainInvokeEvent, path: string) => {
+    shell.showItemInFolder(path)
+  })
+
   ipcMain.handle("read-clipboard-image", () => {
     const image = clipboard.readImage()
     if (image.isEmpty()) return null

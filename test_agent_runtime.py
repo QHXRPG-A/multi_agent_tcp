@@ -20,6 +20,7 @@ from multi_agent_tcp import (
     CodexAdapter,
     CodeMakerAdapter,
     GuLiCodeTopAgentProfile,
+    AgentTCPClient,
     GraphDefinition,
     GraphEdge,
     GraphExecutor,
@@ -878,6 +879,47 @@ class _SequencedCluster(_FakeCluster):
         self._release_events[idx].set()
 
 
+class _SharedClientCluster(_FakeCluster):
+    def __init__(self) -> None:
+        super().__init__()
+        self.client = AgentTCPClient("graph-runtime", "127.0.0.1", 0)
+        self._started_events: list[asyncio.Event] = []
+
+    async def run_single(
+        self,
+        worker_id: str,
+        body: Any,
+        *,
+        timeout_sec: float = 600.0,
+        _skip_skill_inject: bool = False,
+        meta: dict[str, Any] | None = None,
+        stream_callback: Any = None,
+    ) -> dict[str, Any]:
+        started = asyncio.Event()
+        self._started_events.append(started)
+        self.sent.append((worker_id, body, timeout_sec))
+        started.set()
+        return await self.client.wait_for_message(
+            expect_from=worker_id,
+            timeout_sec=timeout_sec,
+            stream_callback=stream_callback,
+        )
+
+    async def wait_started(self, idx: int) -> None:
+        while len(self._started_events) <= idx:
+            await asyncio.sleep(0)
+        await self._started_events[idx].wait()
+
+    async def emit_worker_message(self, worker_id: str, body: Any) -> None:
+        await self.client._enqueue_received(
+            {
+                "type": "message",
+                "from": worker_id,
+                "body": body,
+            }
+        )
+
+
 class _VerboseReplyCluster(_FakeCluster):
     async def run_single(
         self,
@@ -985,6 +1027,69 @@ async def test_graph_runtime_queues_messages_until_agent_is_idle() -> None:
     assert "running" in states
     assert "waiting_for_reply" in states
     assert "processing_reply" in states
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_completes_concurrent_worker_replies_out_of_order() -> None:
+    cluster = _SharedClientCluster()
+    node_a = AgentNode(node_id="node-a", agent_id="agent-a", cwd=Path("."), timeout_sec=1.0)
+    node_b = AgentNode(node_id="node-b", agent_id="agent-b", cwd=Path("."), timeout_sec=1.0)
+    runtime = GraphRuntime(cluster)
+
+    task_a = asyncio.create_task(runtime.send_agent_message(node_a, {"prompt": "a"}))
+    task_b = asyncio.create_task(runtime.send_agent_message(node_b, {"prompt": "b"}))
+    await cluster.wait_started(1)
+
+    await cluster.emit_worker_message(
+        "agent-b",
+        {
+            "type": "agent.stream",
+            "event": {
+                "kind": "part.delta",
+                "node_id": "node-b",
+                "agent_id": "agent-b",
+                "delta": "b-progress",
+            },
+        },
+    )
+    await cluster.emit_worker_message("agent-b", {"ok": True, "text": "b final"})
+    await cluster.emit_worker_message(
+        "agent-a",
+        {
+            "type": "agent.stream",
+            "event": {
+                "kind": "part.delta",
+                "node_id": "node-a",
+                "agent_id": "agent-a",
+                "delta": "a-progress",
+            },
+        },
+    )
+    await cluster.emit_worker_message("agent-a", {"ok": True, "text": "a final"})
+
+    reply_a, reply_b = await asyncio.gather(task_a, task_b)
+
+    assert reply_a["said"] == "a final"
+    assert reply_b["said"] == "b final"
+    assert runtime.instances["node-a"].state == "idle"
+    assert runtime.instances["node-b"].state == "idle"
+    assert runtime.instances["node-a"].busy_count == 0
+    assert runtime.instances["node-b"].busy_count == 0
+    assert runtime.instances["node-a"].messages_sent == 1
+    assert runtime.instances["node-b"].messages_sent == 1
+    deltas = {
+        (event.get("node_id"), event.get("delta"))
+        for event in runtime.agent_stream_events
+        if event.get("kind") == "part.delta"
+    }
+    assert ("node-a", "a-progress") in deltas
+    assert ("node-b", "b-progress") in deltas
+    completed_nodes = {
+        event.get("node_id")
+        for event in runtime.agent_stream_events
+        if event.get("kind") == "message.completed"
+    }
+    assert {"node-a", "node-b"} <= completed_nodes
 
 
 @pytest.mark.asyncio
@@ -1523,6 +1628,120 @@ async def test_graph_runtime_reminds_idle_source_about_remaining_outgoing_target
     assert len(reminders) == 1
     assert reminders[0].payload["remaining_targets"] == ["agent-c"]
     assert reminders[0].payload["required_outgoing_targets"] == ["agent-b", "agent-c"]
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_prompts_idle_agent_summary_after_threshold(monkeypatch) -> None:
+    now = {"value": 1000.0}
+    monkeypatch.setattr("multi_agent_tcp.graph_runtime.time.monotonic", lambda: now["value"])
+    runtime = GraphRuntime(_FakeCluster())
+    node = AgentNode(node_id="agent-a", agent_id="worker-a", cwd=Path("."))
+
+    await runtime.send_agent_message(node, {"prompt": "do work"})
+    inst = runtime.instances["agent-a"]
+    assert inst.has_received_flow is True
+    assert inst.task_status == "working"
+
+    now["value"] += 20.0
+    await runtime.tick()
+    assert not [event for event in runtime.events if event.event_type == "AgentSummaryRequested"]
+
+    now["value"] += 11.0
+    await runtime.tick()
+
+    summary_events = [
+        event for event in runtime.events if event.event_type == "AgentSummaryRequested"
+    ]
+    assert len(summary_events) == 1
+    queued = runtime.pending_messages[summary_events[0].payload["message_id"]]
+    assert queued.body["type"] == "framework_summary_request"
+    assert "your own current task" in queued.body["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_idle_timer_resets_when_new_work_arrives(monkeypatch) -> None:
+    now = {"value": 2000.0}
+    monkeypatch.setattr("multi_agent_tcp.graph_runtime.time.monotonic", lambda: now["value"])
+    runtime = GraphRuntime(_FakeCluster())
+    node = AgentNode(node_id="agent-a", agent_id="worker-a", cwd=Path("."))
+
+    await runtime.send_agent_message(node, {"prompt": "first"})
+    runtime.record_agent_task_status(
+        "agent-a",
+        agent_id="worker-a",
+        status="completed",
+        summary="first done",
+    )
+    assert runtime.instances["agent-a"].task_status == "completed"
+
+    now["value"] += 20.0
+    await runtime.send_agent_message(node, {"prompt": "second"})
+    inst = runtime.instances["agent-a"]
+    assert inst.task_status == "working"
+    assert inst.summary_prompted_at is None
+
+    now["value"] += 20.0
+    await runtime.tick()
+    assert not [event for event in runtime.events if event.event_type == "AgentSummaryRequested"]
+
+    now["value"] += 11.0
+    await runtime.tick()
+    assert [event for event in runtime.events if event.event_type == "AgentSummaryRequested"]
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_ring_agent_waits_for_circulation_counts_before_summary(monkeypatch) -> None:
+    now = {"value": 3000.0}
+    monkeypatch.setattr("multi_agent_tcp.graph_runtime.time.monotonic", lambda: now["value"])
+    graph = GraphDefinition(
+        agent_nodes={
+            "a": AgentNode(node_id="a", agent_id="worker-a", cwd=Path(".")),
+            "b": AgentNode(node_id="b", agent_id="worker-b", cwd=Path(".")),
+        },
+        edges=[
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "a", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    runtime.configure_completion_tracking(graph)
+
+    await runtime.send_agent_message(graph.agent_nodes["a"], {"prompt": "ring work"})
+    now["value"] += 31.0
+    await runtime.tick()
+    assert not [event for event in runtime.events if event.event_type == "AgentSummaryRequested"]
+
+    for counts in runtime._agent_ring_circulation_counts.values():
+        for ring_id in list(counts):
+            counts[ring_id] = 0
+    await runtime.tick()
+
+    summary_events = [
+        event for event in runtime.events if event.event_type == "AgentSummaryRequested"
+    ]
+    assert len(summary_events) == 1
+    assert summary_events[0].node_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_ready_for_top_agent_summary_after_all_agents_terminal() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "a": AgentNode(node_id="a", agent_id="worker-a", cwd=Path(".")),
+            "b": AgentNode(node_id="b", agent_id="worker-b", cwd=Path(".")),
+        },
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    runtime.configure_completion_tracking(graph)
+
+    await runtime.send_agent_message(graph.agent_nodes["a"], {"prompt": "a"})
+    await runtime.send_agent_message(graph.agent_nodes["b"], {"prompt": "b"})
+    runtime.record_agent_task_status("a", agent_id="worker-a", status="completed", summary="a done")
+    runtime.record_agent_task_status("b", agent_id="worker-b", status="completed", summary="b done")
+
+    snapshot = runtime.status_snapshot(graph=graph)
+    assert snapshot["run"]["ready_for_top_agent_summary"] is True
+    assert any(event.event_type == "RunReadyForTopAgentSummary" for event in runtime.events)
 
 
 def test_graph_runtime_join_barrier_wait_all_aggregates_source_metadata() -> None:
@@ -2808,6 +3027,14 @@ def test_graph_definition_builds_agent_connections_and_organization_view() -> No
         "selected_by": "top_agent",
         "framework_role": "validate_only",
         "valid_start_nodes": ["planner", "coder", "doc", "reviewer"],
+        "required_start_groups": [
+            {
+                "group_id": "start-group-planner",
+                "node_ids": ["planner"],
+                "required_count": 1,
+                "kind": "source_agent",
+            }
+        ],
     }
     assert view["agents"]["planner"]["agent_id"] == "worker-planner"
     assert view["agents"]["planner"]["downstream_agents"] == ["coder", "doc"]
@@ -2896,6 +3123,115 @@ def test_gulicode_top_agent_context_and_start_plan_validation() -> None:
     assert validation.errors == []
     assert validation.normalized_plan is not None
     assert validation.normalized_plan["start_nodes"] == ["planner"]
+    assert validation.required_start_groups == [
+        {
+            "group_id": "start-group-planner",
+            "node_ids": ["planner"],
+            "required_count": 1,
+            "kind": "source_agent",
+        }
+    ]
+
+
+def test_graph_definition_required_start_groups_cover_source_components() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "a": AgentNode(node_id="a"),
+            "b": AgentNode(node_id="b"),
+            "c": AgentNode(node_id="c"),
+            "d": AgentNode(node_id="d"),
+        },
+        edges=[
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "c", edge_type="exec"),
+        ],
+    )
+
+    assert graph.required_start_groups() == [
+        {
+            "group_id": "start-group-a",
+            "node_ids": ["a"],
+            "required_count": 1,
+            "kind": "source_agent",
+        },
+        {
+            "group_id": "start-group-d",
+            "node_ids": ["d"],
+            "required_count": 1,
+            "kind": "source_agent",
+        },
+    ]
+
+    profile = GuLiCodeTopAgentProfile()
+    valid = TopAgentStartPlan.from_dict(
+        {
+            "user_goal": "Run both components.",
+            "agent_descriptions": {
+                "a": "Starts ABC.",
+                "b": "Middle.",
+                "c": "End.",
+                "d": "Independent.",
+            },
+            "start_nodes": ["a", "d"],
+            "tasks": {
+                "a": {
+                    "goal": "Start ABC.",
+                    "expected_output": "ABC flow dispatched.",
+                    "acceptance": "B receives work.",
+                },
+                "d": {
+                    "goal": "Handle D.",
+                    "expected_output": "D result.",
+                    "acceptance": "D completes.",
+                },
+            },
+        }
+    )
+    assert profile.validate_start_plan(graph, valid).ok is True
+
+    invalid = TopAgentStartPlan.from_dict(
+        {
+            **valid.to_dict(),
+            "start_nodes": ["b"],
+            "tasks": {
+                "b": {
+                    "goal": "Wrong start.",
+                    "expected_output": "No.",
+                    "acceptance": "No.",
+                }
+            },
+        }
+    )
+    validation = profile.validate_start_plan(graph, invalid)
+    assert validation.ok is False
+    joined = "\n".join(validation.errors)
+    assert "not valid source start nodes: b" in joined
+    assert "missing required start group start-group-a" in joined
+    assert "missing required start group start-group-d" in joined
+
+
+def test_graph_definition_required_start_groups_allow_one_node_from_source_ring() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "a": AgentNode(node_id="a"),
+            "b": AgentNode(node_id="b"),
+            "c": AgentNode(node_id="c"),
+        },
+        edges=[
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "a", edge_type="exec"),
+            GraphEdge("b", "c", edge_type="exec"),
+        ],
+    )
+
+    assert graph.required_start_groups() == [
+        {
+            "group_id": "start-group-a-b",
+            "node_ids": ["a", "b"],
+            "required_count": 1,
+            "kind": "source_component",
+        }
+    ]
 
 
 def test_gulicode_top_agent_start_plan_validation_rejects_unsafe_shape() -> None:
@@ -3107,6 +3443,101 @@ def test_graph_runtime_complete_writes_final_report_and_archive_index(tmp_path: 
     assert archives[0]["archive_id"] == "run-final-completed"
     assert "FinalReportPublished" in [event.event_type for event in runtime.events]
     assert "RunArchiveIndexed" in [event.event_type for event in runtime.events]
+
+
+def test_graph_runtime_workspace_status_hydrates_shared_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+) -> None:
+    (tmp_path / "src").mkdir()
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path, workspace_id="ws-outputs")
+    run = manager.create_run(run_id="run-outputs")
+    private = manager.agent_workspace_dir(run, "agent-coder")
+    server = WorkspaceRPCServer(manager, run)
+    server.start()
+    try:
+        context_path = private / "workspace_api_context.json"
+        context_path.write_text(
+            json.dumps(server.context_for("agent-coder"), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(WORKSPACE_API_CONTEXT_ENV, str(context_path))
+
+        assert workspace_api_main(
+            ["publish", "--area", "reports", "--path", "summary.md", "--text", "report ok"]
+        ) == 0
+        report_out = json.loads(capsys.readouterr().out)
+        artifact_source = private / "build.log"
+        artifact_source.write_text("build ok\n", encoding="utf-8")
+        assert workspace_api_main(
+            [
+                "publish-file",
+                "--area",
+                "artifacts",
+                "--path",
+                "logs/build.log",
+                "--file",
+                str(artifact_source),
+            ]
+        ) == 0
+        artifact_out = json.loads(capsys.readouterr().out)
+
+        runtime = GraphRuntime(_FakeCluster(), archive_manager=manager, archive_run=run)
+        workspace = runtime.status_snapshot()["workspace"]
+
+        assert workspace["workspace_id"] == "ws-outputs"
+        assert workspace["workspace_root"] == str(run.path.resolve())
+        assert workspace["shared_root"] == str(run.shared_dir.resolve())
+        assert workspace["directories"]["reports"] == str(run.shared_reports_dir.resolve())
+        assert workspace["directories"]["artifacts"] == str(run.shared_artifacts_dir.resolve())
+        assert workspace["reports"] == [
+            {
+                "area": "reports",
+                "name": "summary.md",
+                "path": "summary.md",
+                "absolute_path": str((run.shared_reports_dir / "summary.md").resolve()),
+                "version": report_out["version"],
+                "owner": "agent-coder",
+                "updated_at": workspace["reports"][0]["updated_at"],
+                "lease_id": workspace["reports"][0]["lease_id"],
+            }
+        ]
+        assert workspace["artifacts"][0]["area"] == artifact_out["area"]
+        assert workspace["artifacts"][0]["path"] == artifact_out["path"]
+        assert workspace["artifacts"][0]["absolute_path"] == str((run.shared_artifacts_dir / "logs" / "build.log").resolve())
+        assert workspace["artifacts"][0]["version"] == artifact_out["version"]
+    finally:
+        server.close()
+
+
+def test_graph_runtime_workspace_status_hydrates_accepted_changesets(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('base')\n", encoding="utf-8")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path, workspace_id="ws-changes")
+    run = manager.create_run(run_id="run-changes", code_mode="project_reference")
+    checkout = manager.checkout_agent(run, "agent-coder", write_scope=["src/**"])
+    (checkout.checkout_dir / "src" / "app.py").write_text("print('changed')\n", encoding="utf-8")
+    result = manager.submit_checkout(run, checkout, task_id="task-code", summary="change app")
+
+    runtime = GraphRuntime(_FakeCluster(), archive_manager=manager, archive_run=run)
+    workspace = runtime.status_snapshot()["workspace"]
+
+    assert result.status == "accepted"
+    assert workspace["workspace_id"] == "ws-changes"
+    assert workspace["directories"]["changesets"] == str((run.path / "changesets").resolve())
+    assert workspace["changesets"] == [
+        {
+            "changeset_id": result.changeset_id,
+            "name": result.changeset_id,
+            "path": result.changeset_id,
+            "absolute_path": str((run.path / "changesets" / result.changeset_id).resolve()),
+            "files": ["src/app.py"],
+            "agent_id": "agent-coder",
+            "status": "accepted",
+            "integration_ref": result.integration_ref,
+        }
+    ]
 
 
 @pytest.mark.asyncio

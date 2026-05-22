@@ -76,6 +76,7 @@ export type BlueprintWindowPlanningSubmitInput = {
   task: string
   startNodeIds: string[]
   message: string
+  silentBlocked?: boolean
 }
 
 export type BlueprintWindowPlanningSubmitRequest = BlueprintWindowContext & {
@@ -198,6 +199,7 @@ export type ElectronAPI = {
   saveFilePicker: (opts?: { title?: string; defaultPath?: string }) => Promise<string | null>
   openLink: (url: string) => void
   openPath: (path: string, app?: string) => Promise<void>
+  revealPathInFileManager: (path: string) => Promise<void>
   readClipboardImage: () => Promise<{ buffer: ArrayBuffer; width: number; height: number } | null>
   showNotification: (title: string, body?: string) => void
   getWindowFocused: () => Promise<boolean>

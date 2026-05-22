@@ -919,6 +919,43 @@ def test_run_mcp_ordinary_agent_context_and_join_contribute_are_scope_bound() ->
     assert control.requests[-1]["command"] == "agent.context"
     assert control.requests[-1]["args"] == {"source_node_id": "planner", "batch_id": "batch-1"}
 
+    task_status = asyncio.run(
+        handle._ordinary_agent_task_status(
+            scope,
+            status="completed",
+            summary="planner task done",
+            message_id=None,
+            batch_id=None,
+            reports=[{"path": "reports/planner.md"}],
+            artifacts=None,
+            changesets=None,
+            next_actions=["review"],
+            metadata={"via": "mcp"},
+        )
+    )
+    assert task_status["ok"] is True
+    assert control.requests[-1]["command"] == "agent.task_status"
+    assert control.requests[-1]["args"]["node_id"] == "planner"
+    assert control.requests[-1]["args"]["agent_id"] == "agent-planner"
+    assert control.requests[-1]["args"]["message_id"] == "msg-1"
+    assert control.requests[-1]["args"]["batch_id"] == "batch-1"
+
+    with pytest.raises(PermissionError):
+        asyncio.run(
+            handle._ordinary_agent_task_status(
+                scope,
+                status="completed",
+                summary="wrong message",
+                message_id="other-message",
+                batch_id=None,
+                reports=None,
+                artifacts=None,
+                changesets=None,
+                next_actions=None,
+                metadata=None,
+            )
+        )
+
     with pytest.raises(PermissionError) as wrong_batch_error:
         asyncio.run(handle._ordinary_agent_context(scope, batch_id="other-batch"))
     wrong_batch_message = str(wrong_batch_error.value)
@@ -1217,6 +1254,7 @@ def test_run_mcp_streamable_http_tools_are_split_by_token(tmp_path: Path) -> Non
 
     assert "agent_dispatch" in ordinary_tools
     assert "agent_context" in ordinary_tools
+    assert "agent_task_status" in ordinary_tools
     assert "join_contribute" in ordinary_tools
     assert "workspace_status" in ordinary_tools
     assert "workspace_read" not in ordinary_tools
@@ -1667,6 +1705,19 @@ def test_blueprint_service_live_mode_starts_tick_and_streams_agent_events(tmp_pa
     assert run.runtime.message_journal_path == (
         run.runtime.private_context_run.shared_dir / "logs" / "message_journal.jsonl"
     )
+    assert run.runtime.archive_run is run.runtime.private_context_run
+    run.runtime.private_context_manager.write_shared_text(
+        run.runtime.private_context_run,
+        "reports/live-status.md",
+        "live status ok",
+        owner="agent-planner",
+    )
+    status = service.handle_request({"command": "blueprint.status", "args": {"runId": started["runId"]}})
+    reports = status["status"]["workspace"]["reports"]
+    assert reports[0]["path"] == "live-status.md"
+    assert reports[0]["absolute_path"] == str(
+        (run.runtime.private_context_run.shared_reports_dir / "live-status.md").resolve()
+    )
     service._async_loop.run(asyncio.sleep(0.2))
 
     info = service.handle_request(
@@ -1883,6 +1934,16 @@ def test_blueprint_service_desktop_planning_context_plan_flow(tmp_path: Path, mo
     assert mcp_status["planning_session_id"] == session_id
     assert mcp_status["status_source"]["selected"] == "active_live_run"
     assert "planner" in mcp_status["status"]["agents"]
+    repeated_mcp_status = asyncio.run(
+        session.mcp._control_request(
+            scope,
+            tool_name="runtime_status",
+            command="run.status",
+            args={"recent_events_limit": 20},
+            permission="status",
+        )
+    )
+    assert repeated_mcp_status["source_run_id"] == started["runId"]
     mcp_explanation = asyncio.run(
         session.mcp._control_request(
             scope,
@@ -1915,6 +1976,7 @@ def test_blueprint_service_desktop_planning_context_plan_flow(tmp_path: Path, mo
     assert "planning_status_snapshot" in event_types
     assert "planning_mcp_control_call" in event_types
     assert "planning_status_source_mismatch" in event_types
+    assert event_types.count("planning_status_source_mismatch") == 1
     snapshot = json.loads((diagnostics_dir / "snapshot.json").read_text(encoding="utf-8"))
     assert snapshot["kind"] == "gulicode.blueprint.diagnostics"
     assert snapshot["focus"] == "planning_status_source"
@@ -2000,6 +2062,12 @@ def test_blueprint_service_live_mode_prestarts_all_agents_with_private_context(
     }
     plan = _plan()
     plan["agent_descriptions"]["test-agent"] = "Test panel agent."
+    plan["start_nodes"] = ["planner", "test-agent"]
+    plan["tasks"]["test-agent"] = {
+        "goal": "Exercise the test panel agent.",
+        "expected_output": "A test panel response.",
+        "acceptance": "The test panel agent can start with private context.",
+    }
 
     service = DesktopBlueprintService()
     service.save_blueprint(project, document)
@@ -2826,14 +2894,14 @@ def test_agent_tcp_client_stream_messages_do_not_satisfy_final_reply() -> None:
     async def scenario() -> None:
         client = AgentTCPClient("orchestrator", "127.0.0.1", 0)
         events = []
-        await client._recv_queue.put(
+        await client._enqueue_received(
             {
                 "type": "message",
                 "from": "agent-planner",
                 "body": {"type": "agent.stream", "event": {"kind": "part.delta", "delta": "hello"}},
             }
         )
-        await client._recv_queue.put(
+        await client._enqueue_received(
             {
                 "type": "message",
                 "from": "agent-planner",
@@ -2851,6 +2919,110 @@ def test_agent_tcp_client_stream_messages_do_not_satisfy_final_reply() -> None:
         )
         assert reply["body"]["text"] == "final"
         assert events == [{"kind": "part.delta", "delta": "hello"}]
+
+    asyncio.run(scenario())
+
+
+def test_agent_tcp_client_preserves_unmatched_sender_replies() -> None:
+    async def scenario() -> None:
+        client = AgentTCPClient("orchestrator", "127.0.0.1", 0)
+
+        planner_waiter = asyncio.create_task(
+            client.wait_for_message(expect_from="agent-planner", timeout_sec=1)
+        )
+        await client._enqueue_received(
+            {
+                "type": "message",
+                "from": "agent-reviewer",
+                "body": {"ok": True, "text": "reviewer final"},
+            }
+        )
+        await asyncio.sleep(0)
+        assert planner_waiter.done() is False
+
+        await client._enqueue_received(
+            {
+                "type": "message",
+                "from": "agent-planner",
+                "body": {"ok": True, "text": "planner final"},
+            }
+        )
+
+        planner_reply = await planner_waiter
+        reviewer_reply = await client.wait_for_message(
+            expect_from="agent-reviewer",
+            timeout_sec=1,
+        )
+
+        assert planner_reply["body"]["text"] == "planner final"
+        assert reviewer_reply["body"]["text"] == "reviewer final"
+
+    asyncio.run(scenario())
+
+
+def test_agent_tcp_client_demuxes_concurrent_waiters_and_streams() -> None:
+    async def scenario() -> None:
+        client = AgentTCPClient("orchestrator", "127.0.0.1", 0)
+        planner_events: list[dict] = []
+        reviewer_events: list[dict] = []
+
+        async def planner_stream(event: dict) -> None:
+            planner_events.append(event)
+
+        async def reviewer_stream(event: dict) -> None:
+            reviewer_events.append(event)
+
+        planner_waiter = asyncio.create_task(
+            client.wait_for_message(
+                expect_from="agent-planner",
+                timeout_sec=1,
+                stream_callback=planner_stream,
+            )
+        )
+        reviewer_waiter = asyncio.create_task(
+            client.wait_for_message(
+                expect_from="agent-reviewer",
+                timeout_sec=1,
+                stream_callback=reviewer_stream,
+            )
+        )
+        await asyncio.sleep(0)
+
+        await client._enqueue_received(
+            {
+                "type": "message",
+                "from": "agent-reviewer",
+                "body": {"type": "agent.stream", "event": {"kind": "part.delta", "delta": "review"}},
+            }
+        )
+        await client._enqueue_received(
+            {
+                "type": "message",
+                "from": "agent-reviewer",
+                "body": {"ok": True, "text": "reviewer final"},
+            }
+        )
+        await client._enqueue_received(
+            {
+                "type": "message",
+                "from": "agent-planner",
+                "body": {"type": "agent.stream", "event": {"kind": "part.delta", "delta": "plan"}},
+            }
+        )
+        await client._enqueue_received(
+            {
+                "type": "message",
+                "from": "agent-planner",
+                "body": {"ok": True, "text": "planner final"},
+            }
+        )
+
+        planner_reply, reviewer_reply = await asyncio.gather(planner_waiter, reviewer_waiter)
+
+        assert planner_reply["body"]["text"] == "planner final"
+        assert reviewer_reply["body"]["text"] == "reviewer final"
+        assert planner_events == [{"kind": "part.delta", "delta": "plan"}]
+        assert reviewer_events == [{"kind": "part.delta", "delta": "review"}]
 
     asyncio.run(scenario())
 

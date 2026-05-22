@@ -1,0 +1,44 @@
+%%{init: {"theme": "base", "themeVariables": {"background": "#ffffff", "fontFamily": "Microsoft YaHei, PingFang SC, Noto Sans CJK SC, Arial, sans-serif", "primaryTextColor": "#172033", "lineColor": "#526077"}}}%%
+flowchart TB
+  user["用户目标<br/>提出需求、确认结果"]
+  top["Top Agent<br/>理解目标、拆解任务、解释状态"]
+  framework["框架调度<br/>校验计划、分发任务、汇聚结果、记录事件"]
+  agents["Agents<br/>多个 AgentNode 并行处理子任务"]
+
+  subgraph zones["Agents 围绕三个区协同办公"]
+    direction LR
+    project["工程目录<br/>权威代码源与最终目标<br/>Agent 可读，不直接写"]
+    private["Agent 私有区<br/>每个 Agent 的可写 checkout<br/>完成真实代码改动"]
+    shared["运行共享区<br/>reports / artifacts / manifest<br/>changeset 引用与事件记录<br/>供协作查阅和最终归档"]
+  end
+
+  changeset["changeset 管道<br/>scope 校验、版本检查、冲突检测、合并审计"]
+  merge["框架校验 / 合并 / 冲突反馈<br/>接受安全改动，拒绝越界或冲突提交"]
+  archive["运行收口<br/>沉淀报告、产物、冲突和 run 记录"]
+
+  user -->|"目标 / 追问"| top
+  top -->|"启动计划"| framework
+  framework -->|"任务、上下文、三区边界"| agents
+  agents -->|"读取项目上下文"| project
+  project -->|"checkout --path / --scope-path"| private
+  agents -->|"在私有 checkout 修改"| private
+  private -->|"submit changeset"| changeset
+  changeset -->|"提交给框架"| merge
+  merge -->|"接受后写回"| project
+  merge -->|"accepted / conflict / touched files"| shared
+  private -->|"publish 报告、产物、摘要引用"| shared
+  shared -->|"run 收口归档"| archive
+
+  classDef actor fill:#e9f7f1,stroke:#2f8f6b,color:#133827
+  classDef control fill:#eef3ff,stroke:#3867c8,color:#162a55
+  classDef project fill:#eaf6ff,stroke:#2f6fab,color:#16324f
+  classDef private fill:#f1faea,stroke:#4a8f3a,color:#183b16
+  classDef shared fill:#fff6df,stroke:#b88318,color:#4a3300
+  classDef archive fill:#f5edff,stroke:#7652b3,color:#2d1c4d
+
+  class user,top,agents actor
+  class framework,changeset,merge control
+  class project project
+  class private private
+  class shared shared
+  class archive archive

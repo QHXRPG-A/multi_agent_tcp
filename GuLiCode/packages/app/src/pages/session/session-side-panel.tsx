@@ -41,7 +41,7 @@ export function SessionSidePanel(props: {
   focusReviewDiff: (path: string) => void
   reviewSnap: boolean
   size: Sizing
-  onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => boolean
+  onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => boolean | Promise<boolean>
 }) {
   const layout = useLayout()
   const platform = usePlatform()

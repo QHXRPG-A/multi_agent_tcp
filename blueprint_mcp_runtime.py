@@ -828,6 +828,32 @@ class RunMCPRuntimeHandle:
             return await self._ordinary_agent_context(scope, batch_id=batch_id)
 
         @mcp.tool()
+        async def agent_task_status(
+            status: str,
+            summary: str = "",
+            message_id: Optional[str] = None,
+            batch_id: Optional[str] = None,
+            reports: Optional[list[dict[str, Any]]] = None,
+            artifacts: Optional[list[dict[str, Any]]] = None,
+            changesets: Optional[list[dict[str, Any]]] = None,
+            next_actions: Optional[list[str]] = None,
+            metadata: Optional[dict[str, Any]] = None,
+        ) -> Dict[str, Any]:
+            scope = _require_scope("ordinary", "agent_task_status")
+            return await self._ordinary_agent_task_status(
+                scope,
+                status=status,
+                summary=summary,
+                message_id=message_id,
+                batch_id=batch_id,
+                reports=reports,
+                artifacts=artifacts,
+                changesets=changesets,
+                next_actions=next_actions,
+                metadata=metadata,
+            )
+
+        @mcp.tool()
         async def join_contribute(
             join_id: str,
             status: str = "completed",
@@ -1421,6 +1447,63 @@ class RunMCPRuntimeHandle:
             lambda: self.control.handle_request({"command": "agent.context", "args": args})
         )
 
+    async def _ordinary_agent_task_status(
+        self,
+        scope: MCPTokenScope,
+        *,
+        status: str,
+        summary: str,
+        message_id: Optional[str],
+        batch_id: Optional[str],
+        reports: Optional[list[dict[str, Any]]],
+        artifacts: Optional[list[dict[str, Any]]],
+        changesets: Optional[list[dict[str, Any]]],
+        next_actions: Optional[list[str]],
+        metadata: Optional[dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if scope.agent_node_id is None:
+            raise PermissionError("ordinary MCP token is not bound to an AgentNode")
+        _require_allowed_tool(scope, "agent_task_status")
+        context = scope.current_message_context
+        if context is not None:
+            if context.expires_at < float(self.token_store.now()):
+                raise PermissionError("active message context has expired")
+            if message_id is not None and str(message_id) != context.current_message_id:
+                raise PermissionError("agent_task_status cannot report another message_id")
+            if batch_id is not None and str(batch_id) != str(context.outgoing_batch_id or ""):
+                raise PermissionError("agent_task_status cannot report another batch_id")
+        effective_message_id = (
+            str(message_id)
+            if message_id is not None
+            else context.current_message_id
+            if context is not None
+            else None
+        )
+        effective_batch_id = (
+            str(batch_id)
+            if batch_id is not None
+            else context.outgoing_batch_id
+            if context is not None
+            else None
+        )
+        args = {
+            "node_id": scope.agent_node_id,
+            "agent_id": scope.agent_id,
+            "status": status,
+            "summary": summary,
+            "message_id": effective_message_id,
+            "batch_id": effective_batch_id,
+            "reports": reports or [],
+            "artifacts": artifacts or [],
+            "changesets": changesets or [],
+            "next_actions": [str(item) for item in (next_actions or [])],
+            "metadata": metadata or {},
+        }
+        self._record_mcp_tool_call(scope, "agent_task_status", args)
+        return await self._runtime_call(
+            lambda: self.control.handle_request({"command": "agent.task_status", "args": args})
+        )
+
     async def _ordinary_join_contribute(
         self,
         scope: MCPTokenScope,
@@ -1586,6 +1669,7 @@ ORDINARY_TOOL_NAMES = [
     "workspace_publish_file",
     "agent_dispatch",
     "agent_context",
+    "agent_task_status",
     "join_contribute",
 ]
 

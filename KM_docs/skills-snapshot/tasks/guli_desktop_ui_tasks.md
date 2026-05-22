@@ -102,6 +102,20 @@ Do not treat the old Ryven/editor line as the current UI target.
   `GraphRuntime` materialized private Agent context, including private
   checkout cwd, private `CODEX_HOME`, `framework-agent-runtime`, `AGENTS.md`,
   Workspace API env/prompt context, and authorized skill/rule materialization.
+- [DONE] Retired product-facing start/end terminal nodes from new blueprints:
+  Add Node no longer lists them, legacy terminal nodes are hidden, and
+  runtime/export paths filter terminal nodes and terminal-connected edges.
+- [DONE] Added the Runtime task-planning entry: optional multi-select start
+  AgentNodes, required large task textarea, gated submit, and main-chat
+  `blueprintPlanning` handoff instead of direct manual start.
+- [DONE] Changed the top Start controls to focus the Runtime task-planning
+  area, preventing direct starts that bypass task input.
+- [DONE] Changed Runtime action buttons into long row controls with large
+  action labels and smaller explanatory text.
+- [DONE] Added draggable top-level Runtime panels with thick handles, dashed
+  in-layout placeholders, and detached pointer-following drag ghosts.
+- [DONE] Limited the automatic project workdir confirmation dialog to once per
+  app lifetime.
 
 ## In progress
 
@@ -118,11 +132,11 @@ Do not treat the old Ryven/editor line as the current UI target.
   and deletion is handled through context menu, inspector edge action, or
   keyboard shortcuts.
 - [DONE] Added the `Add node` dropdown with Agent, Route sequence, Route
-  parallel, Route parallel_reduce, Start, and End entries. Click adds at the
-  viewport center; dragging an item onto the canvas adds at the snapped drop
-  point.
-- [DONE] Added visible input/output ports: Start output only, End input only,
-  Agent/Route input and output.
+  parallel, and Route parallel_reduce entries. Click adds at the viewport
+  center; dragging an item onto the canvas adds at the snapped drop point.
+  Start and End were later retired from product-facing Add Node UI.
+- [DONE] Added visible Agent/Route input and output ports. Start/End terminal
+  ports are now legacy import compatibility only, not current product UI.
 - [DONE] Split selection from inspection: left-click selects only, double-click
   or right-click `Edit` opens the inspector, and the inspector collapses when
   there is no valid target.
@@ -145,9 +159,14 @@ Do not treat the old Ryven/editor line as the current UI target.
 - [DONE] Added CLI/model dropdown behavior. `cli_kind` supports `codemaker`
   and `codex`; changing it refreshes model choices and the runtime export
   generates the command string.
+- [DONE] Added task-first Runtime entry with start AgentNode selection, task
+  textarea, submit gating, and main-chat `blueprintPlanning` handoff.
+- [DONE] Added Runtime top-level panel reordering by dragging the thick handle
+  above a panel, with an in-layout placeholder and detached drag ghost.
 - [TODO] Manual visual smoke pass in the packaged app for inspector colors,
   select menu readability, `非阻塞` visibility, common config placement,
-  skill/rule dropdowns, model loading/failure state, and tip popovers.
+  skill/rule dropdowns, model loading/failure state, Runtime task planning,
+  draggable Runtime panels, and tip popovers.
 - [TODO] Define durable blueprint state ownership beyond local draft state: project JSON, workspace records, and runtime-backed run state.
 - [TODO] Add command palette or shortcut entry for opening the blueprint panel if it becomes a repeated workflow.
 
@@ -189,7 +208,14 @@ Do not treat the old Ryven/editor line as the current UI target.
 - [DONE] Fixed desktop blueprint `live` Agent startup so ordinary/Test Agents
   are launched from `GraphRuntime` materialized private context, not raw
   `CLIWorkerBackend` node configs.
-- [TODO] Manual smoke the live run UI path: start, tick, status polling,
+- [DONE] Added task-first manual Runtime entry. The Runtime panel now submits
+  required task text through the main chat `blueprintPlanning` flow instead of
+  calling live start directly.
+- [DONE] Added Runtime top-level panel reorder with handle drag, placeholder,
+  and detached ghost.
+- [TODO] Manual smoke the live run UI path: task panel submit, automatic
+  `blueprintPlanning` chat handoff, staged plan approval, live start, tick,
+  status polling,
   Agent long-press progress, right-click `信息面板`, move/resize, close/pin,
   non-pinned outside-click close, WebSocket transcript, and `default/top`
   queue sends.
@@ -226,8 +252,8 @@ Do not treat the old Ryven/editor line as the current UI target.
 
 ```powershell
 cd GuLiCode\packages\app
-bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts
-bun run build
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts ./src/pages/session/blueprint-planning-session.test.ts ./src/components/prompt-input/submit.test.ts ./src/i18n/parity.test.ts
+bun run typecheck
 ```
 
 If touching catalog/model IPC, also run:
@@ -244,7 +270,8 @@ bun test ./src/main/blueprint-catalog.test.ts
 - right-click a node and use `Edit` / `Delete`
 - left-click a node and confirm the inspector stays closed
 - double-click a node and confirm the inspector opens
-- add all six node kinds from the dropdown
+- add Agent and Route node kinds from the dropdown; Start/End should not be
+  present in Add Node
 - drag a menu item onto the canvas and confirm grid snapping
 - drag output port to input port and confirm an edge appears
 - delete selected nodes/edges using `Backspace` and `Delete`
@@ -256,6 +283,12 @@ bun test ./src/main/blueprint-catalog.test.ts
   `skills`, compatible `skill_selection`, and `rule_paths`
 - switch CLI type and verify the model dropdown refreshes or shows failure
   while keeping the current model value
+- in Runtime, verify the start AgentNode multi-select, task textarea, and
+  submit gating
+- submit a Runtime task and verify it appears as a main-chat user message with
+  the composer switched to `blueprintPlanning`
+- drag Runtime panel handles and verify the original panel becomes a dashed
+  placeholder while a detached ghost follows the pointer
 - click inspector `?` buttons and confirm the popover explains "what" and
   "usage"
 - verify the inspector header, field labels, and question buttons are light on
@@ -295,8 +328,9 @@ This task line is in a good first state when:
 Current status: items 1, 2, 3, 4, and 5 have a working baseline.
 Blueprint workbench local-draft editing is complete enough for the runtime
 binding pass: it has RouteNode, port edges, configurable AgentNode fields,
-terminal nodes, add/drop interactions, context menu deletion, inspector
-separation, grid snapping, common config, catalog-backed skill/rule dropdowns,
-CLI/model dropdowns, runtime status projection, and the first Agent
-information panel. Durable project persistence and manual live-runtime smoke
-remain the next UI milestones.
+legacy terminal compatibility without product-facing Start/End nodes, add/drop
+interactions, context menu deletion, inspector separation, grid snapping,
+common config, catalog-backed skill/rule dropdowns, CLI/model dropdowns,
+runtime status projection, task-first Runtime entry, draggable Runtime panels,
+and the first Agent information panel. Durable project persistence and manual
+live-runtime smoke remain the next UI milestones.

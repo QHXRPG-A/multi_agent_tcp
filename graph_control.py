@@ -409,6 +409,34 @@ class GraphRuntimeControlPlane:
                 },
             ).to_dict()
 
+        if command == "agent.task_status":
+            data = self.runtime.record_agent_task_status(
+                str(args["node_id"]),
+                agent_id=(
+                    str(args["agent_id"])
+                    if args.get("agent_id") is not None
+                    else None
+                ),
+                status=str(args["status"]),
+                summary=str(args.get("summary", "")),
+                message_id=(
+                    str(args["message_id"])
+                    if args.get("message_id") is not None
+                    else None
+                ),
+                batch_id=(
+                    str(args["batch_id"])
+                    if args.get("batch_id") is not None
+                    else None
+                ),
+                reports=_list_of_dicts(args.get("reports", [])),
+                artifacts=_list_of_dicts(args.get("artifacts", [])),
+                changesets=_list_of_dicts(args.get("changesets", [])),
+                next_actions=[str(item) for item in (args.get("next_actions") or [])],
+                metadata=dict(args.get("metadata", {})),
+            )
+            return GraphControlResponse(True, data).to_dict()
+
         if command == "run.end":
             result = self.runtime.end_run(
                 str(args["action"]),
@@ -512,6 +540,7 @@ class GraphRuntimeControlPlane:
             return validation.to_dict()
         queued = []
         organization = scoped_organization_view(self.graph)
+        self.runtime.configure_completion_tracking(self.graph)
         if prestart_all_agents:
             await self.runtime.prestart_agents(list(self.graph.agent_nodes.values()))
         for node_id in plan.start_nodes:

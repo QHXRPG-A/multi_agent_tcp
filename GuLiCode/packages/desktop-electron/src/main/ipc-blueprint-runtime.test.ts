@@ -67,6 +67,7 @@ beforeAll(() => {
     shell: {
       openExternal: () => {},
       openPath: async () => "",
+      showItemInFolder: () => {},
     },
   }
   mock.module("electron", () => ({
@@ -92,6 +93,9 @@ describe("blueprint runtime IPC handlers", () => {
     expect(preloadSource).toContain("openBlueprintWindow")
     expect(preloadSource).toContain("onBlueprintWindowDock")
     expect(preloadSource).toContain("onBlueprintWindowPlanningSubmitRequest")
+    expect(ipcSource).toContain('"reveal-path-in-file-manager"')
+    expect(ipcSource).toContain("shell.showItemInFolder")
+    expect(preloadSource).toContain("revealPathInFileManager")
     expect(windowsSource).toContain("new BrowserWindow")
     expect(windowsSource).toContain("blueprintWindowContexts")
     expect(windowsSource).toContain('"blueprint-window-dock-request"')

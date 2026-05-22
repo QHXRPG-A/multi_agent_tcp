@@ -114,6 +114,7 @@
       {"from": "patch", "to": "integration", "edge_type": "exec"},
       {"from": "unit_tests", "to": "integration", "edge_type": "exec"},
       {"from": "e2e_tests", "to": "integration", "edge_type": "exec"},
+      {"from": "integration", "to": "failure_analysis", "edge_type": "retry"},
       {"from": "integration", "to": "summary", "edge_type": "exec"},
       {"from": "summary", "to": "end", "edge_type": "exec"},
       {"from": "requirements", "to": "event_monitor", "edge_type": "side_channel"},

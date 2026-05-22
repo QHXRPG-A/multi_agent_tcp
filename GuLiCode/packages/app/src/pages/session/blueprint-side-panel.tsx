@@ -212,11 +212,18 @@ type BlueprintHeaderStatusState = {
 }
 
 type RuntimePanelMode = "runtime" | "inspector"
+type AutoTopAgentSummaryAttempt = {
+  submitted?: boolean
+  retryAt?: number
+}
+
+const AUTO_TOP_AGENT_SUMMARY_RETRY_MS = 10_000
 
 export type BlueprintPlanningSubmitInput = {
   task: string
   startNodeIds: string[]
   message: string
+  silentBlocked?: boolean
 }
 
 type BlueprintRuntimeStartNodeOption = {
@@ -226,6 +233,14 @@ type BlueprintRuntimeStartNodeOption = {
 }
 
 type RuntimePanelId = "planning" | "status" | "overview" | "agents" | "queues" | "outgoing" | "workspace" | "events"
+type WorkspacePanelArea = "changesets" | "artifacts" | "reports"
+
+type WorkspacePanelItem = {
+  name: string
+  path?: string
+  absolutePath?: string
+  detail?: string
+}
 
 const DEFAULT_RUNTIME_PANEL_ORDER: RuntimePanelId[] = [
   "planning",
@@ -282,8 +297,11 @@ type AgentPanelDisplayEvent = {
   collapsible?: boolean
   detail?: string
   order?: number
+  toolCategory?: AgentPanelToolCategory
   toolItems?: AgentPanelDisplayEvent[]
 }
+
+type AgentPanelToolCategory = "mcp" | "command" | "codex" | "mixed"
 
 type AgentPanelUserMessage = {
   id: string
@@ -603,6 +621,8 @@ export function BlueprintSidePanel(props: {
   })
   const [panelMode, setPanelMode] = createSignal<RuntimePanelMode | undefined>("runtime")
   const runtimePanelOpen = () => panelMode() === "runtime"
+  const [workspacePanelArea, setWorkspacePanelArea] = createSignal<WorkspacePanelArea>()
+  const runtimeWorkspace = createMemo(() => asRecord(asRecord(runtime().status)?.workspace))
   let rootRef: HTMLDivElement | undefined
   let canvasRef: HTMLDivElement | undefined
   let runtimeTaskInputRef: HTMLTextAreaElement | undefined
@@ -610,7 +630,9 @@ export function BlueprintSidePanel(props: {
   const testAgentPersistTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {}
   const testAgentPersistRunning: Record<string, boolean | undefined> = {}
   const testAgentPersistQueued: Record<string, boolean | undefined> = {}
+  const autoTopAgentSummaryAttempts = new Map<string, AutoTopAgentSummaryAttempt>()
   let agentPanelPressFrame: number | undefined
+  let autoTopAgentSummarySubmittingKey: string | undefined
   let agentPanelLongPress:
     | {
         nodeId: string
@@ -1164,6 +1186,49 @@ export function BlueprintSidePanel(props: {
     })
   })
 
+  createEffect(() => {
+    const state = runtime()
+    const runId = state.runId
+    const status = asRecord(state.status)
+    const run = asRecord(status?.run)
+    if (!runId || run?.ready_for_top_agent_summary !== true || !props.onBlueprintPlanningSubmit) return
+    const generation = run.ready_for_top_agent_summary_generation ?? run.summary_generation ?? "latest"
+    const summaryKey = `${runId}:${String(generation)}`
+    const attempt = autoTopAgentSummaryAttempts.get(summaryKey)
+    if (attempt?.submitted || autoTopAgentSummarySubmittingKey === summaryKey) return
+    const now = Date.now()
+    if (attempt?.retryAt && attempt.retryAt > now) return
+
+    autoTopAgentSummarySubmittingKey = summaryKey
+    queueMicrotask(async () => {
+      try {
+        const accepted = await props.onBlueprintPlanningSubmit?.({
+          task: "Summarize completed blueprint run",
+          startNodeIds: [],
+          message: buildTopAgentSummaryMessage({
+            runId,
+            generation,
+            status,
+          }),
+          silentBlocked: true,
+        })
+        autoTopAgentSummaryAttempts.set(
+          summaryKey,
+          accepted
+            ? { submitted: true }
+            : { submitted: false, retryAt: Date.now() + AUTO_TOP_AGENT_SUMMARY_RETRY_MS },
+        )
+      } catch {
+        autoTopAgentSummaryAttempts.set(summaryKey, {
+          submitted: false,
+          retryAt: Date.now() + AUTO_TOP_AGENT_SUMMARY_RETRY_MS,
+        })
+      } finally {
+        if (autoTopAgentSummarySubmittingKey === summaryKey) autoTopAgentSummarySubmittingKey = undefined
+      }
+    })
+  })
+
   async function refreshBlueprintRuntime(runId = runtime().runId, opts: { quiet?: boolean } = {}) {
     if (!runId || !platform.blueprintRunStatus) return
     if (!opts.quiet) setRuntime((current) => ({ ...current, loading: true, error: undefined }))
@@ -1246,6 +1311,37 @@ export function BlueprintSidePanel(props: {
     view().blueprintPanel.close()
   }
 
+  async function openWorkspaceDirectory(area: WorkspacePanelArea) {
+    const directory = workspaceAreaDirectory(runtimeWorkspace(), area)
+    if (!directory || !platform.openPath) return
+    try {
+      await platform.openPath(directory)
+    } catch (error) {
+      showToast({
+        variant: "error",
+        title: language.t("common.requestFailed"),
+        description: readableError(error),
+      })
+    }
+  }
+
+  async function revealWorkspaceItem(path: string | undefined) {
+    if (!path) return
+    try {
+      if (platform.revealPathInFileManager) {
+        await platform.revealPathInFileManager(path)
+        return
+      }
+      if (platform.openPath) await platform.openPath(parentDirectory(path))
+    } catch (error) {
+      showToast({
+        variant: "error",
+        title: language.t("common.requestFailed"),
+        description: readableError(error),
+      })
+    }
+  }
+
   function handleBlueprintHeaderPointerDown(event: PointerEvent) {
     if (props.floating) return
     if (!platform.openBlueprintWindow && !props.onFloat) return
@@ -1309,6 +1405,33 @@ export function BlueprintSidePanel(props: {
       if (current.includes(nodeId)) return current.filter((id) => id !== nodeId)
       return [...current, nodeId]
     })
+  }
+
+  function buildTopAgentSummaryMessage(input: {
+    runId: string
+    generation: unknown
+    status?: Record<string, unknown>
+  }) {
+    const agents = asRecord(input.status?.agents)
+    const taskStatusLines = Object.entries(agents ?? {}).map(([nodeId, value]) => {
+      const agent = asRecord(value)
+      const agentId = String(agent?.agent_id ?? "")
+      const taskStatus = String(agent?.task_status ?? "unknown")
+      const detail = agentId ? ` (${agentId})` : ""
+      return `- ${nodeId}${detail}: ${taskStatus}`
+    })
+    return [
+      "All AgentNodes in the active GuLiCode blueprint run have reported terminal task statuses.",
+      "",
+      `Run ID: ${input.runId}`,
+      `Summary generation: ${String(input.generation ?? "latest")}`,
+      "",
+      "Agent task statuses:",
+      ...(taskStatusLines.length ? taskStatusLines : ["- unknown"]),
+      "",
+      "Please act as the GuLiCode desktop Top Agent for this run. Use the framework_control_* MCP tools (framework_control_runtime_status, framework_control_top_agent_explain_status, and framework_control_top_agent_utterances) for the active live run, then summarize the final outcome for the user.",
+      "Call out failures, blocked work, missing reports, or private implementation notes that should not be treated as delivered work. Do not stage a new start plan and do not start a new run.",
+    ].join("\n")
   }
 
   function buildBlueprintPlanningMessage(task: string, startNodeIds: string[]) {
@@ -2488,6 +2611,17 @@ export function BlueprintSidePanel(props: {
               />
             )}
           </For>
+          <Show when={workspacePanelArea()}>
+            {(area) => (
+              <WorkspaceContentPanel
+                area={area()}
+                workspace={runtimeWorkspace()}
+                onClose={() => setWorkspacePanelArea(undefined)}
+                onOpenDirectory={() => void openWorkspaceDirectory(area())}
+                onRevealItem={(path) => void revealWorkspaceItem(path)}
+              />
+            )}
+          </Show>
         </div>
 
         <Show when={runtimePanelOpen() || (panelMode() === "inspector" && inspectorOpen())}>
@@ -2512,6 +2646,9 @@ export function BlueprintSidePanel(props: {
                   onSubmitPlanningTask={() => void submitBlueprintPlanningTask()}
                   onRefresh={() => void refreshBlueprintRuntime()}
                   onEnd={(action) => void endBlueprintRuntime(action)}
+                  workspacePanelArea={workspacePanelArea()}
+                  onWorkspaceAreaOpen={setWorkspacePanelArea}
+                  onWorkspaceAreaOpenInExplorer={(area) => void openWorkspaceDirectory(area)}
                 />
               </Match>
               <Match when={inspectorOpen()}>
@@ -2606,6 +2743,9 @@ function BlueprintRuntimePanel(props: {
   onSubmitPlanningTask: () => void
   onRefresh: () => void
   onEnd: (action: BlueprintRunEndAction) => void
+  workspacePanelArea?: WorkspacePanelArea
+  onWorkspaceAreaOpen: (area: WorkspacePanelArea) => void
+  onWorkspaceAreaOpenInExplorer: (area: WorkspacePanelArea) => void
 }) {
   const language = useLanguage()
   const status = createMemo(() => asRecord(props.state.status))
@@ -2618,6 +2758,9 @@ function BlueprintRuntimePanel(props: {
   const joins = createMemo(() => recordEntries(asRecord(status()?.joins)))
   const jobs = createMemo(() => recordEntries(asRecord(status()?.jobs)))
   const workspace = createMemo(() => asRecord(status()?.workspace))
+  const workspaceChanges = createMemo(() => workspaceAreaItems(workspace(), "changesets"))
+  const workspaceArtifacts = createMemo(() => workspaceAreaItems(workspace(), "artifacts"))
+  const workspaceReports = createMemo(() => workspaceAreaItems(workspace(), "reports"))
   const explanation = createMemo(() => asRecord(props.state.explanation))
   const summary = createMemo(() => asRecord(explanation()?.summary))
   const runStatus = createMemo(() => runtimeStatus(props.state.status) || "idle")
@@ -2625,6 +2768,7 @@ function BlueprintRuntimePanel(props: {
   const [runtimePanelOrder, setRuntimePanelOrder] = createSignal<RuntimePanelId[]>([...DEFAULT_RUNTIME_PANEL_ORDER])
   const [draggedRuntimePanel, setDraggedRuntimePanel] = createSignal<RuntimePanelId>()
   const [runtimePanelDrag, setRuntimePanelDrag] = createSignal<RuntimePanelDragState>()
+  const [runtimeEventsPanelHeight, setRuntimeEventsPanelHeight] = createSignal(240)
   let runtimePanelListRef: HTMLDivElement | undefined
 
   const moveRuntimePanelAtPointer = (dragging: RuntimePanelId, clientY: number) => {
@@ -2795,6 +2939,11 @@ function BlueprintRuntimePanel(props: {
                 </div>
               )}
             </Show>
+            <Show when={run()?.ready_for_top_agent_summary}>
+              <div class="mt-2 rounded-sm border border-[rgba(45,212,191,0.28)] bg-[rgba(45,212,191,0.08)] px-2 py-1 text-11-regular text-[#b8fff4]">
+                {language.t("blueprint.runtime.readyForTopSummary" as never)}
+              </div>
+            </Show>
             <div class="mt-3 flex flex-col gap-2">
               <RuntimeActionButton
                 label={language.t("blueprint.runtime.complete")}
@@ -2847,8 +2996,8 @@ function BlueprintRuntimePanel(props: {
               {([id, agent]) => (
                 <RuntimeRow
                   title={id}
-                  meta={`${String(agent.state ?? "unknown")} · ${language.t("blueprint.runtime.queue")}: ${String(agent.queue_size ?? 0)}`}
-                  detail={String(agent.last_error ?? agent.agent_id ?? "")}
+                  meta={`${String(agent.state ?? "unknown")} · ${language.t("blueprint.runtime.taskStatus" as never)}: ${String(agent.task_status ?? "not_started")} · ${language.t("blueprint.runtime.queue")}: ${String(agent.queue_size ?? 0)}`}
+                  detail={runtimeAgentDetail(agent, language)}
                 />
               )}
             </For>
@@ -2887,9 +3036,27 @@ function BlueprintRuntimePanel(props: {
           <RuntimePanelShell {...runtimePanelShellProps("workspace")}>
           <RuntimeSection title={language.t("blueprint.runtime.workspace")}>
             <div class="grid grid-cols-3 gap-2">
-              <RuntimeMetric label={language.t("blueprint.runtime.changes")} value={arrayOfRecords(workspace()?.changesets).length} />
-              <RuntimeMetric label={language.t("blueprint.runtime.artifacts")} value={arrayOfRecords(workspace()?.artifacts).length} />
-              <RuntimeMetric label={language.t("blueprint.runtime.reports")} value={arrayOfRecords(workspace()?.reports).length} />
+              <RuntimeWorkspaceMetric
+                label={language.t("blueprint.runtime.changes")}
+                value={workspaceChanges().length}
+                active={props.workspacePanelArea === "changesets"}
+                onOpen={() => props.onWorkspaceAreaOpen("changesets")}
+                onOpenInExplorer={() => props.onWorkspaceAreaOpenInExplorer("changesets")}
+              />
+              <RuntimeWorkspaceMetric
+                label={language.t("blueprint.runtime.artifacts")}
+                value={workspaceArtifacts().length}
+                active={props.workspacePanelArea === "artifacts"}
+                onOpen={() => props.onWorkspaceAreaOpen("artifacts")}
+                onOpenInExplorer={() => props.onWorkspaceAreaOpenInExplorer("artifacts")}
+              />
+              <RuntimeWorkspaceMetric
+                label={language.t("blueprint.runtime.reports")}
+                value={workspaceReports().length}
+                active={props.workspacePanelArea === "reports"}
+                onOpen={() => props.onWorkspaceAreaOpen("reports")}
+                onOpenInExplorer={() => props.onWorkspaceAreaOpenInExplorer("reports")}
+              />
             </div>
             <RuntimeJsonPreview value={workspace() ?? {}} />
           </RuntimeSection>
@@ -2897,16 +3064,39 @@ function BlueprintRuntimePanel(props: {
 
           <RuntimePanelShell {...runtimePanelShellProps("events")}>
           <RuntimeSection title={language.t("blueprint.runtime.events")}>
-            <RuntimeEmpty when={props.state.events.length === 0} />
-            <For each={props.state.events}>
-              {(event) => (
-                <RuntimeRow
-                  title={String(event.type ?? event.record_type ?? "event")}
-                  meta={String(event.status ?? "")}
-                  detail={String(event.message ?? event.event ?? event.node_id ?? "")}
-                />
-              )}
-            </For>
+            <div class="flex min-w-0 items-center gap-2 rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] px-2 py-1">
+              <span class="shrink-0 text-10-regular text-[#95afc4]">{language.t("blueprint.runtime.eventPanelLength" as never)}</span>
+              <input
+                data-blueprint-runtime-events-height-slider
+                type="range"
+                min="120"
+                max="520"
+                step="20"
+                value={runtimeEventsPanelHeight()}
+                class="min-w-0 flex-1 accent-[#67e8f9]"
+                onPointerDown={(event) => event.stopPropagation()}
+                onInput={(event) => setRuntimeEventsPanelHeight(Number(event.currentTarget.value))}
+              />
+              <span class="w-12 shrink-0 text-right font-mono text-10-regular text-[#95afc4]">{runtimeEventsPanelHeight()}</span>
+            </div>
+            <div
+              data-blueprint-runtime-events-list
+              class="min-h-0 overflow-y-auto pr-1"
+              style={{ "max-height": `${runtimeEventsPanelHeight()}px` }}
+            >
+              <div class="flex flex-col gap-1">
+                <RuntimeEmpty when={props.state.events.length === 0} />
+                <For each={props.state.events}>
+                  {(event) => (
+                    <RuntimeEventRow
+                      title={String(event.type ?? event.record_type ?? "event")}
+                      meta={String(event.status ?? "")}
+                      detail={String(event.message ?? event.event ?? event.node_id ?? "")}
+                    />
+                  )}
+                </For>
+              </div>
+            </div>
           </RuntimeSection>
           </RuntimePanelShell>
         </div>
@@ -3091,10 +3281,130 @@ function RuntimeSection(props: { title: string; children: JSX.Element }) {
 }
 
 function RuntimeMetric(props: { label: string; value: string | number }) {
+  const value = () => String(props.value)
   return (
-    <div class="min-w-0 rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] p-2">
+    <div class="min-w-0 rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] p-2" title={`${props.label}: ${value()}`}>
       <div class="truncate text-10-regular text-[#95afc4]">{props.label}</div>
-      <div class="mt-0.5 truncate text-14-medium text-[#f8fdff]">{props.value}</div>
+      <div class="mt-0.5 truncate text-14-medium text-[#f8fdff]">{value()}</div>
+    </div>
+  )
+}
+
+function RuntimeWorkspaceMetric(props: {
+  label: string
+  value: string | number
+  active: boolean
+  onOpen: () => void
+  onOpenInExplorer: () => void
+}) {
+  const language = useLanguage()
+  return (
+    <ContextMenu>
+      <ContextMenu.Trigger class="contents">
+        <button
+          type="button"
+          data-blueprint-runtime-workspace-metric
+          class="min-w-0 rounded-sm border bg-[#06101a] p-2 text-left outline-none transition-colors hover:border-[rgba(103,232,249,0.34)] focus:border-[#67e8f9]"
+          classList={{
+            "border-[#67e8f9] shadow-[0_0_0_1px_rgba(103,232,249,0.2)]": props.active,
+            "border-[rgba(103,232,249,0.12)]": !props.active,
+          }}
+          onClick={props.onOpen}
+        >
+          <div class="truncate text-10-regular text-[#95afc4]">{props.label}</div>
+          <div class="mt-0.5 truncate text-14-medium text-[#f8fdff]">{props.value}</div>
+        </button>
+      </ContextMenu.Trigger>
+      <ContextMenu.Portal>
+        <ContextMenu.Content>
+          <ContextMenu.Item onSelect={props.onOpenInExplorer}>
+            <Icon size="small" name="folder" />
+            <ContextMenu.ItemLabel>{language.t("blueprint.runtime.openInExplorer" as never)}</ContextMenu.ItemLabel>
+          </ContextMenu.Item>
+        </ContextMenu.Content>
+      </ContextMenu.Portal>
+    </ContextMenu>
+  )
+}
+
+function WorkspaceContentPanel(props: {
+  area: WorkspacePanelArea
+  workspace?: Record<string, unknown>
+  onClose: () => void
+  onOpenDirectory: () => void
+  onRevealItem: (path: string | undefined) => void
+}) {
+  const language = useLanguage()
+  const items = createMemo(() => workspaceAreaItems(props.workspace, props.area))
+  const title = () => workspaceAreaTitle(language.t, props.area)
+  return (
+    <div
+      data-blueprint-workspace-content-panel
+      class="absolute right-3 top-3 z-30 flex max-h-[min(520px,calc(100%-24px))] w-[420px] max-w-[calc(100%-24px)] flex-col rounded-md border border-[rgba(103,232,249,0.28)] bg-[#08131f] shadow-[0_18px_52px_rgba(0,0,0,0.44)]"
+      onPointerDown={(event) => event.stopPropagation()}
+      onWheel={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.stopPropagation()}
+    >
+      <div class="flex shrink-0 items-center justify-between gap-3 border-b border-[rgba(103,232,249,0.14)] px-3 py-2">
+        <div class="min-w-0 truncate text-12-medium text-[#67e8f9]">{title()}</div>
+        <div class="flex shrink-0 items-center gap-1">
+          <IconButton
+            icon="folder"
+            variant="ghost"
+            class="h-6 w-6 text-[#f8fdff]"
+            onClick={props.onOpenDirectory}
+            aria-label={language.t("blueprint.runtime.openInExplorer" as never)}
+          />
+          <IconButton
+            icon="close"
+            variant="ghost"
+            class="h-6 w-6 text-[#f8fdff]"
+            onClick={props.onClose}
+            aria-label={language.t("blueprint.runtime.closeWorkspacePanel" as never)}
+          />
+        </div>
+      </div>
+      <div class="min-h-0 overflow-y-auto p-3">
+        <Show
+          when={items().length > 0}
+          fallback={
+            <div class="rounded-sm border border-dashed border-[rgba(103,232,249,0.18)] px-3 py-5 text-center text-12-regular text-[#95afc4]">
+              {language.t("blueprint.runtime.emptyWorkspaceArea" as never)}
+            </div>
+          }
+        >
+          <div class="flex flex-col gap-2">
+            <For each={items()}>
+              {(item) => (
+                <ContextMenu>
+                  <ContextMenu.Trigger class="contents">
+                    <div
+                      data-blueprint-workspace-content-item
+                      class="min-w-0 rounded-sm border border-[rgba(103,232,249,0.14)] bg-[#06101a] px-3 py-2"
+                    >
+                      <div class="truncate text-12-medium text-[#f8fdff]">{item.name}</div>
+                      <Show when={item.absolutePath}>
+                        {(path) => <div class="mt-1 break-all font-mono text-10-regular text-[#95afc4]">{path()}</div>}
+                      </Show>
+                      <Show when={item.detail}>
+                        {(detail) => <div class="mt-1 line-clamp-2 text-10-regular text-[#7da0b8]">{detail()}</div>}
+                      </Show>
+                    </div>
+                  </ContextMenu.Trigger>
+                  <ContextMenu.Portal>
+                    <ContextMenu.Content>
+                      <ContextMenu.Item onSelect={() => props.onRevealItem(item.absolutePath)}>
+                        <Icon size="small" name="open-file" />
+                        <ContextMenu.ItemLabel>{language.t("blueprint.runtime.openInExplorer" as never)}</ContextMenu.ItemLabel>
+                      </ContextMenu.Item>
+                    </ContextMenu.Content>
+                  </ContextMenu.Portal>
+                </ContextMenu>
+              )}
+            </For>
+          </div>
+        </Show>
+      </div>
     </div>
   )
 }
@@ -3117,6 +3427,13 @@ function AgentStatusRow(props: { label: string; value: string; mono?: boolean; t
   )
 }
 
+function runtimeAgentDetail(agent: Record<string, unknown>, language: ReturnType<typeof useLanguage>) {
+  const primary = String(agent.last_error ?? agent.task_summary ?? agent.agent_id ?? "")
+  const flow = `${language.t("blueprint.runtime.flow" as never)}: ${agent.has_received_flow ? "yes" : "no"}`
+  const prompted = agent.summary_prompted_at ? language.t("blueprint.runtime.summaryPrompt" as never) : ""
+  return [primary, flow, prompted].filter(Boolean).join(" · ")
+}
+
 function RuntimeRow(props: { title: string; meta?: string; detail?: string }) {
   return (
     <div class="min-w-0 rounded-sm border border-[rgba(103,232,249,0.12)] bg-[#06101a] px-2 py-1.5">
@@ -3128,6 +3445,22 @@ function RuntimeRow(props: { title: string; meta?: string; detail?: string }) {
       </div>
       <Show when={props.detail}>
         {(detail) => <div class="mt-0.5 truncate text-11-regular text-[#95afc4]">{detail()}</div>}
+      </Show>
+    </div>
+  )
+}
+
+function RuntimeEventRow(props: { title: string; meta?: string; detail?: string }) {
+  return (
+    <div class="min-w-0 rounded-sm border border-[rgba(103,232,249,0.1)] bg-[#06101a] px-2 py-0.5">
+      <div class="flex min-w-0 items-center justify-between gap-2">
+        <div class="min-w-0 truncate text-10-medium leading-4 text-[#f8fdff]">{props.title}</div>
+        <Show when={props.meta}>
+          {(meta) => <div class="shrink-0 truncate text-10-regular leading-4 text-[#95afc4]">{meta()}</div>}
+        </Show>
+      </div>
+      <Show when={props.detail}>
+        {(detail) => <div class="truncate text-10-regular leading-4 text-[#95afc4]">{detail()}</div>}
       </Show>
     </div>
   )
@@ -3168,7 +3501,9 @@ function AgentInfoPanel(props: {
 }) {
   const runtime = createMemo(() => asRecord(props.panel.info?.runtime))
   const latestStatus = createMemo(() => latestAgentStatusEvent(props.events))
+  const latestTaskStatus = createMemo(() => latestAgentTaskStatusEvent(props.events))
   const latestStatusRecord = createMemo(() => asRecord(latestStatus()))
+  const latestTaskStatusRecord = createMemo(() => asRecord(latestTaskStatus()))
   const statusField = (key: string) => latestStatusRecord()?.[key] ?? runtime()?.[key]
   const testMode = createMemo(() => Boolean(props.panel.info?.testMode))
   const testAgentRecording = createMemo(
@@ -3181,6 +3516,18 @@ function AgentInfoPanel(props: {
   const live = createMemo(() => !!props.runId && !isTerminalRuntimeStatus(props.runtimeStatus))
   const state = createMemo(() =>
     String(statusField("agent_state") ?? runtime()?.state ?? (props.runId ? props.runtimeStatus ?? "running" : "未运行")),
+  )
+  const taskStatus = createMemo(() =>
+    String(latestTaskStatusRecord()?.status ?? statusField("task_status") ?? runtime()?.task_status ?? "not_started"),
+  )
+  const taskSummary = createMemo(() =>
+    agentStreamStructuredText(latestTaskStatusRecord()?.summary ?? statusField("task_summary") ?? runtime()?.task_summary),
+  )
+  const taskMessageId = createMemo(
+    () =>
+      stringValue(latestTaskStatusRecord()?.message_id) ??
+      stringValue(statusField("task_status_message_id")) ??
+      stringValue(runtime()?.task_status_message_id),
   )
   const queueSize = createMemo(() => String(statusField("queue_size") ?? 0))
   const messagesSent = createMemo(() => String(statusField("messages_sent") ?? 0))
@@ -3254,8 +3601,9 @@ function AgentInfoPanel(props: {
       </div>
       <div data-agent-panel-status-summary class="shrink-0 border-b border-[rgba(103,232,249,0.12)] p-3 text-11-regular">
         <div class="flex items-stretch gap-2">
-          <div class="grid min-w-0 flex-1 grid-cols-4 gap-2">
+          <div class="grid min-w-0 flex-1 grid-cols-3 gap-2">
             <RuntimeMetric label="状态" value={state()} />
+            <RuntimeMetric label="任务状态" value={taskStatus()} />
             <RuntimeMetric label="队列" value={queueSize()} />
             <RuntimeMetric label="消息" value={messagesSent()} />
             <RuntimeMetric label="忙碌" value={busyCount()} />
@@ -3263,7 +3611,7 @@ function AgentInfoPanel(props: {
           <Button
             size="small"
             variant="ghost"
-            class="h-[60px] w-8 shrink-0 px-0 text-[#d7f7ff]"
+            class="min-h-[60px] w-8 shrink-0 self-stretch px-0 text-[#d7f7ff]"
             classList={{ "bg-[rgba(103,232,249,0.12)]": statusDetailsOpen() }}
             onClick={() => setStatusDetailsOpen((open) => !open)}
             aria-expanded={statusDetailsOpen()}
@@ -3283,6 +3631,13 @@ function AgentInfoPanel(props: {
               <div class="mb-2 text-10-medium uppercase text-[#67e8f9]">运行状态</div>
               <div class="flex flex-col gap-1">
                 <AgentStatusRow label="当前状态" value={state()} />
+                <AgentStatusRow label="任务状态" value={taskStatus()} />
+                <Show when={taskMessageId()}>
+                  {(value) => <AgentStatusRow label="任务消息" value={value()} mono />}
+                </Show>
+                <Show when={taskSummary()}>
+                  {(value) => <AgentStatusRow label="任务摘要" value={value()} />}
+                </Show>
                 <Show when={currentMessageId()}>
                   {(value) => <AgentStatusRow label="当前消息" value={value()} mono />}
                 </Show>
@@ -3425,6 +3780,7 @@ function AgentPanelDisplayEventRow(props: {
 }) {
   const event = () => props.event
   const compact = () => event().tone === "tool"
+  const toolCategory = () => (event().tone === "tool" ? event().toolCategory ?? "codex" : undefined)
   const nestedToolItems = () =>
     event().tone === "tool" && (event().toolItems?.length ?? 0) > 1 ? (event().toolItems ?? []) : []
   const hasNestedToolItems = () => nestedToolItems().length > 0
@@ -3435,7 +3791,9 @@ function AgentPanelDisplayEventRow(props: {
         "ml-8 border-[rgba(103,232,249,0.20)] bg-[rgba(103,232,249,0.08)]": event().tone === "user",
         "border-[rgba(103,232,249,0.12)] bg-[#071019]": event().tone === "reply" || event().tone === "event" || !event().tone,
         "border-[rgba(168,85,247,0.20)] bg-[rgba(88,28,135,0.14)]": event().tone === "reasoning",
-        "border-[rgba(34,197,94,0.20)] bg-[rgba(20,83,45,0.14)]": event().tone === "tool",
+        "border-[rgba(59,130,246,0.36)] bg-[rgba(30,64,175,0.16)]": event().tone === "tool" && toolCategory() === "mcp",
+        "border-[rgba(168,85,247,0.38)] bg-[rgba(88,28,135,0.18)]": event().tone === "tool" && toolCategory() === "command",
+        "border-[rgba(34,211,238,0.34)] bg-[rgba(8,145,178,0.16)]": event().tone === "tool" && (toolCategory() === "codex" || toolCategory() === "mixed"),
         "border-[rgba(248,113,113,0.24)] bg-[rgba(127,29,29,0.22)]": event().tone === "error",
       }}
     >
@@ -3459,6 +3817,13 @@ function AgentPanelDisplayEventRow(props: {
           >
             <span class="min-w-0 truncate">{event().kind}</span>
             <div class="flex shrink-0 items-center gap-2 text-10-regular text-[#7fa4ba]">
+              <Show when={toolCategory()}>
+                {(category) => (
+                  <span class={agentPanelToolCategoryBadgeClass(category())} title={agentPanelToolCategoryTitle(category())}>
+                    {agentPanelToolCategoryLabel(category())}
+                  </span>
+                )}
+              </Show>
               <Show when={event().status}>{(status) => <span>{status()}</span>}</Show>
               <Collapsible.Arrow class="text-[#7fa4ba]" />
             </div>
@@ -4609,6 +4974,56 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined
 }
 
+function workspaceAreaTitle(t: (key: never) => string, area: WorkspacePanelArea) {
+  if (area === "changesets") return t("blueprint.runtime.changes" as never)
+  if (area === "artifacts") return t("blueprint.runtime.artifacts" as never)
+  return t("blueprint.runtime.reports" as never)
+}
+
+function workspaceAreaItems(workspace: Record<string, unknown> | undefined, area: WorkspacePanelArea): WorkspacePanelItem[] {
+  return arrayOfRecords(workspace?.[area]).map((item, index) => {
+    const path = stringValue(item.path) ?? stringValue(item.changeset_id)
+    const absolutePath = stringValue(item.absolute_path) ?? stringValue(item.absolutePath)
+    const name = stringValue(item.name) ?? stringValue(item.changeset_id) ?? basename(path) ?? `${area}-${index + 1}`
+    const files = Array.isArray(item.files) ? item.files.map((file) => String(file)).filter(Boolean) : []
+    return {
+      name,
+      path,
+      absolutePath,
+      detail: files.length > 0 ? files.join(", ") : path,
+    }
+  })
+}
+
+function workspaceAreaDirectory(workspace: Record<string, unknown> | undefined, area: WorkspacePanelArea) {
+  const directories = asRecord(workspace?.directories)
+  const direct = stringValue(directories?.[area])
+  if (direct) return direct
+  const sharedRoot = stringValue(workspace?.shared_root)
+  if (sharedRoot && area !== "changesets") return joinLocalPath(sharedRoot, area === "artifacts" ? "artifacts" : "reports")
+  const workspaceRoot = stringValue(workspace?.workspace_root)
+  if (workspaceRoot && area === "changesets") return joinLocalPath(workspaceRoot, "changesets")
+  return undefined
+}
+
+function basename(path: string | undefined) {
+  if (!path) return undefined
+  const normalized = path.replace(/[\\/]+$/, "")
+  const index = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"))
+  return index >= 0 ? normalized.slice(index + 1) : normalized
+}
+
+function parentDirectory(path: string) {
+  const normalized = path.replace(/[\\/]+$/, "")
+  const index = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"))
+  return index > 0 ? normalized.slice(0, index) : normalized
+}
+
+function joinLocalPath(base: string, child: string) {
+  const separator = base.includes("\\") ? "\\" : "/"
+  return `${base.replace(/[\\/]+$/, "")}${separator}${child.replace(/^[\\/]+/, "")}`
+}
+
 function isTerminalUserMessageStatus(status: AgentPanelUserMessage["status"] | undefined) {
   return status === "succeeded" || status === "failed"
 }
@@ -4656,6 +5071,13 @@ function latestAgentStatusEvent(events: AgentStreamEvent[]) {
   return undefined
 }
 
+function latestAgentTaskStatusEvent(events: AgentStreamEvent[]) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index]?.kind === "agent.task_status") return events[index]
+  }
+  return undefined
+}
+
 function stabilizeAgentPanelDisplayEvents(previous: AgentPanelDisplayEvent[], next: AgentPanelDisplayEvent[]) {
   if (!previous.length) return next
   const previousById = new Map(previous.map((event) => [event.id, event]))
@@ -4679,6 +5101,7 @@ function agentPanelDisplayEventEquals(left: AgentPanelDisplayEvent, right: Agent
     left.tone === right.tone &&
     left.collapsible === right.collapsible &&
     left.detail === right.detail &&
+    left.toolCategory === right.toolCategory &&
     left.order === right.order
   )
 }
@@ -4783,12 +5206,14 @@ function visibleAgentPanelEvents(events: AgentStreamEvent[], userMessages: Agent
       const key = stringValue(event.part_id) ?? stringValue(event.message_id) ?? stringValue(event.event_id) ?? `tool-${event.seq ?? tools.size}`
       const text = agentPanelToolEventText(event)
       const title = `工具调用${agentPanelToolName(event) ? ` · ${agentPanelToolName(event)}` : ""}`
+      const toolCategory = agentPanelToolCategory(event)
       const current = tools.get(key)
       if (!current) {
         const entry = agentPanelDisplayEventFromStream(event, title, text, `tool-${key}`, {
           tone: "tool",
           collapsible: true,
           detail: agentPanelToolDetail(event),
+          toolCategory,
           order,
         })
         tools.set(key, entry)
@@ -4800,6 +5225,7 @@ function visibleAgentPanelEvents(events: AgentStreamEvent[], userMessages: Agent
       current.status = stringValue(event.status) ?? current.status
       current.seq = event.seq ?? current.seq
       current.detail = agentPanelToolDetail(event) ?? current.detail
+      current.toolCategory = toolCategory
       appendAgentPanelTool(key, current, order)
       continue
     }
@@ -4887,6 +5313,7 @@ function agentPanelToolGroupDisplayEvent(group: AgentPanelToolGroup): AgentPanel
       tone: "tool",
       collapsible: true,
       order: group.order,
+      toolCategory: "mixed",
       toolItems: [],
     }
   }
@@ -4907,6 +5334,7 @@ function agentPanelToolGroupDisplayEvent(group: AgentPanelToolGroup): AgentPanel
     tone: "tool",
     collapsible: true,
     detail: agentPanelToolGroupDetail(group.tools),
+    toolCategory: agentPanelToolGroupCategory(group.tools),
     order: group.order,
     toolItems: group.tools,
   }
@@ -4923,6 +5351,11 @@ function agentPanelToolGroupItemText(tool: AgentPanelDisplayEvent, index: number
 function agentPanelToolGroupDetail(tools: AgentPanelDisplayEvent[]) {
   const names = tools.map((tool) => tool.kind.replace(/^工具调用\s*·?\s*/, "")).filter(Boolean)
   return names.length ? names.join(" · ") : undefined
+}
+
+function agentPanelToolGroupCategory(tools: AgentPanelDisplayEvent[]): AgentPanelToolCategory {
+  const categories = new Set(tools.map((tool) => tool.toolCategory ?? "codex"))
+  return categories.size === 1 ? [...categories][0] ?? "codex" : "mixed"
 }
 
 function agentPanelToolGroupStatus(tools: AgentPanelDisplayEvent[]) {
@@ -5024,6 +5457,36 @@ function agentPanelStreamEventOrder(event: AgentStreamEvent) {
 
 function agentPanelToolName(event: AgentStreamEvent) {
   return stringValue(event.tool_name) ?? stringValue(event.tool_kind) ?? stringValue(event.part_id)
+}
+
+function agentPanelToolCategory(event: AgentStreamEvent): AgentPanelToolCategory {
+  const kind = stringValue(event.tool_kind)
+  if (kind === "mcp_tool_call") return "mcp"
+  if (kind === "command_execution") return "command"
+  if (stringValue(event.tool_server)) return "mcp"
+  return "codex"
+}
+
+function agentPanelToolCategoryLabel(category: AgentPanelToolCategory) {
+  if (category === "mcp") return "MCP"
+  if (category === "command") return "Shell"
+  if (category === "mixed") return "混合"
+  return "Codex"
+}
+
+function agentPanelToolCategoryTitle(category: AgentPanelToolCategory) {
+  if (category === "mcp") return "MCP tool"
+  if (category === "command") return "Codex worker shell / command_execution"
+  if (category === "mixed") return "Mixed tool types"
+  return "Codex built-in tool"
+}
+
+function agentPanelToolCategoryBadgeClass(category: AgentPanelToolCategory) {
+  const base =
+    "rounded border px-1.5 py-0.5 text-[10px] leading-none tracking-normal"
+  if (category === "mcp") return `${base} border-[rgba(96,165,250,0.55)] bg-[rgba(37,99,235,0.20)] text-[#93c5fd]`
+  if (category === "command") return `${base} border-[rgba(192,132,252,0.58)] bg-[rgba(126,34,206,0.22)] text-[#d8b4fe]`
+  return `${base} border-[rgba(34,211,238,0.55)] bg-[rgba(8,145,178,0.22)] text-[#67e8f9]`
 }
 
 function agentPanelToolDetail(event: AgentStreamEvent) {

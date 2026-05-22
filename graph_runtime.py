@@ -39,6 +39,9 @@ _VALID_TOP_AGENT_RUN_PERMISSIONS = {"ask", "start", "status", "end", "utterances
 _VALID_JOIN_POLICIES = {"wait-all", "wait-any", "quorum"}
 _VALID_RUN_END_ACTIONS = {"complete", "cancel", "fail", "pause", "archive_only"}
 _AGENT_CAN_ACCEPT_STATES = {"idle", "queued", "timed_out"}
+_VALID_AGENT_TASK_STATUSES = {"not_started", "working", "completed", "blocked", "needs_input", "failed"}
+_TERMINAL_AGENT_TASK_STATUSES = {"completed", "blocked", "needs_input", "failed"}
+COMPLETION_IDLE_THRESHOLD_SEC = 30.0
 _VALID_AGENT_RUNTIME_STATES = {
     "created",
     "starting",
@@ -62,6 +65,10 @@ _VALID_AGENT_RUNTIME_STATES = {
 def is_dispatch_no_op_body(body: Any) -> bool:
     """Return whether a structured dispatch body is an explicit target no-op."""
     return body == "" or (type(body) is int and body == 0)
+
+
+def is_framework_summary_request_body(body: Any) -> bool:
+    return isinstance(body, dict) and body.get("type") == "framework_summary_request"
 
 
 def _reply_failure_reason(reply: Any) -> Optional[str]:
@@ -794,12 +801,14 @@ class TopAgentPlanValidation:
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     normalized_plan: Optional[Dict[str, Any]] = None
+    required_start_groups: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "ok": self.ok,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
+            "required_start_groups": [dict(group) for group in self.required_start_groups],
         }
         if self.normalized_plan is not None:
             data["normalized_plan"] = dict(self.normalized_plan)
@@ -950,7 +959,7 @@ class GuLiCodeTopAgentProfile:
                 "- Use framework MCP tools for runtime-control planning; do not bypass the GraphRuntimeControlPlane.",
                 "- If required information is missing, call `top_agent_request_user_input` with short answerable questions before proposing a plan.",
                 "- Produce one concise responsibility description for every AgentNode.",
-                "- Choose start_nodes explicitly from existing AgentNode ids; the framework does not choose them for you.",
+                "- Choose start_nodes explicitly from the framework's required_start_groups: each source component needs exactly one selected AgentNode, and isolated AgentNodes must be selected.",
                 "- Provide one task for every selected start node.",
                 "- Each task must include goal, expected_output, and acceptance.",
                 "- Validate candidate plans with `runtime_validate_start`, then stage the accepted proposal with `top_agent_stage_start_plan`.",
@@ -975,7 +984,7 @@ class GuLiCodeTopAgentProfile:
                 "- Desktop role: GuLiCode desktop/current chat session is the Top Agent; there is no separate bottom Top Agent CLI/worker.",
                 "- Organization view: inspect graph, agents, edges, scopes, and agent_connections.",
                 "- User input: call `top_agent_request_user_input(questions)` when the plan depends on missing choices or constraints.",
-                "- Start plan: draft user_goal, agent_descriptions, start_nodes, tasks, and run_policy; validate, then stage with `top_agent_stage_start_plan(plan, plan_markdown)`.",
+                "- Start plan: draft user_goal, agent_descriptions, start_nodes, tasks, and run_policy; use required_start_groups so every source component has exactly one start node, validate, then stage with `top_agent_stage_start_plan(plan, plan_markdown)`.",
                 "- Approval boundary: never call `runtime_start`; the GuLiCode desktop app starts the run after the user approves the staged plan.",
                 "- Blueprint boundary: do not edit or save blueprint graph structure in v1.",
                 "- Status: read runtime events, agent states, queues, jobs, changesets, conflicts, artifacts, and reports.",
@@ -1052,6 +1061,35 @@ class GuLiCodeTopAgentProfile:
             errors.append("start_nodes contains unknown AgentNode ids: " + ", ".join(unknown_starts))
         if len(start_ids) != len(plan.start_nodes):
             errors.append("start_nodes must not contain duplicates")
+        required_start_groups = graph.required_start_groups()
+        valid_source_starts = {
+            node_id
+            for group in required_start_groups
+            for node_id in group.get("node_ids", [])
+        }
+        invalid_source_starts = sorted((start_ids & node_ids) - valid_source_starts)
+        if invalid_source_starts:
+            errors.append(
+                "start_nodes contains nodes that are not valid source start nodes: "
+                + ", ".join(invalid_source_starts)
+            )
+        for group in required_start_groups:
+            group_nodes = [str(node_id) for node_id in group.get("node_ids", [])]
+            selected = [node_id for node_id in plan.start_nodes if node_id in set(group_nodes)]
+            if not selected:
+                errors.append(
+                    "start_nodes missing required start group "
+                    + str(group.get("group_id"))
+                    + ": choose one of "
+                    + ", ".join(group_nodes)
+                )
+            elif len(selected) > 1:
+                errors.append(
+                    "start_nodes contains multiple nodes from required start group "
+                    + str(group.get("group_id"))
+                    + ": "
+                    + ", ".join(selected)
+                )
 
         task_ids = set(plan.tasks)
         missing_tasks = sorted(start_ids - task_ids)
@@ -1074,7 +1112,12 @@ class GuLiCodeTopAgentProfile:
             ok=not errors,
             errors=errors,
             warnings=warnings,
-            normalized_plan=plan.to_dict() if not errors else None,
+            normalized_plan=(
+                {**plan.to_dict(), "required_start_groups": required_start_groups}
+                if not errors
+                else None
+            ),
+            required_start_groups=required_start_groups,
         )
 
 
@@ -1093,6 +1136,20 @@ class AgentInstance:
     started_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.monotonic)
     state_history: List[Dict[str, Any]] = field(default_factory=list)
+    has_received_flow: bool = False
+    idle_since: Optional[float] = None
+    task_status: str = "not_started"
+    task_summary: str = ""
+    task_status_updated_at: Optional[float] = None
+    task_status_message_id: Optional[str] = None
+    task_status_batch_id: Optional[str] = None
+    task_status_reports: List[Dict[str, Any]] = field(default_factory=list)
+    task_status_artifacts: List[Dict[str, Any]] = field(default_factory=list)
+    task_status_changesets: List[Dict[str, Any]] = field(default_factory=list)
+    task_status_next_actions: List[str] = field(default_factory=list)
+    task_status_metadata: Dict[str, Any] = field(default_factory=dict)
+    summary_prompted_at: Optional[float] = None
+    summary_prompt_message_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.set_state(self.state)
@@ -1110,11 +1167,17 @@ class AgentInstance:
     ) -> None:
         if state not in _VALID_AGENT_RUNTIME_STATES:
             raise ValueError(f"unsupported agent runtime state: {state!r}")
+        old_state = self.state
         self.state = state
         self.updated_at = time.monotonic()
         self.last_error = error
         if message_id is not None or state == "idle":
             self.current_message_id = message_id
+        if state == "idle":
+            if old_state != "idle" or self.idle_since is None:
+                self.idle_since = self.updated_at
+        else:
+            self.idle_since = None
         self.state_history.append(
             {
                 "state": state,
@@ -1629,6 +1692,10 @@ class GraphRuntime:
         self._ended_at: Optional[float] = None
         self._end_reason: Optional[str] = None
         self._run_manifest: Dict[str, Any] = {}
+        self._completion_agent_node_ids: List[str] = []
+        self._completion_generation = 0
+        self._ready_for_top_agent_summary = False
+        self._ready_for_top_agent_summary_generation: Optional[int] = None
         self._closed = False
 
     def _ensure_private_context_runtime(self, node: AgentNode) -> None:
@@ -1839,6 +1906,13 @@ class GraphRuntime:
             "current_message_id": inst.current_message_id,
             "messages_sent": inst.messages_sent,
             "last_error": error if error is not None else inst.last_error,
+            "has_received_flow": inst.has_received_flow,
+            "idle_since": inst.idle_since,
+            "task_status": inst.task_status,
+            "task_summary": inst.task_summary,
+            "task_status_updated_at": inst.task_status_updated_at,
+            "summary_prompted_at": inst.summary_prompted_at,
+            "summary_prompt_message_id": inst.summary_prompt_message_id,
         }
 
     def _extract_agent_said(self, reply: Any) -> str:
@@ -1999,6 +2073,240 @@ class GraphRuntime:
                 )
             )
 
+    def configure_completion_tracking(self, graph: "GraphDefinition") -> None:
+        self._completion_agent_node_ids = list(graph.agent_nodes)
+        self.configure_agent_rings(graph)
+
+    def _mark_completion_activity(self) -> None:
+        self._completion_generation += 1
+        self._ready_for_top_agent_summary = False
+        self._ready_for_top_agent_summary_generation = None
+
+    def _mark_agent_flow_received(
+        self,
+        inst: AgentInstance,
+        *,
+        message_id: str,
+        body: Any,
+    ) -> None:
+        inst.has_received_flow = True
+        inst.task_status = "working"
+        inst.task_summary = ""
+        inst.task_status_updated_at = time.monotonic()
+        inst.task_status_message_id = message_id
+        inst.task_status_batch_id = None
+        inst.task_status_reports = []
+        inst.task_status_artifacts = []
+        inst.task_status_changesets = []
+        inst.task_status_next_actions = []
+        inst.task_status_metadata = {}
+        if not is_framework_summary_request_body(body):
+            inst.summary_prompted_at = None
+            inst.summary_prompt_message_id = None
+            self._mark_completion_activity()
+
+    def record_agent_task_status(
+        self,
+        node_id: str,
+        *,
+        agent_id: Optional[str] = None,
+        status: str,
+        summary: str = "",
+        message_id: Optional[str] = None,
+        batch_id: Optional[str] = None,
+        reports: Optional[Sequence[Dict[str, Any]]] = None,
+        artifacts: Optional[Sequence[Dict[str, Any]]] = None,
+        changesets: Optional[Sequence[Dict[str, Any]]] = None,
+        next_actions: Optional[Sequence[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in _VALID_AGENT_TASK_STATUSES - {"not_started"}:
+            raise ValueError(
+                "agent task status must be one of: working, completed, blocked, needs_input, failed"
+            )
+        inst = self._instances.get(str(node_id))
+        if inst is None:
+            raise KeyError(f"unknown AgentNode instance: {node_id}")
+        if agent_id is not None and str(agent_id) != inst.agent_id:
+            raise PermissionError("agent task status cannot be reported as another agent")
+
+        inst.has_received_flow = True
+        inst.task_status = normalized_status
+        inst.task_summary = str(summary or "").strip()
+        inst.task_status_updated_at = time.monotonic()
+        inst.task_status_message_id = str(message_id) if message_id is not None else inst.current_message_id
+        inst.task_status_batch_id = str(batch_id) if batch_id is not None else None
+        inst.task_status_reports = [dict(item) for item in (reports or []) if isinstance(item, dict)]
+        inst.task_status_artifacts = [dict(item) for item in (artifacts or []) if isinstance(item, dict)]
+        inst.task_status_changesets = [dict(item) for item in (changesets or []) if isinstance(item, dict)]
+        inst.task_status_next_actions = [str(item) for item in (next_actions or [])]
+        inst.task_status_metadata = dict(metadata or {})
+        if normalized_status in _TERMINAL_AGENT_TASK_STATUSES:
+            inst.summary_prompted_at = None
+            inst.summary_prompt_message_id = None
+
+        payload = {
+            "node_id": inst.node.node_id,
+            "agent_id": inst.agent_id,
+            "status": inst.task_status,
+            "summary": inst.task_summary,
+            "message_id": inst.task_status_message_id,
+            "batch_id": inst.task_status_batch_id,
+            "reports": list(inst.task_status_reports),
+            "artifacts": list(inst.task_status_artifacts),
+            "changesets": list(inst.task_status_changesets),
+            "next_actions": list(inst.task_status_next_actions),
+            "metadata": dict(inst.task_status_metadata),
+            "updated_at": inst.task_status_updated_at,
+        }
+        self._emit(
+            GraphEvent(
+                "AgentTaskStatusReported",
+                node_id=inst.node.node_id,
+                agent_id=inst.agent_id,
+                status=inst.task_status,
+                payload=payload,
+            )
+        )
+        self.record_agent_stream_event({"kind": "agent.task_status", **payload})
+        self._maybe_emit_top_agent_summary_ready()
+        return {"ok": True, "task_status": dict(payload)}
+
+    def _agent_has_waiting_outgoing_batch(self, inst: AgentInstance) -> bool:
+        return any(
+            batch.status == "staging"
+            and batch.source_node_id == inst.node.node_id
+            and bool(batch.remaining_targets)
+            for batch in self._outgoing_batches.values()
+        )
+
+    def _agent_ring_counts_allow_summary(self, inst: AgentInstance) -> bool:
+        counts = self.agent_ring_circulation_counts_for(inst.node.node_id)
+        return not counts or all(int(value) <= 0 for value in counts.values())
+
+    def _agent_should_receive_summary_prompt(self, inst: AgentInstance, now: float) -> bool:
+        if not inst.has_received_flow:
+            return False
+        if inst.state != "idle" or inst.idle_since is None:
+            return False
+        if inst.task_status in _TERMINAL_AGENT_TASK_STATUSES:
+            return False
+        if inst.summary_prompted_at is not None:
+            return False
+        if self._agent_has_waiting_outgoing_batch(inst):
+            return False
+        if not self._agent_ring_counts_allow_summary(inst):
+            return False
+        return (now - inst.idle_since) >= COMPLETION_IDLE_THRESHOLD_SEC
+
+    def _summary_request_body(self, inst: AgentInstance, *, now: float) -> Dict[str, Any]:
+        ring_counts = self.agent_ring_circulation_counts_for(inst.node.node_id)
+        return {
+            "type": "framework_summary_request",
+            "prompt": (
+                "Summarize your own current task outcome for the framework. "
+                "Do not summarize the ring or the whole blueprint. Call the "
+                "`agent_task_status` MCP tool with completed, blocked, needs_input, or failed."
+            ),
+            "summary_request": {
+                "reason": "idle_task_status_missing",
+                "idle_seconds": max(0.0, now - float(inst.idle_since or now)),
+                "ring_circulation_counts": dict(ring_counts),
+            },
+            "context": {
+                "framework_context": {
+                    "agent_node_id": inst.node.node_id,
+                    "agent_id": inst.agent_id,
+                    "message_envelope": {
+                        "outgoing_batch_id": None,
+                        "required_outgoing_targets": [],
+                        "remaining_targets": [],
+                    },
+                }
+            },
+        }
+
+    def _maybe_prompt_idle_agent_summaries(self, now: float) -> None:
+        for inst in list(self._instances.values()):
+            if not self._agent_should_receive_summary_prompt(inst, now):
+                continue
+            message_id = f"summary-msg-{inst.node.node_id}-{uuid.uuid4().hex[:8]}"
+            pending = self.queue_agent_message(
+                inst.node,
+                self._summary_request_body(inst, now=now),
+                source_node_id=None,
+                source_agent_id="graph-runtime",
+                message_id=message_id,
+                queue_mode="top",
+            )
+            inst.summary_prompted_at = now
+            inst.summary_prompt_message_id = pending.message_id
+            self._emit(
+                GraphEvent(
+                    "AgentSummaryRequested",
+                    node_id=inst.node.node_id,
+                    agent_id=inst.agent_id,
+                    status="queued",
+                    payload={
+                        "message_id": pending.message_id,
+                        "reason": "idle_task_status_missing",
+                    },
+                )
+            )
+
+    def _completion_node_ids(self) -> List[str]:
+        return list(self._completion_agent_node_ids or sorted(self._instances))
+
+    def _has_visible_pending_runtime_work(self) -> bool:
+        queued = any(
+            message.status in {"queued", "dispatching"}
+            for message in self._pending_messages.values()
+        )
+        dispatching = bool(self._dispatch_tasks)
+        waiting_batches = any(batch.status == "staging" for batch in self._outgoing_batches.values())
+        waiting_joins = any(barrier.status == "waiting" for barrier in self._join_barriers.values())
+        running_jobs = any(job.status in {"queued", "running"} for job in self._jobs.values())
+        conflicts = bool(self._workspace_state_snapshot().get("conflicts", []))
+        return queued or dispatching or waiting_batches or waiting_joins or running_jobs or conflicts
+
+    def _all_completion_agents_terminal(self) -> bool:
+        node_ids = self._completion_node_ids()
+        if not node_ids:
+            return False
+        for node_id in node_ids:
+            inst = self._instances.get(node_id)
+            if inst is None:
+                return False
+            if not inst.has_received_flow:
+                return False
+            if inst.task_status not in _TERMINAL_AGENT_TASK_STATUSES:
+                return False
+        return True
+
+    def _maybe_emit_top_agent_summary_ready(self) -> None:
+        if self._run_status != "running":
+            return
+        if self._ready_for_top_agent_summary:
+            return
+        if self._has_visible_pending_runtime_work():
+            return
+        if not self._all_completion_agents_terminal():
+            return
+        self._ready_for_top_agent_summary = True
+        self._ready_for_top_agent_summary_generation = self._completion_generation
+        payload = {
+            "generation": self._completion_generation,
+            "agent_node_ids": self._completion_node_ids(),
+            "agent_task_statuses": {
+                node_id: self._instances[node_id].task_status
+                for node_id in self._completion_node_ids()
+                if node_id in self._instances
+            },
+        }
+        self._emit(GraphEvent("RunReadyForTopAgentSummary", status="ready", payload=payload))
+        self.record_agent_stream_event({"kind": "run.ready_for_top_agent_summary", **payload})
+
     def start_tick_loop(self) -> None:
         """Start the framework tick loop if an event loop is running."""
         if self._closed or self._tick_task is not None:
@@ -2040,6 +2348,7 @@ class GraphRuntime:
         for message_id in finished:
             self._dispatch_tasks.pop(message_id, None)
 
+        self._maybe_prompt_idle_agent_summaries(self._last_tick_at)
         for node_id, inst in list(self._instances.items()):
             if inst.busy_count < 0:
                 inst.busy_count = 0
@@ -2074,6 +2383,7 @@ class GraphRuntime:
             self._dispatch_tasks[pending.message_id] = asyncio.create_task(
                 self._dispatch_pending_message(inst.node, pending)
             )
+        self._maybe_emit_top_agent_summary_ready()
 
     def _maybe_remind_outgoing_targets(self, inst: AgentInstance) -> None:
         if not inst.can_accept_message:
@@ -2370,16 +2680,24 @@ class GraphRuntime:
         return pending
 
     def _workspace_state_snapshot(self) -> Dict[str, Any]:
-        if self.workspace is None:
+        workspace_run = self._workspace_run_for_snapshot()
+        if self.workspace is None and workspace_run is None:
             return {
                 "workspace_id": None,
+                "workspace_root": None,
+                "shared_root": None,
+                "directories": {
+                    "changesets": None,
+                    "artifacts": None,
+                    "reports": None,
+                },
                 "changesets": [],
                 "conflicts": [],
                 "artifacts": [],
                 "reports": [],
                 "jobs": {},
             }
-        root = self.workspace.workspace_root
+        root = self.workspace.workspace_root if self.workspace is not None else Path(getattr(workspace_run, "path"))
         changesets: List[Dict[str, Any]] = []
         conflicts: List[Dict[str, Any]] = []
         artifacts: List[Dict[str, Any]] = []
@@ -2397,18 +2715,148 @@ class GraphRuntime:
             elif event_type == "AgentReportSubmitted":
                 reports.append(dict(payload))
 
+        run_directories: Dict[str, Optional[str]] = {
+            "changesets": None,
+            "artifacts": None,
+            "reports": None,
+        }
+        shared_root: Optional[str] = None
+        workspace_id = self.workspace.workspace_id if self.workspace is not None else None
+        if workspace_run is not None:
+            run_path = Path(getattr(workspace_run, "path"))
+            run_manifest = self._read_workspace_json(run_path / "run_manifest.json")
+            workspace_id = str(run_manifest.get("workspace_id") or workspace_id or "")
+            if not workspace_id:
+                workspace_id = None
+            shared_dir = Path(getattr(workspace_run, "shared_dir", run_path / "shared"))
+            shared_root = str(shared_dir.resolve())
+            run_directories = {
+                "changesets": str((run_path / "changesets").resolve()),
+                "artifacts": str(Path(getattr(workspace_run, "shared_artifacts_dir", shared_dir / "artifacts")).resolve()),
+                "reports": str(Path(getattr(workspace_run, "shared_reports_dir", shared_dir / "reports")).resolve()),
+            }
+            changesets = self._run_workspace_changesets(workspace_run)
+            artifacts = self._run_workspace_shared_files(workspace_run, "artifacts")
+            reports = self._run_workspace_shared_files(workspace_run, "reports")
+
         return {
-            "workspace_id": self.workspace.workspace_id,
-            "workspace_root": str(root),
-            "jobs": {
-                job_id: dict(entry)
-                for job_id, entry in self.workspace.jobs.items()
-            },
+            "workspace_id": workspace_id,
+            "workspace_root": str(root.resolve()),
+            "shared_root": shared_root,
+            "directories": run_directories,
+            "jobs": (
+                {
+                    job_id: dict(entry)
+                    for job_id, entry in self.workspace.jobs.items()
+                }
+                if self.workspace is not None
+                else {}
+            ),
             "changesets": changesets,
             "conflicts": conflicts,
             "artifacts": artifacts,
             "reports": reports,
         }
+
+    def _workspace_run_for_snapshot(self) -> Any:
+        if self.archive_run is not None:
+            return self.archive_run
+        if self.private_context_run is not None:
+            return self.private_context_run
+        return None
+
+    @staticmethod
+    def _read_workspace_json(path: Path) -> Dict[str, Any]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _shared_write_metadata_by_path(self, workspace_run: Any) -> Dict[str, Dict[str, Any]]:
+        run_path = Path(getattr(workspace_run, "path"))
+        shared_dir = Path(getattr(workspace_run, "shared_dir", run_path / "shared"))
+        manifest = self._read_workspace_json(shared_dir / "manifest.json")
+        metadata: Dict[str, Dict[str, Any]] = {}
+        writes = manifest.get("writes", [])
+        if not isinstance(writes, list):
+            return metadata
+        for record in writes:
+            if not isinstance(record, dict) or record.get("event_type") != "write":
+                continue
+            rel_path = str(record.get("path") or "").replace("\\", "/").strip("/")
+            if not rel_path:
+                continue
+            entry = metadata.setdefault(rel_path, {"version": 0})
+            entry["version"] = int(entry.get("version") or 0) + 1
+            for key in ("owner", "bytes", "updated_at", "lease_id"):
+                if key in record:
+                    entry[key] = record[key]
+        return metadata
+
+    def _run_workspace_shared_files(self, workspace_run: Any, area: str) -> List[Dict[str, Any]]:
+        run_path = Path(getattr(workspace_run, "path"))
+        shared_dir = Path(getattr(workspace_run, "shared_dir", run_path / "shared"))
+        area_dir = Path(getattr(workspace_run, f"shared_{area}_dir", shared_dir / area))
+        if not area_dir.exists():
+            return []
+        metadata = self._shared_write_metadata_by_path(workspace_run)
+        items: List[Dict[str, Any]] = []
+        for path in sorted(area_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.resolve().relative_to(area_dir.resolve()).as_posix()
+            shared_rel = f"{area}/{rel}"
+            item: Dict[str, Any] = {
+                "area": area,
+                "name": path.name,
+                "path": rel,
+                "absolute_path": str(path.resolve()),
+            }
+            item.update(metadata.get(shared_rel, {}))
+            items.append(item)
+        return items
+
+    def _run_workspace_changesets(self, workspace_run: Any) -> List[Dict[str, Any]]:
+        run_path = Path(getattr(workspace_run, "path"))
+        changesets_dir = run_path / "changesets"
+        if not changesets_dir.exists():
+            return []
+        items: List[Dict[str, Any]] = []
+        for path in sorted(changesets_dir.iterdir()):
+            if not path.is_dir():
+                continue
+            changeset = self._read_workspace_json(path / "changeset.json")
+            submit_result = self._read_workspace_json(path / "submit_result.json")
+            status = str(submit_result.get("status") or changeset.get("status") or "")
+            if status != "accepted":
+                continue
+            changeset_id = str(
+                submit_result.get("changeset_id")
+                or changeset.get("changeset_id")
+                or path.name
+            )
+            files = submit_result.get("merged_files")
+            if not isinstance(files, list):
+                raw_files = changeset.get("files", [])
+                files = [
+                    str(item.get("path") if isinstance(item, dict) else item)
+                    for item in raw_files
+                    if isinstance(item, (dict, str))
+                ]
+            item: Dict[str, Any] = {
+                "changeset_id": changeset_id,
+                "name": changeset_id,
+                "path": path.name,
+                "absolute_path": str(path.resolve()),
+                "files": [str(file) for file in files],
+                "agent_id": changeset.get("agent_id"),
+                "status": status,
+            }
+            if submit_result.get("integration_ref") is not None:
+                item["integration_ref"] = submit_result["integration_ref"]
+            items.append({key: value for key, value in item.items() if value is not None})
+        return items
 
     def status_snapshot(
         self,
@@ -2433,6 +2881,20 @@ class GraphRuntime:
                 "queue_size": len(self._agent_message_queues.get(node_id, [])),
                 "started_at": inst.started_at,
                 "updated_at": inst.updated_at,
+                "has_received_flow": inst.has_received_flow,
+                "idle_since": inst.idle_since,
+                "task_status": inst.task_status,
+                "task_summary": inst.task_summary,
+                "task_status_updated_at": inst.task_status_updated_at,
+                "task_status_message_id": inst.task_status_message_id,
+                "task_status_batch_id": inst.task_status_batch_id,
+                "task_status_reports": list(inst.task_status_reports),
+                "task_status_artifacts": list(inst.task_status_artifacts),
+                "task_status_changesets": list(inst.task_status_changesets),
+                "task_status_next_actions": list(inst.task_status_next_actions),
+                "task_status_metadata": dict(inst.task_status_metadata),
+                "summary_prompted_at": inst.summary_prompted_at,
+                "summary_prompt_message_id": inst.summary_prompt_message_id,
             }
 
         queue_state = {
@@ -2467,6 +2929,9 @@ class GraphRuntime:
                 "last_tick_at": self._last_tick_at,
                 "manifest": dict(self._run_manifest),
                 "message_journal": self._message_journal_summary(),
+                "ready_for_top_agent_summary": self._ready_for_top_agent_summary,
+                "summary_generation": self._completion_generation,
+                "ready_for_top_agent_summary_generation": self._ready_for_top_agent_summary_generation,
             },
             "agents": agents,
             "queues": {
@@ -3533,6 +3998,8 @@ class GraphRuntime:
             timeout_sec=timeout_sec,
             queue_mode=normalized_queue_mode,
         )
+        if inst is not None:
+            self._mark_agent_flow_received(inst, message_id=pending.message_id, body=body)
         queue = self._agent_message_queues.setdefault(node.node_id, [])
         if normalized_queue_mode == "top":
             queue.insert(0, pending)
@@ -3638,6 +4105,7 @@ class GraphRuntime:
             inst.busy_count = max(0, inst.busy_count - 1)
             busy_released = True
 
+        self._mark_agent_flow_received(inst, message_id=message_id, body=body)
         self.record_agent_stream_event(
             self._agent_stream_status_event(
                 inst,
@@ -4179,6 +4647,95 @@ class GraphDefinition:
                 connections[edge.source].append(edge.target)
         return connections
 
+    def agent_flow_connections(self) -> Dict[str, List[str]]:
+        """Return AgentNode-to-AgentNode lines that can carry framework flow."""
+
+        connections: Dict[str, List[str]] = {
+            node_id: [] for node_id in self.agent_nodes
+        }
+        for edge in self.edges:
+            if edge.edge_type == "data":
+                continue
+            if edge.source not in self.agent_nodes:
+                continue
+            if edge.target not in self.agent_nodes:
+                continue
+            if edge.target not in connections[edge.source]:
+                connections[edge.source].append(edge.target)
+        return connections
+
+    def required_start_groups(self) -> List[Dict[str, Any]]:
+        """Return source SCCs that must be covered by a start node."""
+
+        connections = self.agent_flow_connections()
+        index = 0
+        stack: List[str] = []
+        on_stack: set[str] = set()
+        indices: Dict[str, int] = {}
+        lowlinks: Dict[str, int] = {}
+        components: List[List[str]] = []
+
+        def strongconnect(node_id: str) -> None:
+            nonlocal index
+            indices[node_id] = index
+            lowlinks[node_id] = index
+            index += 1
+            stack.append(node_id)
+            on_stack.add(node_id)
+            for target in connections.get(node_id, []):
+                if target not in indices:
+                    strongconnect(target)
+                    lowlinks[node_id] = min(lowlinks[node_id], lowlinks[target])
+                elif target in on_stack:
+                    lowlinks[node_id] = min(lowlinks[node_id], indices[target])
+            if lowlinks[node_id] != indices[node_id]:
+                return
+            component: List[str] = []
+            while stack:
+                item = stack.pop()
+                on_stack.remove(item)
+                component.append(item)
+                if item == node_id:
+                    break
+            components.append(sorted(component))
+
+        for node_id in sorted(self.agent_nodes):
+            if node_id not in indices:
+                strongconnect(node_id)
+
+        component_by_node: Dict[str, int] = {}
+        for component_index, component in enumerate(components):
+            for node_id in component:
+                component_by_node[node_id] = component_index
+
+        incoming_component_counts = {component_index: 0 for component_index in range(len(components))}
+        for source, targets in connections.items():
+            source_component = component_by_node[source]
+            for target in targets:
+                target_component = component_by_node[target]
+                if target_component != source_component:
+                    incoming_component_counts[target_component] += 1
+
+        groups: List[Dict[str, Any]] = []
+        for component in sorted(
+            (
+                component
+                for component_index, component in enumerate(components)
+                if incoming_component_counts[component_index] == 0
+            ),
+            key=lambda item: (item[0] if item else "", len(item), tuple(item)),
+        ):
+            group_id = "start-group-" + "-".join(component)
+            groups.append(
+                {
+                    "group_id": group_id,
+                    "node_ids": list(component),
+                    "required_count": 1,
+                    "kind": "source_component" if len(component) > 1 else "source_agent",
+                }
+            )
+        return groups
+
     def agent_rings(self) -> List[AgentRing]:
         """Return concrete simple AgentNode rings over direct exec edges.
 
@@ -4303,6 +4860,7 @@ class GraphDefinition:
                 "selected_by": "top_agent",
                 "framework_role": "validate_only",
                 "valid_start_nodes": list(self.agent_nodes),
+                "required_start_groups": self.required_start_groups(),
             },
         }
 

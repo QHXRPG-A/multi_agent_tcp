@@ -19,7 +19,9 @@ class AgentTCPClient:
         self.role = role
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
-        self._recv_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+        self._inbox: List[Dict[str, Any]] = []
+        self._inbox_changed = asyncio.Condition()
+        self._read_closed = False
         self._reader_task: Optional[asyncio.Task] = None
         self._gather_futures: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
 
@@ -34,6 +36,9 @@ class AgentTCPClient:
             raise RuntimeError(f"register failed: {ack}")
         if ack.get("type") != "registered":
             raise RuntimeError(f"unexpected register ack: {ack}")
+        async with self._inbox_changed:
+            self._read_closed = False
+            self._inbox_changed.notify_all()
 
         async def pump() -> None:
             assert self._reader is not None
@@ -55,7 +60,7 @@ class AgentTCPClient:
                             if fut is not None and not fut.done():
                                 fut.set_result(msg)
                                 continue
-                    await self._recv_queue.put(msg)
+                    await self._enqueue_received(msg)
             except (asyncio.IncompleteReadError, EOFError, ConnectionError, OSError) as e:
                 log.debug("recv pump end: %s", e)
             finally:
@@ -63,7 +68,9 @@ class AgentTCPClient:
                     if not fut.done():
                         fut.set_exception(ConnectionError("connection closed during batch_gather"))
                 self._gather_futures.clear()
-                await self._recv_queue.put({"type": "_disconnected"})
+                async with self._inbox_changed:
+                    self._read_closed = True
+                    self._inbox_changed.notify_all()
 
         self._reader_task = asyncio.create_task(pump())
 
@@ -83,6 +90,9 @@ class AgentTCPClient:
                 pass
             self._writer = None
         self._reader = None
+        async with self._inbox_changed:
+            self._read_closed = True
+            self._inbox_changed.notify_all()
 
     async def send_to(
         self,
@@ -179,7 +189,11 @@ class AgentTCPClient:
         """Block until one ``message`` (or optional ``broadcast``) arrives; optional filter by ``from``."""
 
         async def _one() -> Dict[str, Any]:
-            async for msg in self.incoming():
+            while True:
+                msg = await self._pop_wait_message(
+                    expect_from=expect_from,
+                    accept_broadcast=accept_broadcast,
+                )
                 t = msg.get("type")
                 if t == "error":
                     return msg
@@ -193,19 +207,71 @@ class AgentTCPClient:
                         if isinstance(body, dict) and body.get("type") == "agent.stream":
                             event = body.get("event")
                             if stream_callback is not None and isinstance(event, dict):
-                                await stream_callback(event)
+                                result = stream_callback(event)
+                                if asyncio.iscoroutine(result):
+                                    await result
                             continue
                         return msg
                 if accept_broadcast and t == "broadcast":
                     if expect_from is None or msg.get("from") == expect_from:
                         return msg
-            raise ConnectionError("connection closed while waiting for message")
 
         return await asyncio.wait_for(_one(), timeout=timeout_sec)
 
     async def incoming(self) -> AsyncIterator[Dict[str, Any]]:
         while True:
-            msg = await self._recv_queue.get()
-            if msg.get("type") == "_disconnected":
+            msg = await self._pop_incoming_message()
+            if msg is None:
                 break
             yield msg
+
+    async def _enqueue_received(self, msg: Dict[str, Any]) -> None:
+        async with self._inbox_changed:
+            self._inbox.append(msg)
+            self._inbox_changed.notify_all()
+
+    async def _pop_incoming_message(self) -> Optional[Dict[str, Any]]:
+        async with self._inbox_changed:
+            while not self._inbox:
+                if self._read_closed:
+                    return None
+                await self._inbox_changed.wait()
+            return self._inbox.pop(0)
+
+    async def _pop_wait_message(
+        self,
+        *,
+        expect_from: Optional[str],
+        accept_broadcast: bool,
+    ) -> Dict[str, Any]:
+        async with self._inbox_changed:
+            while True:
+                idx = self._find_wait_message_index(
+                    expect_from=expect_from,
+                    accept_broadcast=accept_broadcast,
+                )
+                if idx is not None:
+                    return self._inbox.pop(idx)
+                if self._read_closed:
+                    raise ConnectionError("connection closed while waiting for message")
+                await self._inbox_changed.wait()
+
+    def _find_wait_message_index(
+        self,
+        *,
+        expect_from: Optional[str],
+        accept_broadcast: bool,
+    ) -> Optional[int]:
+        for idx, msg in enumerate(self._inbox):
+            t = msg.get("type")
+            if t in ("error", "ping", "pong", "gather_result"):
+                return idx
+            if t == "message" and (expect_from is None or msg.get("from") == expect_from):
+                return idx
+            if (
+                accept_broadcast
+                and t == "broadcast"
+                and (expect_from is None or msg.get("from") == expect_from)
+            ):
+                return idx
+        return None

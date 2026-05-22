@@ -151,6 +151,8 @@ def framework_agent_rules() -> str:
             "- When `framework_context.message_envelope.required_outgoing_targets` is empty, this is leaf work: do not call `agent_dispatch` or `join_contribute`; process the message and publish durable results through `workspace_publish` / `workspace_publish_file`.",
             "- Use `join_contribute` only when the framework or task explicitly provides a real `join_id`; outgoing batch ids such as `out-*` are not join ids.",
             "- To provide durable results to the framework, use assigned framework MCP tools.",
+            "- Before finishing a message, call `agent_task_status` with your own task status and summary after submit/publish/dispatch work is done.",
+            "- If the framework sends `framework_summary_request`, summarize only your own current task and call `agent_task_status`; do not summarize the ring or full blueprint.",
             "- Do not request or depend on top-agent-only utterance inspection APIs.",
             "- Framework rules and skills are materialized once when your private worker context is prepared; per-message updates arrive only through `framework_context`.",
             "- Use only skills and rules exposed in your private CODEX_HOME/cwd context.",
@@ -169,6 +171,7 @@ def framework_top_agent_rules() -> str:
             "- Use only the injected `framework_control` MCP tools for organization, status, explanation, utterance inspection, user questions, and start-plan staging.",
             "- Ask missing blocking questions with `top_agent_request_user_input`; do not simulate user confirmation.",
             "- Validate a complete `TopAgentStartPlan` with `runtime_validate_start`, then stage it with `top_agent_stage_start_plan`.",
+            "- Use `required_start_groups`: select exactly one start AgentNode from each source component, including isolated AgentNodes.",
             "- Do not call `runtime_start`; the app calls `blueprint.start` only after the user approves the staged plan.",
             "- Do not modify, persist, or rewrite blueprint graph structure in v1.",
             "- Do not expose MCP tokens, private workspace paths, or framework internals to the user or ordinary agents.",
@@ -194,7 +197,7 @@ def framework_agent_skill() -> str:
             "The framework runtime skill is stable for the worker context; per-message state changes are provided through `framework_context`.",
             "",
             "If Codex lists a framework MCP server such as `framework_ordinary`, use those MCP tools first. "
-            "They are the preferred interface for checkout/status/diff/submit/sync, publish/publish_file, and downstream dispatch. "
+            "They are the preferred interface for checkout/status/diff/submit/sync, publish/publish_file, downstream dispatch, and task status reporting. "
             "Read project files and temporary shared workspace files directly from the read-only paths injected into AGENTS.md, the prompt preamble, and the Codex Execution Context. "
             "The shared workspace includes reports, artifacts, manifest.json, and logs; write reports and artifacts through publish tools.",
             "",
@@ -223,6 +226,12 @@ def framework_agent_skill() -> str:
             "Use `join_contribute` only when the framework or task explicitly provides a real `join_id`. "
             "Outgoing batch ids such as `out-*` are not join ids. "
             "For leaf results, receipts, or simple status reporting, publish a shared report instead.",
+            "",
+            "For task status, call `agent_task_status` before your final CLI reply. "
+            "Use `completed` after your own work is done, `blocked` when a framework or project condition prevents completion, "
+            "`needs_input` when user input is required, and `failed` for unrecoverable errors. "
+            "If the framework asks with `framework_summary_request`, summarize only your own current task and then call `agent_task_status`; "
+            "do not summarize the ring or the whole blueprint.",
         ]
     )
 
@@ -243,6 +252,7 @@ def framework_top_agent_skill() -> str:
             "Workflow:",
             "- Inspect organization and status through `framework_control` before proposing a start plan.",
             "- If required choices or constraints are missing, call `top_agent_request_user_input(questions)` and wait for the desktop answer.",
+            "- Cover every `required_start_groups` entry with exactly one selected start AgentNode; for an isolated AgentNode, select that node.",
             "- Build a complete `TopAgentStartPlan` with `user_goal`, `agent_descriptions`, `start_nodes`, `tasks`, and `run_policy`.",
             "- Call `runtime_validate_start(plan)` and fix validation errors before staging.",
             "- Call `top_agent_stage_start_plan(plan, plan_markdown)` when the proposal is ready for the user confirmation card.",

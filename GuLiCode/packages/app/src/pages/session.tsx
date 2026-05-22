@@ -678,10 +678,13 @@ export default function Page() {
     })
   }
 
-  const requestBlueprintPlanningSubmit = (input: { message: string }) => {
-    if (!blueprintPlanningAvailable() || isChildSession() || composer.blocked() || !prompt.ready()) {
-      showBlueprintPlanningSubmitBlocked()
+  const requestBlueprintPlanningSubmit = (input: { message: string; silentBlocked?: boolean }) => {
+    const block = () => {
+      if (!input.silentBlocked) showBlueprintPlanningSubmitBlocked()
       return false
+    }
+    if (!blueprintPlanningAvailable() || isChildSession() || composer.blocked() || !prompt.ready()) {
+      return block()
     }
     const currentText = prompt
       .current()
@@ -689,13 +692,12 @@ export default function Page() {
       .join("")
       .trim()
     if (currentText || prompt.context.items().length > 0) {
-      showBlueprintPlanningSubmitBlocked()
-      return false
+      return block()
     }
     setBlueprintPlanningSubmitRequest({
       id: Date.now(),
       text: input.message,
-      onBlocked: showBlueprintPlanningSubmitBlocked,
+      onBlocked: input.silentBlocked ? undefined : showBlueprintPlanningSubmitBlocked,
     })
     return true
   }
@@ -2255,9 +2257,10 @@ export default function Page() {
     if (!blueprintWindowEventMatchesSession(detail)) return
     const input = isRecord(detail?.input) ? detail.input : undefined
     const message = typeof input?.message === "string" ? input.message : ""
+    const silentBlocked = input?.silentBlocked === true
     const respond = typeof detail?.respond === "function" ? detail.respond : undefined
     if (!message || !respond) return
-    respond(requestBlueprintPlanningSubmit({ message }))
+    respond(requestBlueprintPlanningSubmit({ message, silentBlocked }))
   }
 
   onMount(() => {

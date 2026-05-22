@@ -60,6 +60,7 @@ export type BlueprintWindowPlanningSubmitInput = {
   task: string
   startNodeIds: string[]
   message: string
+  silentBlocked?: boolean
 }
 
 export type Platform = {
@@ -77,6 +78,9 @@ export type Platform = {
 
   /** Open a local path in a local app (desktop only) */
   openPath?(path: string, app?: string): Promise<void>
+
+  /** Reveal a local file or directory in the platform file manager (desktop only) */
+  revealPathInFileManager?(path: string): Promise<void>
 
   /** Restart the app  */
   restart(): Promise<void>

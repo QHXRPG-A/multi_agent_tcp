@@ -150,6 +150,7 @@ class DesktopBlueprintRun:
     backend: Any = None
     mcp: Any = None
     diagnostics_dir: Optional[Path] = None
+    planning_status_mismatch_keys: set[str] = field(default_factory=set, repr=False)
     stream_condition: Any = field(default_factory=threading.Condition)
 
     def summary(self) -> Dict[str, Any]:
@@ -790,6 +791,8 @@ class DesktopBlueprintService:
             rpc_server.start()
             runtime = GraphRuntime(
                 backend,
+                archive_manager=manager,
+                archive_run=workspace_run,
                 enforce_private_agent_context=True,
                 private_context_manager=manager,
                 private_context_run=workspace_run,
@@ -1677,6 +1680,10 @@ class DesktopBlueprintService:
     ) -> None:
         if not status_source.get("mismatch"):
             return
+        mismatch_key = _planning_status_mismatch_key(status_source, planning_status, active_status)
+        if mismatch_key in run.planning_status_mismatch_keys:
+            return
+        run.planning_status_mismatch_keys.add(mismatch_key)
         self._append_blueprint_diagnostics_event(
             run,
             "planning_status_source_mismatch",
@@ -2246,6 +2253,21 @@ def _runtime_status_comparison_key(status: Optional[Dict[str, Any]]) -> Dict[str
             for node_id, agent in sorted(agents.items())
         },
     }
+
+
+def _planning_status_mismatch_key(
+    status_source: Dict[str, Any],
+    planning_status: Optional[Dict[str, Any]],
+    active_status: Optional[Dict[str, Any]],
+) -> str:
+    data = {
+        "planning_session_id": status_source.get("planningSessionId"),
+        "active_run_id": status_source.get("activeRunId"),
+        "selected": status_source.get("selected"),
+        "planning": _runtime_status_comparison_key(planning_status),
+        "active": _runtime_status_comparison_key(active_status),
+    }
+    return json.dumps(data, sort_keys=True, ensure_ascii=False, default=str)
 
 
 def _compact_control_result(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

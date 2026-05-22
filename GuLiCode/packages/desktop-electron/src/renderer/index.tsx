@@ -231,6 +231,13 @@ const createPlatform = (): Platform => {
       }
       return window.api.openPath(path, app)
     },
+    async revealPathInFileManager(path: string) {
+      if (os === "windows" && (await isWslEnabled())) {
+        const converted = await window.api.wslPath(path, "windows").catch(() => null)
+        return window.api.revealPathInFileManager(converted ?? path)
+      }
+      return window.api.revealPathInFileManager(path)
+    },
 
     back() {
       window.history.back()

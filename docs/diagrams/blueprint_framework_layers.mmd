@@ -1,0 +1,27 @@
+%%{init: {"theme": "base", "themeVariables": {"background": "#ffffff", "fontFamily": "Microsoft YaHei, PingFang SC, Noto Sans CJK SC, Arial, sans-serif", "primaryTextColor": "#172033", "lineColor": "#526077"}}}%%
+flowchart TB
+  title["蓝图框架分层图<br/>从产品入口到 Agent 执行的职责边界"]
+
+  desktop["GuLiCode 桌面与 Top Agent<br/>面向用户接收目标、追问澄清、解释进展；不直接改写运行时事实"]
+  workbench["蓝图工作台<br/>展示组织图、任务入口、运行面板和产物入口；不复制调度语义"]
+  control["GraphRuntimeControlPlane 控制面<br/>提供组织读取、计划校验、启动、状态、结束等稳定接口；不绕过运行时决策"]
+  runtime["GraphRuntime 运行时<br/>掌握队列、消息分发、汇聚等待、事件和最终状态；是调度事实来源"]
+  agents["AgentNode 协作调度<br/>按蓝图拓扑排队执行、补齐下游消息、处理 fan-out 与 fan-in"]
+  workspace["Workspace / Reports / Events<br/>管理工程目录、Agent 私有区、运行共享区、changeset、报告、产物和事件"]
+  backend["CLIWorkerBackend<br/>适配 Codex / CodeMaker 等 CLI worker；只负责具体执行，不拥有产品调度语义"]
+
+  title --> desktop --> workbench --> control --> runtime --> agents --> workspace --> backend
+
+  classDef headline fill:#172033,stroke:#172033,color:#ffffff
+  classDef product fill:#e9f7f1,stroke:#2f8f6b,color:#133827
+  classDef control fill:#eef3ff,stroke:#3867c8,color:#162a55
+  classDef runtime fill:#fff5df,stroke:#b7791f,color:#4a2d00
+  classDef workspace fill:#f5edff,stroke:#7652b3,color:#2d1c4d
+  classDef backend fill:#f2f4f8,stroke:#667085,color:#202939
+
+  class title headline
+  class desktop,workbench product
+  class control control
+  class runtime,agents runtime
+  class workspace workspace
+  class backend backend

@@ -1,6 +1,6 @@
 # Current Short-Term Goals
 
-Last cleaned: 2026-05-22
+Last cleaned: 2026-05-21
 
 ## Current Main Line
 
@@ -41,10 +41,11 @@ This round has already established the first usable desktop/UI baseline:
   drag/drop node creation, port-to-port connection, context-menu deletion,
   keyboard deletion, reset/fit view, and inspector editing.
 - The local graph model now includes `route_nodes`, full `AgentNode`
-  configuration fields, terminal node kinds, route node kinds, and port-aware
-  `GraphEdge` fields with default `out -> in` exec edges.
-- Every canvas node now renders at least one connection port: Start has output,
-  End has input, and Agent/Route nodes have both input and output.
+  configuration fields, legacy terminal-node compatibility, route node kinds,
+  and port-aware `GraphEdge` fields with default `out -> in` exec edges.
+- Agent/Route canvas nodes render input/output connection ports. Start/End
+  terminal ports are now legacy import compatibility only, not current product
+  UI.
 - Inspector fields now include per-field `?` tip buttons describing what each
   setting is and what it is used for.
 - The blueprint panel has passed the current dark, technology-oriented,
@@ -139,6 +140,31 @@ This round has already established the first usable desktop/UI baseline:
   checkout submits are accepted even when Dulwich is unavailable or reports a
   false conflict, and the combined
   `test_desktop_blueprint_service.py test_workspace_manager.py` run passes.
+- Blueprint runtime manual entry is now task-planning-first: the Runtime panel
+  asks for optional start AgentNodes plus a required task, then submits the
+  task as a real main-chat user message in `blueprintPlanning` mode instead of
+  directly starting the runtime.
+- New product-facing blueprints no longer create or show start/end terminal
+  nodes. Legacy terminal nodes are still readable, but canvas, inspector,
+  export, and runtime graph conversion filter them out.
+- Desktop graph validation no longer requires terminal start/end nodes for
+  `blueprint.validate`, `blueprint.start`, or planning context creation.
+  Final `TopAgentStartPlan` validation still requires non-empty AgentNode
+  `start_nodes` and matching tasks.
+- The automatic project-workdir confirmation dialog is now shown only once per
+  app lifetime. Manual directory selection and relocation conflict dialogs are
+  unchanged.
+- Runtime top-level panels are reorderable by dragging the thick handle above
+  a panel. The original panel becomes a dashed placeholder and a detached
+  dashed ghost follows the mouse until drop.
+- Blueprint drag-out now opens a real independent Electron `BrowserWindow`,
+  not an in-app fixed overlay. The popout route renders only the blueprint
+  panel through the shared provider stack, keeps the "dock back to sidebar"
+  button, and sends dock/close/planning-submit events back to the main session.
+- Blueprint node ports are hidden by default unless their direction has an
+  edge: no incoming edge hides the left/input port, and no outgoing edge hides
+  the right/output port. Hover, selection, and active connection dragging still
+  reveal ports for graph editing.
 
 ## Immediate Handoff For The Next Agent
 
@@ -157,9 +183,15 @@ Start from these source files:
 - `GuLiCode/packages/desktop-electron/src/main/blueprint-runtime.ts`
 - `GuLiCode/packages/desktop-electron/src/main/blueprint-runtime.test.ts`
 - `GuLiCode/packages/desktop-electron/src/main/ipc-blueprint-runtime.test.ts`
+- `GuLiCode/packages/desktop-electron/src/main/windows.ts`
+- `GuLiCode/packages/desktop-electron/src/renderer/index.tsx`
 - `GuLiCode/packages/app/src/pages/session.tsx`
 - `GuLiCode/packages/app/src/pages/session/session-side-panel.tsx`
+- `GuLiCode/packages/app/src/pages/session/blueprint-window.tsx`
+- `GuLiCode/packages/app/src/pages/session/composer/session-composer-region.tsx`
 - `GuLiCode/packages/app/src/components/session/session-header.tsx`
+- `GuLiCode/packages/app/src/components/prompt-input.tsx`
+- `GuLiCode/packages/app/src/components/prompt-input/submit.ts`
 - `GuLiCode/packages/app/src/context/layout.tsx`
 - `GuLiCode/packages/app/src/i18n/en.ts`
 - `GuLiCode/packages/app/src/i18n/zh.ts`
@@ -174,8 +206,8 @@ Before changing behavior, run:
 
 ```powershell
 cd GuLiCode\packages\app
-bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts
-bun run build
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts ./src/pages/session/blueprint-planning-session.test.ts ./src/components/prompt-input/submit.test.ts ./src/i18n/parity.test.ts
+bun run typecheck
 ```
 
 If touching Electron catalog/model IPC, runtime IPC, or packaged desktop
@@ -202,55 +234,142 @@ internal traversal logs.
 
 ## Active Priorities
 
-2026-05-22 highest priority: Test Agents communication validation.
+2026-05-21 Blueprint independent window and endpoint visibility update:
 
-The next work should treat Test Agent communication as the first priority,
-ahead of new Top Agent product planning or broader UI polish. The immediate
-goal is to keep blueprint fan-out/fan-in behavior observable and aligned with
-the framework contract.
+Closed in this pass:
 
-Priority checklist:
-
-1. Run small blueprints with one upstream Test Agent and multiple downstream
-   Test Agents; confirm every required downstream target receives its own
-   framework-delivered message and current batch.
-2. Compare per-agent information panel JSON snapshots under
-   `agent-info-panel-tests`; there should be one file per Test Agent node id,
-   and same-name nodes intentionally overwrite the same file.
-3. Inspect ordinary Agent MCP logs for misuse of upstream batch ids,
-   `agent_dispatch` on leaf nodes, and `join_contribute` with `out-*` ids.
-   These should now be prevented first by framework rules/skill and corrected
-   second by MCP error guidance.
-4. Verify leaf Test Agents publish receipts/results through shared reports
-   (`workspace_publish` / `workspace_publish_file`) instead of dispatching or
-   joining when `required_outgoing_targets` is empty.
-5. Keep any new fixes scoped to communication contract convergence:
-   current batch ownership, downstream target scope, shared report receipts,
-   and join id boundaries.
+1. Blueprint title-bar drag-out now opens an independent Electron
+   `BrowserWindow`; the previous in-app fixed overlay has been removed.
+2. Popout windows are keyed by `projectDir + sessionId` and focus existing
+   matching windows instead of creating duplicates.
+3. Popout renderer initialization uses `getBlueprintWindowContext()` and a
+   dedicated `/:dir/blueprint-window/:id?` route.
+4. `AppInterface visualShell={false}` lets the popout reuse providers without
+   rendering the normal desktop app shell.
+5. The popout keeps the "dock back to sidebar" action. Docking focuses the main
+   window, reopens the embedded side panel, and closes the popout.
+6. Closing the popout clears the main session blueprint floating/open state.
+7. Runtime task submit from the popout forwards to the main session
+   `blueprintPlanning` handoff and returns an accepted/rejected response.
+8. Node input/output ports now default to edge-directed visibility with
+   hover/selection/connection-drag edit fallbacks.
 
 Detailed archive:
 
-- [`../archive/test_agent_communication_priority_2026-05-22.md`](../archive/test_agent_communication_priority_2026-05-22.md)
+- [`../archive/blueprint_popout_window_ports_2026-05-21.md`](../archive/blueprint_popout_window_ports_2026-05-21.md)
 
-2026-05-21 GuLiCode desktop bottom Top Agent capability planning:
+Immediate next checks:
 
-New task, concrete strategy TBD:
+1. Manual desktop smoke: drag blueprint out, move the independent OS window,
+   dock it back, and close it.
+2. Manual popout runtime smoke: submit a task from the popout and verify the
+   main chat blueprint-planning flow receives it.
+3. Manual endpoint smoke: isolated nodes hide ports by default, hover/selection
+   reveals them, and connection dragging still creates edges.
 
-1. Define how GuLiCode desktop should expose Top Agent as a first-class
-   governance/control capability at the desktop/runtime layer, not as an
-   unrestricted root executor.
-2. Shape the product loop around:
-   user demand -> Top Agent console -> organization/status context ->
-   validated `TopAgentStartPlan` -> optional plan confirmation ->
-   `run.start` -> runtime status/explain/end.
-3. Keep `GraphRuntimeControlPlane` / `GraphRuntime` authoritative for
-   scheduling, workspace writes, agent dispatch, archive, conflict handling,
-   and final run status.
-4. Decide the concrete strategy later: UI entry placement, lazy vs persistent
-   Top Agent session lifecycle, permission gates, plan confirmation UX,
-   manifest/audit records, and whether any event-driven follow-up is allowed.
-5. Avoid always-on automatic intervention until the policy and user-visible
-   controls are explicit.
+2026-05-21 Blueprint runtime task entry and panel reorder:
+
+Closed in this pass:
+
+1. New blueprint documents no longer seed start/end terminal nodes; legacy
+   `terminal_nodes` remain import-compatible but are hidden and filtered from
+   runtime/export surfaces.
+2. Add Node no longer offers Start/End. Runtime/export graph conversion keeps
+   AgentNode/RouteNode execution structure only.
+3. `createBlueprintStartPlan` now requires explicit `startNodes`; missing
+   start nodes intentionally produces an empty `start_nodes` plan for backend
+   validation to reject.
+4. Desktop service validation for `blueprint.validate`, `blueprint.start`, and
+   planning context creation moved from terminal `validate_runnable()` to
+   DAG/reference/AgentNode validation.
+5. The Runtime panel now has a top task-planning area with AgentNode
+   multi-select, large task textarea, and gated submit.
+6. Manual task submit goes through the main chat: it switches to
+   `blueprintPlanning`, sends a real user message, and relies on the existing
+   Top Agent planning flow to stage or reject the live run.
+7. Top toolbar Start and Runtime header Start now focus the task-planning area
+   instead of directly starting the blueprint.
+8. Runtime action controls were changed into long rows with large action text
+   and smaller explanatory copy.
+9. Runtime top-level panels can be reordered by dragging their thick handle;
+   the original panel becomes a placeholder and a detached ghost follows the
+   pointer.
+10. The automatic project-workdir confirmation prompt now fires only once per
+    app lifetime.
+
+Immediate follow-up queue:
+
+1. Manual smoke the full intended path in the running desktop app: task panel
+   submit -> main chat user message -> automatic `blueprintPlanning` mode ->
+   staged plan -> approve -> live run.
+2. Visual smoke the narrow Runtime panel layout, especially the multi-select,
+   selected start nodes, textarea, submit button, long action buttons, drag
+   ghost, and placeholder.
+3. Decide whether runtime panel order should persist between panel sessions or
+   remain local to the current session.
+
+Detailed archive:
+
+- [`../archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](../archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
+
+2026-05-21 Desktop blueprint planning mode:
+
+Closed in this pass:
+
+1. Product direction changed: the GuLiCode desktop app/current chat session is
+   the Top Agent role. Do not start a separate bottom Top Agent worker,
+   private Top Agent `CODEX_HOME`, or user-runnable Top Agent CLI session.
+2. The composer dropdown now has a virtual "blueprint planning" mode. Only
+   that mode provisions planning context/MCP and attaches the framework system
+   prompt. Build/Plan/ordinary agents remain normal chat.
+3. Backend planning context is `DesktopBlueprintPlanningSession`, keyed by
+   `projectDir + blueprintId + desktopSessionId`; it uses a no-op
+   runtime/control plane for graph organization, plan validation, questions,
+   and staged plans.
+4. Planning MCP exposes the desktop planning subset and filters
+   `runtime_start`, `top_agent_ask`, and `top_agent_start_session`.
+5. Approve remains app-mediated through `startBlueprintRun(..., "live")`,
+   followed by `markBlueprintPlanningPlanStarted`.
+6. Fixed current debug blockers: wrong project directory passed to
+   `ensureContext`, stale `runs/active/planning-*` workspace collision,
+   Solid store clone failure on approve/start, and dynamic MCP false
+   `not connected` caused by using `mcp.status()` after runtime `mcp.add`.
+
+P0 closed in this pass:
+
+1. Planning-mode status source mismatch is fixed. Planning MCP
+   `runtime_status`, `runtime_explain_status`, `top_agent_explain_status`,
+   `top_agent_utterances`, and `runtime_top_agent_utterances` now select the
+   active live `DesktopBlueprintRun` when one is linked or discoverable for the
+   same `projectDir + blueprintId`.
+2. If no active live run exists, planning status falls back to the planning
+   context no-op runtime.
+3. MCP responses keep the existing shape and add `status_source`,
+   `source_run_id`, and `planning_session_id`.
+4. `blueprint.planning.status` now returns `statusSource` alongside the old
+   `runtimeStatus` and `activeRun` fields.
+5. Live runs create run-scoped diagnostics at
+   `shared/logs/blueprint-diagnostics/{snapshot.json,events.jsonl}`.
+6. Manual evidence from `D:\agents_work_test` showed the planning no-op runtime
+   stayed `created` with no agents, while `active_live_run` reported
+   `running` and `test-agent=idle`; the Top Agent status tools selected
+   `active_live_run` and answered consistently with the Runtime panel.
+
+Immediate follow-up queue:
+
+1. Manual smoke the new Runtime task panel while a planning context exists;
+   direct side-panel Start has been retired in favor of task submit through
+   main-chat `blueprintPlanning`.
+2. Consider throttling repeated `planning_status_source_mismatch` diagnostics
+   during polling.
+3. Optionally expose diagnostics paths from run summaries in a developer/debug
+   UI affordance.
+
+Detailed archive:
+
+- [`../archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](../archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
+- [`../archive/blueprint_planning_mode_no_bottom_top_agent_2026-05-21.md`](../archive/blueprint_planning_mode_no_bottom_top_agent_2026-05-21.md)
+- [`../archive/blueprint_planning_status_source_diagnostics_2026-05-21.md`](../archive/blueprint_planning_status_source_diagnostics_2026-05-21.md)
 
 2026-05-20 Agent information panel stream UI update:
 
@@ -476,15 +595,17 @@ Superseded 2026-05-14 priority list kept for historical context:
 
 3. Blueprint embedding smoke:
    - Click the blueprint entry in the session header.
-   - Verify the right-side blueprint panel opens with the seed graph
-     `start -> planner -> coder -> review -> summary -> end`.
+   - Verify the right-side blueprint panel opens with an Agent/Route seed
+     graph; Start/End terminals should not appear in new product-facing
+     blueprints.
    - Drag the session/blueprint divider and verify both panes resize like the review side panel.
    - Zoom with the mouse wheel.
    - Pan the canvas with right-click drag; left-click drag on blank canvas should not pan.
    - Left-click a node to select it without opening the inspector.
    - Double-click a node, or use the right-click node menu `Edit`, to open the inspector.
    - Use the `Add node` dropdown to create Agent, Route sequence, Route parallel,
-     Route parallel_reduce, Start, and End nodes.
+     and Route parallel_reduce nodes. Start/End should not appear in current
+     product-facing Add Node UI.
    - Drag an add-node menu item onto the canvas and verify the dropped position
      snaps to the 24px grid.
    - Drag from an output port to an input port and verify a port-aware `exec`
@@ -492,8 +613,8 @@ Superseded 2026-05-14 priority list kept for historical context:
    - Delete nodes and edges through right-click menu / inspector action /
      `Backspace` / `Delete`, and verify connected edges are removed with their node.
    - Verify the inspector collapses when no inspected target remains.
-   - Edit Agent, Route, Terminal, and Edge inspector fields; JSON fields should
-     show an invalid state while preserving the previous parsed value.
+   - Edit Agent, Route, and Edge inspector fields; JSON fields should show an
+     invalid state while preserving the previous parsed value.
    - Verify the top-left common config panel controls project workdir, skill
      dir, and rule dir.
    - Verify the Agent inspector does not show editable command, cwd,

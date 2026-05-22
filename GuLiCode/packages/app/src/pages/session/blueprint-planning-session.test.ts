@@ -29,6 +29,7 @@ describe("session blueprint planning source", () => {
     expect(sessionSource).toContain("cloneBlueprintPlanningPayload(plan)")
     expect(sessionSource).toContain("startBlueprintRun(sdk.directory, DEFAULT_BLUEPRINT_ID, startPlan, \"live\")")
     expect(sessionSource).toContain("requestBlueprintPlanningSubmit")
+    expect(sessionSource).toContain("silentBlocked")
     expect(sessionSource).toContain("setBlueprintPlanningSubmitRequest")
     expect(sessionSource).toContain("blueprintPlanningSubmitRequest={blueprintPlanningSubmitRequest()}")
     expect(promptInputSource).toContain("props.blueprintPlanningSubmitRequest")
