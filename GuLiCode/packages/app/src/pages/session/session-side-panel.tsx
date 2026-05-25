@@ -27,7 +27,11 @@ import { FileTabContent } from "@/pages/session/file-tabs"
 import { createOpenSessionFileTab, createSessionTabs, getTabReorderIndex, type Sizing } from "@/pages/session/helpers"
 import { setSessionHandoff } from "@/pages/session/handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
-import { BlueprintSidePanel, type BlueprintPlanningSubmitInput } from "@/pages/session/blueprint-side-panel"
+import {
+  BlueprintSidePanel,
+  type BlueprintPlanningProgressState,
+  type BlueprintPlanningSubmitInput,
+} from "@/pages/session/blueprint-side-panel"
 
 export function SessionSidePanel(props: {
   canReview: () => boolean
@@ -41,6 +45,7 @@ export function SessionSidePanel(props: {
   focusReviewDiff: (path: string) => void
   reviewSnap: boolean
   size: Sizing
+  blueprintPlanningProgress?: BlueprintPlanningProgressState
   onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => boolean | Promise<boolean>
 }) {
   const layout = useLayout()
@@ -230,7 +235,10 @@ export function SessionSidePanel(props: {
             <div class="size-full min-w-0 h-full bg-background-base">
               <Switch>
                 <Match when={blueprintOpen()}>
-                  <BlueprintSidePanel onBlueprintPlanningSubmit={props.onBlueprintPlanningSubmit} />
+                  <BlueprintSidePanel
+                    blueprintPlanningProgress={props.blueprintPlanningProgress}
+                    onBlueprintPlanningSubmit={props.onBlueprintPlanningSubmit}
+                  />
                 </Match>
                 <Match when={true}>
                   <DragDropProvider

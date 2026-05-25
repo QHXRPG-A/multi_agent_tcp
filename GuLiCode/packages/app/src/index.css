@@ -24,6 +24,33 @@
     }
   }
 
+  @keyframes blueprint-runtime-node-breathe {
+    0%,
+    100% {
+      filter: brightness(1) drop-shadow(0 0 0 rgba(34, 197, 94, 0));
+    }
+
+    50% {
+      filter: brightness(1.08) drop-shadow(0 0 16px rgba(34, 197, 94, 0.36));
+    }
+  }
+
+  @keyframes blueprint-progress-indeterminate {
+    0% {
+      transform: translateX(-120%) scaleX(0.28);
+      animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    45% {
+      transform: translateX(-12%) scaleX(0.58);
+      animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1);
+    }
+
+    100% {
+      transform: translateX(115%) scaleX(0.32);
+    }
+  }
+
   [data-component="session-progress"] {
     position: absolute;
     inset: 0 0 auto;
@@ -46,6 +73,25 @@
     clip-path: inset(0 100% 0 0 round 999px);
     animation: session-progress-whip var(--session-progress-ms, 1800ms) infinite;
     will-change: clip-path;
+  }
+
+  [data-blueprint-node][data-runtime-state="working"] {
+    animation: blueprint-runtime-node-breathe 1700ms ease-in-out infinite;
+    will-change: filter;
+  }
+
+  [data-blueprint-runtime-flow] circle {
+    filter: drop-shadow(0 0 5px rgba(187, 247, 208, 0.72));
+  }
+
+  [data-blueprint-progress-bar] {
+    width: 100%;
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(103, 232, 249, 0), #67e8f9 34%, #bbf7d0 68%, rgba(187, 247, 208, 0));
+    transform-origin: left center;
+    animation: blueprint-progress-indeterminate 1450ms infinite;
+    will-change: transform;
   }
 
   [data-component="getting-started"] {
@@ -80,6 +126,23 @@
     }
     to {
       opacity: 1;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    [data-blueprint-node][data-runtime-state="working"] {
+      animation: none;
+      filter: none;
+    }
+
+    [data-blueprint-runtime-flow] {
+      display: none;
+    }
+
+    [data-blueprint-progress-bar] {
+      animation: none;
+      transform: none;
+      opacity: 0.82;
     }
   }
 }

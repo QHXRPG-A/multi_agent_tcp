@@ -1,4 +1,4 @@
----
+﻿---
 name: multi-agent-tcp
 description: >-
  Work on the current multi_agent_tcp direction: GuLiCode desktop productization,
@@ -47,6 +47,137 @@ F:\src\Package\Script\Python\multi_agent_tcp
 ```
 
 Historical paths such as `D:\agents\multi_agent_tcp` or `F:\src\ryven_demo` may appear in archives. Do not use them as current defaults unless the user's machine actually has that path.
+
+## Archive Structure
+
+Archive records are now split by ownership:
+
+1. `archive/frontend/`: GuLiCode app/desktop renderer, blueprint side panel,
+   session composer planning UX, CSS/i18n, popout windows, and UI tests.
+2. `archive/runtime-backend/`: GraphRuntime, GraphRuntimeControlPlane,
+   Blueprint MCP runtime, DesktopBlueprintService, AgentTCP, CLIWorkerBackend,
+   ring runtime, queues, workspaces, and local desktop service behavior.
+3. `archive/future-server/`: reserved for future hosted/server-side product
+   work such as remote orchestration APIs, persistence, auth, deployment, and
+   observability.
+
+## Fast Handoff - 2026-05-25 Blueprint Flow Progress Overlay + Plan Sync
+
+When the next task is blueprint submit progress, Top Agent staged-plan
+confirmation, progress overlay/mask behavior, or the plan card not appearing,
+start from this state:
+
+1. The frontend owns the blueprint progress overlay in
+   `GuLiCode/packages/app/src/pages/session/blueprint-side-panel.tsx`.
+2. `BlueprintProgressOverlay` blocks only the blueprint panel with a white mask
+   and indeterminate HUD. The left chat remains available for plan
+   confirmation, rejection, questions, and summaries.
+3. Progress phases are `planning`, `start`, `summary`, and `ending`.
+   `running` is intentionally not a blocking progress phase; once runtime
+   status is `running`, the overlay disappears and the runtime visual frame,
+   node glow, and edge flow projection carry the active-run state.
+4. `session.tsx` derives `blueprintPlanningProgress` and passes it through
+   `SessionSidePanel` into `BlueprintSidePanel`.
+5. `planningRequested` is the explicit session-side bridge for right-panel
+   blueprint submissions. It keeps planning progress visible from accepted
+   submit through Top Agent staged plan/question availability.
+6. `blueprintPlanningStatus` is pulled immediately when a planning session
+   exists, then polled while the session is busy, `planningRequested` is true,
+   or pending question/plan state exists. This prevents missing the
+   confirm/reject card after `framework_control_top_agent_stage_start_plan`.
+7. `BlueprintSidePanel` has a module-level flow lock store so closing and
+   reopening the blueprint panel does not drop planning/start overlay state.
+8. Runtime summary readiness still triggers automatic Top Agent summary request
+   and automatic runtime complete, with dedupe by `runId:generation`.
+9. If automatic runtime complete fails, the overlay unlocks so the user can use
+   the right runtime controls.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-side-panel.test.ts ./src/pages/session/blueprint-planning-session.test.ts ./src/i18n/parity.test.ts
+bun run typecheck
+```
+
+Observed result: targeted app tests passed with 14 tests and 468 assertions;
+app typecheck passed.
+
+Current follow-ups:
+
+1. Manual smoke submit -> Top Agent staged plan -> confirm/reject card after a
+   fresh desktop launch.
+2. Manual smoke approve/start and verify the overlay disappears as soon as the
+   runtime status becomes `running`.
+3. Manual smoke summary readiness after panel reopen and verify auto-summary
+   and auto-complete dedupe still hold.
+
+Detailed archive:
+
+- [`archive/frontend/blueprint_flow_progress_overlay_plan_sync_2026-05-25.md`](archive/frontend/blueprint_flow_progress_overlay_plan_sync_2026-05-25.md)
+
+## Fast Handoff - 2026-05-25 Blueprint Runtime Visual Flow + Pending Filter
+
+When the next task is blueprint runtime visual behavior, selected-node styling,
+edge message-flow animation, pending-message counts, or the live run observed
+on 2026-05-25, start from this state:
+
+1. The active product surface is still `GuLiCode/packages/app/src/pages/session/blueprint-side-panel.tsx`;
+   do not introduce a renderer-side scheduler. The UI projects
+   `runtime().status` / `props.state.status`.
+2. Selected blueprint nodes no longer use the node-tone glow as selected
+   feedback. Selection is represented by a brighter, thicker border while
+   `inspecting` / `connecting` outlines remain available for edit feedback.
+3. During an active run, all visible nodes receive a low-strength runtime glow.
+   Agent nodes in `dispatching`, `running`, `waiting_for_reply`,
+   `processing_reply`, or with `busy_count > 0` receive the stronger working
+   glow and breathing animation.
+4. Runtime edge flow is derived from real active messages only:
+   `status.queues.pending_messages` entries whose message status is
+   `queued` or `dispatching` and whose `source_node_id -> node_id` pair maps to
+   an existing edge.
+5. Completed, failed, source-less, or no-edge messages must not render flow
+   dots. The `pending_messages` field may retain completed history, so UI
+   pending counts must use the same active-message filter instead of counting
+   the raw record entries.
+6. Active flow edges render `data-blueprint-runtime-flow` SVG groups with a
+   row of `animateMotion` dots along the retained edge path. Reduced-motion
+   users keep static highlights and hide the animated dots.
+7. An active run adds `data-blueprint-runtime-frame` around only the canvas
+   viewport, not the right runtime panel.
+8. The 2026-05-25 live run under `D:\agents_work_test` was
+   `run-2306ff139459`: fan-in results arrived from `test-agent-3`,
+   then `test-agent-2`, then `test-agent-1`, and all were processed by
+   `test-agent`. The run still reported `running` with
+   `ready_for_top_agent_summary=true`, so the green frame/node glow may remain
+   while edge dots should disappear.
+9. The earlier run/archive cleanup intentionally deleted
+   `docs/blueprints/runs/complex_test_blueprint_latest/*`; do not restore those
+   files unless explicitly asked.
+
+Latest relevant verification:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/pages/session/blueprint-side-panel.test.ts
+bun run typecheck
+```
+
+Observed result: blueprint side-panel tests passed with 12 passed and 336
+assertions; app typecheck passed.
+
+Current follow-ups:
+
+1. Manual smoke a live queued/dispatching interval and confirm flow dots appear
+   only on the edge currently carrying a message.
+2. Decide whether `ready_for_top_agent_summary=true` should eventually auto-end
+   a run or stay as deliberate user closure.
+3. If backend schema cleanup is desired, split retained message history from
+   active pending work instead of overloading `pending_messages`.
+
+Detailed archive:
+
+- [`archive/frontend/blueprint_runtime_visual_flow_pending_filter_2026-05-25.md`](archive/frontend/blueprint_runtime_visual_flow_pending_filter_2026-05-25.md)
 
 ## Fast Handoff - 2026-05-22 Agent Task Panel + Auto Top Summary
 
@@ -120,7 +251,7 @@ Current follow-ups:
 
 Detailed archive:
 
-- [`archive/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md`](archive/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md)
+- [`archive/frontend/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md`](archive/frontend/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md)
 
 ## Fast Handoff - 2026-05-22 Runtime Completion, Demux, And Workspace Panels
 
@@ -200,7 +331,7 @@ Current follow-ups:
 
 Detailed archive:
 
-- [`archive/blueprint_runtime_completion_demux_workspace_2026-05-22.md`](archive/blueprint_runtime_completion_demux_workspace_2026-05-22.md)
+- [`archive/runtime-backend/blueprint_runtime_completion_demux_workspace_2026-05-22.md`](archive/runtime-backend/blueprint_runtime_completion_demux_workspace_2026-05-22.md)
 
 ## Fast Handoff - 2026-05-21 Blueprint Popout Window + Endpoint Visibility
 
@@ -265,7 +396,7 @@ Current follow-ups:
 
 Detailed archive:
 
-- [`archive/blueprint_popout_window_ports_2026-05-21.md`](archive/blueprint_popout_window_ports_2026-05-21.md)
+- [`archive/frontend/blueprint_popout_window_ports_2026-05-21.md`](archive/frontend/blueprint_popout_window_ports_2026-05-21.md)
 
 ## Fast Handoff - 2026-05-21 Blueprint Runtime Task Entry
 
@@ -336,7 +467,7 @@ Current follow-ups:
 
 Detailed archive:
 
-- [`archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
+- [`archive/frontend/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](archive/frontend/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
 
 ## Fast Handoff - 2026-05-21 Desktop Blueprint Planning Mode
 
@@ -401,9 +532,9 @@ bun run typecheck
 
 Detailed archive:
 
-- [`archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
-- [`archive/blueprint_planning_mode_no_bottom_top_agent_2026-05-21.md`](archive/blueprint_planning_mode_no_bottom_top_agent_2026-05-21.md)
-- [`archive/blueprint_planning_status_source_diagnostics_2026-05-21.md`](archive/blueprint_planning_status_source_diagnostics_2026-05-21.md)
+- [`archive/frontend/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](archive/frontend/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
+- [`archive/frontend/blueprint_planning_mode_no_bottom_top_agent_2026-05-21.md`](archive/frontend/blueprint_planning_mode_no_bottom_top_agent_2026-05-21.md)
+- [`archive/frontend/blueprint_planning_status_source_diagnostics_2026-05-21.md`](archive/frontend/blueprint_planning_status_source_diagnostics_2026-05-21.md)
 
 ## Fast Handoff - 2026-05-20 Agent Info Panel Stream UI
 
@@ -453,8 +584,8 @@ bun run typecheck
 
 Detailed archive:
 
-- [`archive/agent_info_panel_stream_ui_2026-05-20.md`](archive/agent_info_panel_stream_ui_2026-05-20.md)
-- [`archive/agent_info_panel_markdown_longpress_2026-05-20.md`](archive/agent_info_panel_markdown_longpress_2026-05-20.md)
+- [`archive/frontend/agent_info_panel_stream_ui_2026-05-20.md`](archive/frontend/agent_info_panel_stream_ui_2026-05-20.md)
+- [`archive/frontend/agent_info_panel_markdown_longpress_2026-05-20.md`](archive/frontend/agent_info_panel_markdown_longpress_2026-05-20.md)
 
 ## Fast Handoff - 2026-05-20 Blueprint Project Workdir + Agent Surface
 
@@ -514,7 +645,7 @@ bun run typecheck
 
 Detailed archive:
 
-- [`archive/blueprint_project_workdir_agent_surface_2026-05-20.md`](archive/blueprint_project_workdir_agent_surface_2026-05-20.md)
+- [`archive/frontend/blueprint_project_workdir_agent_surface_2026-05-20.md`](archive/frontend/blueprint_project_workdir_agent_surface_2026-05-20.md)
 
 ## Fast Handoff - 2026-05-19 Full MCP Control + Real Codex Smoke
 
@@ -582,8 +713,8 @@ pytest -q test_desktop_blueprint_service.py::test_real_codex_live_blueprint_uses
 
 Detailed archive:
 
-- [`archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md`](archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md)
-- [`archive/blueprint_run_mcp_runtime_2026-05-19.md`](archive/blueprint_run_mcp_runtime_2026-05-19.md)
+- [`archive/runtime-backend/blueprint_full_mcp_control_real_smoke_2026-05-19.md`](archive/runtime-backend/blueprint_full_mcp_control_real_smoke_2026-05-19.md)
+- [`archive/runtime-backend/blueprint_run_mcp_runtime_2026-05-19.md`](archive/runtime-backend/blueprint_run_mcp_runtime_2026-05-19.md)
 
 ## Fast Handoff - 2026-05-19 Blueprint Header Status + IPC Restart
 
@@ -617,7 +748,7 @@ bun run build
 
 Detailed archive:
 
-- [`archive/blueprint_header_status_debug_restart_2026-05-19.md`](archive/blueprint_header_status_debug_restart_2026-05-19.md)
+- [`archive/frontend/blueprint_header_status_debug_restart_2026-05-19.md`](archive/frontend/blueprint_header_status_debug_restart_2026-05-19.md)
 
 ## Fast Handoff - 2026-05-19 Blueprint Python Detection + Config UX
 
@@ -667,7 +798,7 @@ python -m py_compile desktop_blueprint_service.py cluster.py
 
 Detailed archive:
 
-- [`archive/blueprint_python_detection_config_2026-05-19.md`](archive/blueprint_python_detection_config_2026-05-19.md)
+- [`archive/frontend/blueprint_python_detection_config_2026-05-19.md`](archive/frontend/blueprint_python_detection_config_2026-05-19.md)
 
 ## Fast Handoff - 2026-05-19 Blueprint Common Config + Private Runtime
 
@@ -719,7 +850,7 @@ pytest -q test_desktop_blueprint_service.py test_workspace_manager.py
 
 Detailed archive:
 
-- [`archive/blueprint_common_config_paths_2026-05-19.md`](archive/blueprint_common_config_paths_2026-05-19.md)
+- [`archive/frontend/blueprint_common_config_paths_2026-05-19.md`](archive/frontend/blueprint_common_config_paths_2026-05-19.md)
 
 ## Fast Handoff - 2026-05-18 Blueprint Agent Panel + Debug Baseline
 
@@ -794,9 +925,9 @@ bun run build
 
 Detailed archive:
 
-- [`archive/agent_info_panel_interaction_2026-05-18.md`](archive/agent_info_panel_interaction_2026-05-18.md)
-- [`archive/agent_info_panel_test_node_json_2026-05-18.md`](archive/agent_info_panel_test_node_json_2026-05-18.md)
-- [`archive/agent_info_panel_stream_private_context_2026-05-18.md`](archive/agent_info_panel_stream_private_context_2026-05-18.md)
+- [`archive/frontend/agent_info_panel_interaction_2026-05-18.md`](archive/frontend/agent_info_panel_interaction_2026-05-18.md)
+- [`archive/frontend/agent_info_panel_test_node_json_2026-05-18.md`](archive/frontend/agent_info_panel_test_node_json_2026-05-18.md)
+- [`archive/frontend/agent_info_panel_stream_private_context_2026-05-18.md`](archive/frontend/agent_info_panel_stream_private_context_2026-05-18.md)
 
 ## Fast Handoff - 2026-05-15 Real Codex Framework Flow Baseline
 
@@ -1075,23 +1206,23 @@ Short-term work. Prefer current files in this order:
 
 Historical change records only. Do not use archive content as current behavior unless a current knowledge document points to it.
 
-- [`archive/guli_desktop_ui_archive.md`](archive/guli_desktop_ui_archive.md)
-- [`archive/blueprint_integration_archive.md`](archive/blueprint_integration_archive.md)
-- [`archive/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md`](archive/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md)
-- [`archive/blueprint_runtime_completion_demux_workspace_2026-05-22.md`](archive/blueprint_runtime_completion_demux_workspace_2026-05-22.md)
-- [`archive/blueprint_popout_window_ports_2026-05-21.md`](archive/blueprint_popout_window_ports_2026-05-21.md)
-- [`archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](archive/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
-- [`archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md`](archive/blueprint_full_mcp_control_real_smoke_2026-05-19.md)
-- [`archive/blueprint_run_mcp_runtime_2026-05-19.md`](archive/blueprint_run_mcp_runtime_2026-05-19.md)
-- [`archive/agent_info_panel_live_runtime_2026-05-18.md`](archive/agent_info_panel_live_runtime_2026-05-18.md)
-- [`archive/agent_info_panel_interaction_2026-05-18.md`](archive/agent_info_panel_interaction_2026-05-18.md)
-- [`archive/agent_info_panel_markdown_longpress_2026-05-20.md`](archive/agent_info_panel_markdown_longpress_2026-05-20.md)
-- [`archive/agent_info_panel_test_node_json_2026-05-18.md`](archive/agent_info_panel_test_node_json_2026-05-18.md)
-- [`archive/blueprint_header_status_debug_restart_2026-05-19.md`](archive/blueprint_header_status_debug_restart_2026-05-19.md)
-- [`archive/gulicode_runtime_baseline_archive.md`](archive/gulicode_runtime_baseline_archive.md)
-- [`archive/agents_architecture_archive.md`](archive/agents_architecture_archive.md)
-- [`archive/ring_runtime_closure_archive.md`](archive/ring_runtime_closure_archive.md)
-- [`archive/ring_session_runtime_archive.md`](archive/ring_session_runtime_archive.md)
+- [`archive/frontend/guli_desktop_ui_archive.md`](archive/frontend/guli_desktop_ui_archive.md)
+- [`archive/frontend/blueprint_integration_archive.md`](archive/frontend/blueprint_integration_archive.md)
+- [`archive/frontend/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md`](archive/frontend/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md)
+- [`archive/runtime-backend/blueprint_runtime_completion_demux_workspace_2026-05-22.md`](archive/runtime-backend/blueprint_runtime_completion_demux_workspace_2026-05-22.md)
+- [`archive/frontend/blueprint_popout_window_ports_2026-05-21.md`](archive/frontend/blueprint_popout_window_ports_2026-05-21.md)
+- [`archive/frontend/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md`](archive/frontend/blueprint_runtime_task_entry_panel_reorder_2026-05-21.md)
+- [`archive/runtime-backend/blueprint_full_mcp_control_real_smoke_2026-05-19.md`](archive/runtime-backend/blueprint_full_mcp_control_real_smoke_2026-05-19.md)
+- [`archive/runtime-backend/blueprint_run_mcp_runtime_2026-05-19.md`](archive/runtime-backend/blueprint_run_mcp_runtime_2026-05-19.md)
+- [`archive/frontend/agent_info_panel_live_runtime_2026-05-18.md`](archive/frontend/agent_info_panel_live_runtime_2026-05-18.md)
+- [`archive/frontend/agent_info_panel_interaction_2026-05-18.md`](archive/frontend/agent_info_panel_interaction_2026-05-18.md)
+- [`archive/frontend/agent_info_panel_markdown_longpress_2026-05-20.md`](archive/frontend/agent_info_panel_markdown_longpress_2026-05-20.md)
+- [`archive/frontend/agent_info_panel_test_node_json_2026-05-18.md`](archive/frontend/agent_info_panel_test_node_json_2026-05-18.md)
+- [`archive/frontend/blueprint_header_status_debug_restart_2026-05-19.md`](archive/frontend/blueprint_header_status_debug_restart_2026-05-19.md)
+- [`archive/runtime-backend/gulicode_runtime_baseline_archive.md`](archive/runtime-backend/gulicode_runtime_baseline_archive.md)
+- [`archive/runtime-backend/agents_architecture_archive.md`](archive/runtime-backend/agents_architecture_archive.md)
+- [`archive/runtime-backend/ring_runtime_closure_archive.md`](archive/runtime-backend/ring_runtime_closure_archive.md)
+- [`archive/runtime-backend/ring_session_runtime_archive.md`](archive/runtime-backend/ring_session_runtime_archive.md)
 
 ## Query Map
 
@@ -1100,7 +1231,7 @@ Historical change records only. Do not use archive content as current behavior u
   proxy, `NO_PROXY`, and repo `skill_list`: read `environment_setup.md`.
 - GuLiCode desktop startup, one-click launcher, packaged bring-up, taskbar icon, and direct Electron fallback: read `knowledge_base/gulicode_desktop.md`.
 - Guli productization, desktop UI ownership, branding, icon replacement, empty-state wording, blueprint entry placement, and blueprint workbench embedding: read `knowledge_base/guli_desktop_ui.md`, then `tasks/guli_desktop_ui_tasks.md`.
-- Blueprint Agent information panel interactions, task status display, automatic Top Agent summary, long-press progress, Markdown reply rendering, context-menu entry, move/resize behavior, Test Agent JSON snapshots, user-message capture, and clean desktop debug baseline: read `archive/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md`, then `archive/agent_info_panel_markdown_longpress_2026-05-20.md`, then `archive/agent_info_panel_interaction_2026-05-18.md`, then `archive/agent_info_panel_test_node_json_2026-05-18.md`, then `tasks/current_goals.md`.
+- Blueprint Agent information panel interactions, task status display, automatic Top Agent summary, long-press progress, Markdown reply rendering, context-menu entry, move/resize behavior, Test Agent JSON snapshots, user-message capture, and clean desktop debug baseline: read `archive/frontend/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md`, then `archive/frontend/agent_info_panel_markdown_longpress_2026-05-20.md`, then `archive/frontend/agent_info_panel_interaction_2026-05-18.md`, then `archive/frontend/agent_info_panel_test_node_json_2026-05-18.md`, then `tasks/current_goals.md`.
 - GuLiCode top Agent, organization view, top-agent profile, start plan, status explanation: read `多agents通信设计.md`, then `tasks/multi_agent_communication_tasks.md`.
 - Runtime start/status/end, organization, message batch, agent dispatch, join-create/join-contribute: read `knowledge_base/dispatch_workflows.md`.
 - Current architecture or component ownership: read `knowledge_base/core_architecture.md`.

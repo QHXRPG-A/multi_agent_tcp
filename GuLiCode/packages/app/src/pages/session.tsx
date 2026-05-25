@@ -64,6 +64,7 @@ import { type DiffStyle, SessionReviewTab, type SessionReviewTabProps } from "@/
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { syncSessionModel } from "@/pages/session/session-model-helpers"
 import { SessionSidePanel } from "@/pages/session/session-side-panel"
+import type { BlueprintPlanningProgressState } from "@/pages/session/blueprint-side-panel"
 import { TerminalPanel } from "@/pages/session/terminal-panel"
 import { useSessionCommands } from "@/pages/session/use-session-commands"
 import { useSessionHashScroll } from "@/pages/session/use-session-hash-scroll"
@@ -571,6 +572,7 @@ export default function Page() {
     pendingPlan: undefined as BlueprintPlanningPlan | undefined,
     activeRun: undefined as Record<string, unknown> | undefined,
     mcpRegisteredSessionId: undefined as string | undefined,
+    planningRequested: false,
     preparing: false,
     answering: false,
     approving: false,
@@ -583,6 +585,20 @@ export default function Page() {
     platform.platform === "desktop" &&
     !!platform.ensureBlueprintPlanningContext
 
+  const blueprintPlanningProgress = createMemo<BlueprintPlanningProgressState>(() => {
+    if (blueprintPlanning.desktopSessionId !== params.id) return { active: false }
+    if (blueprintPlanning.approving) return { active: true, phase: "start" }
+    if (
+      blueprintPlanning.preparing ||
+      blueprintPlanning.planningRequested ||
+      blueprintPlanning.pendingQuestion ||
+      blueprintPlanning.pendingPlan
+    ) {
+      return { active: true, phase: "planning" }
+    }
+    return { active: false }
+  })
+
   const applyBlueprintPlanningSnapshot = (snapshot: Record<string, unknown>, desktopSessionId?: string) => {
     batch(() => {
       setBlueprintPlanning("desktopSessionId", desktopSessionId ?? blueprintPlanning.desktopSessionId)
@@ -591,9 +607,13 @@ export default function Page() {
         typeof snapshot.sessionId === "string" ? snapshot.sessionId : blueprintPlanning.sessionId,
       )
       setBlueprintPlanning("events", blueprintPlanningEvents(snapshot.events))
-      setBlueprintPlanning("pendingQuestion", blueprintPlanningQuestion(snapshot.pendingQuestion))
-      setBlueprintPlanning("pendingPlan", blueprintPlanningPlan(snapshot.pendingPlan))
-      setBlueprintPlanning("activeRun", isRecord(snapshot.activeRun) ? snapshot.activeRun : undefined)
+      const pendingQuestion = blueprintPlanningQuestion(snapshot.pendingQuestion)
+      const pendingPlan = blueprintPlanningPlan(snapshot.pendingPlan)
+      const activeRun = isRecord(snapshot.activeRun) ? snapshot.activeRun : undefined
+      setBlueprintPlanning("pendingQuestion", pendingQuestion)
+      setBlueprintPlanning("pendingPlan", pendingPlan)
+      setBlueprintPlanning("activeRun", activeRun)
+      if (pendingQuestion || pendingPlan || activeRun) setBlueprintPlanning("planningRequested", false)
     })
   }
 
@@ -694,10 +714,14 @@ export default function Page() {
     if (currentText || prompt.context.items().length > 0) {
       return block()
     }
+    if (!input.silentBlocked) setBlueprintPlanning({ desktopSessionId: params.id, planningRequested: true })
     setBlueprintPlanningSubmitRequest({
       id: Date.now(),
       text: input.message,
-      onBlocked: input.silentBlocked ? undefined : showBlueprintPlanningSubmitBlocked,
+      onBlocked: () => {
+        if (!input.silentBlocked) setBlueprintPlanning("planningRequested", false)
+        if (!input.silentBlocked) showBlueprintPlanningSubmitBlocked()
+      },
     })
     return true
   }
@@ -705,8 +729,13 @@ export default function Page() {
   createEffect(() => {
     const sessionId = blueprintPlanning.sessionId
     if (!sessionId || blueprintPlanning.desktopSessionId !== params.id || !platform.blueprintPlanningStatus) return
+    void platform
+      .blueprintPlanningStatus?.(sessionId)
+      .then((snapshot) => applyBlueprintPlanningSnapshot(snapshot))
+      .catch(() => undefined)
     if (
       (sync.data.session_status[params.id ?? ""]?.type ?? "idle") === "idle" &&
+      !blueprintPlanning.planningRequested &&
       !blueprintPlanning.pendingQuestion &&
       !blueprintPlanning.pendingPlan
     )
@@ -1957,6 +1986,36 @@ export default function Page() {
     )
   }
 
+  createEffect(() => {
+    const sessionID = params.id
+    if (
+      !sessionID ||
+      blueprintPlanning.desktopSessionId !== sessionID ||
+      !blueprintPlanning.planningRequested ||
+      blueprintPlanning.pendingQuestion ||
+      blueprintPlanning.pendingPlan ||
+      blueprintPlanning.activeRun ||
+      blueprintPlanning.preparing ||
+      busy(sessionID)
+    ) {
+      return
+    }
+    const timer = window.setTimeout(() => {
+      if (
+        blueprintPlanning.desktopSessionId === sessionID &&
+        blueprintPlanning.planningRequested &&
+        !blueprintPlanning.pendingQuestion &&
+        !blueprintPlanning.pendingPlan &&
+        !blueprintPlanning.activeRun &&
+        !blueprintPlanning.preparing &&
+        !busy(sessionID)
+      ) {
+        setBlueprintPlanning("planningRequested", false)
+      }
+    }, 15_000)
+    onCleanup(() => window.clearTimeout(timer))
+  })
+
   const queuedFollowups = createMemo(() => {
     const id = params.id
     if (!id) return emptyFollowups
@@ -2463,6 +2522,7 @@ export default function Page() {
           focusReviewDiff={focusReviewDiff}
           reviewSnap={ui.reviewSnap}
           size={size}
+          blueprintPlanningProgress={blueprintPlanningProgress()}
           onBlueprintPlanningSubmit={requestBlueprintPlanningSubmit}
         />
       </div>

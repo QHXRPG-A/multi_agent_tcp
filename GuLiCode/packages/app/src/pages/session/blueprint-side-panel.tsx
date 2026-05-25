@@ -87,6 +87,11 @@ const AGENT_PANEL_MIN_WIDTH = 320
 const AGENT_PANEL_MIN_HEIGHT = 300
 const AGENT_PANEL_MARGIN = 8
 const BLUEPRINT_FLOAT_DRAG_THRESHOLD = 8
+const RUNTIME_WORKING_AGENT_STATES = new Set(["dispatching", "running", "waiting_for_reply", "processing_reply"])
+const RUNTIME_FLOW_MESSAGE_STATUSES = new Set(["queued", "dispatching"])
+const BLUEPRINT_RUNTIME_FLOW_DOTS = [0, 1, 2, 3, 4]
+const AUTO_RUNTIME_COMPLETE_REASON = "blueprint UI auto complete after Top Agent summary readiness"
+const BLUEPRINT_FLOW_LOCK_PENDING_GRACE_MS = 10_000
 let projectWorkdirAutoPromptShownThisApp = false
 const BLUEPRINT_THEME = {
   "--background-base": "#0b111b",
@@ -225,6 +230,24 @@ export type BlueprintPlanningSubmitInput = {
   message: string
   silentBlocked?: boolean
 }
+
+export type BlueprintPlanningProgressPhase = "planning" | "start"
+export type BlueprintPlanningProgressState = {
+  active: boolean
+  phase?: BlueprintPlanningProgressPhase
+}
+
+type BlueprintProgressPhase = BlueprintPlanningProgressPhase | "summary" | "ending"
+type BlueprintFlowLockState = {
+  active: boolean
+  planningSeen?: boolean
+  startSeen?: boolean
+  submittedAt?: number
+}
+
+const blueprintFlowLockStore = new Map<string, BlueprintFlowLockState>()
+const blueprintRuntimeManualUnlockKeys = new Set<string>()
+const autoCompletedRuntimeKeys = new Set<string>()
 
 type BlueprintRuntimeStartNodeOption = {
   id: string
@@ -562,12 +585,15 @@ type NodeItem =
       node: BlueprintAgentNode
     }
 
+type RuntimeNodeVisualState = "idle" | "active" | "working"
+
 export function BlueprintSidePanel(props: {
   floating?: boolean
   floatingRect?: BlueprintFloatingRect
   onFloat?: (rect?: Partial<BlueprintFloatingRect>) => void
   onDock?: () => void
   onFloatingRectChange?: (rect: Partial<BlueprintFloatingRect>) => void
+  blueprintPlanningProgress?: BlueprintPlanningProgressState
   onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => boolean | Promise<boolean>
 } = {}) {
   const language = useLanguage()
@@ -577,6 +603,7 @@ export function BlueprintSidePanel(props: {
   const dialog = useDialog()
   const { params, view } = useSessionLayout()
   const projectDirectory = decode64(params.dir) ?? "global"
+  const blueprintFlowLockKey = `${projectDirectory}:${DEFAULT_BLUEPRINT_ID}`
   const [draft, setDraft, _, draftReady] = persisted(
     Persist.workspace(projectDirectory, "blueprint-draft.v1"),
     createStore<BlueprintDraft>(createDefaultBlueprintDraft(projectDirectory)),
@@ -590,6 +617,12 @@ export function BlueprintSidePanel(props: {
   const [pythonDetecting, setPythonDetecting] = createSignal(false)
   const [pythonDetectFailed, setPythonDetectFailed] = createSignal(false)
   const [projectWorkdirRelocating, setProjectWorkdirRelocating] = createSignal(false)
+  const [blueprintFlowLock, writeBlueprintFlowLock] = createSignal<BlueprintFlowLockState>(
+    blueprintFlowLockStore.get(blueprintFlowLockKey) ?? { active: false },
+  )
+  const [autoCompletingRuntimeKey, setAutoCompletingRuntimeKey] = createSignal<string>()
+  const [progressAnchorVersion, setProgressAnchorVersion] = createSignal(0)
+  const [runtimeManualUnlockVersion, setRuntimeManualUnlockVersion] = createSignal(0)
   const [catalog, setCatalog] = createSignal<CatalogState>({
     skillDir: "",
     ruleDir: "",
@@ -650,6 +683,31 @@ export function BlueprintSidePanel(props: {
     }
   })
 
+  function setBlueprintFlowLock(
+    next: BlueprintFlowLockState | ((current: BlueprintFlowLockState) => BlueprintFlowLockState),
+  ) {
+    writeBlueprintFlowLock((current) => {
+      const resolved = typeof next === "function" ? next(current) : next
+      if (resolved.active) blueprintFlowLockStore.set(blueprintFlowLockKey, resolved)
+      else blueprintFlowLockStore.delete(blueprintFlowLockKey)
+      return resolved
+    })
+  }
+
+  function unlockRuntimeForManualControl(runId: string) {
+    blueprintRuntimeManualUnlockKeys.add(runId)
+    setRuntimeManualUnlockVersion((version) => version + 1)
+  }
+
+  function clearRuntimeManualUnlock(runId: string) {
+    if (!blueprintRuntimeManualUnlockKeys.delete(runId)) return
+    setRuntimeManualUnlockVersion((version) => version + 1)
+  }
+
+  function planningProgressActive() {
+    return props.blueprintPlanningProgress?.active === true
+  }
+
   const addOptions = createMemo(() => [
     {
       kind: "agent" as const,
@@ -696,6 +754,84 @@ export function BlueprintSidePanel(props: {
   )
   const incomingNodeIds = createMemo(() => new Set(visibleEdges().map((edge) => edge.to)))
   const outgoingNodeIds = createMemo(() => new Set(visibleEdges().map((edge) => edge.from)))
+  const runtimeRunActive = createMemo(() => {
+    const status = runtimeStatus(runtime().status)
+    return status === "running" && !isTerminalRuntimeStatus(status)
+  })
+  const runtimeRunRecord = createMemo(() => asRecord(asRecord(runtime().status)?.run))
+  const runtimeSummaryReady = createMemo(() => runtimeRunRecord()?.ready_for_top_agent_summary === true)
+  const runtimeSummaryKey = createMemo(() => {
+    const runId = runtime().runId
+    const run = runtimeRunRecord()
+    if (!runId || run?.ready_for_top_agent_summary !== true) return
+    const generation = run.ready_for_top_agent_summary_generation ?? run.summary_generation ?? "latest"
+    return `${runId}:${String(generation)}`
+  })
+  const runtimeStarted = createMemo(() => {
+    const status = runtimeStatus(runtime().status)
+    return !!runtime().runId && status === "running"
+  })
+  const runtimeSummaryLockActive = createMemo(() => {
+    runtimeManualUnlockVersion()
+    const runId = runtime().runId
+    const status = runtimeStatus(runtime().status)
+    return runtimeSummaryReady() && !!runId && !!status && !isTerminalRuntimeStatus(status) && !blueprintRuntimeManualUnlockKeys.has(runId)
+  })
+  const blueprintFlowLockActive = createMemo(
+    () => blueprintFlowLock().active || runtimeSummaryLockActive() || !!autoCompletingRuntimeKey() || runtime().action === "complete",
+  )
+  const externalBlueprintProgressPhase = createMemo(() =>
+    props.blueprintPlanningProgress?.active ? props.blueprintPlanningProgress.phase : undefined,
+  )
+  const blueprintProgressPhase = createMemo<BlueprintProgressPhase | undefined>(() => {
+    if (!blueprintFlowLockActive()) return undefined
+    const action = runtime().action
+    if (autoCompletingRuntimeKey() || action === "complete") return "ending"
+    if (runtimeSummaryReady()) return "summary"
+    if (runtimeStarted()) return undefined
+    const external = externalBlueprintProgressPhase()
+    if (external) return external
+    if (action === "plan") return "planning"
+    return "planning"
+  })
+  const blueprintProgressHudStyle = createMemo<JSX.CSSProperties>(() => {
+    progressAnchorVersion()
+    const rootRect = rootRef?.getBoundingClientRect()
+    const canvasRect = canvasRef?.getBoundingClientRect()
+    if (!rootRect || !canvasRect) {
+      return {
+        left: "50%",
+        bottom: "2rem",
+        transform: "translateX(-50%)",
+      }
+    }
+    return {
+      left: `${canvasRect.left - rootRect.left + canvasRect.width / 2}px`,
+      bottom: `${Math.max(24, rootRect.bottom - canvasRect.bottom + 24)}px`,
+      transform: "translateX(-50%)",
+      "max-width": `${Math.max(260, Math.min(680, canvasRect.width - 48))}px`,
+    }
+  })
+  const runtimeAgents = createMemo(() => asRecord(asRecord(runtime().status)?.agents))
+  const runtimeNodeVisualStates = createMemo<Record<string, RuntimeNodeVisualState>>(() => {
+    if (!runtimeRunActive()) return {}
+    const agents = runtimeAgents()
+    const states: Record<string, RuntimeNodeVisualState> = {}
+    for (const item of nodes()) {
+      let state: RuntimeNodeVisualState = "active"
+      if (item.type === "agent") {
+        const agent = asRecord(agents?.[item.id])
+        const agentState = stringValue(agent?.state)
+        const busyCount = Number(agent?.busy_count ?? 0)
+        if ((agentState && RUNTIME_WORKING_AGENT_STATES.has(agentState)) || busyCount > 0) state = "working"
+      }
+      states[item.id] = state
+    }
+    return states
+  })
+  const runtimeEdgeFlowIds = createMemo(() =>
+    runtimeRunActive() ? runtimeEdgeFlows(runtime().status, visibleEdges()) : new Set<string>(),
+  )
 
   const inspectedAgent = createMemo(() => {
     if (draft.inspector?.type !== "node") return
@@ -1128,6 +1264,63 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
+    const phase = externalBlueprintProgressPhase()
+    if (!phase) return
+    setBlueprintFlowLock((current) => ({
+      ...current,
+      active: true,
+      planningSeen: true,
+      startSeen: current.startSeen || phase === "start",
+      submittedAt: current.submittedAt ?? Date.now(),
+    }))
+  })
+
+  createEffect(() => {
+    const lock = blueprintFlowLock()
+    const runId = runtime().runId
+    const status = runtimeStatus(runtime().status)
+    if (runId && isTerminalRuntimeStatus(status)) {
+      clearRuntimeManualUnlock(runId)
+      setAutoCompletingRuntimeKey(undefined)
+      if (lock.active) setBlueprintFlowLock({ active: false })
+      return
+    }
+    if (runId && status === "running" && !runtimeSummaryReady()) {
+      if (lock.active) setBlueprintFlowLock({ active: false })
+      return
+    }
+    if (!lock.active) return
+    if (
+      lock.planningSeen &&
+      !lock.startSeen &&
+      !planningProgressActive() &&
+      !runId &&
+      !runtime().loading
+    ) {
+      setBlueprintFlowLock({ active: false })
+    }
+  })
+
+  createEffect(() => {
+    const lock = blueprintFlowLock()
+    if (!lock.active || lock.planningSeen || planningProgressActive() || runtime().runId || runtime().loading) return
+    const submittedAt = lock.submittedAt ?? Date.now()
+    const delay = Math.max(0, BLUEPRINT_FLOW_LOCK_PENDING_GRACE_MS - (Date.now() - submittedAt))
+    const timer = window.setTimeout(() => {
+      const current = blueprintFlowLock()
+      if (current.active && !current.planningSeen && !planningProgressActive() && !runtime().runId && !runtime().loading) {
+        setBlueprintFlowLock({ active: false })
+      }
+    }, delay)
+    onCleanup(() => window.clearTimeout(timer))
+  })
+
+  createEffect(() => {
+    if (!blueprintProgressPhase()) return
+    requestAnimationFrame(() => setProgressAnchorVersion((version) => version + 1))
+  })
+
+  createEffect(() => {
     if (!persistence().loaded || !platform.listBlueprintRuns || runtime().runId || runtime().runs.length) return
     let cancelled = false
     void platform
@@ -1226,6 +1419,28 @@ export function BlueprintSidePanel(props: {
       } finally {
         if (autoTopAgentSummarySubmittingKey === summaryKey) autoTopAgentSummarySubmittingKey = undefined
       }
+    })
+  })
+
+  createEffect(() => {
+    if (!blueprintFlowLockActive()) return
+    const runId = runtime().runId
+    const status = runtimeStatus(runtime().status)
+    const key = runtimeSummaryKey()
+    if (!runId || !key || isTerminalRuntimeStatus(status) || !platform.endBlueprintRun) return
+    if (autoCompletedRuntimeKeys.has(key) || autoCompletingRuntimeKey() === key) return
+    autoCompletedRuntimeKeys.add(key)
+    setAutoCompletingRuntimeKey(key)
+    queueMicrotask(async () => {
+      const completed = await endBlueprintRuntime("complete", {
+        auto: true,
+        reason: AUTO_RUNTIME_COMPLETE_REASON,
+      })
+      if (!completed) {
+        unlockRuntimeForManualControl(runId)
+        setBlueprintFlowLock({ active: false })
+      }
+      if (autoCompletingRuntimeKey() === key) setAutoCompletingRuntimeKey(undefined)
     })
   })
 
@@ -1491,6 +1706,12 @@ export function BlueprintSidePanel(props: {
     setPanelMode("runtime")
     setPersistence((current) => ({ ...current, saving: true, error: undefined }))
     setRuntime((current) => ({ ...current, loading: true, action: "plan", error: undefined }))
+    setBlueprintFlowLock({
+      active: true,
+      planningSeen: planningProgressActive(),
+      startSeen: props.blueprintPlanningProgress?.phase === "start",
+      submittedAt: Date.now(),
+    })
     try {
       await platform.configureBlueprintRuntime?.(startDraft.config.python_path)
       await persistProjectDraft(startDraft)
@@ -1502,6 +1723,7 @@ export function BlueprintSidePanel(props: {
         message: buildBlueprintPlanningMessage(task, startNodeIds),
       })
       if (!accepted) {
+        setBlueprintFlowLock({ active: false })
         setRuntime((current) => ({ ...current, loading: false, action: undefined }))
         return
       }
@@ -1510,16 +1732,20 @@ export function BlueprintSidePanel(props: {
     } catch (error) {
       const message = readableError(error)
       setPersistence((current) => ({ ...current, saving: false, error: message }))
+      setBlueprintFlowLock({ active: false })
       setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
     }
   }
 
-  async function endBlueprintRuntime(action: BlueprintRunEndAction) {
+  async function endBlueprintRuntime(
+    action: BlueprintRunEndAction,
+    opts: { auto?: boolean; reason?: string } = {},
+  ): Promise<boolean> {
     const runId = runtime().runId
-    if (!runId || !platform.endBlueprintRun) return
+    if (!runId || !platform.endBlueprintRun) return false
     setRuntime((current) => ({ ...current, loading: true, action, error: undefined }))
     try {
-      const ended = await platform.endBlueprintRun(runId, action, `blueprint UI ${action}`)
+      const ended = await platform.endBlueprintRun(runId, action, opts.reason ?? `blueprint UI ${action}`)
       syncAgentPanelUserMessagesFromRuntimeEvents(arrayOfRecords(asRecord(ended.status)?.recent_events))
       setRuntime((current) => ({
         ...current,
@@ -1532,8 +1758,18 @@ export function BlueprintSidePanel(props: {
       }))
       scheduleOpenTestAgentPanelPersists()
       void refreshBlueprintRuntime(runId, { quiet: true })
+      return true
     } catch (error) {
-      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: readableError(error) }))
+      const message = readableError(error)
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
+      if (opts.auto) {
+        showToast({
+          variant: "error",
+          title: language.t("common.requestFailed"),
+          description: message,
+        })
+      }
+      return false
     }
   }
 
@@ -2257,18 +2493,31 @@ export function BlueprintSidePanel(props: {
     deleteCurrent()
   }
 
+  const refreshProgressAnchor = () => setProgressAnchorVersion((version) => version + 1)
+
   onMount(() => {
     window.addEventListener("pointermove", handlePointerMove)
     window.addEventListener("pointerup", handlePointerUp)
     window.addEventListener("pointercancel", handlePointerCancel)
     window.addEventListener("dragover", handleWindowDragOver, true)
     window.addEventListener("drop", handleWindowDrop, true)
+    window.addEventListener("resize", refreshProgressAnchor)
+    const progressResizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? undefined
+        : new ResizeObserver(() => {
+            refreshProgressAnchor()
+          })
+    if (rootRef) progressResizeObserver?.observe(rootRef)
+    if (canvasRef) progressResizeObserver?.observe(canvasRef)
     onCleanup(() => {
       window.removeEventListener("pointermove", handlePointerMove)
       window.removeEventListener("pointerup", handlePointerUp)
       window.removeEventListener("pointercancel", handlePointerCancel)
       window.removeEventListener("dragover", handleWindowDragOver, true)
       window.removeEventListener("drop", handleWindowDrop, true)
+      window.removeEventListener("resize", refreshProgressAnchor)
+      progressResizeObserver?.disconnect()
       cancelAgentPanelLongPress()
     })
   })
@@ -2283,7 +2532,7 @@ export function BlueprintSidePanel(props: {
     <div
       ref={rootRef}
       id="blueprint-panel"
-      class="size-full min-w-0 h-full flex flex-col bg-background-base"
+      class="relative size-full min-w-0 h-full flex flex-col bg-background-base"
       style={BLUEPRINT_THEME}
       tabIndex={0}
       onKeyDown={handleKeyDown}
@@ -2515,6 +2764,7 @@ export function BlueprintSidePanel(props: {
                 {(edge) => {
                   const path = () => edgePath(draft, edge)
                   const selected = () => draft.selection?.type === "edge" && draft.selection.id === edge.id
+                  const flowing = () => runtimeEdgeFlowIds().has(edge.id)
                   return (
                     <g>
                       <path
@@ -2532,13 +2782,30 @@ export function BlueprintSidePanel(props: {
                       <path
                         d={path()}
                         fill="none"
-                        stroke={selected() ? "var(--blueprint-edge-active)" : "var(--blueprint-edge)"}
-                        stroke-width={selected() ? 2 : 1.5}
+                        stroke={selected() || flowing() ? "var(--blueprint-edge-active)" : "var(--blueprint-edge)"}
+                        stroke-width={selected() || flowing() ? 2 : 1.5}
                         stroke-linecap="round"
                         stroke-linejoin="round"
                         marker-end="url(#blueprint-arrow)"
                         style={{ "pointer-events": "none" }}
                       />
+                      <Show when={flowing()}>
+                        <g data-blueprint-runtime-flow style={{ "pointer-events": "none" }}>
+                          <For each={BLUEPRINT_RUNTIME_FLOW_DOTS}>
+                            {(dot) => (
+                              <circle r="2.7" fill="#bbf7d0" opacity="0.95">
+                                <animateMotion
+                                  path={path()}
+                                  dur="1.45s"
+                                  begin={`-${dot * 0.16}s`}
+                                  repeatCount="indefinite"
+                                  calcMode="linear"
+                                />
+                              </circle>
+                            )}
+                          </For>
+                        </g>
+                      </Show>
                     </g>
                   )
                 }}
@@ -2577,6 +2844,7 @@ export function BlueprintSidePanel(props: {
                   selected={draft.selection?.type === "node" && draft.selection.id === item.id}
                   inspecting={draft.inspector?.type === "node" && draft.inspector.id === item.id}
                   connecting={connection()?.source === item.id}
+                  runtimeVisualState={runtimeNodeVisualState(runtimeNodeVisualStates(), item.id)}
                   hasIncomingEdge={incomingNodeIds().has(item.id)}
                   hasOutgoingEdge={outgoingNodeIds().has(item.id)}
                   isConnectTargetVisible={!!connection() && connection()?.source !== item.id}
@@ -2593,6 +2861,12 @@ export function BlueprintSidePanel(props: {
               )}
             </For>
           </div>
+          <Show when={runtimeRunActive()}>
+            <div
+              data-blueprint-runtime-frame
+              class="pointer-events-none absolute inset-0 z-20 border-2 border-[#22c55e] shadow-[inset_0_0_0_1px_rgba(187,247,208,0.34),0_0_20px_rgba(34,197,94,0.34)]"
+            />
+          </Show>
           <For each={agentPanelEntries()}>
             {(panel) => (
               <AgentInfoPanel
@@ -2672,6 +2946,9 @@ export function BlueprintSidePanel(props: {
           </div>
         </Show>
       </div>
+      <Show when={blueprintProgressPhase()}>
+        {(phase) => <BlueprintProgressOverlay phase={phase()} style={blueprintProgressHudStyle()} />}
+      </Show>
     </div>
   )
 }
@@ -2730,6 +3007,36 @@ function BlueprintHeaderStatus(props: { status: BlueprintHeaderStatusState }) {
   )
 }
 
+function BlueprintProgressOverlay(props: { phase: BlueprintProgressPhase; style: JSX.CSSProperties }) {
+  const language = useLanguage()
+  const label = () => language.t(`blueprint.progress.${props.phase}` as never)
+
+  return (
+    <div
+      data-blueprint-progress-overlay
+      role="status"
+      aria-live="polite"
+      aria-label={label()}
+      class="absolute inset-0 z-50 pointer-events-auto"
+    >
+      <div data-blueprint-progress-mask class="absolute inset-0 bg-white/55 backdrop-blur-[1px]" />
+      <div
+        data-blueprint-progress-hud
+        class="absolute w-[min(680px,calc(100%-48px))] rounded-md border border-[rgba(103,232,249,0.36)] bg-[#06101a]/95 px-4 py-3 shadow-[0_18px_60px_rgba(2,8,23,0.36)]"
+        style={props.style}
+      >
+        <div class="mb-2 flex items-center justify-between gap-3">
+          <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{label()}</div>
+          <div class="shrink-0 text-10-medium uppercase text-[#67e8f9]">{language.t("blueprint.runtime.panel")}</div>
+        </div>
+        <div data-blueprint-progress-track class="h-1.5 overflow-hidden rounded-full bg-[rgba(103,232,249,0.16)]">
+          <div data-blueprint-progress-bar />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function BlueprintRuntimePanel(props: {
   state: BlueprintRuntimeState
   startNodeOptions: BlueprintRuntimeStartNodeOption[]
@@ -2752,8 +3059,12 @@ function BlueprintRuntimePanel(props: {
   const run = createMemo(() => asRecord(status()?.run))
   const agents = createMemo(() => recordEntries(asRecord(status()?.agents)))
   const queues = createMemo(() => asRecord(status()?.queues))
-  const pendingMessages = createMemo(() => recordEntries(asRecord(queues()?.pending_messages)))
-  const queueByAgent = createMemo(() => recordEntries(asRecord(queues()?.by_agent)))
+  const pendingMessages = createMemo(() => runtimePendingMessageEntries(queues()?.pending_messages))
+  const queueByAgent = createMemo(() =>
+    recordEntries(asRecord(queues()?.by_agent))
+      .map(([id, messages]) => [id, runtimePendingMessages(messages)] as const)
+      .filter(([, messages]) => messages.length > 0),
+  )
   const outgoing = createMemo(() => recordEntries(asRecord(status()?.outgoing_batches)))
   const joins = createMemo(() => recordEntries(asRecord(status()?.joins)))
   const jobs = createMemo(() => recordEntries(asRecord(status()?.jobs)))
@@ -3009,7 +3320,7 @@ function BlueprintRuntimePanel(props: {
             <RuntimeEmpty when={pendingMessages().length === 0 && queueByAgent().length === 0} />
             <For each={queueByAgent()}>
               {([id, messages]) => (
-                <RuntimeRow title={id} meta={`${arrayOfRecords(messages).length} ${language.t("blueprint.runtime.messages")}`} />
+                <RuntimeRow title={id} meta={`${messages.length} ${language.t("blueprint.runtime.messages")}`} />
               )}
             </For>
             <For each={pendingMessages()}>
@@ -3867,6 +4178,7 @@ function BlueprintNodeView(props: {
   selected: boolean
   inspecting: boolean
   connecting: boolean
+  runtimeVisualState: RuntimeNodeVisualState
   hasIncomingEdge: boolean
   hasOutgoingEdge: boolean
   isConnectTargetVisible: boolean
@@ -3896,13 +4208,11 @@ function BlueprintNodeView(props: {
         ? {
             background: "linear-gradient(135deg, rgba(15, 82, 70, 0.96), rgba(8, 36, 45, 0.96))",
             border: props.selected ? "rgba(45, 212, 191, 0.92)" : "rgba(45, 212, 191, 0.48)",
-            glow: "0 12px 36px rgba(20, 184, 166, 0.18)",
             icon: "#5eead4",
           }
         : {
             background: "linear-gradient(135deg, rgba(72, 36, 89, 0.96), rgba(22, 22, 44, 0.96))",
             border: props.selected ? "rgba(216, 180, 254, 0.92)" : "rgba(192, 132, 252, 0.48)",
-            glow: "0 12px 36px rgba(168, 85, 247, 0.18)",
             icon: "#d8b4fe",
           }
     }
@@ -3910,7 +4220,6 @@ function BlueprintNodeView(props: {
       return {
         background: "linear-gradient(135deg, rgba(18, 46, 66, 0.98), rgba(8, 24, 36, 0.98))",
         border: props.selected ? "rgba(125, 211, 252, 0.94)" : "rgba(56, 189, 248, 0.5)",
-        glow: "0 16px 42px rgba(14, 165, 233, 0.18)",
         icon: "#7dd3fc",
       }
     }
@@ -3918,14 +4227,12 @@ function BlueprintNodeView(props: {
       return {
         background: "linear-gradient(135deg, rgba(51, 48, 25, 0.98), rgba(13, 28, 30, 0.98))",
         border: props.selected ? "rgba(250, 204, 21, 0.94)" : "rgba(250, 204, 21, 0.5)",
-        glow: "0 16px 42px rgba(250, 204, 21, 0.14)",
         icon: "#facc15",
       }
     }
     return {
       background: "linear-gradient(135deg, rgba(25, 39, 62, 0.98), rgba(10, 20, 34, 0.98))",
       border: props.selected ? "rgba(103, 232, 249, 0.96)" : "rgba(99, 179, 215, 0.46)",
-      glow: "0 16px 42px rgba(34, 211, 238, 0.16)",
       icon: "#67e8f9",
     }
   })
@@ -3935,6 +4242,7 @@ function BlueprintNodeView(props: {
       <ContextMenu.Trigger class="contents">
         <div
           data-blueprint-node
+          data-runtime-state={props.runtimeVisualState}
           role="button"
           tabIndex={0}
           class="absolute flex flex-col items-start justify-center gap-1 rounded-md border px-3 text-left transition-[border-color,box-shadow,background-color]"
@@ -3947,9 +4255,8 @@ function BlueprintNodeView(props: {
             transform: `translate3d(${props.layout?.x ?? 0}px, ${props.layout?.y ?? 0}px, 0)`,
             background: nodeTone().background,
             "border-color": nodeTone().border,
-            "box-shadow": props.selected
-              ? `${nodeTone().glow}, inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 1px rgba(103, 232, 249, 0.18)`
-              : "0 10px 28px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.06)",
+            "border-width": props.selected ? "2px" : "1px",
+            "box-shadow": runtimeNodeBoxShadow(props.runtimeVisualState),
           }}
           onPointerDown={props.onPointerDown}
           onPointerEnter={() => setHovering(true)}
@@ -5052,6 +5359,57 @@ function mergeRuntimeRunsWithStatus(
   if (statusRun?.ended_at !== undefined) merged.endedAt = statusRun.ended_at
   const rest = runs.filter((run) => stringValue(run.runId) !== runId)
   return [merged, ...rest]
+}
+
+function runtimeNodeVisualState(states: Record<string, RuntimeNodeVisualState>, nodeId: string): RuntimeNodeVisualState {
+  return states[nodeId] ?? "idle"
+}
+
+function runtimeNodeBoxShadow(state: RuntimeNodeVisualState) {
+  if (state === "working") {
+    return "0 14px 36px rgba(0, 0, 0, 0.28), 0 0 34px rgba(34, 197, 94, 0.36), 0 0 0 1px rgba(187, 247, 208, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.08)"
+  }
+  if (state === "active") {
+    return "0 12px 30px rgba(0, 0, 0, 0.26), 0 0 24px rgba(34, 197, 94, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.07)"
+  }
+  return "0 10px 28px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.06)"
+}
+
+function runtimeEdgeFlows(status: unknown, edges: BlueprintEdge[]) {
+  const queues = asRecord(asRecord(status)?.queues)
+  const flowPairs = new Set<string>()
+  for (const message of runtimePendingMessages(queues?.pending_messages)) {
+    const source = stringValue(message.source_node_id) ?? stringValue(message.sourceNodeId)
+    const target = stringValue(message.node_id) ?? stringValue(message.nodeId)
+    const messageStatus = stringValue(message.status)
+    if (!source || !target || !messageStatus || !RUNTIME_FLOW_MESSAGE_STATUSES.has(messageStatus)) continue
+    flowPairs.add(runtimeEdgeFlowKey(source, target))
+  }
+  return new Set(edges.filter((edge) => flowPairs.has(runtimeEdgeFlowKey(edge.from, edge.to))).map((edge) => edge.id))
+}
+
+function runtimePendingMessageEntries(value: unknown): Array<[string, Record<string, unknown>]> {
+  return runtimeMessageEntries(value).filter(([, message]) => runtimeMessageIsActive(message))
+}
+
+function runtimePendingMessages(value: unknown) {
+  return runtimePendingMessageEntries(value).map(([, message]) => message)
+}
+
+function runtimeMessageEntries(value: unknown): Array<[string, Record<string, unknown>]> {
+  if (Array.isArray(value)) {
+    return arrayOfRecords(value).map((message, index) => [stringValue(message.message_id) ?? String(index), message])
+  }
+  return recordEntries(asRecord(value))
+}
+
+function runtimeMessageIsActive(message: Record<string, unknown>) {
+  const messageStatus = stringValue(message.status)
+  return !!messageStatus && RUNTIME_FLOW_MESSAGE_STATUSES.has(messageStatus)
+}
+
+function runtimeEdgeFlowKey(source: string, target: string) {
+  return `${source}\u0000${target}`
 }
 
 function runtimeStatus(status: unknown) {
