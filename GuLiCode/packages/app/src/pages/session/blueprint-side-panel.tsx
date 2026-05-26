@@ -90,7 +90,7 @@ const BLUEPRINT_FLOAT_DRAG_THRESHOLD = 8
 const RUNTIME_WORKING_AGENT_STATES = new Set(["dispatching", "running", "waiting_for_reply", "processing_reply"])
 const RUNTIME_FLOW_MESSAGE_STATUSES = new Set(["queued", "dispatching"])
 const BLUEPRINT_RUNTIME_FLOW_DOTS = [0, 1, 2, 3, 4]
-const AUTO_RUNTIME_COMPLETE_REASON = "blueprint UI auto complete after Top Agent summary readiness"
+const AUTO_RUNTIME_COMPLETE_REASON = "blueprint UI auto complete after all agents reached terminal task status"
 const BLUEPRINT_FLOW_LOCK_PENDING_GRACE_MS = 10_000
 let projectWorkdirAutoPromptShownThisApp = false
 const BLUEPRINT_THEME = {
@@ -217,12 +217,6 @@ type BlueprintHeaderStatusState = {
 }
 
 type RuntimePanelMode = "runtime" | "inspector"
-type AutoTopAgentSummaryAttempt = {
-  submitted?: boolean
-  retryAt?: number
-}
-
-const AUTO_TOP_AGENT_SUMMARY_RETRY_MS = 10_000
 
 export type BlueprintPlanningSubmitInput = {
   task: string
@@ -297,6 +291,53 @@ type BlueprintRuntimeState = {
   action?: string
   error?: string
   lastUpdatedAt?: number
+}
+
+export type BlueprintDiffFile = {
+  file: string
+  patch: string
+  additions: number
+  deletions: number
+  status?: "added" | "deleted" | "modified"
+}
+
+export type BlueprintDiffSyncPayload = {
+  runId: string
+  changesetIds: string[]
+  acceptedDiffs: BlueprintDiffFile[]
+}
+
+type BlueprintDiffChangeset = {
+  changesetId: string
+  status: string
+  agentId?: string
+  taskId?: string
+  summary?: string
+  fileCount: number
+  textFileCount: number
+  binaryFileCount: number
+  additions: number
+  deletions: number
+  patchExists: boolean
+}
+
+type BlueprintChangesetDiffDetail = {
+  changesetId: string
+  status: string
+  diffs: BlueprintDiffFile[]
+  binaryFiles: Record<string, unknown>[]
+  metadata: Record<string, unknown>
+}
+
+type BlueprintDiffState = {
+  loading: boolean
+  error?: string
+  summary: Record<string, unknown>
+  changesets: BlueprintDiffChangeset[]
+  acceptedDiffs: BlueprintDiffFile[]
+  binaryFiles: Record<string, unknown>[]
+  detailLoading?: string
+  details: Record<string, BlueprintChangesetDiffDetail | undefined>
 }
 
 type AgentStreamEvent = Record<string, unknown> & {
@@ -594,7 +635,9 @@ export function BlueprintSidePanel(props: {
   onDock?: () => void
   onFloatingRectChange?: (rect: Partial<BlueprintFloatingRect>) => void
   blueprintPlanningProgress?: BlueprintPlanningProgressState
+  blueprintPlanningActiveRun?: Record<string, unknown>
   onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => boolean | Promise<boolean>
+  onBlueprintDiffChanged?: (payload: BlueprintDiffSyncPayload) => void
 } = {}) {
   const language = useLanguage()
   const platform = usePlatform()
@@ -645,6 +688,16 @@ export function BlueprintSidePanel(props: {
     events: [],
     loading: false,
   })
+  const [blueprintDiffOpen, setBlueprintDiffOpen] = createSignal(false)
+  const [blueprintDiffSelectedChangesetId, setBlueprintDiffSelectedChangesetId] = createSignal<string>()
+  const [blueprintDiff, setBlueprintDiff] = createStore<BlueprintDiffState>({
+    loading: false,
+    summary: {},
+    changesets: [],
+    acceptedDiffs: [],
+    binaryFiles: [],
+    details: {},
+  })
   const [runtimeTask, setRuntimeTask] = createSignal("")
   const [runtimeStartNodeIds, setRuntimeStartNodeIds] = createSignal<string[]>([])
   const [agentPanel, setAgentPanel] = createStore<AgentPanelState>({
@@ -656,6 +709,19 @@ export function BlueprintSidePanel(props: {
   const runtimePanelOpen = () => panelMode() === "runtime"
   const [workspacePanelArea, setWorkspacePanelArea] = createSignal<WorkspacePanelArea>()
   const runtimeWorkspace = createMemo(() => asRecord(asRecord(runtime().status)?.workspace))
+  const blueprintDiffAvailable = createMemo(() => !!runtime().runId && !!platform.blueprintRunDiff)
+  const blueprintDiffButtonLabel = createMemo(() => {
+    const conflict = blueprintDiffSummaryCount(blueprintDiff.summary, "conflict")
+    const pending = blueprintDiffSummaryCount(blueprintDiff.summary, "pending")
+    const total = blueprintDiffSummaryCount(blueprintDiff.summary, "total")
+    const accepted = blueprintDiffSummaryCount(blueprintDiff.summary, "accepted")
+    if (conflict > 0) return language.t("blueprint.diff.conflictCount" as never, { count: conflict } as never)
+    if (pending > 0) return language.t("blueprint.diff.pendingCount" as never, { count: pending } as never)
+    if (accepted > 0 || total > 0) {
+      return language.t("blueprint.diff.buttonCount" as never, { count: accepted || total } as never)
+    }
+    return language.t("blueprint.diff.button" as never)
+  })
   let rootRef: HTMLDivElement | undefined
   let canvasRef: HTMLDivElement | undefined
   let runtimeTaskInputRef: HTMLTextAreaElement | undefined
@@ -663,9 +729,10 @@ export function BlueprintSidePanel(props: {
   const testAgentPersistTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {}
   const testAgentPersistRunning: Record<string, boolean | undefined> = {}
   const testAgentPersistQueued: Record<string, boolean | undefined> = {}
-  const autoTopAgentSummaryAttempts = new Map<string, AutoTopAgentSummaryAttempt>()
   let agentPanelPressFrame: number | undefined
-  let autoTopAgentSummarySubmittingKey: string | undefined
+  let previousBlueprintDiffRunId: string | undefined
+  let previousAcceptedDiffSignature: string | undefined
+  let syncedAcceptedDiffSignature: string | undefined
   let agentPanelLongPress:
     | {
         nodeId: string
@@ -1282,7 +1349,9 @@ export function BlueprintSidePanel(props: {
     if (runId && isTerminalRuntimeStatus(status)) {
       clearRuntimeManualUnlock(runId)
       setAutoCompletingRuntimeKey(undefined)
-      if (lock.active) setBlueprintFlowLock({ active: false })
+      if (lock.active && !externalBlueprintProgressPhase() && runtime().action !== "plan") {
+        setBlueprintFlowLock({ active: false })
+      }
       return
     }
     if (runId && status === "running" && !runtimeSummaryReady()) {
@@ -1342,6 +1411,39 @@ export function BlueprintSidePanel(props: {
 
   createEffect(() => {
     const runId = runtime().runId
+    if (runId === previousBlueprintDiffRunId) return
+    previousBlueprintDiffRunId = runId
+    previousAcceptedDiffSignature = undefined
+    syncedAcceptedDiffSignature = undefined
+    setBlueprintDiffOpen(false)
+    setBlueprintDiffSelectedChangesetId(undefined)
+    setBlueprintDiff({
+      loading: false,
+      error: undefined,
+      summary: {},
+      changesets: [],
+      acceptedDiffs: [],
+      binaryFiles: [],
+      detailLoading: undefined,
+      details: {},
+    })
+    if (runId) void refreshBlueprintRunDiff(runId, { quiet: true })
+  })
+
+  onMount(() => {
+    const handleWorkspaceDiffChanged = (event: Event) => {
+      const detail = asRecord((event as CustomEvent).detail)
+      if (detail?.source === "blueprint") return
+      const runId = stringValue(detail?.runId)
+      if (!runId || runId !== runtime().runId) return
+      void refreshBlueprintRunDiff(runId, { quiet: true })
+    }
+    window.addEventListener("workspace.diff.changed", handleWorkspaceDiffChanged)
+    onCleanup(() => window.removeEventListener("workspace.diff.changed", handleWorkspaceDiffChanged))
+  })
+
+  createEffect(() => {
+    const runId = runtime().runId
     const status = runtimeStatus(runtime().status)
     if (!runId || isTerminalRuntimeStatus(status)) return
     const interval = setInterval(() => {
@@ -1380,46 +1482,26 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
-    const state = runtime()
-    const runId = state.runId
-    const status = asRecord(state.status)
-    const run = asRecord(status?.run)
-    if (!runId || run?.ready_for_top_agent_summary !== true || !props.onBlueprintPlanningSubmit) return
-    const generation = run.ready_for_top_agent_summary_generation ?? run.summary_generation ?? "latest"
-    const summaryKey = `${runId}:${String(generation)}`
-    const attempt = autoTopAgentSummaryAttempts.get(summaryKey)
-    if (attempt?.submitted || autoTopAgentSummarySubmittingKey === summaryKey) return
-    const now = Date.now()
-    if (attempt?.retryAt && attempt.retryAt > now) return
-
-    autoTopAgentSummarySubmittingKey = summaryKey
-    queueMicrotask(async () => {
-      try {
-        const accepted = await props.onBlueprintPlanningSubmit?.({
-          task: "Summarize completed blueprint run",
-          startNodeIds: [],
-          message: buildTopAgentSummaryMessage({
-            runId,
-            generation,
-            status,
-          }),
-          silentBlocked: true,
-        })
-        autoTopAgentSummaryAttempts.set(
-          summaryKey,
-          accepted
-            ? { submitted: true }
-            : { submitted: false, retryAt: Date.now() + AUTO_TOP_AGENT_SUMMARY_RETRY_MS },
-        )
-      } catch {
-        autoTopAgentSummaryAttempts.set(summaryKey, {
-          submitted: false,
-          retryAt: Date.now() + AUTO_TOP_AGENT_SUMMARY_RETRY_MS,
-        })
-      } finally {
-        if (autoTopAgentSummarySubmittingKey === summaryKey) autoTopAgentSummarySubmittingKey = undefined
-      }
-    })
+    const activeRun = asRecord(props.blueprintPlanningActiveRun)
+    const runId = stringValue(activeRun?.runId)
+    if (!runId) return
+    const activeRunResponse = activeRun ?? { runId }
+    const status = asRecord(activeRun?.status)
+    const runStatusValue = runtimeStatus(status)
+    if (runStatusValue && isTerminalRuntimeStatus(runStatusValue)) return
+    setRuntime((current) => ({
+      ...current,
+      runId,
+      runs: mergeRuntimeRunsWithStatus(current.runs, activeRunResponse),
+      status: status ?? current.status,
+      events: arrayOfRecords(status?.recent_events),
+      loading: false,
+      action: undefined,
+      error: undefined,
+      lastUpdatedAt: Date.now(),
+    }))
+    setPanelMode("runtime")
+    void refreshBlueprintRuntime(runId, { quiet: true })
   })
 
   createEffect(() => {
@@ -1466,6 +1548,7 @@ export function BlueprintSidePanel(props: {
         error: undefined,
         lastUpdatedAt: Date.now(),
       }))
+      await refreshBlueprintRunDiff(runId, { quiet: true })
       await refreshOpenAgentPanelInfos(runId)
       scheduleOpenTestAgentPanelPersists()
     } catch (error) {
@@ -1475,6 +1558,78 @@ export function BlueprintSidePanel(props: {
         error: readableError(error),
       }))
     }
+  }
+
+  async function refreshBlueprintRunDiff(runId = runtime().runId, opts: { quiet?: boolean } = {}) {
+    if (!runId || !platform.blueprintRunDiff) return
+    if (!opts.quiet) setBlueprintDiff("loading", true)
+    try {
+      const response = await platform.blueprintRunDiff(runId)
+      const next = normalizeBlueprintRunDiff(response)
+      setBlueprintDiff({
+        loading: false,
+        error: undefined,
+        summary: next.summary,
+        changesets: next.changesets,
+        acceptedDiffs: next.acceptedDiffs,
+        binaryFiles: next.binaryFiles,
+        detailLoading: undefined,
+        details: blueprintDiff.details,
+      })
+      emitWorkspaceDiffChangedIfNeeded(runId, next.changesets, next.acceptedDiffs)
+    } catch (error) {
+      setBlueprintDiff("loading", false)
+      setBlueprintDiff("error", readableError(error))
+    }
+  }
+
+  async function loadBlueprintChangesetDiff(changesetId: string) {
+    const runId = runtime().runId
+    if (!runId || !platform.blueprintChangesetDiff) return
+    if (blueprintDiff.details[changesetId]) return
+    setBlueprintDiff("detailLoading", changesetId)
+    try {
+      const response = await platform.blueprintChangesetDiff(runId, changesetId)
+      setBlueprintDiff("details", changesetId, normalizeBlueprintChangesetDetail(response))
+      setBlueprintDiff("detailLoading", undefined)
+    } catch (error) {
+      setBlueprintDiff("detailLoading", undefined)
+      setBlueprintDiff("error", readableError(error))
+    }
+  }
+
+  function emitWorkspaceDiffChangedIfNeeded(
+    runId: string,
+    changesets: BlueprintDiffChangeset[],
+    acceptedDiffs: BlueprintDiffFile[],
+  ) {
+    const signature = changesets
+      .filter((changeset) => changeset.status === "accepted")
+      .map((changeset) => changeset.changesetId)
+      .sort()
+      .join("|")
+    const changed = previousAcceptedDiffSignature !== signature
+    const shouldSync = signature
+      ? syncedAcceptedDiffSignature !== signature
+      : changed && previousAcceptedDiffSignature !== undefined && syncedAcceptedDiffSignature !== signature
+    if (shouldSync) {
+      const payload: BlueprintDiffSyncPayload = {
+        runId,
+        changesetIds: signature ? signature.split("|") : [],
+        acceptedDiffs,
+      }
+      props.onBlueprintDiffChanged?.(payload)
+      window.dispatchEvent(
+        new CustomEvent("workspace.diff.changed", {
+          detail: {
+            source: "blueprint",
+            ...payload,
+          },
+        }),
+      )
+      syncedAcceptedDiffSignature = signature
+    }
+    previousAcceptedDiffSignature = signature
   }
 
   function openRuntimePlanningPanel() {
@@ -1620,33 +1775,6 @@ export function BlueprintSidePanel(props: {
       if (current.includes(nodeId)) return current.filter((id) => id !== nodeId)
       return [...current, nodeId]
     })
-  }
-
-  function buildTopAgentSummaryMessage(input: {
-    runId: string
-    generation: unknown
-    status?: Record<string, unknown>
-  }) {
-    const agents = asRecord(input.status?.agents)
-    const taskStatusLines = Object.entries(agents ?? {}).map(([nodeId, value]) => {
-      const agent = asRecord(value)
-      const agentId = String(agent?.agent_id ?? "")
-      const taskStatus = String(agent?.task_status ?? "unknown")
-      const detail = agentId ? ` (${agentId})` : ""
-      return `- ${nodeId}${detail}: ${taskStatus}`
-    })
-    return [
-      "All AgentNodes in the active GuLiCode blueprint run have reported terminal task statuses.",
-      "",
-      `Run ID: ${input.runId}`,
-      `Summary generation: ${String(input.generation ?? "latest")}`,
-      "",
-      "Agent task statuses:",
-      ...(taskStatusLines.length ? taskStatusLines : ["- unknown"]),
-      "",
-      "Please act as the GuLiCode desktop Top Agent for this run. Use the framework_control_* MCP tools (framework_control_runtime_status, framework_control_top_agent_explain_status, and framework_control_top_agent_utterances) for the active live run, then summarize the final outcome for the user.",
-      "Call out failures, blocked work, missing reports, or private implementation notes that should not be treated as delivered work. Do not stage a new start plan and do not start a new run.",
-    ].join("\n")
   }
 
   function buildBlueprintPlanningMessage(task: string, startNodeIds: string[]) {
@@ -2672,6 +2800,26 @@ export function BlueprintSidePanel(props: {
               />
             </Show>
           </div>
+          <Tooltip placement="bottom" value={language.t("blueprint.diff.title" as never)}>
+            <Button
+              data-blueprint-diff-toggle
+              size="small"
+              variant={blueprintDiffOpen() ? "secondary" : "ghost"}
+              icon="eye"
+              class="h-7 px-2"
+              disabled={!blueprintDiffAvailable()}
+              aria-expanded={blueprintDiffOpen()}
+              onClick={() => {
+                if (!blueprintDiffAvailable()) return
+                setAddMenuOpen(false)
+                setGlobalConfigOpen(false)
+                setBlueprintDiffOpen((open) => !open)
+                void refreshBlueprintRunDiff(runtime().runId, { quiet: true })
+              }}
+            >
+              <span class="hidden lg:inline">{blueprintDiffButtonLabel()}</span>
+            </Button>
+          </Tooltip>
         </div>
         <div class="flex shrink-0 items-center gap-1">
           <Tooltip placement="bottom" value={language.t("blueprint.runtime.refresh")}>
@@ -2896,6 +3044,18 @@ export function BlueprintSidePanel(props: {
               />
             )}
           </Show>
+          <Show when={blueprintDiffOpen()}>
+            <BlueprintDiffOverlay
+              state={blueprintDiff}
+              selectedChangesetId={blueprintDiffSelectedChangesetId()}
+              onClose={() => setBlueprintDiffOpen(false)}
+              onRefresh={() => void refreshBlueprintRunDiff(runtime().runId)}
+              onSelectChangeset={(changesetId) => {
+                setBlueprintDiffSelectedChangesetId(changesetId)
+                void loadBlueprintChangesetDiff(changesetId)
+              }}
+            />
+          </Show>
         </div>
 
         <Show when={runtimePanelOpen() || (panelMode() === "inspector" && inspectorOpen())}>
@@ -2948,6 +3108,172 @@ export function BlueprintSidePanel(props: {
       </div>
       <Show when={blueprintProgressPhase()}>
         {(phase) => <BlueprintProgressOverlay phase={phase()} style={blueprintProgressHudStyle()} />}
+      </Show>
+    </div>
+  )
+}
+
+function BlueprintDiffOverlay(props: {
+  state: BlueprintDiffState
+  selectedChangesetId?: string
+  onClose: () => void
+  onRefresh: () => void
+  onSelectChangeset: (changesetId: string) => void
+}) {
+  const language = useLanguage()
+  const groups = createMemo(() => groupBlueprintDiffChangesets(props.state.changesets))
+  const selectedDetail = createMemo(() =>
+    props.selectedChangesetId ? props.state.details[props.selectedChangesetId] : undefined,
+  )
+
+  return (
+    <div
+      data-blueprint-diff-overlay
+      class="absolute left-3 right-3 top-3 z-40 max-h-[calc(100%-24px)] overflow-hidden rounded-md border border-[rgba(103,232,249,0.24)] bg-[#071019]/95 shadow-[0_18px_48px_rgba(0,0,0,0.48)] backdrop-blur"
+      onPointerDown={(event) => event.stopPropagation()}
+      onWheel={(event) => event.stopPropagation()}
+    >
+      <div class="flex items-center justify-between gap-3 border-b border-[rgba(103,232,249,0.16)] px-3 py-2">
+        <div class="min-w-0">
+          <div class="truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.diff.title" as never)}</div>
+          <div class="text-10-regular text-[#95afc4]">
+            {language.t("blueprint.diff.summary" as never, {
+              count: blueprintDiffSummaryCount(props.state.summary, "total"),
+              files: blueprintDiffSummaryCount(props.state.summary, "files"),
+            } as never)}
+          </div>
+        </div>
+        <div class="flex shrink-0 items-center gap-1">
+          <IconButton
+            icon="reset"
+            variant="ghost"
+            class="h-7 w-7"
+            disabled={props.state.loading}
+            onClick={props.onRefresh}
+            aria-label={language.t("blueprint.diff.refresh" as never)}
+          />
+          <IconButton
+            icon="close-small"
+            variant="ghost"
+            class="h-7 w-7"
+            onClick={props.onClose}
+            aria-label={language.t("common.close")}
+          />
+        </div>
+      </div>
+      <div class="max-h-[min(620px,calc(100vh-180px))] overflow-y-auto px-3 py-3">
+        <Show when={props.state.error}>
+          {(error) => <div class="mb-3 rounded border border-[#ef4444]/30 bg-[#450a0a]/40 px-3 py-2 text-12-regular text-[#fecaca]">{error()}</div>}
+        </Show>
+        <Show when={props.state.loading}>
+          <div class="py-8 text-center text-12-regular text-[#95afc4]">{language.t("common.loading")}</div>
+        </Show>
+        <Show when={!props.state.loading && props.state.changesets.length === 0}>
+          <div class="py-10 text-center text-12-regular text-[#95afc4]">{language.t("blueprint.diff.empty" as never)}</div>
+        </Show>
+        <div class="flex flex-col gap-3">
+          <For each={groups()}>
+            {(group) => (
+              <section class="rounded border border-[rgba(148,163,184,0.16)] bg-[#0b1622]/80">
+                <div class="flex items-center gap-2 border-b border-[rgba(148,163,184,0.12)] px-3 py-2">
+                  <span
+                    class="h-2.5 w-2.5 shrink-0 rounded-full"
+                    style={{ "background-color": blueprintAgentColor(group.agentId) }}
+                  />
+                  <div class="min-w-0 truncate text-11-medium text-[#f8fdff]">
+                    {group.agentId || language.t("blueprint.diff.unknownAgent" as never)}
+                  </div>
+                  <Show when={group.taskId}>
+                    {(taskId) => <div class="min-w-0 truncate text-10-regular text-[#95afc4]">{taskId()}</div>}
+                  </Show>
+                </div>
+                <div class="divide-y divide-[rgba(148,163,184,0.12)]">
+                  <For each={group.items}>
+                    {(changeset) => (
+                      <div data-blueprint-diff-changeset class="px-3 py-2">
+                        <div class="flex items-center justify-between gap-3">
+                          <div class="min-w-0">
+                            <div class="flex min-w-0 items-center gap-2">
+                              <span class={`rounded px-1.5 py-0.5 text-10-medium ${blueprintDiffStatusClass(changeset.status)}`}>
+                                {blueprintDiffStatusLabel(language.t, changeset.status)}
+                              </span>
+                              <div class="truncate font-mono text-11-regular text-[#dbeafe]">{changeset.changesetId}</div>
+                            </div>
+                            <div class="mt-1 truncate text-11-regular text-[#95afc4]">
+                              {changeset.summary || language.t("blueprint.diff.noSummary" as never)}
+                            </div>
+                            <div class="mt-1 text-10-regular text-[#7891a8]">
+                              {language.t("blueprint.diff.fileStats" as never, {
+                                files: changeset.fileCount,
+                                additions: changeset.additions,
+                                deletions: changeset.deletions,
+                              } as never)}
+                              <Show when={changeset.binaryFileCount > 0}>
+                                {" "}
+                                {language.t("blueprint.diff.binaryStats" as never, { count: changeset.binaryFileCount } as never)}
+                              </Show>
+                            </div>
+                          </div>
+                          <Button
+                            size="small"
+                            variant={props.selectedChangesetId === changeset.changesetId ? "secondary" : "ghost"}
+                            class="h-7 shrink-0 px-2"
+                            disabled={!changeset.patchExists}
+                            onClick={() => props.onSelectChangeset(changeset.changesetId)}
+                          >
+                            {props.state.detailLoading === changeset.changesetId
+                              ? language.t("common.loading")
+                              : language.t("blueprint.diff.view" as never)}
+                          </Button>
+                        </div>
+                        <Show when={props.selectedChangesetId === changeset.changesetId && selectedDetail()}>
+                          {(detail) => (
+                            <BlueprintDiffDetailView
+                              detail={detail()}
+                            />
+                          )}
+                        </Show>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </section>
+            )}
+          </For>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function BlueprintDiffDetailView(props: { detail: BlueprintChangesetDiffDetail }) {
+  const language = useLanguage()
+  return (
+    <div data-blueprint-diff-detail class="mt-3 rounded border border-[rgba(103,232,249,0.16)] bg-[#020617]/70">
+      <Show when={props.detail.diffs.length === 0}>
+        <div class="px-3 py-3 text-11-regular text-[#95afc4]">{language.t("blueprint.diff.noTextDiff" as never)}</div>
+      </Show>
+      <For each={props.detail.diffs}>
+        {(diff) => (
+          <div class="border-b border-[rgba(148,163,184,0.12)] last:border-b-0">
+            <div class="flex items-center justify-between gap-2 px-3 py-2">
+              <div class="min-w-0 truncate font-mono text-11-medium text-[#e0f2fe]">{diff.file}</div>
+              <div class="shrink-0 text-10-regular text-[#95afc4]">
+                +{diff.additions} / -{diff.deletions}
+              </div>
+            </div>
+            <pre class="max-h-72 overflow-auto px-3 pb-3 font-mono text-[11px] leading-5 text-[#cbd5e1]">
+              <For each={diff.patch.split("\n")}>
+                {(line) => <div class={blueprintPatchLineClass(line)}>{line || " "}</div>}
+              </For>
+            </pre>
+          </div>
+        )}
+      </For>
+      <Show when={props.detail.binaryFiles.length > 0}>
+        <div class="border-t border-[rgba(148,163,184,0.12)] px-3 py-2 text-11-regular text-[#95afc4]">
+          {language.t("blueprint.diff.binaryStats" as never, { count: props.detail.binaryFiles.length } as never)}
+        </div>
       </Show>
     </div>
   )
@@ -5279,6 +5605,124 @@ function arrayOfRecords(value: unknown): Record<string, unknown>[] {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined
+}
+
+function numberValue(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value)
+  return 0
+}
+
+function blueprintDiffSummaryCount(summary: Record<string, unknown> | undefined, key: string) {
+  return numberValue(summary?.[key])
+}
+
+function normalizeBlueprintRunDiff(value: unknown): Omit<BlueprintDiffState, "loading" | "error" | "detailLoading" | "details"> {
+  const record = asRecord(value)
+  return {
+    summary: asRecord(record?.summary) ?? {},
+    changesets: arrayOfRecords(record?.changesets).map(normalizeBlueprintDiffChangeset),
+    acceptedDiffs: arrayOfRecords(record?.acceptedDiffs).map(normalizeBlueprintDiffFile).filter((item) => item.patch),
+    binaryFiles: arrayOfRecords(record?.binaryFiles),
+  }
+}
+
+function normalizeBlueprintChangesetDetail(value: unknown): BlueprintChangesetDiffDetail {
+  const record = asRecord(value)
+  const metadata = asRecord(record?.metadata) ?? {}
+  const changesetId =
+    stringValue(record?.changesetId) ??
+    stringValue(record?.changeset_id) ??
+    stringValue(metadata.changesetId) ??
+    stringValue(metadata.changeset_id) ??
+    "changeset"
+  return {
+    changesetId,
+    status: stringValue(record?.status) ?? stringValue(metadata.status) ?? "pending",
+    diffs: arrayOfRecords(record?.diffs).map(normalizeBlueprintDiffFile).filter((item) => item.patch),
+    binaryFiles: arrayOfRecords(record?.binaryFiles),
+    metadata,
+  }
+}
+
+function normalizeBlueprintDiffChangeset(value: Record<string, unknown>): BlueprintDiffChangeset {
+  const changesetId = stringValue(value.changesetId) ?? stringValue(value.changeset_id) ?? "changeset"
+  return {
+    changesetId,
+    status: stringValue(value.status) ?? "pending",
+    agentId: stringValue(value.agentId) ?? stringValue(value.agent_id),
+    taskId: stringValue(value.taskId) ?? stringValue(value.task_id),
+    summary: stringValue(value.summary),
+    fileCount: numberValue(value.fileCount),
+    textFileCount: numberValue(value.textFileCount),
+    binaryFileCount: numberValue(value.binaryFileCount),
+    additions: numberValue(value.additions),
+    deletions: numberValue(value.deletions),
+    patchExists: value.patchExists !== false,
+  }
+}
+
+function normalizeBlueprintDiffFile(value: Record<string, unknown>): BlueprintDiffFile {
+  const status = stringValue(value.status)
+  return {
+    file: stringValue(value.file) ?? stringValue(value.path) ?? "file",
+    patch: typeof value.patch === "string" ? value.patch : "",
+    additions: numberValue(value.additions),
+    deletions: numberValue(value.deletions),
+    status: status === "added" || status === "deleted" || status === "modified" ? status : undefined,
+  }
+}
+
+function groupBlueprintDiffChangesets(changesets: BlueprintDiffChangeset[]) {
+  const groups: Array<{ id: string; agentId?: string; taskId?: string; items: BlueprintDiffChangeset[] }> = []
+  const byKey = new Map<string, { id: string; agentId?: string; taskId?: string; items: BlueprintDiffChangeset[] }>()
+  for (const changeset of changesets) {
+    const key = `${changeset.agentId ?? ""}\u0000${changeset.taskId ?? ""}`
+    let group = byKey.get(key)
+    if (!group) {
+      group = {
+        id: key,
+        agentId: changeset.agentId,
+        taskId: changeset.taskId,
+        items: [],
+      }
+      byKey.set(key, group)
+      groups.push(group)
+    }
+    group.items.push(changeset)
+  }
+  return groups
+}
+
+function blueprintAgentColor(agentId?: string) {
+  const input = agentId || "unknown"
+  let hash = 0
+  for (const ch of input) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
+  const hue = hash % 360
+  return `hsl(${hue} 72% 58%)`
+}
+
+function blueprintDiffStatusClass(status: string) {
+  if (status === "accepted") return "bg-[#064e3b] text-[#bbf7d0]"
+  if (status === "conflict") return "bg-[#7f1d1d] text-[#fecaca]"
+  if (status === "rejected" || status === "failed") return "bg-[#3f1d1d] text-[#fca5a5]"
+  return "bg-[#1e3a8a] text-[#bfdbfe]"
+}
+
+function blueprintDiffStatusLabel(t: (key: never) => string, status: string) {
+  if (status === "accepted") return t("blueprint.diff.status.accepted" as never)
+  if (status === "conflict") return t("blueprint.diff.status.conflict" as never)
+  if (status === "rejected") return t("blueprint.diff.status.rejected" as never)
+  if (status === "failed") return t("blueprint.diff.status.failed" as never)
+  return t("blueprint.diff.status.pending" as never)
+}
+
+function blueprintPatchLineClass(line: string) {
+  if (line.startsWith("+++") || line.startsWith("---")) return "text-[#93c5fd]"
+  if (line.startsWith("+")) return "bg-[#052e1c] text-[#86efac]"
+  if (line.startsWith("-")) return "bg-[#3f1111] text-[#fca5a5]"
+  if (line.startsWith("@@")) return "text-[#67e8f9]"
+  return "text-[#cbd5e1]"
 }
 
 function workspaceAreaTitle(t: (key: never) => string, area: WorkspacePanelArea) {

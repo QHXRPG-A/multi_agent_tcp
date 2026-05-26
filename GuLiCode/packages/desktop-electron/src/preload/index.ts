@@ -59,6 +59,8 @@ const api: ElectronAPI = {
   blueprintStart: (projectDir, blueprintId, plan, executionMode) =>
     ipcRenderer.invoke("blueprint-start", projectDir, blueprintId, plan, executionMode),
   blueprintStatus: (runId) => ipcRenderer.invoke("blueprint-status", runId),
+  blueprintRunDiff: (runId) => ipcRenderer.invoke("blueprint-run-diff", runId),
+  blueprintChangesetDiff: (runId, changesetId) => ipcRenderer.invoke("blueprint-changeset-diff", runId, changesetId),
   blueprintEnd: (runId, action, reason) => ipcRenderer.invoke("blueprint-end", runId, action, reason),
   blueprintRecentEvents: (runId, limit) => ipcRenderer.invoke("blueprint-recent-events", runId, limit),
   blueprintAgentInfo: (runId, nodeId) => ipcRenderer.invoke("blueprint-agent-info", runId, nodeId),

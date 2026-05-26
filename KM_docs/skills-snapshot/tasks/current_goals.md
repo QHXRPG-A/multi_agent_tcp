@@ -1,6 +1,6 @@
 # Current Short-Term Goals
 
-Last cleaned: 2026-05-21
+Last cleaned: 2026-05-26
 
 ## Current Main Line
 
@@ -233,6 +233,81 @@ Do not use `DEBUG=*` by default; it floods the terminal with Babel/Vite
 internal traversal logs.
 
 ## Active Priorities
+
+2026-05-26 Blueprint runtime and Diff stabilization:
+
+Current state:
+
+1. Run-scoped Blueprint Diff is implemented end to end: backend reads archived
+   `changesets/<id>/{changeset.json,patch.diff,submit_result.json}`, desktop
+   bridge exposes `blueprint.runDiff` / `blueprint.changesetDiff`, and the
+   blueprint panel renders the run-scoped overlay inside the canvas area.
+2. The native right global Review/FileTree diff now receives blueprint accepted
+   diffs through a direct parent callback plus the existing
+   `workspace.diff.changed` fallback event. This avoids lost first-sync events
+   and works for non-git project-reference sessions by merging blueprint diffs
+   into the `turn` review mode.
+3. Completed live smoke evidence:
+   - `run-3811f7b6a44f`: 3 accepted changesets / 3 files.
+   - `run-739420ebbb3d`: 4 total changesets, 3 accepted, 1 rejected,
+     `acceptedDiffs` has 3 files.
+   - `run-bda914213882`: 3 accepted changesets / 3 files.
+4. Blueprint startup slowness root cause is fixed in workspace checkout:
+   `workspace_manager._relative_files()` no longer uses `root.rglob("*")`.
+   It uses top-down `os.walk` pruning so excluded directories such as
+   `.multi_agent_workspace`, `.git`, and `node_modules` are never descended
+   into. On `D:\agents_work_test`, full-scope copy measured `0.015s`, 4 files,
+   and did not enter `.multi_agent_workspace`.
+5. The frontend no longer auto-submits a completed-run Top Agent summary
+   prompt. Reloading with Ctrl+R should not create a new "思考中" turn. The
+   `ready_for_top_agent_summary` backend flag remains only as a terminal
+   readiness signal for automatic run completion/final result calculation.
+6. Existing blockers fixed during smoke remain in force: archived run Diff
+   lookup reopens active/archived/failed run paths; `workspace_publish`
+   cross-Agent same-path writes require `expected_version`; default AgentNode
+   `write_scope` is project-wide `["**"]`, with legacy
+   `["shared/reports/**"]` migrated to that default.
+
+High-priority remaining checks:
+
+1. Restart GuLiCode desktop/blueprint service before retesting startup speed;
+   existing Python service processes still have old code loaded.
+2. Manual UI smoke for native global diff sync:
+   - Start a new live blueprint run in `D:\agents_work_test`.
+   - Verify the blueprint Diff overlay and right native Review/FileTree diff
+     show accepted diffs during runtime and after completion/archive.
+   - Verify rejected/conflict changesets stay visible in Blueprint Diff status
+     UI but do not enter native accepted diff rendering.
+3. Ctrl+R smoke after a completed run:
+   - Reload the Electron renderer.
+   - Verify the completed run is restored without auto-submitting a Top Agent
+     summary prompt and without creating a new left-chat "思考中" turn.
+4. Test multiple Agents sequentially modifying the same project file and
+   verify Blueprint Diff display:
+   - Run 3 Agents in sequential/blocking order.
+   - All Agents must use `workspace_checkout` / `workspace_submit`; do not use
+     `workspace_publish` as the main result.
+   - Target one file such as `docs/blueprint_diff_shared_test.md`.
+   - Agent 1 creates the file; Agent 2 syncs/reads current content and appends
+     the second section; Agent 3 syncs/reads current content and appends the
+     third section.
+   - Expected result: Blueprint Diff shows 3 changesets for one file, and each
+     `查看` detail shows the correct incremental diff.
+5. Test `workspace_submit` conflict and Blueprint Diff status display:
+   - Run 3 Agents in `parallel_all`.
+   - All Agents must use `workspace_checkout` / `workspace_submit`; do not use
+     `workspace_publish` as the main result.
+   - All Agents edit the same first line of a file such as
+     `docs/blueprint_diff_conflict_test.md` with different content.
+   - Expected result: Blueprint Diff shows accepted/conflict/rejected status
+     distribution correctly, and conflicted changesets do not enter
+     `acceptedDiffs`.
+
+Detailed archive:
+
+- [`../archive/runtime-backend/blueprint_run_diff_workspace_scope_2026-05-26.md`](../archive/runtime-backend/blueprint_run_diff_workspace_scope_2026-05-26.md)
+- [`../archive/runtime-backend/blueprint_checkout_prune_startup_2026-05-26.md`](../archive/runtime-backend/blueprint_checkout_prune_startup_2026-05-26.md)
+- [`../archive/frontend/blueprint_diff_native_sync_no_auto_summary_2026-05-26.md`](../archive/frontend/blueprint_diff_native_sync_no_auto_summary_2026-05-26.md)
 
 2026-05-21 Blueprint independent window and endpoint visibility update:
 

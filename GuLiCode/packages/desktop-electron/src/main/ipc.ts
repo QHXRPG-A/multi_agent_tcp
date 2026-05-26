@@ -186,6 +186,14 @@ export function registerIpcHandlers(deps: Deps) {
     },
   )
   ipcMain.handle("blueprint-status", (_event: IpcMainInvokeEvent, runId: string) => deps.blueprintRuntime.status(runId))
+  ipcMain.handle("blueprint-run-diff", (_event: IpcMainInvokeEvent, runId: string) =>
+    deps.blueprintRuntime.runDiff(runId),
+  )
+  ipcMain.handle(
+    "blueprint-changeset-diff",
+    (_event: IpcMainInvokeEvent, runId: string, changesetId: string) =>
+      deps.blueprintRuntime.changesetDiff(runId, changesetId),
+  )
   ipcMain.handle(
     "blueprint-end",
     (_event: IpcMainInvokeEvent, runId: string, action: BlueprintRunEndAction, reason?: string) =>

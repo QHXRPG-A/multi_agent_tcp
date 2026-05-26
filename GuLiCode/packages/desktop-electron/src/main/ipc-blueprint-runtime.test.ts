@@ -84,13 +84,20 @@ describe("blueprint runtime IPC handlers", () => {
   test("exposes independent blueprint window IPC hooks", async () => {
     const ipcSource = await Bun.file(new URL("./ipc.ts", import.meta.url)).text()
     const preloadSource = await Bun.file(new URL("../preload/index.ts", import.meta.url)).text()
+    const rendererSource = await Bun.file(new URL("../renderer/index.tsx", import.meta.url)).text()
     const windowsSource = await Bun.file(new URL("./windows.ts", import.meta.url)).text()
 
     expect(ipcSource).toContain('"blueprint-window-open"')
     expect(ipcSource).toContain('"blueprint-window-dock"')
     expect(ipcSource).toContain('"blueprint-window-close"')
     expect(ipcSource).toContain('"blueprint-window-submit-planning"')
+    expect(ipcSource).toContain('"blueprint-run-diff"')
+    expect(ipcSource).toContain('"blueprint-changeset-diff"')
     expect(preloadSource).toContain("openBlueprintWindow")
+    expect(preloadSource).toContain("blueprintRunDiff")
+    expect(preloadSource).toContain("blueprintChangesetDiff")
+    expect(rendererSource).toContain("typeof api.blueprintRunDiff")
+    expect(rendererSource).toContain("typeof api.blueprintChangesetDiff")
     expect(preloadSource).toContain("onBlueprintWindowDock")
     expect(preloadSource).toContain("onBlueprintWindowPlanningSubmitRequest")
     expect(ipcSource).toContain('"reveal-path-in-file-manager"')
@@ -149,6 +156,14 @@ describe("blueprint runtime IPC handlers", () => {
       status: (runId: string) => {
         calls.push(`status:${runId}`)
         return { code: "NOT_STARTED" }
+      },
+      runDiff: (runId: string) => {
+        calls.push(`run-diff:${runId}`)
+        return { changesets: [] }
+      },
+      changesetDiff: (runId: string, changesetId: string) => {
+        calls.push(`changeset-diff:${runId}:${changesetId}`)
+        return { changesetId }
       },
       end: (runId: string, action: string, reason?: string) => {
         calls.push(`end:${runId}:${action}:${reason}`)
@@ -241,6 +256,8 @@ describe("blueprint runtime IPC handlers", () => {
     await handlers.get("blueprint-configure-runtime")?.({}, "C:\\Python\\python.exe")
     await handlers.get("blueprint-start")?.({}, "C:\\repo", "default", { goal: "ship" }, "live")
     await handlers.get("blueprint-status")?.({}, "run-1")
+    await handlers.get("blueprint-run-diff")?.({}, "run-1")
+    await handlers.get("blueprint-changeset-diff")?.({}, "run-1", "cs-1")
     await handlers.get("blueprint-end")?.({}, "run-1", "cancel", "user")
     await handlers.get("blueprint-recent-events")?.({}, "run-1", 10)
     await handlers.get("blueprint-agent-info")?.({}, "run-1", "coder")
@@ -321,6 +338,8 @@ describe("blueprint runtime IPC handlers", () => {
       "configure:C:\\Python\\python.exe",
       "start:C:\\repo:default:ship:live",
       "status:run-1",
+      "run-diff:run-1",
+      "changeset-diff:run-1:cs-1",
       "end:run-1:cancel:user",
       "events:run-1:10",
       "agent-info:run-1:coder",

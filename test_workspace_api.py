@@ -120,6 +120,55 @@ def test_workspace_api_expected_version_blocks_stale_write(tmp_path: Path, monke
     assert manager.read_shared_text(run, "reports/result.md") == "v1"
 
 
+def test_workspace_rpc_publish_blocks_cross_agent_overwrite_without_expected_version(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-rpc-publish-conflict")
+    server = WorkspaceRPCServer(manager, run)
+    server.start()
+    try:
+        token_a = server.token_for("agent-a")
+        token_b = server.token_for("agent-b")
+
+        first = server.handle_request(
+            {
+                "token": token_a,
+                "command": "publish",
+                "args": {"area": "reports", "path": "shared.md", "text": "from a\n"},
+            }
+        )
+        assert first["ok"] is True
+        assert first["version"] == 1
+
+        with pytest.raises(FileExistsError, match="expected_version=1"):
+            server.handle_request(
+                {
+                    "token": token_b,
+                    "command": "publish",
+                    "args": {"area": "reports", "path": "shared.md", "text": "from b\n"},
+                }
+            )
+        assert manager.read_shared_text(run, "reports/shared.md") == "from a\n"
+
+        second = server.handle_request(
+            {
+                "token": token_b,
+                "command": "publish",
+                "args": {
+                    "area": "reports",
+                    "path": "shared.md",
+                    "text": "from a\nfrom b\n",
+                    "expected_version": 1,
+                },
+            }
+        )
+        assert second["ok"] is True
+        assert second["version"] == 2
+        assert manager.read_shared_text(run, "reports/shared.md") == "from a\nfrom b\n"
+    finally:
+        server.close()
+
+
 def test_workspace_api_publish_file_expected_version_blocks_stale_binary(
     tmp_path: Path,
     monkeypatch,

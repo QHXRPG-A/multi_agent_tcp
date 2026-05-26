@@ -79,7 +79,7 @@ python -m multi_agent_tcp.workspace_api publish --area reports --path status.jso
 
 The command prints JSON with `ok`, `area`, `path`, `owner`, and `version`. It does not print a new physical path because the shared root is already injected into the agent context.
 
-For version-checked publish workflows, read `shared_workspace.manifest` directly to find the current path version, then pass it to publish:
+For version-checked publish workflows, read `shared_workspace.manifest` directly to find the current path version, then pass it to publish. Cross-agent overwrites of an existing shared path require `--expected-version`; without it the command fails instead of silently replacing another agent's output.
 
 ```powershell
 python -m multi_agent_tcp.workspace_api publish --area reports --path result.md --file updated.md --expected-version 3

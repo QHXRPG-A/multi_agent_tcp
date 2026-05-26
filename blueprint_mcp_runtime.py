@@ -511,6 +511,7 @@ class RunMCPRuntimeHandle:
             log_level="warning",
             lifespan="on",
             access_log=False,
+            loop="multi_agent_tcp._asyncio_utils:windows_proactor_connection_reset_loop",
         )
         self._uvicorn_server = uvicorn.Server(config)
         self._state = "starting"
@@ -775,6 +776,15 @@ class RunMCPRuntimeHandle:
             text: str,
             expected_version: Optional[int] = None,
         ) -> Dict[str, Any]:
+            """Publish complete UTF-8 text into shared reports/artifacts.
+
+            To continue writing a path that may already exist, first read the
+            current shared file and shared manifest.json, build the full new
+            file content, then pass expected_version equal to the manifest
+            version. Cross-agent same-path overwrites without expected_version
+            are rejected; use an agent-specific path when coordination is not
+            intended.
+            """
             return self._workspace_request(
                 _require_scope("ordinary"),
                 "publish",
@@ -793,6 +803,14 @@ class RunMCPRuntimeHandle:
             file_path: str,
             expected_version: Optional[int] = None,
         ) -> Dict[str, Any]:
+            """Publish a complete local file into shared reports/artifacts.
+
+            To replace a shared path that may already exist, first read shared
+            manifest.json and pass expected_version equal to the current path
+            version. Cross-agent same-path overwrites without expected_version
+            are rejected; use an agent-specific path when coordination is not
+            intended.
+            """
             scope = _require_scope("ordinary")
             resolved = resolve_allowed_publish_file(scope, file_path)
             return self._workspace_request(

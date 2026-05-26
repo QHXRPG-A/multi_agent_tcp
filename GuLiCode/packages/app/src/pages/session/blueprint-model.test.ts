@@ -69,6 +69,7 @@ describe("blueprint draft model", () => {
     })
 
     expect(draft.graph.agent_nodes["coder-1"]?.agent_id).toBe("agent-coder-1")
+    expect(draft.graph.agent_nodes["coder-1"]?.write_scope).toEqual(["**"])
     expect(draft.layout.nodes["coder-1"]).toEqual({ x: 0, y: 24 })
     expect(draft.selection).toEqual({ type: "node", id: "coder-1" })
     expect(draft.inspector).toEqual({ type: "node", id: "coder-1" })
@@ -87,6 +88,7 @@ describe("blueprint draft model", () => {
       command: "codex",
       timeout_sec: 1800,
       adapter_options: { [TEST_AGENT_NODE_FLAG]: true, skip_git_repo_check: true },
+      write_scope: ["**"],
     })
     expect(draft.layout.nodes["test-agent"]).toEqual({ x: 0, y: 24 })
     expect(draft.selection).toEqual({ type: "node", id: "test-agent" })
@@ -104,6 +106,15 @@ describe("blueprint draft model", () => {
     const runtime = toRuntimeGraphDraft(legacyTestAgent)
     expect(runtime.agent_nodes["test-agent"]?.adapter_options.skip_git_repo_check).toBe(true)
     expect(runtime.agent_nodes["test-agent"]?.timeout_sec).toBe(1800)
+  })
+
+  test("migrates legacy report-only write scope to project-wide default", () => {
+    const draft = createDefaultBlueprintDraft()
+    draft.graph.agent_nodes.planner.write_scope = ["shared/reports/**"]
+
+    const runtime = toRuntimeGraphDraft(draft)
+
+    expect(runtime.agent_nodes.planner.write_scope).toEqual(["**"])
   })
 
   test("adds route nodes and keeps the legacy terminal helper available", () => {

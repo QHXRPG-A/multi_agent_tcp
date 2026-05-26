@@ -1,4 +1,4 @@
-import type { Project, UserMessage } from "@opencode-ai/sdk/v2"
+import type { Project, SnapshotFileDiff, UserMessage, VcsFileDiff } from "@opencode-ai/sdk/v2"
 import type { McpStatus } from "@opencode-ai/sdk/v2/client"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { createQuery, skipToken, useMutation, useQueryClient } from "@tanstack/solid-query"
@@ -64,7 +64,7 @@ import { type DiffStyle, SessionReviewTab, type SessionReviewTabProps } from "@/
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { syncSessionModel } from "@/pages/session/session-model-helpers"
 import { SessionSidePanel } from "@/pages/session/session-side-panel"
-import type { BlueprintPlanningProgressState } from "@/pages/session/blueprint-side-panel"
+import type { BlueprintDiffSyncPayload, BlueprintPlanningProgressState } from "@/pages/session/blueprint-side-panel"
 import { TerminalPanel } from "@/pages/session/terminal-panel"
 import { useSessionCommands } from "@/pages/session/use-session-commands"
 import { useSessionHashScroll } from "@/pages/session/use-session-hash-scroll"
@@ -78,6 +78,7 @@ import { formatServerError } from "@/utils/server-errors"
 const emptyUserMessages: UserMessage[] = []
 type FollowupItem = FollowupDraft & { id: string }
 type FollowupEdit = Pick<FollowupItem, "id" | "prompt" | "context">
+type ReviewDiff = SnapshotFileDiff | VcsFileDiff
 const emptyFollowups: FollowupItem[] = []
 
 type BlueprintPlanningEvent = Record<string, unknown> & {
@@ -1050,6 +1051,7 @@ export default function Page() {
   }, desktopReviewOpen())
 
   const turnDiffs = createMemo(() => list(lastUserMessage()?.summary?.diffs))
+  const [blueprintReviewDiffs, setBlueprintReviewDiffs] = createSignal<ReviewDiff[]>([])
   const nogit = createMemo(() => !!sync.project && sync.project.vcs !== "git")
   const changesOptions = createMemo<ChangeMode[]>(() => {
     const list: ChangeMode[] = []
@@ -1099,11 +1101,45 @@ export default function Page() {
     }
   })
   const refreshVcs = () => void queryClient.invalidateQueries({ queryKey: vcsKey() })
+  const refreshWorkspaceDiffViews = () => {
+    refreshVcs()
+    void file.tree.refresh("")
+  }
+  const handleBlueprintDiffChanged = (payload: BlueprintDiffSyncPayload) => {
+    setBlueprintReviewDiffs(list(payload.acceptedDiffs))
+    refreshWorkspaceDiffViews()
+  }
+  const mergeBlueprintReviewDiffs = (base: ReviewDiff[]) => {
+    const blueprint = blueprintReviewDiffs()
+    if (blueprint.length === 0) return base
+    if (base.length === 0) return blueprint
+    const seen = new Set(base.map((item) => item.file.replaceAll("\\", "/")))
+    const merged = [...base]
+    for (const item of blueprint) {
+      const key = item.file.replaceAll("\\", "/")
+      if (seen.has(key)) continue
+      seen.add(key)
+      merged.push(item)
+    }
+    return merged
+  }
+  onMount(() => {
+    const cleanup = makeEventListener(window, "workspace.diff.changed", (event) => {
+      const detail = event instanceof CustomEvent && isRecord(event.detail) ? event.detail : undefined
+      if (detail?.source === "blueprint" && "acceptedDiffs" in detail) {
+        setBlueprintReviewDiffs(list(detail.acceptedDiffs))
+        refreshWorkspaceDiffViews()
+        return
+      }
+      refreshWorkspaceDiffViews()
+    })
+    onCleanup(cleanup)
+  })
   const reviewDiffs = () => {
     if (store.changes === "git" || store.changes === "branch")
       // avoids suspense
-      return vcsQuery.isFetched ? (vcsQuery.data ?? []) : []
-    return turnDiffs()
+      return mergeBlueprintReviewDiffs(vcsQuery.isFetched ? (vcsQuery.data ?? []) : [])
+    return mergeBlueprintReviewDiffs(turnDiffs())
   }
   const reviewCount = () => reviewDiffs().length
   const hasReview = () => reviewCount() > 0
@@ -1495,6 +1531,7 @@ export default function Page() {
     on(
       sessionKey,
       () => {
+        setBlueprintReviewDiffs([])
         setTree({
           reviewScroll: undefined,
           pendingDiff: undefined,
@@ -2523,7 +2560,9 @@ export default function Page() {
           reviewSnap={ui.reviewSnap}
           size={size}
           blueprintPlanningProgress={blueprintPlanningProgress()}
+          blueprintPlanningActiveRun={blueprintPlanning.activeRun}
           onBlueprintPlanningSubmit={requestBlueprintPlanningSubmit}
+          onBlueprintDiffChanged={handleBlueprintDiffChanged}
         />
       </div>
 

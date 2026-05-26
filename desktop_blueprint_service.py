@@ -32,6 +32,7 @@ from .cluster import CLIWorkerBackend
 from .blueprint_mcp_runtime import RunMCPRuntimeHandle, TOP_AGENT_PLANNING_CONTROL_TOOLS
 from .graph_control import GraphRuntimeControlPlane, graph_definition_from_dict
 from .graph_runtime import GraphRuntime, GuLiCodeTopAgentProfile, TopAgentStartPlan
+from ._asyncio_utils import install_asyncio_connection_reset_filter
 from .skill_space import SkillRecord
 from .workspace_manager import DulwichWorkspaceManager
 from .workspace_rpc import WorkspaceRPCServer
@@ -93,6 +94,7 @@ class DesktopAsyncLoop:
 
             def run_loop() -> None:
                 loop = asyncio.new_event_loop()
+                install_asyncio_connection_reset_filter(loop)
                 asyncio.set_event_loop(loop)
                 self._loop = loop
                 self._ready.set()
@@ -397,6 +399,13 @@ class DesktopBlueprintService:
             )
         if command == "blueprint.status":
             return self.status_blueprint_run(request_run_id(args))
+        if command == "blueprint.runDiff":
+            return self.blueprint_run_diff(request_run_id(args))
+        if command == "blueprint.changesetDiff":
+            return self.blueprint_changeset_diff(
+                request_run_id(args),
+                str(args.get("changesetId") or args.get("changeset_id") or "").strip(),
+            )
         if command == "blueprint.end":
             return self.end_blueprint_run(
                 request_run_id(args),
@@ -746,6 +755,71 @@ class DesktopBlueprintService:
                 "limit": limit,
                 "events": status["recent_events"],
             }
+
+    def blueprint_run_diff(self, run_id: str) -> Dict[str, Any]:
+        with self._lock:
+            run = self._get_run(run_id)
+            source = self._workspace_diff_source(run)
+            if source is None:
+                return {
+                    "ok": True,
+                    "runId": run.run_id,
+                    "summary": {
+                        "total": 0,
+                        "accepted": 0,
+                        "conflict": 0,
+                        "rejected": 0,
+                        "pending": 0,
+                        "failed": 0,
+                        "files": 0,
+                        "textFiles": 0,
+                        "binaryFiles": 0,
+                        "additions": 0,
+                        "deletions": 0,
+                    },
+                    "changesets": [],
+                    "acceptedDiffs": [],
+                    "binaryFiles": [],
+                }
+            manager, workspace_run = source
+            diff = manager.blueprint_run_diff(workspace_run).to_dict()
+            diff["ok"] = True
+            diff["runId"] = run.run_id
+            run.updated_at = float(self.now())
+            return diff
+
+    def blueprint_changeset_diff(self, run_id: str, changeset_id: str) -> Dict[str, Any]:
+        if not changeset_id:
+            raise BlueprintServiceError("BAD_REQUEST", "changesetId must be a non-empty string")
+        with self._lock:
+            run = self._get_run(run_id)
+            source = self._workspace_diff_source(run)
+            if source is None:
+                raise BlueprintServiceError(
+                    "CHANGESET_NOT_FOUND",
+                    f"changeset was not found: {changeset_id}",
+                    status=404,
+                )
+            manager, workspace_run = source
+            try:
+                detail = manager.blueprint_changeset_detail(workspace_run, changeset_id).to_dict()
+            except FileNotFoundError as exc:
+                message = str(exc)
+                if "patch.diff" in message:
+                    raise BlueprintServiceError(
+                        "CHANGESET_PATCH_MISSING",
+                        f"changeset patch.diff is missing: {changeset_id}",
+                        status=404,
+                    ) from exc
+                raise BlueprintServiceError(
+                    "CHANGESET_NOT_FOUND",
+                    f"changeset was not found: {changeset_id}",
+                    status=404,
+                ) from exc
+            detail["ok"] = True
+            detail["runId"] = run.run_id
+            run.updated_at = float(self.now())
+            return detail
 
     async def _start_live_runtime(
         self,
@@ -1236,6 +1310,25 @@ class DesktopBlueprintService:
             return self._async_loop.call(fn)
         return fn()
 
+    def _workspace_diff_source(self, run: DesktopBlueprintRun) -> Optional[tuple[DulwichWorkspaceManager, Any]]:
+        manager = getattr(run.runtime, "archive_manager", None) or getattr(run.runtime, "private_context_manager", None)
+        workspace_run = getattr(run.runtime, "archive_run", None) or getattr(run.runtime, "private_context_run", None)
+        if not isinstance(manager, DulwichWorkspaceManager) or workspace_run is None:
+            return None
+        run_path = Path(getattr(workspace_run, "path", ""))
+        if not run_path.is_dir():
+            open_run_any = getattr(manager, "open_run_any", None)
+            if callable(open_run_any):
+                try:
+                    workspace_run = open_run_any(getattr(workspace_run, "run_id", run.run_id))
+                except FileNotFoundError:
+                    return None
+                if getattr(run.runtime, "archive_run", None) is not None:
+                    run.runtime.archive_run = workspace_run
+                if getattr(run.runtime, "private_context_run", None) is not None:
+                    run.runtime.private_context_run = workspace_run
+        return manager, workspace_run
+
     async def _start_blueprint_planning_context(
         self,
         session_id: str,
@@ -1554,11 +1647,23 @@ class DesktopBlueprintService:
         self,
         session: DesktopBlueprintPlanningSession,
     ) -> Optional[DesktopBlueprintRun]:
+        linked: Optional[DesktopBlueprintRun] = None
         with self._lock:
             if session.active_run_id:
                 linked = self._runs.get(session.active_run_id)
-                if linked is not None and linked.execution_mode == "live":
-                    return linked
+        if linked is not None and linked.execution_mode == "live":
+            try:
+                linked_status = self._runtime_call(linked, lambda: linked.runtime.status_snapshot()["run"])
+            except Exception:
+                linked_status = {}
+            if str(linked_status.get("status") or "") not in TERMINAL_RUN_STATUSES:
+                return linked
+            with session.condition:
+                if session.active_run_id == linked.run_id:
+                    session.active_run_id = None
+                    session.updated_at = float(self.now())
+                    session.condition.notify_all()
+        with self._lock:
             candidates = [
                 run
                 for run in self._runs.values()
@@ -1766,6 +1871,8 @@ class DesktopBlueprintService:
             runtime_status = None
             runtime_explanation = None
         active_run_obj = self._active_live_run_for_planning_session(session)
+        with session.condition:
+            active_run_id = session.active_run_id
         active_run_status = None
         active_run = None
         if active_run_obj is not None:

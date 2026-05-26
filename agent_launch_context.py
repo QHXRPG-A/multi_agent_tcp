@@ -139,6 +139,7 @@ def framework_agent_rules() -> str:
             "- Use framework MCP tools when they are configured in Codex.",
             "- Submit code changes from the private checkout through `workspace_submit`.",
             "- Publish reports, artifacts, summaries, file/version references, and changeset ids through `workspace_publish` / `workspace_publish_file`.",
+            "- If multiple AgentNodes may publish to one shared path, either use an agent-specific path or read the current shared file plus shared `manifest.json`, then publish the full replacement content with `expected_version`; cross-agent overwrites without `expected_version` are rejected.",
             "- Do not write directly into project_context, project_code_root, or the temporary shared workspace as a code/output completion path.",
             "- If a direct project/shared write is denied by the sandbox, treat that as boundary enforcement and continue through checkout/submit/publish instead of stopping.",
             "- Communicate with other AgentNodes through framework messages and shared references, not by copying project source trees into shared space.",
@@ -214,7 +215,9 @@ def framework_agent_skill() -> str:
             "",
             "For reports and artifacts, publish through `workspace_publish` / `workspace_publish_file` "
             "as shared run context. Use summaries, file paths, versions, and changeset ids when another AgentNode needs code context. "
-            "If you need a current shared path version, read the shared `manifest.json` file directly. "
+            "`workspace_publish` writes complete file content, not a line-level append patch. "
+            "If you need to continue from an existing shared file, read that file and the shared `manifest.json` directly, build the full new content, and pass the current version as `expected_version`. "
+            "When updating a shared path previously written by another AgentNode, pass `expected_version` or publish to a unique per-agent path; silent last-write-wins overwrites are blocked. "
             "When `framework_context.message_envelope.required_outgoing_targets` is empty, treat the message as leaf work: "
             "do not call `agent_dispatch` or `join_contribute`; process the message and publish the result or receipt as a shared report.",
             "",

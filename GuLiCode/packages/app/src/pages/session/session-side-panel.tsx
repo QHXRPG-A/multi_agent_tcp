@@ -29,6 +29,7 @@ import { setSessionHandoff } from "@/pages/session/handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import {
   BlueprintSidePanel,
+  type BlueprintDiffSyncPayload,
   type BlueprintPlanningProgressState,
   type BlueprintPlanningSubmitInput,
 } from "@/pages/session/blueprint-side-panel"
@@ -46,7 +47,9 @@ export function SessionSidePanel(props: {
   reviewSnap: boolean
   size: Sizing
   blueprintPlanningProgress?: BlueprintPlanningProgressState
+  blueprintPlanningActiveRun?: Record<string, unknown>
   onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => boolean | Promise<boolean>
+  onBlueprintDiffChanged?: (payload: BlueprintDiffSyncPayload) => void
 }) {
   const layout = useLayout()
   const platform = usePlatform()
@@ -237,7 +240,9 @@ export function SessionSidePanel(props: {
                 <Match when={blueprintOpen()}>
                   <BlueprintSidePanel
                     blueprintPlanningProgress={props.blueprintPlanningProgress}
+                    blueprintPlanningActiveRun={props.blueprintPlanningActiveRun}
                     onBlueprintPlanningSubmit={props.onBlueprintPlanningSubmit}
+                    onBlueprintDiffChanged={props.onBlueprintDiffChanged}
                   />
                 </Match>
                 <Match when={true}>

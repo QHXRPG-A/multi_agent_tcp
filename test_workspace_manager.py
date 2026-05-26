@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from multi_agent_tcp import DulwichWorkspaceManager, describe_dulwich_backend
 import multi_agent_tcp.workspace_manager as workspace_manager
@@ -42,6 +42,9 @@ def test_workspace_lifecycle_archives_full_run_directory(tmp_path: Path) -> None
     archives = manager.list_long_term_archives()
     assert archives[0]["archive_id"] == "run-1-completed"
     assert not (tmp_path / ".multi_agent_workspace" / "runs" / "active" / "run-1").exists()
+    assert run.path == archive
+    assert run.integration_dir == archive / "shared" / "code"
+    assert manager.open_run_any("run-1").path == archive
 
 
 def test_custom_long_term_workspace_inside_project_is_readonly_and_not_snapshotted(tmp_path: Path) -> None:
@@ -200,6 +203,32 @@ def test_project_reference_missing_static_scope_does_not_scan_project_root(
     assert checkout.write_scope == ["shared/reports/**"]
 
 
+def test_project_reference_full_scope_prunes_workspace_root_during_checkout(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _write(tmp_path / "docs" / "a.txt", "base\n")
+    _write(tmp_path / ".multi_agent_workspace" / "old" / "hidden.txt", "ignore\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-reference-full", code_mode="project_reference")
+
+    seen_dirs: List[str] = []
+    real_walk = workspace_manager.os.walk
+
+    def tracked_walk(top: object, *args: object, **kwargs: object):
+        for dir_path, dir_names, file_names in real_walk(top, *args, **kwargs):
+            seen_dirs.append(Path(dir_path).resolve().relative_to(tmp_path.resolve()).as_posix())
+            yield dir_path, dir_names, file_names
+
+    monkeypatch.setattr(workspace_manager.os, "walk", tracked_walk)
+
+    checkout = manager.checkout_agent(run, "agent-a", write_scope=["**"])
+
+    assert (checkout.checkout_dir / "docs" / "a.txt").read_text(encoding="utf-8") == "base\n"
+    assert not (checkout.checkout_dir / ".multi_agent_workspace").exists()
+    assert ".multi_agent_workspace" not in seen_dirs
+
+
 def test_run_has_private_scratch_and_shared_outcome_space(tmp_path: Path) -> None:
     _write(tmp_path / "src" / "a.txt", "base\n")
     manager = DulwichWorkspaceManager.open_or_init(tmp_path)
@@ -344,6 +373,121 @@ def test_agent_checkout_submit_accepts_and_archives_changeset(tmp_path: Path) ->
     assert (result.archive_path / "changeset.json").is_file()
     submit_result = json.loads((result.archive_path / "submit_result.json").read_text(encoding="utf-8"))
     assert submit_result["status"] == "accepted"
+
+
+def test_blueprint_run_diff_reads_accepted_changeset_summary_and_detail(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-blueprint-diff", code_mode="project_reference")
+    checkout = manager.checkout_agent(run, "agent-a", checkout_paths=["src/a.txt"])
+
+    _write(checkout.checkout_dir / "src" / "a.txt", "changed\n")
+    result = manager.submit_checkout(run, checkout, task_id="task-1", summary="change a")
+    summary = manager.blueprint_run_diff(run).to_dict()
+    detail = manager.blueprint_changeset_detail(run, result.changeset_id).to_dict()
+
+    assert summary["summary"]["accepted"] == 1
+    assert summary["summary"]["files"] == 1
+    assert summary["changesets"][0]["agentId"] == "agent-a"
+    assert summary["changesets"][0]["taskId"] == "task-1"
+    assert summary["acceptedDiffs"][0]["file"] == "src/a.txt"
+    assert "changed" in summary["acceptedDiffs"][0]["patch"]
+    assert detail["changesetId"] == result.changeset_id
+    assert detail["status"] == "accepted"
+    assert detail["diffs"][0]["file"] == "src/a.txt"
+
+
+def test_blueprint_run_diff_reads_archived_changesets(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-blueprint-diff-archived", code_mode="project_reference")
+    checkout = manager.checkout_agent(run, "agent-a", checkout_paths=["src/a.txt"])
+
+    _write(checkout.checkout_dir / "src" / "a.txt", "changed\n")
+    result = manager.submit_checkout(run, checkout, task_id="task-archived", summary="change archived")
+    archive = manager.archive_run(run)
+
+    summary = manager.blueprint_run_diff(run).to_dict()
+    reopened = manager.open_run_any(run.run_id)
+    detail = manager.blueprint_changeset_detail(reopened, result.changeset_id).to_dict()
+
+    assert run.path == archive
+    assert reopened.path == archive
+    assert summary["summary"]["accepted"] == 1
+    assert summary["changesets"][0]["changesetId"] == result.changeset_id
+    assert summary["acceptedDiffs"][0]["file"] == "src/a.txt"
+    assert detail["status"] == "accepted"
+    assert detail["diffs"][0]["file"] == "src/a.txt"
+
+
+def test_blueprint_run_diff_excludes_conflict_rejected_and_unsubmitted_checkout_from_accepted(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    _write(tmp_path / "secret.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-blueprint-diff-status", code_mode="project_reference")
+    checkout_a = manager.checkout_agent(run, "agent-a", checkout_paths=["src/a.txt"])
+    checkout_b = manager.checkout_agent(run, "agent-b", checkout_paths=["src/a.txt"])
+    checkout_c = manager.checkout_agent(run, "agent-c", write_scope=["src/**"])
+    checkout_d = manager.checkout_agent(run, "agent-d", checkout_paths=["src/a.txt"])
+
+    _write(checkout_a.checkout_dir / "src" / "a.txt", "from a\n")
+    _write(checkout_b.checkout_dir / "src" / "a.txt", "from b\n")
+    _write(checkout_c.checkout_dir / "secret.txt", "changed\n")
+    _write(checkout_d.checkout_dir / "src" / "a.txt", "unsubmitted\n")
+
+    accepted = manager.submit_checkout(run, checkout_a)
+    conflict = manager.submit_checkout(run, checkout_b)
+    rejected = manager.submit_checkout(run, checkout_c)
+    diff = manager.blueprint_run_diff(run).to_dict()
+
+    assert accepted.status == "accepted"
+    assert conflict.status == "conflict"
+    assert rejected.status == "rejected"
+    assert diff["summary"]["total"] == 3
+    assert diff["summary"]["accepted"] == 1
+    assert diff["summary"]["conflict"] == 1
+    assert diff["summary"]["rejected"] == 1
+    assert [item["file"] for item in diff["acceptedDiffs"]] == ["src/a.txt"]
+    assert all(item["agentId"] != "agent-d" for item in diff["changesets"])
+
+
+def test_blueprint_changeset_detail_reports_missing_patch(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-blueprint-diff-missing-patch", code_mode="project_reference")
+    checkout = manager.checkout_agent(run, "agent-a", checkout_paths=["src/a.txt"])
+
+    _write(checkout.checkout_dir / "src" / "a.txt", "changed\n")
+    result = manager.submit_checkout(run, checkout)
+    assert result.archive_path is not None
+    (result.archive_path / "patch.diff").unlink()
+
+    try:
+        manager.blueprint_changeset_detail(run, result.changeset_id)
+    except FileNotFoundError as exc:
+        assert "patch.diff" in str(exc)
+    else:  # pragma: no cover - assertion branch
+        raise AssertionError("expected missing patch.diff to fail")
+
+
+def test_blueprint_run_diff_keeps_binary_files_out_of_text_renderer(tmp_path: Path) -> None:
+    (tmp_path / "assets").mkdir(parents=True)
+    (tmp_path / "assets" / "image.bin").write_bytes(b"base\x00data")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-blueprint-diff-binary", code_mode="project_reference")
+    checkout = manager.checkout_agent(run, "agent-a", checkout_paths=["assets/image.bin"])
+
+    (checkout.checkout_dir / "assets" / "image.bin").write_bytes(b"changed\x00data")
+    result = manager.submit_checkout(run, checkout)
+    diff = manager.blueprint_run_diff(run).to_dict()
+    detail = manager.blueprint_changeset_detail(run, result.changeset_id).to_dict()
+
+    assert diff["acceptedDiffs"] == []
+    assert diff["binaryFiles"][0]["file"] == "assets/image.bin"
+    assert detail["diffs"] == []
+    assert detail["binaryFiles"][0]["file"] == "assets/image.bin"
 
 
 def test_agent_checkout_pulls_scoped_files_from_integration_workspace(tmp_path: Path) -> None:

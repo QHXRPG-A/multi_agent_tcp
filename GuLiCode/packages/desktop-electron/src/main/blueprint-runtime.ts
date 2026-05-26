@@ -135,6 +135,14 @@ export class BlueprintRuntime {
     return this.request("blueprint.status", { runId })
   }
 
+  runDiff(runId: string) {
+    return this.request("blueprint.runDiff", { runId })
+  }
+
+  changesetDiff(runId: string, changesetId: string) {
+    return this.request("blueprint.changesetDiff", { runId, changesetId })
+  }
+
   end(runId: string, action: BlueprintRunEndAction, reason?: string) {
     return this.request("blueprint.end", { runId, action, reason })
   }

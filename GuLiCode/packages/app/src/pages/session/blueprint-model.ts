@@ -189,7 +189,8 @@ const DEFAULT_VIEWPORT: BlueprintViewport = {
   zoom: 1,
 }
 
-const DEFAULT_AGENT_SCOPE = ["shared/reports/**"]
+const DEFAULT_AGENT_SCOPE = ["**"]
+const LEGACY_REPORT_ONLY_AGENT_SCOPE = ["shared/reports/**"]
 const DEFAULT_MODEL = "netease-codemaker/kimi-k2.5"
 const DEFAULT_PROJECT_WORKDIR = "."
 export const DEFAULT_PYTHON_PATH = ""
@@ -908,6 +909,12 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
     testAgent && (!Number.isFinite(configuredTimeoutSec) || configuredTimeoutSec < TEST_AGENT_TIMEOUT_SEC)
       ? TEST_AGENT_TIMEOUT_SEC
       : (node.timeout_sec ?? defaults.timeout_sec)
+  const configuredWriteScope = node.write_scope ?? defaults.write_scope
+  const writeScope =
+    configuredWriteScope.length === LEGACY_REPORT_ONLY_AGENT_SCOPE.length &&
+    configuredWriteScope.every((scope, index) => scope === LEGACY_REPORT_ONLY_AGENT_SCOPE[index])
+      ? defaults.write_scope
+      : configuredWriteScope
   return {
     ...defaults,
     ...node,
@@ -921,7 +928,7 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
     ),
     timeout_sec: timeoutSec,
     read_scope: [...(node.read_scope ?? defaults.read_scope)],
-    write_scope: [...(node.write_scope ?? defaults.write_scope)],
+    write_scope: [...writeScope],
     artifact_scope: [...(node.artifact_scope ?? defaults.artifact_scope)],
   }
 }

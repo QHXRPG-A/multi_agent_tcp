@@ -124,19 +124,30 @@ def _relative_files(
     out: Dict[str, Path] = {}
     if not root.is_dir():
         return out
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        resolved = path.resolve()
-        if any(resolved == ex or _path_within(resolved, ex) for ex in excluded):
-            continue
-        rel = path.relative_to(root).as_posix()
-        parts = rel.split("/")
-        if any(_snapshot_pattern_matches(rel, part, patterns) for part in parts):
-            continue
-        if _snapshot_pattern_matches(rel, rel, patterns):
-            continue
-        out[rel] = path
+    for dir_path, dir_names, file_names in os.walk(root):
+        base = Path(dir_path)
+        dir_names[:] = [
+            name
+            for name in dir_names
+            if not _path_is_copy_excluded(
+                base / name,
+                root,
+                excluded_roots=excluded,
+                exclude_patterns=patterns,
+            )
+        ]
+        for name in file_names:
+            path = base / name
+            if not path.is_file():
+                continue
+            if _path_is_copy_excluded(
+                path,
+                root,
+                excluded_roots=excluded,
+                exclude_patterns=patterns,
+            ):
+                continue
+            out[path.resolve().relative_to(root).as_posix()] = path
     return out
 
 
@@ -228,12 +239,31 @@ def _relative_files_from_candidates(
     for candidate in candidates:
         if not candidate.exists():
             continue
+        if _path_is_copy_excluded(
+            candidate,
+            root,
+            excluded_roots=excluded_roots,
+            exclude_patterns=exclude_patterns,
+        ):
+            continue
         if candidate.is_file():
             record(candidate)
             continue
         if candidate.is_dir():
-            for path in candidate.rglob("*"):
-                record(path)
+            for dir_path, dir_names, file_names in os.walk(candidate):
+                base = Path(dir_path)
+                dir_names[:] = [
+                    name
+                    for name in dir_names
+                    if not _path_is_copy_excluded(
+                        base / name,
+                        root,
+                        excluded_roots=excluded_roots,
+                        exclude_patterns=exclude_patterns,
+                    )
+                ]
+                for name in file_names:
+                    record(base / name)
     return out
 
 
@@ -427,8 +457,11 @@ def _count_patch_lines(patch: str) -> tuple[int, int]:
 def _unified_diff(base_file: Path, new_file: Path, rel_path: str) -> str:
     if (base_file.exists() and _is_binary(base_file)) or (new_file.exists() and _is_binary(new_file)):
         return ""
-    base_lines = base_file.read_text(encoding="utf-8").splitlines() if base_file.exists() else []
-    new_lines = new_file.read_text(encoding="utf-8").splitlines() if new_file.exists() else []
+    try:
+        base_lines = base_file.read_text(encoding="utf-8").splitlines() if base_file.exists() else []
+        new_lines = new_file.read_text(encoding="utf-8").splitlines() if new_file.exists() else []
+    except (OSError, UnicodeDecodeError):
+        return ""
     lines = list(
         difflib.unified_diff(
             base_lines,
@@ -439,6 +472,22 @@ def _unified_diff(base_file: Path, new_file: Path, rel_path: str) -> str:
         )
     )
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _is_text_diffable(path: Path) -> bool:
+    if not path.exists():
+        return True
+    if _is_binary(path):
+        return False
+    try:
+        path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return True
+
+
+def _diff_is_binary(base_file: Path, new_file: Path) -> bool:
+    return not _is_text_diffable(base_file) or not _is_text_diffable(new_file)
 
 
 def _changed_line_regions(base_lines: List[str], other_lines: List[str]) -> List[tuple[int, int, List[str]]]:
@@ -537,6 +586,7 @@ class FileChange:
     base_hash: Optional[str] = None
     new_hash: Optional[str] = None
     patch: Optional[str] = None
+    binary: bool = False
 
     def to_dict(self, *, include_patch: bool = True) -> Dict[str, Any]:
         data: Dict[str, Any] = {
@@ -546,6 +596,8 @@ class FileChange:
             "deletions": self.deletions,
             "base_hash": self.base_hash,
             "new_hash": self.new_hash,
+            "binary": self.binary,
+            "has_patch": bool(self.patch),
         }
         if include_patch:
             data["patch"] = self.patch or ""
@@ -675,6 +727,63 @@ class ChangesetSubmitResult:
         if self.archive_path is not None:
             data["archive_path"] = str(self.archive_path)
         return data
+
+
+@dataclass
+class BlueprintChangesetDetail:
+    run_id: str
+    changeset_id: str
+    status: str
+    diffs: List[Dict[str, Any]] = field(default_factory=list)
+    binary_files: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "runId": self.run_id,
+            "changesetId": self.changeset_id,
+            "status": self.status,
+            "diffs": list(self.diffs),
+            "binaryFiles": list(self.binary_files),
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass
+class BlueprintRunDiff:
+    run_id: str
+    summary: Dict[str, Any]
+    changesets: List[Dict[str, Any]] = field(default_factory=list)
+    accepted_diffs: List[Dict[str, Any]] = field(default_factory=list)
+    binary_files: List[Dict[str, Any]] = field(default_factory=list)
+
+    @classmethod
+    def empty(cls, run_id: str) -> "BlueprintRunDiff":
+        return cls(
+            run_id=run_id,
+            summary={
+                "total": 0,
+                "accepted": 0,
+                "conflict": 0,
+                "rejected": 0,
+                "pending": 0,
+                "failed": 0,
+                "files": 0,
+                "textFiles": 0,
+                "binaryFiles": 0,
+                "additions": 0,
+                "deletions": 0,
+            },
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "runId": self.run_id,
+            "summary": dict(self.summary),
+            "changesets": list(self.changesets),
+            "acceptedDiffs": list(self.accepted_diffs),
+            "binaryFiles": list(self.binary_files),
+        }
 
 
 @dataclass
@@ -899,9 +1008,19 @@ class DulwichWorkspaceManager:
         run_path = self.workspace_root / "runs" / "active" / run_id
         if not run_path.is_dir():
             raise FileNotFoundError(f"active run not found: {run_path}")
+        return self._open_run_at_path(run_id, run_path)
+
+    def open_run_any(self, run_id: str) -> RunWorkspace:
+        for bucket in ("active", "archived", "failed"):
+            run_path = self.workspace_root / "runs" / bucket / run_id
+            if run_path.is_dir():
+                return self._open_run_at_path(run_id, run_path)
+        raise FileNotFoundError(f"run not found: {run_id}")
+
+    def _open_run_at_path(self, run_id: str, run_path: Path) -> RunWorkspace:
         manifest = _read_json(run_path / "run_manifest.json", {})
         return RunWorkspace(
-            run_id=run_id,
+            run_id=str(manifest.get("run_id") or run_id),
             path=run_path,
             base_dir=run_path / "base",
             integration_dir=run_path / "shared" / "code",
@@ -1081,6 +1200,78 @@ class DulwichWorkspaceManager:
 
     def diff_checkout(self, run: RunWorkspace, checkout: AgentCheckout) -> List[FileChange]:
         return self._diff_dirs(checkout.base_dir, checkout.checkout_dir, include_patch=True)
+
+    def blueprint_run_diff(self, run: RunWorkspace) -> BlueprintRunDiff:
+        changesets_dir = run.path / "changesets"
+        if not changesets_dir.exists():
+            return BlueprintRunDiff.empty(run.run_id)
+
+        summary = BlueprintRunDiff.empty(run.run_id).summary
+        changesets: List[Dict[str, Any]] = []
+        accepted_diffs: List[Dict[str, Any]] = []
+        binary_files: List[Dict[str, Any]] = []
+
+        for root in sorted(changesets_dir.iterdir()):
+            if not root.is_dir():
+                continue
+            changeset = _read_json(root / "changeset.json", {})
+            submit_result = _read_json(root / "submit_result.json", {})
+            if not isinstance(changeset, dict):
+                changeset = {}
+            if not isinstance(submit_result, dict):
+                submit_result = {}
+            patch_path = root / "patch.diff"
+            patch_exists = patch_path.is_file()
+            detail = self._blueprint_changeset_from_archive(
+                run,
+                root,
+                changeset,
+                submit_result,
+                patch_exists=patch_exists,
+            )
+            item = detail.metadata
+            status = detail.status if detail.status in {"accepted", "conflict", "rejected", "pending", "failed"} else "pending"
+            summary["total"] += 1
+            summary[status] = int(summary.get(status, 0)) + 1
+            summary["files"] += int(item.get("fileCount") or 0)
+            summary["textFiles"] += int(item.get("textFileCount") or 0)
+            summary["binaryFiles"] += int(item.get("binaryFileCount") or 0)
+            summary["additions"] += int(item.get("additions") or 0)
+            summary["deletions"] += int(item.get("deletions") or 0)
+            changesets.append(item)
+            binary_files.extend(detail.binary_files)
+            if detail.status == "accepted" and patch_exists:
+                accepted_diffs.extend(detail.diffs)
+
+        return BlueprintRunDiff(
+            run_id=run.run_id,
+            summary=summary,
+            changesets=changesets,
+            accepted_diffs=accepted_diffs,
+            binary_files=binary_files,
+        )
+
+    def blueprint_changeset_detail(self, run: RunWorkspace, changeset_id: str) -> BlueprintChangesetDetail:
+        safe_changeset_id = _safe_id(str(changeset_id).strip(), field_name="changeset_id")
+        root = run.path / "changesets" / safe_changeset_id
+        if not root.is_dir():
+            raise FileNotFoundError(f"changeset archive not found: {safe_changeset_id}")
+        patch_path = root / "patch.diff"
+        if not patch_path.is_file():
+            raise FileNotFoundError(f"changeset patch.diff not found: {safe_changeset_id}")
+        changeset = _read_json(root / "changeset.json", {})
+        submit_result = _read_json(root / "submit_result.json", {})
+        if not isinstance(changeset, dict):
+            changeset = {}
+        if not isinstance(submit_result, dict):
+            submit_result = {}
+        return self._blueprint_changeset_from_archive(
+            run,
+            root,
+            changeset,
+            submit_result,
+            patch_exists=True,
+        )
 
     def submit_checkout(
         self,
@@ -1475,14 +1666,17 @@ class DulwichWorkspaceManager:
         target = self._shared_target(run, rel_path)
         if lease.path != str(rel_path).replace("\\", "/").strip("/"):
             raise ValueError("lease path does not match write path")
-        if expected_version is not None:
-            current_version = self.shared_file_version(run, rel_path)
-            if current_version != int(expected_version):
-                if owned_lease:
-                    self.release_shared_lease(run, lease)
-                raise FileExistsError(
-                    f"shared path version conflict: expected {expected_version}, got {current_version}: {rel_path}"
-                )
+        try:
+            self._validate_shared_write_version(
+                run,
+                rel_path,
+                owner=owner,
+                expected_version=expected_version,
+            )
+        except Exception:
+            if owned_lease:
+                self.release_shared_lease(run, lease)
+            raise
         tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1524,14 +1718,17 @@ class DulwichWorkspaceManager:
         target = self._shared_target(run, rel_path)
         if lease.path != str(rel_path).replace("\\", "/").strip("/"):
             raise ValueError("lease path does not match write path")
-        if expected_version is not None:
-            current_version = self.shared_file_version(run, rel_path)
-            if current_version != int(expected_version):
-                if owned_lease:
-                    self.release_shared_lease(run, lease)
-                raise FileExistsError(
-                    f"shared path version conflict: expected {expected_version}, got {current_version}: {rel_path}"
-                )
+        try:
+            self._validate_shared_write_version(
+                run,
+                rel_path,
+                owner=owner,
+                expected_version=expected_version,
+            )
+        except Exception:
+            if owned_lease:
+                self.release_shared_lease(run, lease)
+            raise
         tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1594,6 +1791,50 @@ class DulwichWorkspaceManager:
             and item.get("event_type") == "write"
             and item.get("path") == normalized
         )
+
+    def _latest_shared_write(self, run: RunWorkspace, rel_path: str) -> Optional[Dict[str, Any]]:
+        shared_dir = run.shared_dir or (run.path / "shared")
+        manifest_path = shared_dir / "manifest.json"
+        normalized = str(rel_path).replace("\\", "/").strip("/")
+        data = _read_json(manifest_path, {})
+        writes = data.get("writes", [])
+        if not isinstance(writes, list):
+            return None
+        for item in reversed(writes):
+            if (
+                isinstance(item, dict)
+                and item.get("event_type") == "write"
+                and item.get("path") == normalized
+            ):
+                return item
+        return None
+
+    def _validate_shared_write_version(
+        self,
+        run: RunWorkspace,
+        rel_path: str,
+        *,
+        owner: str,
+        expected_version: Optional[int],
+    ) -> None:
+        current_version = self.shared_file_version(run, rel_path)
+        if expected_version is not None:
+            if current_version != int(expected_version):
+                raise FileExistsError(
+                    f"shared path version conflict: expected {expected_version}, got {current_version}: {rel_path}"
+                )
+            return
+        if current_version <= 0:
+            return
+        latest = self._latest_shared_write(run, rel_path)
+        latest_owner = str(latest.get("owner") or "") if latest else ""
+        if latest_owner and latest_owner != str(owner):
+            raise FileExistsError(
+                "shared path version conflict: "
+                f"{rel_path} already has version {current_version} from {latest_owner}; "
+                f"pass expected_version={current_version} after reading the current shared file/manifest "
+                "or publish to an agent-specific path"
+            )
 
     def list_shared_files(self, run: RunWorkspace, rel_dir: str = "") -> List[str]:
         """List files under a shared workspace subdirectory."""
@@ -1702,7 +1943,19 @@ class DulwichWorkspaceManager:
         target = target_parent / run.run_id
         if target.exists():
             raise FileExistsError(f"archive target already exists: {target}")
+        setattr(run, "_pre_archive_path", run.path)
         shutil.move(str(run.path), str(target))
+        run.path = target
+        run.base_dir = target / "base"
+        run.integration_dir = target / "shared" / "code"
+        run.jobs_dir = target / "jobs"
+        run.agents_dir = target / "agents"
+        run.shared_dir = target / "shared"
+        run.shared_code_dir = target / "shared" / "code"
+        run.shared_artifacts_dir = target / "shared" / "artifacts"
+        run.shared_reports_dir = target / "shared" / "reports"
+        run.shared_locks_dir = target / "shared" / ".locks"
+        run.status = status
         return target
 
     def archive_run_shared_workspace(self, run: RunWorkspace, *, status: str = "completed") -> Path:
@@ -1811,7 +2064,8 @@ class DulwichWorkspaceManager:
                 continue
             base_file = left / rel
             new_file = right / rel
-            patch = _unified_diff(base_file, new_file, rel) if include_patch else ""
+            binary = _diff_is_binary(base_file, new_file)
+            patch = _unified_diff(base_file, new_file, rel) if include_patch and not binary else ""
             additions, deletions = _count_patch_lines(patch)
             changes.append(
                 FileChange(
@@ -1822,9 +2076,115 @@ class DulwichWorkspaceManager:
                     base_hash=_sha256_file(base_file),
                     new_hash=_sha256_file(new_file),
                     patch=patch,
+                    binary=binary,
                 )
             )
         return changes
+
+    def _blueprint_changeset_from_archive(
+        self,
+        run: RunWorkspace,
+        root: Path,
+        changeset: Dict[str, Any],
+        submit_result: Dict[str, Any],
+        *,
+        patch_exists: bool,
+    ) -> BlueprintChangesetDetail:
+        changeset_id = str(
+            submit_result.get("changeset_id")
+            or changeset.get("changeset_id")
+            or root.name
+        )
+        status = str(submit_result.get("status") or changeset.get("status") or "pending").strip().lower()
+        if status not in {"accepted", "conflict", "rejected", "pending", "failed"}:
+            status = "failed" if status in {"error", "errored"} else "pending"
+        raw_files = changeset.get("files", [])
+        if not isinstance(raw_files, list):
+            raw_files = []
+
+        diffs: List[Dict[str, Any]] = []
+        binary_files: List[Dict[str, Any]] = []
+        file_paths: List[str] = []
+        additions = 0
+        deletions = 0
+
+        for raw in raw_files:
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get("path") or "").replace("\\", "/").strip("/")
+            if not path:
+                continue
+            file_paths.append(path)
+            file_additions = int(raw.get("additions") or 0)
+            file_deletions = int(raw.get("deletions") or 0)
+            additions += file_additions
+            deletions += file_deletions
+            patch = raw.get("patch")
+            patch_text = patch if isinstance(patch, str) else ""
+            binary = bool(raw.get("binary")) or (not patch_text and not bool(raw.get("has_patch")))
+            if patch_text:
+                diffs.append(
+                    {
+                        "file": path,
+                        "patch": patch_text,
+                        "additions": file_additions,
+                        "deletions": file_deletions,
+                        "status": str(raw.get("status") or "modified"),
+                    }
+                )
+            elif binary:
+                binary_files.append(
+                    {
+                        "changesetId": changeset_id,
+                        "file": path,
+                        "path": path,
+                        "status": str(raw.get("status") or "modified"),
+                        "additions": file_additions,
+                        "deletions": file_deletions,
+                        "baseHash": raw.get("base_hash"),
+                        "newHash": raw.get("new_hash"),
+                    }
+                )
+
+        metadata = {
+            "changesetId": changeset_id,
+            "changeset_id": changeset_id,
+            "runId": str(changeset.get("run_id") or run.run_id),
+            "agentId": changeset.get("agent_id"),
+            "agent_id": changeset.get("agent_id"),
+            "taskId": changeset.get("task_id"),
+            "task_id": changeset.get("task_id"),
+            "summary": changeset.get("summary") or submit_result.get("summary") or "",
+            "status": status,
+            "path": root.name,
+            "absolutePath": str(root.resolve()),
+            "fileCount": len(file_paths),
+            "textFileCount": len(diffs),
+            "binaryFileCount": len(binary_files),
+            "additions": additions,
+            "deletions": deletions,
+            "files": file_paths,
+            "createdAt": changeset.get("created_at"),
+            "created_at": changeset.get("created_at"),
+            "patchExists": patch_exists,
+            "hasDetail": patch_exists,
+        }
+        if submit_result.get("integration_ref") is not None:
+            metadata["integrationRef"] = submit_result["integration_ref"]
+            metadata["integration_ref"] = submit_result["integration_ref"]
+        if submit_result.get("conflicts"):
+            metadata["conflicts"] = submit_result.get("conflicts")
+        if submit_result.get("scope_violations"):
+            metadata["scopeViolations"] = submit_result.get("scope_violations")
+            metadata["scope_violations"] = submit_result.get("scope_violations")
+        return BlueprintChangesetDetail(
+            run_id=run.run_id,
+            changeset_id=changeset_id,
+            status=status,
+            diffs=diffs,
+            binary_files=binary_files,
+            metadata={key: value for key, value in metadata.items() if value is not None},
+        )
 
     def _plan_checkout_change(
         self,

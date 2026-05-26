@@ -135,6 +135,8 @@ export type ElectronAPI = {
     executionMode?: "status" | "live",
   ) => Promise<Record<string, unknown>>
   blueprintStatus: (runId: string) => Promise<Record<string, unknown>>
+  blueprintRunDiff: (runId: string) => Promise<Record<string, unknown>>
+  blueprintChangesetDiff: (runId: string, changesetId: string) => Promise<Record<string, unknown>>
   blueprintEnd: (runId: string, action: BlueprintRunEndAction, reason?: string) => Promise<Record<string, unknown>>
   blueprintRecentEvents: (runId: string, limit?: number) => Promise<Record<string, unknown>>
   blueprintAgentInfo: (runId: string | undefined, nodeId: string) => Promise<Record<string, unknown>>

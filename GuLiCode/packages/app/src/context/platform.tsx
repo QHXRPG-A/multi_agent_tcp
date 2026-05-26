@@ -156,6 +156,12 @@ export type Platform = {
   /** Reserved runtime API for the next status UI pass (desktop only) */
   blueprintRunStatus?(runId: string): Promise<Record<string, unknown>>
 
+  /** Read the current run-scoped blueprint changeset diff summary (desktop only) */
+  blueprintRunDiff?(runId: string): Promise<Record<string, unknown>>
+
+  /** Read one changeset's blueprint diff detail (desktop only) */
+  blueprintChangesetDiff?(runId: string, changesetId: string): Promise<Record<string, unknown>>
+
   /** Reserved runtime API for the next status UI pass (desktop only) */
   endBlueprintRun?(runId: string, action: BlueprintRunEndAction, reason?: string): Promise<Record<string, unknown>>
 

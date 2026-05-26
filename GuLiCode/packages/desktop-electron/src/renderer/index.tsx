@@ -56,6 +56,10 @@ const listenForDeepLinks = () => {
 }
 
 const createPlatform = (): Platform => {
+  const api = window.api as typeof window.api & {
+    blueprintRunDiff?: (runId: string) => Promise<Record<string, unknown>>
+    blueprintChangesetDiff?: (runId: string, changesetId: string) => Promise<Record<string, unknown>>
+  }
   const os = (() => {
     const ua = navigator.userAgent
     if (ua.includes("Mac")) return "macos"
@@ -176,6 +180,17 @@ const createPlatform = (): Platform => {
       window.api.blueprintStart(projectDir, blueprintId, plan, executionMode),
 
     blueprintRunStatus: (runId: string) => window.api.blueprintStatus(runId),
+
+    ...(typeof api.blueprintRunDiff === "function"
+      ? { blueprintRunDiff: (runId: string) => api.blueprintRunDiff!(runId) }
+      : {}),
+
+    ...(typeof api.blueprintChangesetDiff === "function"
+      ? {
+          blueprintChangesetDiff: (runId: string, changesetId: string) =>
+            api.blueprintChangesetDiff!(runId, changesetId),
+        }
+      : {}),
 
     endBlueprintRun: (runId, action, reason) => window.api.blueprintEnd(runId, action, reason),
 

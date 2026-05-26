@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .protocol import read_frame, write_frame
@@ -75,20 +76,22 @@ class AgentTCPClient:
         self._reader_task = asyncio.create_task(pump())
 
     async def close(self) -> None:
-        if self._reader_task:
-            self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
-            self._reader_task = None
-        if self._writer:
-            try:
-                self._writer.close()
-                await self._writer.wait_closed()
-            except (ConnectionError, OSError):
-                pass
-            self._writer = None
+        reader_task = self._reader_task
+        writer = self._writer
+        self._reader_task = None
+        self._writer = None
+        self._reader = None
+        if writer:
+            with suppress(ConnectionError, OSError):
+                writer.close()
+        if reader_task:
+            reader_task.cancel()
+        if writer:
+            with suppress(asyncio.TimeoutError, ConnectionError, OSError):
+                await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+        if reader_task:
+            with suppress(asyncio.CancelledError, asyncio.TimeoutError, ConnectionError, OSError):
+                await asyncio.wait_for(reader_task, timeout=2.0)
         self._reader = None
         async with self._inbox_changed:
             self._read_closed = True

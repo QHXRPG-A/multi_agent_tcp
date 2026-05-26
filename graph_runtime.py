@@ -41,6 +41,8 @@ _VALID_RUN_END_ACTIONS = {"complete", "cancel", "fail", "pause", "archive_only"}
 _AGENT_CAN_ACCEPT_STATES = {"idle", "queued", "timed_out"}
 _VALID_AGENT_TASK_STATUSES = {"not_started", "working", "completed", "blocked", "needs_input", "failed"}
 _TERMINAL_AGENT_TASK_STATUSES = {"completed", "blocked", "needs_input", "failed"}
+DEFAULT_AGENT_WRITE_SCOPE = ["**"]
+LEGACY_REPORT_ONLY_WRITE_SCOPE = ["shared/reports/**"]
 COMPLETION_IDLE_THRESHOLD_SEC = 30.0
 _VALID_AGENT_RUNTIME_STATES = {
     "created",
@@ -60,6 +62,17 @@ _VALID_AGENT_RUNTIME_STATES = {
     "stopping",
     "stopped",
 }
+
+
+def _default_agent_write_scope() -> List[str]:
+    return list(DEFAULT_AGENT_WRITE_SCOPE)
+
+
+def _normalize_agent_write_scope(value: Any, *, default: Optional[Sequence[str]] = None) -> List[str]:
+    scope = [str(s) for s in (value if value is not None else (default or []))]
+    if scope == LEGACY_REPORT_ONLY_WRITE_SCOPE:
+        return _default_agent_write_scope()
+    return scope
 
 
 def is_dispatch_no_op_body(body: Any) -> bool:
@@ -532,7 +545,7 @@ class AgentNode:
     workspace_id: Optional[str] = None
     workspace_root: Optional[Path] = None
     read_scope: List[str] = field(default_factory=list)
-    write_scope: List[str] = field(default_factory=list)
+    write_scope: List[str] = field(default_factory=_default_agent_write_scope)
     artifact_scope: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -663,7 +676,10 @@ class AgentNode:
                 else None
             ),
             read_scope=[str(s) for s in data.get("read_scope", [])],
-            write_scope=[str(s) for s in data.get("write_scope", [])],
+            write_scope=_normalize_agent_write_scope(
+                data.get("write_scope"),
+                default=DEFAULT_AGENT_WRITE_SCOPE,
+            ),
             artifact_scope=[str(s) for s in data.get("artifact_scope", [])],
         )
 
@@ -3329,11 +3345,20 @@ class GraphRuntime:
             return None
         if archive_path is None or self.archive_run is None:
             return report_path
-        run_path = Path(getattr(self.archive_run, "path", ""))
-        try:
-            return archive_path / report_path.resolve().relative_to(run_path.resolve())
-        except ValueError:
-            return report_path
+        run_paths = [
+            Path(raw)
+            for raw in (
+                getattr(self.archive_run, "_pre_archive_path", None),
+                getattr(self.archive_run, "path", None),
+            )
+            if raw
+        ]
+        for run_path in run_paths:
+            try:
+                return archive_path / report_path.resolve().relative_to(run_path.resolve())
+            except ValueError:
+                continue
+        return report_path
 
     def end_run(
         self,

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from urllib import request
 
@@ -16,6 +17,7 @@ import pytest
 
 from multi_agent_tcp.desktop_blueprint_service import (
     BlueprintServiceError,
+    DesktopBlueprintRun,
     DesktopBlueprintHTTPServer,
     DesktopBlueprintNoopBackend,
     DesktopBlueprintService,
@@ -31,8 +33,13 @@ from multi_agent_tcp.codex_bridge import codex_jsonl_event_to_agent_stream_event
 from multi_agent_tcp.agent_launch_context import (
     write_private_codex_mcp_config,
 )
+from multi_agent_tcp._asyncio_utils import (
+    install_asyncio_connection_reset_filter,
+    _should_suppress_asyncio_connection_reset,
+)
 from multi_agent_tcp.client import AgentTCPClient
-from multi_agent_tcp.workspace_manager import DulwichWorkspaceManager
+from multi_agent_tcp.protocol import read_frame, write_frame
+from multi_agent_tcp.workspace_manager import DulwichWorkspaceManager, RunWorkspace
 
 
 def _document(project_dir: Path | None = None) -> dict:
@@ -123,6 +130,88 @@ def _workspace_manifest_entries(run: object, event_type: str) -> list[dict]:
         for item in writes
         if isinstance(item, dict) and item.get("event_type") == event_type
     ]
+
+
+def test_blueprint_service_exposes_run_and_changeset_diff_commands(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src" / "a.txt").write_text("base\n", encoding="utf-8")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    workspace_run = manager.create_run(run_id="run-service-diff", code_mode="project_reference")
+    checkout = manager.checkout_agent(workspace_run, "agent-a", checkout_paths=["src/a.txt"])
+    (checkout.checkout_dir / "src" / "a.txt").write_text("changed\n", encoding="utf-8")
+    result = manager.submit_checkout(workspace_run, checkout, task_id="task-1", summary="change a")
+
+    active_path = workspace_run.path
+    stale_workspace_run = RunWorkspace(
+        run_id=workspace_run.run_id,
+        path=active_path,
+        base_dir=active_path / "base",
+        integration_dir=active_path / "shared" / "code",
+        jobs_dir=active_path / "jobs",
+        agents_dir=active_path / "agents",
+        shared_dir=active_path / "shared",
+        shared_code_dir=active_path / "shared" / "code",
+        shared_artifacts_dir=active_path / "shared" / "artifacts",
+        shared_reports_dir=active_path / "shared" / "reports",
+        shared_locks_dir=active_path / "shared" / ".locks",
+        status="running",
+        long_term_workspace_root=manager.workspace_root,
+        code_mode="project_reference",
+    )
+
+    class FakeRuntime:
+        archive_manager = manager
+        archive_run = workspace_run
+        private_context_manager = None
+        private_context_run = None
+
+    fake_runtime = FakeRuntime()
+    service = DesktopBlueprintService()
+    service._runs["run-service-diff"] = DesktopBlueprintRun(
+        run_id="run-service-diff",
+        project_dir=tmp_path.resolve(),
+        blueprint_id="default",
+        document=_document(tmp_path),
+        graph=None,
+        runtime=fake_runtime,
+        control=None,
+        execution_mode="status",
+        created_at=1.0,
+        updated_at=1.0,
+    )
+
+    summary = service.handle_request({"command": "blueprint.runDiff", "args": {"runId": "run-service-diff"}})
+    detail = service.handle_request(
+        {
+            "command": "blueprint.changesetDiff",
+            "args": {"runId": "run-service-diff", "changesetId": result.changeset_id},
+        }
+    )
+
+    assert summary["ok"] is True
+    assert summary["summary"]["accepted"] == 1
+    assert summary["acceptedDiffs"][0]["file"] == "src/a.txt"
+    assert detail["ok"] is True
+    assert detail["changesetId"] == result.changeset_id
+    assert detail["diffs"][0]["file"] == "src/a.txt"
+
+    archive_path = manager.archive_run(workspace_run)
+    fake_runtime.archive_run = stale_workspace_run
+    archived_summary = service.handle_request({"command": "blueprint.runDiff", "args": {"runId": "run-service-diff"}})
+    assert archived_summary["summary"]["accepted"] == 1
+    assert archived_summary["acceptedDiffs"][0]["file"] == "src/a.txt"
+    assert fake_runtime.archive_run.path == archive_path
+
+    assert result.archive_path is not None
+    (archive_path / "changesets" / result.changeset_id / "patch.diff").unlink()
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.handle_request(
+            {
+                "command": "blueprint.changesetDiff",
+                "args": {"runId": "run-service-diff", "changesetId": result.changeset_id},
+            }
+        )
+    assert exc.value.code == "CHANGESET_PATCH_MISSING"
 
 
 def _wait_for_live_run_idle(
@@ -1983,6 +2072,16 @@ def test_blueprint_service_desktop_planning_context_plan_flow(tmp_path: Path, mo
     assert snapshot["current"]["statusSource"]["selected"] == "active_live_run"
     assert len(FakeLiveBackend.instances) == 1
     assert "agent-planner" in FakeLiveBackend.instances[-1].worker_configs
+    ended = service.handle_request(
+        {"command": "blueprint.end", "args": {"runId": started["runId"], "action": "cancel"}}
+    )
+    assert ended["status"]["run"]["status"] == "cancelled"
+    after_end = service.handle_request(
+        {"command": "blueprint.planning.status", "args": {"sessionId": session_id}}
+    )
+    assert after_end["activeRun"] is None
+    assert after_end["statusSource"]["selected"] == "planning_context"
+    assert service._planning_sessions[session_id].active_run_id is None
     service.close()
 
 
@@ -3025,6 +3124,83 @@ def test_agent_tcp_client_demuxes_concurrent_waiters_and_streams() -> None:
         assert reviewer_events == [{"kind": "part.delta", "delta": "review"}]
 
     asyncio.run(scenario())
+
+
+def test_agent_tcp_client_close_stops_reader_pump() -> None:
+    async def scenario() -> None:
+        registered = asyncio.Event()
+
+        async def handle_client(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            try:
+                msg = await read_frame(reader)
+                assert msg["type"] == "register"
+                await write_frame(writer, {"type": "registered", "agent_id": msg["agent_id"]})
+                registered.set()
+                await reader.read()
+            finally:
+                writer.close()
+                with suppress(ConnectionError, OSError, asyncio.TimeoutError):
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1)
+
+        server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+        try:
+            assert server.sockets
+            host, port = server.sockets[0].getsockname()[:2]
+            client = AgentTCPClient("orchestrator", str(host), int(port))
+            await client.connect()
+            await asyncio.wait_for(registered.wait(), timeout=1)
+            assert client._reader_task is not None
+            assert client._reader_task.done() is False
+
+            await asyncio.wait_for(client.close(), timeout=1)
+
+            assert client._reader_task is None
+            assert client._writer is None
+            assert client._reader is None
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
+def test_asyncio_connection_reset_filter_suppresses_windows_proactor_noise() -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows Proactor-specific noise filter")
+
+    class FakeHandle:
+        def __str__(self) -> str:
+            return "<Handle _ProactorBasePipeTransport._call_connection_lost()>"
+
+    context = {
+        "exception": ConnectionResetError(10054, "connection reset"),
+        "handle": FakeHandle(),
+    }
+    assert _should_suppress_asyncio_connection_reset(context) is True
+
+    loop = asyncio.new_event_loop()
+    calls: list[dict] = []
+
+    def previous_handler(_loop: asyncio.AbstractEventLoop, ctx: dict) -> None:
+        calls.append(ctx)
+
+    try:
+        loop.set_exception_handler(previous_handler)
+        install_asyncio_connection_reset_filter(loop)
+        handler = loop.get_exception_handler()
+        assert handler is not None
+
+        handler(loop, context)
+        assert calls == []
+
+        runtime_context = {"exception": RuntimeError("real failure")}
+        handler(loop, runtime_context)
+        assert calls == [runtime_context]
+    finally:
+        loop.close()
 
 
 def test_blueprint_http_server_returns_error_details(tmp_path: Path) -> None:

@@ -315,7 +315,11 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--file", type=Path, help="read UTF-8 text from this file")
     src.add_argument("--stdin", action="store_true", help="read UTF-8 text from stdin")
     publish.add_argument("--owner", help="override owner recorded in the manifest")
-    publish.add_argument("--expected-version", type=int, help="fail if the target path version changed")
+    publish.add_argument(
+        "--expected-version",
+        type=int,
+        help="required for cross-agent same-path updates; fail if the target path version changed",
+    )
     publish.set_defaults(func=_cmd_publish)
 
     publish_file = sub.add_parser("publish-file", help="publish any local file into a run outcome area")
@@ -323,7 +327,11 @@ def build_parser() -> argparse.ArgumentParser:
     publish_file.add_argument("--path", required=True, help="relative output path inside the area")
     publish_file.add_argument("--file", type=Path, required=True, help="local file to publish")
     publish_file.add_argument("--owner", help="override owner recorded in the manifest")
-    publish_file.add_argument("--expected-version", type=int, help="fail if the target path version changed")
+    publish_file.add_argument(
+        "--expected-version",
+        type=int,
+        help="required for cross-agent same-path updates; fail if the target path version changed",
+    )
     publish_file.set_defaults(func=_cmd_publish_file)
 
     checkout = sub.add_parser("checkout", help="create or refresh the agent private code checkout")

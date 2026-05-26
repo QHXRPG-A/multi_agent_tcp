@@ -238,6 +238,13 @@ def test_agent_node_from_dict_auto_generates_node_id() -> None:
 
     assert node.node_id.startswith("agent-node-")
     assert node.runtime_agent_id == node.node_id
+    assert node.write_scope == ["**"]
+
+
+def test_agent_node_from_dict_migrates_legacy_report_only_write_scope() -> None:
+    node = AgentNode.from_dict({"cwd": ".", "write_scope": ["shared/reports/**"]})
+
+    assert node.write_scope == ["**"]
 
 
 def test_agent_node_to_dict_round_trips_ui_config() -> None:
