@@ -5,6 +5,8 @@ import { AppBaseProviders, AppInterface } from "@/app"
 import { type Platform, PlatformProvider } from "@/context/platform"
 import { dict as en } from "@/i18n/en"
 import { dict as zh } from "@/i18n/zh"
+import { MobileApp } from "@/mobile/mobile-app"
+import { registerPwa } from "@/pwa"
 import { handleNotificationClick } from "@/utils/notification-click"
 import pkg from "../package.json"
 import { ServerConnection } from "./context/server"
@@ -125,20 +127,35 @@ const platform: Platform = {
   setDefaultServer: writeDefaultServerUrl,
 }
 
+registerPwa()
+
 if (root instanceof HTMLElement) {
-  const server: ServerConnection.Http = { type: "http", http: { url: getCurrentUrl() } }
-  render(
-    () => (
-      <PlatformProvider value={platform}>
-        <AppBaseProviders>
-          <AppInterface
-            defaultServer={ServerConnection.Key.make(getDefaultUrl())}
-            servers={[server]}
-            disableHealthCheck
-          />
-        </AppBaseProviders>
-      </PlatformProvider>
-    ),
-    root,
-  )
+  if (location.pathname === "/mobile" || location.pathname.startsWith("/mobile/")) {
+    render(
+      () => (
+        <PlatformProvider value={platform}>
+          <AppBaseProviders>
+            <MobileApp />
+          </AppBaseProviders>
+        </PlatformProvider>
+      ),
+      root,
+    )
+  } else {
+    const server: ServerConnection.Http = { type: "http", http: { url: getCurrentUrl() } }
+    render(
+      () => (
+        <PlatformProvider value={platform}>
+          <AppBaseProviders>
+            <AppInterface
+              defaultServer={ServerConnection.Key.make(getDefaultUrl())}
+              servers={[server]}
+              disableHealthCheck
+            />
+          </AppBaseProviders>
+        </PlatformProvider>
+      ),
+      root,
+    )
+  }
 }

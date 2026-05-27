@@ -1,1 +1,26 @@
-../../ui/src/assets/favicon/site.webmanifest
+{
+  "id": "/",
+  "name": "GuLiCode",
+  "short_name": "GuLiCode",
+  "description": "GuLiCode mobile collaboration client",
+  "start_url": "/mobile",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/web-app-manifest-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/web-app-manifest-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "theme_color": "#131010",
+  "background_color": "#f8f7f7",
+  "display": "standalone",
+  "orientation": "portrait-primary"
+}

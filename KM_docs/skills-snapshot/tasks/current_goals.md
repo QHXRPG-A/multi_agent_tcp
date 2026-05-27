@@ -1,6 +1,6 @@
 # Current Short-Term Goals
 
-Last cleaned: 2026-05-26
+Last cleaned: 2026-05-27
 
 ## Current Main Line
 
@@ -233,6 +233,51 @@ Do not use `DEBUG=*` by default; it floods the terminal with Babel/Vite
 internal traversal logs.
 
 ## Active Priorities
+
+2026-05-27 P0 mobile productization priorities:
+
+The next two tasks are now the highest-priority workstreams. Treat older
+blueprint Diff/runtime stabilization checks as important follow-up work, but
+do not let them displace these two tracks unless the user explicitly redirects.
+
+1. P0-A GuLiCode mobile PWA frontend development.
+   - Continue from the implemented `/mobile` mock-first SolidJS entry in
+     `GuLiCode/packages/app`.
+   - Keep the mobile route independent from desktop runtime providers until a
+     Collaboration Server API boundary is ready.
+   - Replace mock state incrementally with authenticated project, run, event,
+     approval, report, and artifact clients.
+   - Preserve the PWA rule that `/auth/*`, `/api/*`, `/runs/*`, and `/stream`
+     stay `NetworkOnly`; cache only app shell and static assets.
+   - Keep mobile UX constraints in force: `100dvh`, safe-area padding,
+     16px inputs, stable run-status area height, bottom actions, and touch
+     targets at least 44px.
+   - Current source focus:
+     `GuLiCode/packages/app/src/mobile/*`,
+     `GuLiCode/packages/app/src/pwa.ts`,
+     `GuLiCode/packages/app/src/entry.tsx`,
+     `GuLiCode/packages/app/vite.config.ts`,
+     and `GuLiCode/packages/app/e2e/mobile.spec.ts`.
+
+2. P0-B Python service-side development for the mobile Collaboration Server.
+   - Build the Python service boundary that the mobile PWA will call; the PWA
+     must never talk directly to Python Runtime, Workspace RPC, MCP bearer
+     endpoints, private checkouts, or service tokens.
+   - Define and implement auth/session, project listing, run listing, run
+     detail, run creation, run control, event stream, approval, report, and
+     artifact endpoints.
+   - Keep GraphRuntimeControlPlane/Python Runtime access server-side behind a
+     service-token bridge with explicit audit records.
+   - Make event streaming cursor-based and idempotent so the mobile client can
+     reconnect after backgrounding or network loss.
+   - Add backend tests for token boundaries, network/cache assumptions, run
+     control authorization, and report/artifact exposure.
+   - Treat `docs/gulicode_collaboration_server_design.md` and the new mobile
+     PWA archive as the service/API boundary inputs.
+
+Detailed archive:
+
+- [`../archive/frontend/gulicode_mobile_pwa_mock_first_pass_2026-05-27.md`](../archive/frontend/gulicode_mobile_pwa_mock_first_pass_2026-05-27.md)
 
 2026-05-26 Blueprint runtime and Diff stabilization:
 
