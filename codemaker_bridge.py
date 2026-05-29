@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ._proc_utils import async_kill_process_tree
+from ._proc_utils import async_kill_process_tree, hidden_subprocess_kwargs
 
 log = logging.getLogger(__name__)
 
@@ -262,6 +262,7 @@ async def codemaker_run(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=child_env,
+        **hidden_subprocess_kwargs(),
     )
     log.info("[cil] subprocess started pid=%s", proc.pid)
     timeout = codemaker_cfg.get("timeout_sec")

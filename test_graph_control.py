@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -46,7 +47,11 @@ class _FakeCluster:
 def _graph_dict() -> dict[str, Any]:
     return {
         "agent_nodes": {
-            "planner": {"agent_id": "worker-planner", "cli_kind": "codex"},
+            "planner": {
+                "agent_id": "worker-planner",
+                "cli_kind": "codex",
+                "run_prompt": "Use the planning run prompt.",
+            },
             "coder": {"write_scope": ["src/**"]},
             "reviewer": {},
         },
@@ -192,7 +197,8 @@ def test_top_agent_default_rules_include_utterance_contract() -> None:
 
 def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
     graph = graph_definition_from_dict(_graph_dict())
-    runtime = GraphRuntime(_FakeCluster())
+    cluster = _FakeCluster()
+    runtime = GraphRuntime(cluster)
     control = GraphRuntimeControlPlane(runtime, graph)
     server = GraphRuntimeRPCServer(control, token="secret")
     server.start()
@@ -234,6 +240,11 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
         )
         assert snapshot["run"]["manifest"]["start"]["start_plan"]["user_goal"] == "Implement and review."
         assert started["start_manifest"]["organization"]["agents"]["planner"]["node_id"] == "planner"
+        asyncio.run(runtime.dispatch_queued_message_now(started["queued_messages"][0]["message_id"]))
+        assert cluster.sent[0][0] == "worker-planner"
+        assert cluster.sent[0][1]["prompt"] == (
+            "# Agent Run Prompt\n\nUse the planning run prompt.\n\n---\n\nPlan implementation."
+        )
 
         batch = control.handle_request(
             {

@@ -39,7 +39,7 @@ from .client import AgentTCPClient
 from .adapters import CLIAdapter, adapter_from_agent_config, body_to_agent_message
 from . import __version__
 from .log_setup import setup_logging
-from ._proc_utils import terminate_and_wait
+from ._proc_utils import hidden_subprocess_kwargs, terminate_and_wait
 
 log = logging.getLogger(__name__)
 
@@ -307,9 +307,7 @@ def _cmd_spawn(cfg_path: Path, verbose: bool) -> None:
             ]
         )
         log.info("spawn %s", " ".join(cmd))
-        kwargs: Dict[str, Any] = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE  # type: ignore[attr-defined]
+        kwargs: Dict[str, Any] = hidden_subprocess_kwargs()
         procs.append(subprocess.Popen(cmd, **kwargs))
     try:
         while True:
@@ -849,11 +847,7 @@ def _launch_async_dispatch(args: argparse.Namespace) -> dict:
     cmd.extend(["--skill-mode", args.skill_mode])
 
     log_path = DISPATCH_JOBS_DIR / f"{job_id}.log"
-    spawn_kwargs: Dict[str, Any] = {}
-    if sys.platform == "win32":
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NO_WINDOW = 0x08000000
-        spawn_kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NO_WINDOW
+    spawn_kwargs: Dict[str, Any] = hidden_subprocess_kwargs(detached=True)
 
     with open(log_path, "w", encoding="utf-8") as lf:
         proc = subprocess.Popen(

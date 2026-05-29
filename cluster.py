@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TYPE_CHECKING, Tuple
 
 from .client import AgentTCPClient
-from ._proc_utils import terminate_and_wait
+from ._proc_utils import hidden_subprocess_kwargs, terminate_and_wait
 
 if TYPE_CHECKING:
     from .registry import AgentsRegistry
@@ -501,13 +501,10 @@ def _spawn(cmd: List[str], title: str, *, verbose: bool, env: Dict[str, str]) ->
     log.info("spawn [%s] cmd=%s", title, cmd)
     kwargs: Dict[str, Any] = {"env": env}
     if _IS_WIN:
-        kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE  # type: ignore[attr-defined]
-        si = subprocess.STARTUPINFO()
-        si.lpTitle = title  # type: ignore[attr-defined]
-        kwargs["startupinfo"] = si
-    else:
-        kwargs["stdout"] = None if verbose else subprocess.DEVNULL
-        kwargs["stderr"] = None if verbose else subprocess.DEVNULL
+        kwargs.update(hidden_subprocess_kwargs())
+    if not verbose:
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
     return subprocess.Popen(cmd, **kwargs)
 
 

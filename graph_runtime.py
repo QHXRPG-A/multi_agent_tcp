@@ -44,6 +44,7 @@ _TERMINAL_AGENT_TASK_STATUSES = {"completed", "blocked", "needs_input", "failed"
 DEFAULT_AGENT_WRITE_SCOPE = ["**"]
 LEGACY_REPORT_ONLY_WRITE_SCOPE = ["shared/reports/**"]
 COMPLETION_IDLE_THRESHOLD_SEC = 30.0
+AGENT_RUN_PROMPT_HEADER = "# Agent Run Prompt"
 _VALID_AGENT_RUNTIME_STATES = {
     "created",
     "starting",
@@ -78,6 +79,23 @@ def _normalize_agent_write_scope(value: Any, *, default: Optional[Sequence[str]]
 def is_dispatch_no_op_body(body: Any) -> bool:
     """Return whether a structured dispatch body is an explicit target no-op."""
     return body == "" or (type(body) is int and body == 0)
+
+
+def _prepend_agent_run_prompt_to_body(body: Any, run_prompt: str) -> tuple[Any, bool]:
+    run_prompt = str(run_prompt or "").strip()
+    if not run_prompt or is_dispatch_no_op_body(body):
+        return body, False
+    if isinstance(body, dict):
+        prompt = body.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return body, False
+        return {
+            **body,
+            "prompt": f"{AGENT_RUN_PROMPT_HEADER}\n\n{run_prompt}\n\n---\n\n{prompt}",
+        }, True
+    if isinstance(body, str) and body.strip():
+        return f"{AGENT_RUN_PROMPT_HEADER}\n\n{run_prompt}\n\n---\n\n{body}", True
+    return body, False
 
 
 def is_framework_summary_request_body(body: Any) -> bool:
@@ -529,6 +547,7 @@ class AgentNode:
     node_id: str = field(default_factory=generate_agent_node_id)
     agent_id: Optional[str] = None
     prompt: str = ""
+    run_prompt: str = ""
     execution_mode: AgentExecutionMode = "blocking"
     cli_kind: str = "codemaker"
     model: str = "netease-codemaker/kimi-k2.5"
@@ -603,6 +622,7 @@ class AgentNode:
         data: Dict[str, Any] = {
             "node_id": self.node_id,
             "prompt": self.prompt,
+            "run_prompt": self.run_prompt,
             "execution_mode": self.execution_mode,
             "cli_kind": self.cli_kind,
             "model": self.model,
@@ -654,6 +674,7 @@ class AgentNode:
             node_id=node_id.strip() if isinstance(node_id, str) else generate_agent_node_id(),
             agent_id=str(data["agent_id"]).strip() if data.get("agent_id") else None,
             prompt=str(data.get("prompt", "")),
+            run_prompt=str(data.get("run_prompt", "")),
             execution_mode=str(data.get("execution_mode", "blocking")),
             cli_kind=str(data.get("cli_kind", "codemaker")),
             model=str(data.get("model", "netease-codemaker/kimi-k2.5")),
@@ -1166,6 +1187,7 @@ class AgentInstance:
     task_status_metadata: Dict[str, Any] = field(default_factory=dict)
     summary_prompted_at: Optional[float] = None
     summary_prompt_message_id: Optional[str] = None
+    run_prompt_injected: bool = False
 
     def __post_init__(self) -> None:
         self.set_state(self.state)
@@ -2090,8 +2112,13 @@ class GraphRuntime:
             )
 
     def configure_completion_tracking(self, graph: "GraphDefinition") -> None:
+        self.reset_run_prompt_injections()
         self._completion_agent_node_ids = list(graph.agent_nodes)
         self.configure_agent_rings(graph)
+
+    def reset_run_prompt_injections(self) -> None:
+        for inst in self._instances.values():
+            inst.run_prompt_injected = False
 
     def _mark_completion_activity(self) -> None:
         self._completion_generation += 1
@@ -4120,6 +4147,10 @@ class GraphRuntime:
     ) -> Dict[str, Any]:
         message_id = message_id or f"msg-{uuid.uuid4().hex[:12]}"
         inst = await self.ensure_agent(node)
+        if not inst.run_prompt_injected:
+            body, injected = _prepend_agent_run_prompt_to_body(body, inst.node.run_prompt)
+            if injected:
+                inst.run_prompt_injected = True
         inst.busy_count += 1
         busy_released = False
 
@@ -5281,6 +5312,7 @@ class GraphExecutor:
         """
 
         graph.validate_runnable()
+        self.runtime.reset_run_prompt_injections()
         await self.runtime.prestart_agents(list(graph.agent_nodes.values()))
         decisions = self._scenario_decisions(runtime_scenarios)
         executed: List[str] = []
@@ -5434,6 +5466,7 @@ class GraphExecutor:
         """
 
         graph.validate_runnable()
+        self.runtime.reset_run_prompt_injections()
         await self.runtime.prestart_agents(list(graph.agent_nodes.values()))
 
         def emit(event: GraphEvent) -> None:

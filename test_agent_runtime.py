@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -95,6 +96,58 @@ def _assert_codex_ran_workspace_api_commands(
         "stdout": codex_result.get("stdout", ""),
         "stderr": codex_result.get("stderr", ""),
     }
+
+
+def test_hidden_subprocess_kwargs_suppresses_windows_console() -> None:
+    from multi_agent_tcp._proc_utils import hidden_subprocess_kwargs
+
+    kwargs = hidden_subprocess_kwargs()
+    if sys.platform != "win32":
+        assert kwargs == {}
+        return
+
+    flags = kwargs.get("creationflags", 0)
+    assert flags & subprocess.CREATE_NO_WINDOW
+    assert not flags & subprocess.CREATE_NEW_CONSOLE
+    startupinfo = kwargs.get("startupinfo")
+    assert startupinfo is not None
+    assert startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW
+    assert startupinfo.wShowWindow == subprocess.SW_HIDE
+
+
+def test_cluster_spawn_hides_worker_console_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows-specific subprocess launch flags")
+
+    import multi_agent_tcp.cluster as cluster_module
+
+    captured: dict[str, Any] = {}
+
+    class DummyProcess:
+        pid = 12345
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> DummyProcess:
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return DummyProcess()
+
+    monkeypatch.setattr(cluster_module.subprocess, "Popen", fake_popen)
+
+    proc = cluster_module._spawn(
+        ["python", "-V"],
+        "AGENT planner",
+        verbose=False,
+        env={"PYTHONUTF8": "1"},
+    )
+
+    assert proc.pid == 12345
+    assert captured["cmd"] == ["python", "-V"]
+    kwargs = captured["kwargs"]
+    flags = kwargs.get("creationflags", 0)
+    assert flags & subprocess.CREATE_NO_WINDOW
+    assert not flags & subprocess.CREATE_NEW_CONSOLE
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
 
 
 def _workspace_api_audit_commands(run: Any) -> list[str]:
@@ -209,6 +262,8 @@ def test_agent_node_from_dict_and_worker_config() -> None:
         {
             "node_id": "node-1",
             "agent_id": "agent-1",
+            "prompt": "Describe node 1.",
+            "run_prompt": "Always follow the run contract.",
             "execution_mode": "nonblocking",
             "cli_kind": "codemaker",
             "cwd": ".",
@@ -223,6 +278,8 @@ def test_agent_node_from_dict_and_worker_config() -> None:
     worker = node.to_worker_config()
 
     assert node.runtime_agent_id == "agent-1"
+    assert node.prompt == "Describe node 1."
+    assert node.run_prompt == "Always follow the run contract."
     assert node.execution_mode == "nonblocking"
     assert worker.agent_id == "agent-1"
     assert worker.cli_kind == "codemaker"
@@ -255,6 +312,7 @@ def test_agent_node_to_dict_round_trips_ui_config() -> None:
             "cli_kind": "codex",
             "model": "gpt-5.4",
             "cwd": ".",
+            "run_prompt": "Use the private checkout.",
             "skill_selection": {"mode": "selected", "skill_hashes": ["hash-a"]},
         }
     )
@@ -264,6 +322,7 @@ def test_agent_node_to_dict_round_trips_ui_config() -> None:
     assert restored.node_id == "node-ui"
     assert restored.runtime_agent_id == "agent-ui"
     assert restored.cli_kind == "codex"
+    assert restored.run_prompt == "Use the private checkout."
     assert restored.skill_selection.skill_hashes == ["hash-a"]
 
 
@@ -970,6 +1029,53 @@ async def test_graph_runtime_lazy_starts_and_reuses_agent_node() -> None:
     assert reply["node_id"] == "node-a"
     assert reply["said"] == json.dumps({"ok": True}, ensure_ascii=False)
     assert len(runtime.agent_utterances) == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_injects_run_prompt_once_per_agent_run() -> None:
+    cluster = _FakeCluster()
+    node = AgentNode(
+        node_id="node-a",
+        cwd=Path("."),
+        timeout_sec=42.0,
+        run_prompt="Follow the per-run contract.",
+    )
+
+    async with GraphRuntime(cluster) as runtime:
+        await runtime.send_agent_message(node, {"prompt": "first task"})
+        await runtime.send_agent_message(node, {"prompt": "second task"})
+        runtime.reset_run_prompt_injections()
+        await runtime.send_agent_message(node, {"prompt": "new run task"})
+
+    assert cluster.sent[0] == (
+        "node-a",
+        {"prompt": "# Agent Run Prompt\n\nFollow the per-run contract.\n\n---\n\nfirst task"},
+        42.0,
+    )
+    assert cluster.sent[1] == ("node-a", {"prompt": "second task"}, 42.0)
+    assert cluster.sent[2] == (
+        "node-a",
+        {"prompt": "# Agent Run Prompt\n\nFollow the per-run contract.\n\n---\n\nnew run task"},
+        42.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_injects_run_prompt_independently_per_agent() -> None:
+    cluster = _FakeCluster()
+    node_a = AgentNode(node_id="node-a", cwd=Path("."), run_prompt="A runtime rules.")
+    node_b = AgentNode(node_id="node-b", cwd=Path("."), run_prompt="B runtime rules.")
+
+    async with GraphRuntime(cluster) as runtime:
+        await runtime.send_agent_message(node_a, {"prompt": "work a"})
+        await runtime.send_agent_message(node_b, {"prompt": "work b"})
+
+    assert cluster.sent[0][1] == {
+        "prompt": "# Agent Run Prompt\n\nA runtime rules.\n\n---\n\nwork a"
+    }
+    assert cluster.sent[1][1] == {
+        "prompt": "# Agent Run Prompt\n\nB runtime rules.\n\n---\n\nwork b"
+    }
 
 
 @pytest.mark.asyncio

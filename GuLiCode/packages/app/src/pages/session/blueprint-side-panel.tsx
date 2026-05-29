@@ -8,6 +8,7 @@ import { Icon } from "@opencode-ai/ui/icon"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Markdown } from "@opencode-ai/ui/markdown"
 import { Popover } from "@opencode-ai/ui/popover"
+import { Switch as ToggleSwitch } from "@opencode-ai/ui/switch"
 import { TextField, type TextFieldProps } from "@opencode-ai/ui/text-field"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
 import { showToast } from "@opencode-ai/ui/toast"
@@ -30,7 +31,6 @@ import {
   CLI_KIND_OPTIONS,
   DEFAULT_BLUEPRINT_ID,
   DEFAULT_BLUEPRINT_NAME,
-  TEST_AGENT_NODE_FLAG,
   createDefaultBlueprintDraft,
   defaultCommandForCliKind,
   defaultModelForCliKind,
@@ -441,6 +441,10 @@ const INSPECTOR_TIPS = {
     what: "blueprint.tip.prompt.what",
     usage: "blueprint.tip.prompt.usage",
   },
+  runPrompt: {
+    what: "blueprint.tip.runPrompt.what",
+    usage: "blueprint.tip.runPrompt.usage",
+  },
   executionMode: {
     what: "blueprint.tip.executionMode.what",
     usage: "blueprint.tip.executionMode.usage",
@@ -660,6 +664,10 @@ export function BlueprintSidePanel(props: {
     Persist.workspace(projectDirectory, "blueprint-draft.v1"),
     createStore<BlueprintDraft>(createDefaultBlueprintDraft(projectDirectory)),
   )
+  const [testLogPreferences, setTestLogPreferences] = persisted(
+    Persist.global("blueprint-agent-panel-test-log.v1"),
+    createStore({ enabled: true }),
+  )
   const [drag, setDrag] = createSignal<DragState>()
   const [connection, setConnection] = createSignal<ConnectionState>()
   const [agentPanelPress, setAgentPanelPress] = createSignal<AgentPanelPressState>()
@@ -714,6 +722,7 @@ export function BlueprintSidePanel(props: {
     streamEvents: {},
     streamCursor: 0,
   })
+  const agentPanelTestLogActive = () => testLogPreferences.enabled !== false && Boolean(platform.saveBlueprintAgentPanelTest)
   const [panelMode, setPanelMode] = createSignal<RuntimePanelMode | undefined>("runtime")
   const runtimePanelOpen = () => panelMode() === "runtime"
   const [workspacePanelArea, setWorkspacePanelArea] = createSignal<WorkspacePanelArea>()
@@ -754,8 +763,14 @@ export function BlueprintSidePanel(props: {
   let applyingRemote = false
 
   onCleanup(() => {
-    for (const timer of Object.values(testAgentPersistTimers)) {
-      if (timer) clearTimeout(timer)
+    clearAgentPanelTestPersistTimers()
+  })
+
+  createEffect(() => {
+    if (agentPanelTestLogActive()) return
+    clearAgentPanelTestPersistTimers()
+    for (const nodeId of Object.keys(agentPanel.panels)) {
+      if (agentPanel.panels[nodeId]?.testJsonPending) setAgentPanel("panels", nodeId, "testJsonPending", false)
     }
   })
 
@@ -789,11 +804,6 @@ export function BlueprintSidePanel(props: {
       kind: "agent" as const,
       label: language.t("blueprint.node.agent"),
       description: language.t("blueprint.add.agent.description"),
-    },
-    {
-      kind: "test-agent" as const,
-      label: "测试节点",
-      description: "实时记录 Agent 信息面板数据",
     },
     {
       kind: "route-sequence" as const,
@@ -1985,8 +1995,28 @@ export function BlueprintSidePanel(props: {
   }
 
   function scheduleOpenTestAgentPanelPersists() {
+    if (!agentPanelTestLogActive()) return
     for (const panel of Object.values(agentPanel.panels)) {
-      if (isTestAgentNode(draft.graph.agent_nodes[panel.nodeId])) scheduleTestAgentPanelPersist(panel.nodeId)
+      if (draft.graph.agent_nodes[panel.nodeId]) scheduleTestAgentPanelPersist(panel.nodeId)
+    }
+  }
+
+  function setAgentPanelTestLogEnabled(enabled: boolean) {
+    setTestLogPreferences("enabled", enabled)
+    if (enabled) scheduleOpenTestAgentPanelPersists()
+    else clearAgentPanelTestPersistTimers()
+  }
+
+  function clearAgentPanelTestPersistTimer(nodeId: string) {
+    const timer = testAgentPersistTimers[nodeId]
+    if (!timer) return
+    clearTimeout(timer)
+    testAgentPersistTimers[nodeId] = undefined
+  }
+
+  function clearAgentPanelTestPersistTimers() {
+    for (const nodeId of Object.keys(testAgentPersistTimers)) {
+      clearAgentPanelTestPersistTimer(nodeId)
     }
   }
 
@@ -2010,9 +2040,12 @@ export function BlueprintSidePanel(props: {
   }
 
   function scheduleTestAgentPanelPersist(nodeId: string, opts: { immediate?: boolean } = {}) {
-    if (!platform.saveBlueprintAgentPanelTest) return
+    if (!agentPanelTestLogActive()) {
+      clearAgentPanelTestPersistTimer(nodeId)
+      return
+    }
     const node = draft.graph.agent_nodes[nodeId]
-    if (!isTestAgentNode(node)) return
+    if (!node) return
     const panel = agentPanel.panels[nodeId]
     if (!panel) return
     if (testAgentPersistTimers[nodeId]) {
@@ -2033,7 +2066,7 @@ export function BlueprintSidePanel(props: {
   async function persistTestAgentPanelSnapshot(nodeId: string) {
     const node = draft.graph.agent_nodes[nodeId]
     const panel = agentPanel.panels[nodeId]
-    if (!node || !panel || !isTestAgentNode(node) || !platform.saveBlueprintAgentPanelTest) return
+    if (!node || !panel || !agentPanelTestLogActive() || !platform.saveBlueprintAgentPanelTest) return
     if (testAgentPersistRunning[nodeId]) {
       testAgentPersistQueued[nodeId] = true
       return
@@ -2143,7 +2176,7 @@ export function BlueprintSidePanel(props: {
   async function openAgentPanel(nodeId: string, pinned = false) {
     const existing = agentPanel.panels[nodeId]
     const node = draft.graph.agent_nodes[nodeId]
-    const testAgent = isTestAgentNode(node)
+    const testLogActive = agentPanelTestLogActive() && Boolean(node)
     const size = agentPanelSize(existing)
     const position = agentPanelPosition(nodeId, size.width, size.height)
     setAgentPanel("panels", nodeId, {
@@ -2159,12 +2192,12 @@ export function BlueprintSidePanel(props: {
       info: existing?.info,
       userMessages: existing?.userMessages ?? [],
       testJsonPath: existing?.testJsonPath,
-      testJsonPending: testAgent && Boolean(platform.saveBlueprintAgentPanelTest),
+      testJsonPending: testLogActive,
       testJsonError: undefined,
     })
-    if (testAgent) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+    if (testLogActive) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
     await refreshAgentPanelInfo(runtime().runId, nodeId)
-    if (testAgent) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+    if (testLogActive) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
   }
 
   function cancelAgentPanelLongPress() {
@@ -2275,7 +2308,7 @@ export function BlueprintSidePanel(props: {
       if (patch && updateAgentPanelUserMessageByRuntimeMessageId(nodeId, runtimeMessageId, patch)) changedNodes.add(nodeId)
     }
     for (const nodeId of changedNodes) {
-      if (isTestAgentNode(draft.graph.agent_nodes[nodeId])) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
+      if (draft.graph.agent_nodes[nodeId]) scheduleTestAgentPanelPersist(nodeId, { immediate: true })
     }
   }
 
@@ -2296,7 +2329,7 @@ export function BlueprintSidePanel(props: {
       patch = { status: "running", runtimeStatus: agentState }
     }
     if (patch && updateAgentPanelUserMessageByRuntimeMessageId(nodeId, runtimeMessageId, patch)) {
-      if (isTestAgentNode(draft.graph.agent_nodes[nodeId])) scheduleTestAgentPanelPersist(nodeId)
+      if (draft.graph.agent_nodes[nodeId]) scheduleTestAgentPanelPersist(nodeId)
     }
   }
 
@@ -2305,7 +2338,7 @@ export function BlueprintSidePanel(props: {
     const runId = runtime().runId
     if (!panel || !runId || !platform.queueBlueprintAgentMessage) return
     const text = panel.input
-    const testAgent = isTestAgentNode(draft.graph.agent_nodes[nodeId])
+    const testLogActive = agentPanelTestLogActive() && Boolean(draft.graph.agent_nodes[nodeId])
     const messageId = `user-msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     appendAgentPanelUserMessage({
       id: messageId,
@@ -2316,7 +2349,7 @@ export function BlueprintSidePanel(props: {
       status: "queued",
       created_at: new Date().toISOString(),
     })
-    if (testAgent) {
+    if (testLogActive) {
       scheduleTestAgentPanelPersist(nodeId, { immediate: true })
     }
     setAgentPanel("panels", nodeId, "sending", true)
@@ -2331,7 +2364,7 @@ export function BlueprintSidePanel(props: {
         sent_at: new Date().toISOString(),
       })
       syncAgentPanelUserMessagesFromRuntimeEvents(arrayOfRecords(asRecord(queued.status)?.recent_events))
-      if (testAgent) {
+      if (testLogActive) {
         scheduleTestAgentPanelPersist(nodeId, { immediate: true })
       }
       setAgentPanel("panels", nodeId, "input", "")
@@ -2343,13 +2376,13 @@ export function BlueprintSidePanel(props: {
         failed_at: new Date().toISOString(),
         error: message,
       })
-      if (testAgent) {
+      if (testLogActive) {
         scheduleTestAgentPanelPersist(nodeId, { immediate: true })
       }
       setAgentPanel("panels", nodeId, "error", message)
     } finally {
       setAgentPanel("panels", nodeId, "sending", false)
-      if (testAgent) scheduleTestAgentPanelPersist(nodeId)
+      if (testLogActive) scheduleTestAgentPanelPersist(nodeId)
     }
   }
 
@@ -2883,6 +2916,27 @@ export function BlueprintSidePanel(props: {
               />
             </Show>
           </div>
+          <Show when={platform.saveBlueprintAgentPanelTest}>
+            <Tooltip
+              placement="bottom"
+              value={testLogPreferences.enabled !== false ? "Agent panel test log on" : "Agent panel test log off"}
+            >
+              <div
+                data-blueprint-test-log-toggle
+                data-enabled={testLogPreferences.enabled !== false}
+                class="flex h-7 shrink-0 items-center gap-1 rounded-sm px-2 text-text-base hover:bg-surface-base-hover"
+              >
+                <Icon size="small" name="status" class="text-icon-weak" />
+                <ToggleSwitch
+                  checked={testLogPreferences.enabled !== false}
+                  onChange={setAgentPanelTestLogEnabled}
+                  hideLabel
+                >
+                  Agent panel test log
+                </ToggleSwitch>
+              </div>
+            </Tooltip>
+          </Show>
           <Tooltip placement="bottom" value={language.t("blueprint.diff.title" as never)}>
             <Button
               data-blueprint-diff-toggle
@@ -3108,6 +3162,7 @@ export function BlueprintSidePanel(props: {
                 node={draft.graph.agent_nodes[panel.nodeId]}
                 runId={runtime().runId}
                 runtimeStatus={runtimeStatus(runtime().status)}
+                testLogActive={agentPanelTestLogActive()}
                 events={agentPanel.streamEvents[panel.nodeId] ?? []}
                 onClose={() => closeAgentPanel(panel.nodeId)}
                 onPin={() => setAgentPanel("panels", panel.nodeId, "pinned", !panel.pinned)}
@@ -4275,6 +4330,7 @@ function AgentInfoPanel(props: {
   node?: BlueprintAgentNode
   runId?: string
   runtimeStatus?: string
+  testLogActive: boolean
   events: AgentStreamEvent[]
   onClose: () => void
   onPin: () => void
@@ -4292,7 +4348,7 @@ function AgentInfoPanel(props: {
   const statusField = (key: string) => latestStatusRecord()?.[key] ?? runtime()?.[key]
   const testMode = createMemo(() => Boolean(props.panel.info?.testMode))
   const testAgentRecording = createMemo(
-    () => isTestAgentNode(props.node) || testMode() || Boolean(props.panel.testJsonPath) || Boolean(props.panel.testJsonPending),
+    () => props.testLogActive || testMode() || Boolean(props.panel.testJsonPath) || Boolean(props.panel.testJsonPending),
   )
   const testJsonPath = createMemo(() => {
     const path = props.panel.testJsonPath ?? props.panel.info?.jsonPath
@@ -4697,13 +4753,6 @@ function BlueprintNodeView(props: {
         icon: "#7dd3fc",
       }
     }
-    if (props.item.type === "agent" && isTestAgentNode(props.item.node)) {
-      return {
-        background: "linear-gradient(135deg, rgba(51, 48, 25, 0.98), rgba(13, 28, 30, 0.98))",
-        border: props.selected ? "rgba(250, 204, 21, 0.94)" : "rgba(250, 204, 21, 0.5)",
-        icon: "#facc15",
-      }
-    }
     return {
       background: "linear-gradient(135deg, rgba(25, 39, 62, 0.98), rgba(10, 20, 34, 0.98))",
       border: props.selected ? "rgba(103, 232, 249, 0.96)" : "rgba(99, 179, 215, 0.46)",
@@ -4926,6 +4975,13 @@ export function BlueprintInspector(props: {
                 value={props.selectedAgent?.prompt ?? ""}
                 multiline
                 onChange={(value) => updateAgentField("prompt", value)}
+              />
+              <InspectorTextField
+                tip="runPrompt"
+                label={language.t("blueprint.field.runPrompt")}
+                value={props.selectedAgent?.run_prompt ?? ""}
+                multiline
+                onChange={(value) => updateAgentField("run_prompt", value)}
               />
               <SelectField
                 tip="executionMode"
@@ -5699,7 +5755,6 @@ function InspectorTipButton(props: { label: string; tip: InspectorTipKey; placem
 
 function nodeTitle(t: (key: never, params?: Record<string, string | number | boolean>) => string, item: NodeItem) {
   if (item.type === "terminal") return item.kind === "start" ? t("blueprint.node.start" as never) : t("blueprint.node.end" as never)
-  if (item.type === "agent" && isTestAgentNode(item.node)) return "测试节点"
   return item.id
 }
 
@@ -5712,10 +5767,6 @@ function nodeSubtitle(t: (key: never, params?: Record<string, string | number | 
 function routeLabelKey(routeKind: string) {
   if (routeKind === "parallel_reduce") return "parallelReduce"
   return routeKind
-}
-
-function isTestAgentNode(node?: BlueprintAgentNode) {
-  return node?.adapter_options?.[TEST_AGENT_NODE_FLAG] === true
 }
 
 function addNodeIcon(kind: BlueprintAddNodeKind): "blueprint" | "branch" | "selector" {

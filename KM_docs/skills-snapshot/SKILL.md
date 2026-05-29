@@ -87,6 +87,24 @@ Read these first based on the task:
 
 ## Recent Handoff
 
+For the latest Blueprint Agent model/runtime cleanup from 2026-05-29:
+
+- Test Agent merge into normal Agent UI, global Agent panel JSON test-log
+  switch, Agent `简介` / `提示词` split, and frontend tests:
+  `archive/frontend/blueprint_agent_prompt_log_cleanup_2026-05-29.md`
+- Hidden Windows worker/adapter launches and per-run `run_prompt` runtime
+  injection:
+  `archive/runtime-backend/blueprint_hidden_console_run_prompt_2026-05-29.md`
+
+Use those files when the user reports:
+
+- Test Agent nodes or yellow test styling still appear in the Blueprint UI
+- Agent panel test JSON snapshots are missing, unexpectedly produced, or need
+  the global switch behavior checked
+- Agent inspector `简介` / `提示词` behavior is unclear
+- Blueprint startup opens visible terminal windows
+- `run_prompt` is injected repeatedly or not injected on first dispatch
+
 For the latest Collaboration Server `/mobile` desktop-bridge work from
 2026-05-29:
 

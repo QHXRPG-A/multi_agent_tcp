@@ -17,13 +17,13 @@ GuLiCode 桌面负责用户入口、蓝图编排体验和 Top Agent 规划；`Gr
 
 ### 蓝图框架分层
 
-![蓝图框架分层图](docs/diagrams/blueprint_framework_layers.png)
+<img src="docs/diagrams/blueprint_framework_layers.png" alt="蓝图框架分层图" width="92">
 
 产品入口在 GuLiCode 桌面和蓝图工作台，调度事实在 Python runtime，底层 CLI worker 不拥有产品调度语义。
 
 ### Agents 三区协同办公
 
-![Agents 三区协同办公图](docs/diagrams/agents_collaboration_three_zones.png)
+<img src="docs/diagrams/agents_collaboration_three_zones.png" alt="Agents 三区协同办公图" width="261">
 
 普通 Agents 围绕三个区协作：
 

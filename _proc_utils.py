@@ -6,11 +6,29 @@ import logging
 import os
 import subprocess
 import sys
-from typing import Optional
+from typing import Any, Dict
 
 log = logging.getLogger(__name__)
 
 _IS_WIN = sys.platform == "win32"
+
+
+def hidden_subprocess_kwargs(*, detached: bool = False) -> Dict[str, Any]:
+    """Return Popen kwargs that keep Windows console subprocesses hidden."""
+    if not _IS_WIN:
+        return {}
+
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    if detached:
+        flags |= getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+
+    startupinfo = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore[attr-defined]
+    startupinfo.wShowWindow = subprocess.SW_HIDE  # type: ignore[attr-defined]
+    return {
+        "creationflags": flags,
+        "startupinfo": startupinfo,
+    }
 
 
 def kill_process_tree(pid: int, timeout: float = 10.0) -> None:

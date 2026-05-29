@@ -42,6 +42,7 @@ describe("blueprint draft model", () => {
       cwd: ".",
       timeout_sec: 1800,
       prompt_via_file: "auto",
+      run_prompt: "",
       command: "codemaker",
       external: false,
       skill_selection: { mode: "none" },
@@ -75,37 +76,34 @@ describe("blueprint draft model", () => {
     expect(draft.inspector).toEqual({ type: "node", id: "coder-1" })
   })
 
-  test("adds test agent nodes as a Codex panel-inspection preset", () => {
+  test("adds test-agent compatibility nodes as ordinary agent nodes", () => {
     const draft = addTestAgentNode(createDefaultBlueprintDraft(), {
       position: { x: 10, y: 20 },
     })
 
-    expect(draft.graph.agent_nodes["test-agent"]).toMatchObject({
-      node_id: "test-agent",
-      agent_id: "agent-test-agent",
-      cli_kind: "codex",
-      model: "gpt-5.4",
-      command: "codex",
+    expect(draft.graph.agent_nodes.agent).toMatchObject({
+      node_id: "agent",
+      agent_id: "agent-agent",
+      cli_kind: "codemaker",
+      model: "netease-codemaker/kimi-k2.5",
+      command: "codemaker",
       timeout_sec: 1800,
-      adapter_options: { [TEST_AGENT_NODE_FLAG]: true, skip_git_repo_check: true },
+      adapter_options: {},
       write_scope: ["**"],
     })
-    expect(draft.layout.nodes["test-agent"]).toEqual({ x: 0, y: 24 })
-    expect(draft.selection).toEqual({ type: "node", id: "test-agent" })
-    expect(draft.inspector).toEqual({ type: "node", id: "test-agent" })
+    expect(draft.graph.agent_nodes.agent?.adapter_options[TEST_AGENT_NODE_FLAG]).toBeUndefined()
+    expect(draft.layout.nodes.agent).toEqual({ x: 0, y: 24 })
+    expect(draft.selection).toEqual({ type: "node", id: "agent" })
+    expect(draft.inspector).toEqual({ type: "node", id: "agent" })
 
     const viaGenericAdd = addNode(draft, { kind: "test-agent" })
-    expect(viaGenericAdd.graph.agent_nodes["test-agent-1"]?.adapter_options[TEST_AGENT_NODE_FLAG]).toBe(true)
-
-    const legacyTestAgent = addTestAgentNode(createDefaultBlueprintDraft())
-    const legacyNode = legacyTestAgent.graph.agent_nodes["test-agent"]
-    if (legacyNode) {
-      delete legacyNode.adapter_options.skip_git_repo_check
-      legacyNode.timeout_sec = 60
-    }
-    const runtime = toRuntimeGraphDraft(legacyTestAgent)
-    expect(runtime.agent_nodes["test-agent"]?.adapter_options.skip_git_repo_check).toBe(true)
-    expect(runtime.agent_nodes["test-agent"]?.timeout_sec).toBe(1800)
+    expect(viaGenericAdd.graph.agent_nodes["agent-1"]).toMatchObject({
+      node_id: "agent-1",
+      agent_id: "agent-agent-1",
+      cli_kind: "codemaker",
+      adapter_options: {},
+    })
+    expect(viaGenericAdd.graph.agent_nodes["agent-1"]?.adapter_options[TEST_AGENT_NODE_FLAG]).toBeUndefined()
   })
 
   test("migrates legacy report-only write scope to project-wide default", () => {
@@ -183,6 +181,7 @@ describe("blueprint draft model", () => {
       skills: ["multi-agent-tcp", "python-lint-check"],
       skill_selection: { mode: "none" },
       rule_paths: ["F:\\rules\\agent.md", "F:\\rules\\review.yaml"],
+      run_prompt: "Always inspect the current checkout before editing.",
       read_scope: parseScopeText("docs/**, README.md\nnotes/**"),
       adapter_options: { sandbox: "workspace-write" },
       extra_env: { GULI: "1" },
@@ -199,6 +198,7 @@ describe("blueprint draft model", () => {
       skill_hashes: ["multi-agent-tcp", "python-lint-check"],
     })
     expect(graph.agent_nodes.planner.rule_paths).toEqual(["F:\\rules\\agent.md", "F:\\rules\\review.yaml"])
+    expect(graph.agent_nodes.planner.run_prompt).toBe("Always inspect the current checkout before editing.")
     expect(graph.agent_nodes.planner.read_scope).toEqual(["docs/**", "README.md", "notes/**"])
     expect(graph.agent_nodes.planner.adapter_options).toEqual({ sandbox: "workspace-write" })
     expect(graph.agent_nodes.planner.extra_env).toEqual({ GULI: "1" })
@@ -358,6 +358,19 @@ describe("blueprint draft model", () => {
     expect(plan.start_nodes).toEqual(["planner", "coder", "research"])
     expect(Object.keys(plan.tasks)).toEqual(["planner", "coder", "research"])
     expect(plan.tasks.planner.goal).toBe("Build the requested feature.")
+  })
+
+  test("uses agent prompt as description while keeping run prompt out of start plans", () => {
+    const draft = updateAgentNode(createDefaultBlueprintDraft(), "planner", {
+      prompt: "Plan the work and delegate clearly.",
+      run_prompt: "Never expose this per-run instruction in the start plan.",
+    })
+
+    const plan = createBlueprintStartPlan(draft, { startNodes: ["planner"] })
+
+    expect(plan.agent_descriptions.planner).toBe("Plan the work and delegate clearly.")
+    expect(plan.tasks.planner.goal).toBe("Plan the work and delegate clearly.")
+    expect(JSON.stringify(plan)).not.toContain("Never expose this per-run instruction")
   })
 
   test("start plan has no tasks when no start terminal reaches an agent", () => {

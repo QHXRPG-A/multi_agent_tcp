@@ -43,6 +43,7 @@ export type BlueprintAgentNode = {
   node_id: string
   agent_id?: string
   prompt: string
+  run_prompt: string
   execution_mode: BlueprintExecutionMode
   cli_kind: string
   model: string
@@ -438,8 +439,7 @@ export function addNode(
     position?: BlueprintNodeLayout
   },
 ) {
-  if (input.kind === "agent") return addAgentNode(draft, input)
-  if (input.kind === "test-agent") return addTestAgentNode(draft, input)
+  if (input.kind === "agent" || input.kind === "test-agent") return addAgentNode(draft, input)
   if (input.kind === "start" || input.kind === "end") return addTerminalNode(draft, input.kind, input)
   return addRouteNode(draft, routeKindFromAddKind(input.kind), input)
 }
@@ -471,24 +471,7 @@ export function addTestAgentNode(
     position?: BlueprintNodeLayout
   } = {},
 ) {
-  const next = cloneBlueprintDraft(draft)
-  const node_id = uniqueNodeId(next, input.node_id ?? "test-agent")
-  next.graph.agent_nodes[node_id] = {
-    ...createAgentNode({
-      node_id,
-      agent_id: `agent-${node_id}`,
-      prompt: "Display sample Agent information panel content for UI testing.",
-    }),
-    cli_kind: "codex",
-    model: defaultModelForCliKind("codex"),
-    command: defaultCommandForCliKind("codex"),
-    timeout_sec: TEST_AGENT_TIMEOUT_SEC,
-    adapter_options: { [TEST_AGENT_NODE_FLAG]: true, skip_git_repo_check: true },
-  }
-  next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
-  next.selection = { type: "node", id: node_id }
-  next.inspector = { type: "node", id: node_id }
-  return next
+  return addAgentNode(draft, input)
 }
 
 export function addRouteNode(
@@ -853,6 +836,7 @@ function createAgentNode(input: {
   node_id: string
   agent_id: string
   prompt: string
+  run_prompt?: string
   write_scope?: string[]
   artifact_scope?: string[]
 }): BlueprintAgentNode {
@@ -860,6 +844,7 @@ function createAgentNode(input: {
     node_id: input.node_id,
     agent_id: input.agent_id,
     prompt: input.prompt,
+    run_prompt: input.run_prompt ?? "",
     execution_mode: "blocking",
     cli_kind: "codemaker",
     model: DEFAULT_MODEL,
@@ -895,6 +880,7 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
     node_id: id,
     agent_id: node.agent_id ?? `agent-${id}`,
     prompt: node.prompt ?? "Describe this agent's work.",
+    run_prompt: node.run_prompt ?? "",
   })
   const skills = [...(node.skills ?? node.skill_selection?.skill_hashes ?? defaults.skills)]
   const skillSelection = normalizeSkillSelection(node.skill_selection ?? defaults.skill_selection, skills)
@@ -919,6 +905,7 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
     ...defaults,
     ...node,
     node_id: id,
+    run_prompt: String(node.run_prompt ?? defaults.run_prompt),
     skills,
     skill_selection: skillSelection,
     rule_paths: [...(node.rule_paths ?? defaults.rule_paths)],

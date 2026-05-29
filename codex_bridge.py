@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from ._proc_utils import async_kill_process_tree
+from ._proc_utils import async_kill_process_tree, hidden_subprocess_kwargs
 
 log = logging.getLogger(__name__)
 
@@ -709,6 +709,7 @@ async def codex_run(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=child_env,
+        **hidden_subprocess_kwargs(),
     )
     timeout = codex_cfg.get("timeout_sec")
 
