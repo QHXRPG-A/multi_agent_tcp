@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron"
 import type {
   BlueprintWindowContext,
   BlueprintWindowPlanningSubmitRequest,
+  DesktopControlBridgeCommandRequest,
   ElectronAPI,
   InitStep,
   SqliteMigrationProgress,
@@ -61,6 +62,10 @@ const api: ElectronAPI = {
   blueprintStatus: (runId) => ipcRenderer.invoke("blueprint-status", runId),
   blueprintRunDiff: (runId) => ipcRenderer.invoke("blueprint-run-diff", runId),
   blueprintChangesetDiff: (runId, changesetId) => ipcRenderer.invoke("blueprint-changeset-diff", runId, changesetId),
+  blueprintRollbackChangesets: (runId, toChangesetId, reason) =>
+    ipcRenderer.invoke("blueprint-rollback-changesets", runId, toChangesetId, reason),
+  blueprintRestoreRollback: (runId, rollbackId, reason) =>
+    ipcRenderer.invoke("blueprint-restore-rollback", runId, rollbackId, reason),
   blueprintEnd: (runId, action, reason) => ipcRenderer.invoke("blueprint-end", runId, action, reason),
   blueprintRecentEvents: (runId, limit) => ipcRenderer.invoke("blueprint-recent-events", runId, limit),
   blueprintAgentInfo: (runId, nodeId) => ipcRenderer.invoke("blueprint-agent-info", runId, nodeId),
@@ -142,6 +147,14 @@ const api: ElectronAPI = {
   checkUpdate: () => ipcRenderer.invoke("check-update"),
   installUpdate: () => ipcRenderer.invoke("install-update"),
   setBackgroundColor: (color: string) => ipcRenderer.invoke("set-background-color", color),
+  getDesktopControlBridge: () => ipcRenderer.invoke("desktop-control-bridge-info"),
+  respondDesktopControlBridgeCommand: (requestId, response) =>
+    ipcRenderer.invoke("desktop-control-bridge-command-response", requestId, response),
+  onDesktopControlBridgeCommand: (cb) => {
+    const handler = (_: unknown, request: DesktopControlBridgeCommandRequest) => cb(request)
+    ipcRenderer.on("desktop-control-bridge-command", handler)
+    return () => ipcRenderer.removeListener("desktop-control-bridge-command", handler)
+  },
 }
 
 contextBridge.exposeInMainWorld("api", api)

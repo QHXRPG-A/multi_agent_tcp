@@ -58,7 +58,13 @@ describe("blueprint project persistence source", () => {
 describe("blueprint runtime source", () => {
   test("submits runtime tasks through blueprint planning after saving the project document", async () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const snapshotSource = source.slice(source.indexOf("function createDesktopBlueprintSnapshot"), source.indexOf("function desktopSnapshotNodeState"))
 
+    expect(source).toContain("BlueprintCollaborationAuthPanel")
+    expect(source).toContain('<BlueprintCollaborationAuthPanel defaultUsername="1" />')
+    expect(snapshotSource).toContain("const layout = draft.layout.nodes[id]")
+    expect(snapshotSource).toContain("x: layout?.x")
+    expect(snapshotSource).toContain("y: layout?.y")
     expect(source).toContain("const startDraft = await ensureDetectedPythonPath()")
     expect(source).toContain("validateBlueprintConfigForStart(startDraft)")
     expect(source).toContain("BlueprintConfigRequiredDialog")
@@ -605,8 +611,15 @@ describe("blueprint runtime source", () => {
     expect(overlaySelectorIndex).toBeGreaterThan(overlayMountIndex)
     expect(source).toContain("platform.blueprintRunDiff")
     expect(source).toContain("platform.blueprintChangesetDiff")
+    expect(source).toContain("platform.rollbackBlueprintChangesets")
+    expect(source).toContain("platform.restoreBlueprintRollback")
     expect(source).toContain("data-blueprint-diff-changeset")
     expect(source).toContain("data-blueprint-diff-detail")
+    expect(source).toContain("onRollbackChangeset")
+    expect(source).toContain("onRestoreRollback")
+    expect(source).toContain("rollbackable")
+    expect(source).toContain("blueprint.diff.status.rolledBack")
+    expect(source).toContain("blueprint.diff.restoreRollback")
     expect(source).toContain("blueprintAgentColor")
     expect(source).toContain("workspace.diff.changed")
     expect(source).toContain("acceptedDiffs")
@@ -626,5 +639,17 @@ describe("blueprint runtime source", () => {
     expect(sessionSource).toContain("blueprintPlanningActiveRun={blueprintPlanning.activeRun}")
     expect(sessionSidePanelSource).toContain("onBlueprintDiffChanged={props.onBlueprintDiffChanged}")
     expect(source).not.toContain("view().reviewPanel.open()")
+  })
+
+  test("toggles blueprint changeset details and renders rolled back patches without diff coloring", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+
+    expect(source).toContain("if (blueprintDiffSelectedChangesetId() === changesetId)")
+    expect(source).toContain("setBlueprintDiffSelectedChangesetId(undefined)")
+    expect(source).toContain('aria-expanded={props.selectedChangesetId === changeset.changesetId}')
+    expect(source).toContain('tone={changeset.status === "rolled_back" ? "neutral" : "diff"}')
+    expect(source).toContain('function blueprintPatchLineClass(line: string, tone: "diff" | "neutral" = "diff")')
+    expect(source).toContain('if (tone === "neutral") return "text-[#cbd5e1]"')
+    expect(source).toContain("blueprint.diff.noTextDiff")
   })
 })

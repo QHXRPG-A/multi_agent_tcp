@@ -143,6 +143,14 @@ export class BlueprintRuntime {
     return this.request("blueprint.changesetDiff", { runId, changesetId })
   }
 
+  rollbackChangesets(runId: string, toChangesetId: string, reason?: string) {
+    return this.request("blueprint.rollbackChangesets", { runId, toChangesetId, reason })
+  }
+
+  restoreRollback(runId: string, rollbackId?: string, reason?: string) {
+    return this.request("blueprint.restoreRollback", { runId, rollbackId, reason })
+  }
+
   end(runId: string, action: BlueprintRunEndAction, reason?: string) {
     return this.request("blueprint.end", { runId, action, reason })
   }

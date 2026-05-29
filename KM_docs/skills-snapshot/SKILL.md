@@ -81,8 +81,25 @@ Read these first based on the task:
   `environment_setup.md`
 - Current active priorities:
   `tasks/current_goals.md`
+- Debug start workflow for desktop + Collaboration Server + mock mobile +
+  server console:
+  `knowledge_base/debug_start.md`
 
 ## Recent Handoff
+
+For the latest Collaboration Server `/mobile` desktop-bridge work from
+2026-05-29:
+
+- Account-level desktop bridge, mobile chat, composer mode sync, structured
+  segments, and tick/scroll fixes:
+  `archive/future-server/collaboration_server_desktop_bridge_mobile_chat_2026-05-29.md`
+
+Use that file when the user reports:
+
+- mobile chat send reaches desktop but does not appear on `/mobile`
+- `/mobile` mode selector is missing desktop agents or `蓝图规划`
+- reasoning/tool disclosures close, resize, or jump scroll during tick refresh
+- desktop session mirror or `desktop.session.submit` behavior is unclear
 
 For the latest blueprint panel work from 2026-05-25:
 
@@ -119,6 +136,9 @@ files for implementation decisions unless an archive is explicitly called out.
   read `environment_setup.md`.
 - GuLiCode startup, one-click launcher, packaged bring-up, taskbar icon, and
   direct Electron fallback: read `knowledge_base/gulicode_desktop.md`.
+- When the user says `调试启动`: read `knowledge_base/debug_start.md`, then
+  start GuLiCode desktop, the Collaboration Server, the mock mobile `/mobile`
+  client, and the `/console` server console.
 - Desktop UI ownership, branding, icon replacement, empty-state wording,
   blueprint entry placement, and blueprint workbench embedding:
   read `knowledge_base/guli_desktop_ui.md`, then

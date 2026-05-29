@@ -11,7 +11,7 @@ GuLiCode 桌面 / Top Agent / 蓝图工作台
   -> Codex / CodeMaker 等 CLI worker
 ```
 
-GuLiCode 桌面负责用户入口、蓝图编排体验和 Top Agent 规划；`GraphRuntimeControlPlane` 与 `GraphRuntime` 负责框架事实、调度和生命周期；`CLIWorkerBackend` 只是执行适配层，用来在需要模型工作时启动具体 CLI worker。
+GuLiCode 桌面负责用户入口、蓝图编排体验和 Top Agent 规划；`GraphRuntimeControlPlane` 与 `GraphRuntime` 负责框架事实、调度和生命周期；`CLIWorkerBackend` 是执行适配层，用来在需要模型工作时启动具体 CLI worker。
 
 ## 架构图
 
@@ -19,13 +19,13 @@ GuLiCode 桌面负责用户入口、蓝图编排体验和 Top Agent 规划；`Gr
 
 ![蓝图框架分层图](docs/diagrams/blueprint_framework_layers.png)
 
-这张图说明每一层的职责边界：产品入口在 GuLiCode 桌面和蓝图工作台，调度事实在 Python runtime，底层 CLI worker 不拥有产品调度语义。
+产品入口在 GuLiCode 桌面和蓝图工作台，调度事实在 Python runtime，底层 CLI worker 不拥有产品调度语义。
 
 ### Agents 三区协同办公
 
 ![Agents 三区协同办公图](docs/diagrams/agents_collaboration_three_zones.png)
 
-这张图说明普通 Agents 如何围绕三个区协作：
+普通 Agents 围绕三个区协作：
 
 - `工程目录`：权威代码源和最终代码目标。Agent 可以读取，但不能直接写。
 - `Agent 私有区`：每个 Agent 的可写 `checkout_path`，真实代码改动在这里完成。
@@ -42,17 +42,43 @@ GuLiCode 桌面负责用户入口、蓝图编排体验和 Top Agent 规划；`Gr
 - Workspace 三个区：工程目录只读给 Agent，Agent 私有区可写，运行共享区沉淀报告、产物、manifest、changeset 和冲突记录。
 - MCP 工具边界：live blueprint run 可启动 run-scoped MCP 服务，为普通 Agent 和 Top Agent 暴露不同工具集合。
 - Codex-first 适配：当前 live Agent 主线优先使用 Codex CLI；CodeMaker 保留为兼容和备选路径。
+- 本地 Collaboration Server：支持 GuLiCode desktop、`/mobile` 和 `/console` 的账号级协作调试；同账号允许多个移动端连接一个唯一桌面端。
+
+## 环境要求
+
+当前本机已验证的基础环境：
+
+```powershell
+python --version      # Python 3.13.5
+git --version         # git version 2.54.0.windows.1
+node --version        # v24.15.0
+bun --version         # 1.3.13
+codex.cmd --version   # codex-cli 0.125.0
+```
+
+新机器至少需要安装：
+
+- Python 3.10+。
+- Git for Windows。
+- Bun 1.3.x；`GuLiCode/package.json` 当前声明 `bun@1.3.11`，本机使用 `1.3.13`。
+- Node.js 22+，用于 JS/Electron 生态工具。
+- Codex CLI，用于真实 Codex worker；PowerShell 策略阻止 `codex.ps1` 时使用 `codex.cmd`。
+- GuLiCode JS 依赖：`cd GuLiCode; bun install --frozen-lockfile`。
+- Playwright Chromium，用于浏览器/e2e 烟测：`cd GuLiCode\packages\app; bunx playwright install chromium`。
+
+更完整的路径、依赖版本、Windows 代理和 packaging 注意事项见 `KM_docs/environment_setup.md`。
 
 ## 快速开始
 
 ### Python 运行时
 
-建议使用 Python 3.10+，在本仓库根目录安装 editable package：
+在仓库根目录安装 editable package 和常用测试辅助依赖：
 
 ```powershell
 python -m pip install -e .
-multi-agent-tcp doctor --json
-multi-agent-tcp show-registry
+python -m pip install pytest merge3
+python -m multi_agent_tcp doctor --json
+python -m multi_agent_tcp show-registry
 ```
 
 也可以从本目录的上一级用模块方式运行：
@@ -69,6 +95,14 @@ Windows 推荐入口：
 ```powershell
 .\start-gulicode-desktop.cmd
 ```
+
+本地协作调试入口：
+
+```powershell
+.\start-gulicode-debug.cmd
+```
+
+该脚本会幂等检查并启动 Collaboration Server `127.0.0.1:8787`、GuLiCode app dev server `127.0.0.1:3040`、桌面端/sidecar，并打开 `http://127.0.0.1:3040/mobile` 与 `http://127.0.0.1:3040/console`。
 
 跨平台终端入口：
 
@@ -115,6 +149,16 @@ bun test --preload ./happydom.ts ./src/pages/session/blueprint-side-panel.test.t
 bun run typecheck
 ```
 
+移动端/协作调试相关验证：
+
+```powershell
+python -m pytest -q test_collaboration_server.py
+
+cd GuLiCode\packages\app
+bun test --preload ./happydom.ts ./src/mobile ./src/components/collaboration-auth.test.ts ./src/pages/session/blueprint-planning-session.test.ts
+bun run typecheck
+```
+
 Electron 侧常用验证：
 
 ```powershell
@@ -128,6 +172,7 @@ bun run typecheck
 | 路径 | 说明 |
 | --- | --- |
 | `GuLiCode/` | GuLiCode 桌面产品代码，包含 Electron shell、SolidJS app、OpenCode vendor 基线和桌面启动脚本。 |
+| `collaboration_server/` | 本地 Collaboration Server，提供登录、presence、桌面 bridge、移动端提交、会话镜像和只读管理控制台 API。 |
 | `graph_runtime.py` | 核心运行时：AgentNode 队列、dispatch、join、workspace 状态、事件和最终状态。 |
 | `graph_control.py` | Runtime control-plane 包装层，提供组织读取、start/status/end、message batch、join 等接口。 |
 | `desktop_blueprint_service.py` | GuLiCode 桌面与 Python runtime 之间的服务外壳。 |
@@ -136,8 +181,9 @@ bun run typecheck
 | `codex_bridge.py` / `codemaker_bridge.py` / `cluster.py` | CLI worker 适配和兼容层。新文档中优先使用 `CLIWorkerBackend` 这个语义名。 |
 | `docs/` | 设计文档、Workspace API 说明、蓝图 fixture、架构图。 |
 | `KM_docs/skills-snapshot/` | 当前 Codex skill 知识快照，记录近期架构方向、验证命令和交接状态。 |
+| `start-gulicode-debug.cmd` / `start-gulicode-debug.ps1` | 本地协作调试启动脚本，默认拉起 desktop、`/mobile` 和 `/console`。 |
 | `skill_list/` | 本地 Agent skill 目录，通常由 `python -m multi_agent_tcp.init_skill_list` 初始化。 |
-| `test_*.py` | Python runtime、workspace、desktop service、control-plane 的测试。 |
+| `test_*.py` | Python runtime、workspace、desktop service、control-plane 和 Collaboration Server 的测试。 |
 
 ## 当前边界
 
@@ -152,6 +198,7 @@ bun run typecheck
 
 - `docs/workspace_api.md`：Workspace 三个区、checkout/status/diff/submit/publish 的当前契约。
 - `docs/gulicode_blueprint_workbench_design.md`：GuLiCode 蓝图工作台的产品和技术边界。
+- `KM_docs/environment_setup.md`：当前机器环境、依赖安装、调试启动和 Windows 注意事项。
 - `KM_docs/skills-snapshot/knowledge_base/core_architecture.md`：当前核心架构快照。
 - `KM_docs/skills-snapshot/knowledge_base/dispatch_workflows.md`：runtime control-plane 和消息分发工作流。
 - `KM_docs/skills-snapshot/knowledge_base/gulicode_desktop.md`：GuLiCode 桌面启动、打包和本机验证规则。

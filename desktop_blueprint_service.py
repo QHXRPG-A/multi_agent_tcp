@@ -326,6 +326,7 @@ class DesktopBlueprintService:
     _planning_sessions: Dict[str, DesktopBlueprintPlanningSession] = field(default_factory=dict, init=False, repr=False)
     _async_loop: DesktopAsyncLoop = field(default_factory=DesktopAsyncLoop, init=False, repr=False)
     _stream_tokens: Dict[str, Dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _pending_rollbacks: set[str] = field(default_factory=set, init=False, repr=False)
 
     def handle_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         command = str(payload.get("command", "")).strip()
@@ -405,6 +406,19 @@ class DesktopBlueprintService:
             return self.blueprint_changeset_diff(
                 request_run_id(args),
                 str(args.get("changesetId") or args.get("changeset_id") or "").strip(),
+            )
+        if command == "blueprint.rollbackChangesets":
+            return self.rollback_blueprint_changesets(
+                request_run_id(args),
+                str(args.get("toChangesetId") or args.get("to_changeset_id") or args.get("changesetId") or "").strip(),
+                reason=str(args.get("reason", "")),
+            )
+        if command == "blueprint.restoreRollback":
+            rollback_id = args.get("rollbackId") or args.get("rollback_id")
+            return self.restore_blueprint_rollback(
+                request_run_id(args),
+                rollback_id=str(rollback_id).strip() if rollback_id is not None else None,
+                reason=str(args.get("reason", "")),
             )
         if command == "blueprint.end":
             return self.end_blueprint_run(
@@ -771,6 +785,8 @@ class DesktopBlueprintService:
                         "rejected": 0,
                         "pending": 0,
                         "failed": 0,
+                        "rolledBack": 0,
+                        "restorable": 0,
                         "files": 0,
                         "textFiles": 0,
                         "binaryFiles": 0,
@@ -820,6 +836,132 @@ class DesktopBlueprintService:
             detail["runId"] = run.run_id
             run.updated_at = float(self.now())
             return detail
+
+    def rollback_blueprint_changesets(
+        self,
+        run_id: str,
+        to_changeset_id: str,
+        *,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        if not to_changeset_id:
+            raise BlueprintServiceError("BAD_REQUEST", "toChangesetId must be a non-empty string")
+        with self._lock:
+            run = self._get_run(run_id)
+            self._ensure_rollback_allowed(run)
+            if run.run_id in self._pending_rollbacks:
+                raise BlueprintServiceError(
+                    "ROLLBACK_IN_PROGRESS",
+                    "rollback already in progress for this blueprint run",
+                )
+            self._pending_rollbacks.add(run.run_id)
+        try:
+            with self._lock:
+                run = self._get_run(run_id)
+                source = self._workspace_diff_source(run)
+                if source is None:
+                    raise BlueprintServiceError(
+                        "WORKSPACE_NOT_FOUND",
+                        "blueprint workspace was not found",
+                        status=404,
+                    )
+                manager, workspace_run = source
+                try:
+                    result = manager.rollback_changesets(
+                        workspace_run,
+                        to_changeset_id,
+                        actor="desktop",
+                        reason=reason,
+                    ).to_dict()
+                except FileNotFoundError as exc:
+                    raise BlueprintServiceError(
+                        "CHANGESET_NOT_FOUND",
+                        str(exc),
+                        status=404,
+                    ) from exc
+                run.updated_at = float(self.now())
+                return {
+                    "ok": bool(result.get("ok")),
+                    "runId": run.run_id,
+                    "rollback": result,
+                }
+        finally:
+            with self._lock:
+                self._pending_rollbacks.discard(run_id)
+
+    def restore_blueprint_rollback(
+        self,
+        run_id: str,
+        *,
+        rollback_id: Optional[str] = None,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        with self._lock:
+            run = self._get_run(run_id)
+            self._ensure_rollback_allowed(run)
+            if run.run_id in self._pending_rollbacks:
+                raise BlueprintServiceError(
+                    "ROLLBACK_IN_PROGRESS",
+                    "rollback already in progress for this blueprint run",
+                )
+            self._pending_rollbacks.add(run.run_id)
+        try:
+            with self._lock:
+                run = self._get_run(run_id)
+                source = self._workspace_diff_source(run)
+                if source is None:
+                    raise BlueprintServiceError(
+                        "WORKSPACE_NOT_FOUND",
+                        "blueprint workspace was not found",
+                        status=404,
+                    )
+                manager, workspace_run = source
+                try:
+                    result = manager.restore_latest_rollback(
+                        workspace_run,
+                        rollback_id=rollback_id,
+                        actor="desktop",
+                        reason=reason,
+                    ).to_dict()
+                except FileNotFoundError as exc:
+                    raise BlueprintServiceError(
+                        "CHANGESET_NOT_FOUND",
+                        str(exc),
+                        status=404,
+                    ) from exc
+                run.updated_at = float(self.now())
+                return {
+                    "ok": bool(result.get("ok")),
+                    "runId": run.run_id,
+                    "restore": result,
+                }
+        finally:
+            with self._lock:
+                self._pending_rollbacks.discard(run_id)
+
+    def _ensure_rollback_allowed(self, run: DesktopBlueprintRun) -> None:
+        status = ""
+        status_snapshot = getattr(run.runtime, "status_snapshot", None)
+        if callable(status_snapshot):
+            try:
+                snapshot = self._runtime_call(run, lambda: status_snapshot(graph=run.graph))
+            except TypeError:
+                snapshot = self._runtime_call(run, status_snapshot)
+            if isinstance(snapshot, dict):
+                run_status = snapshot.get("run")
+                if isinstance(run_status, dict):
+                    status = str(run_status.get("status") or "")
+        if not status:
+            source = self._workspace_diff_source(run)
+            if source is not None:
+                _manager, workspace_run = source
+                status = str(getattr(workspace_run, "status", "") or "")
+        if status not in TERMINAL_RUN_STATUSES:
+            raise BlueprintServiceError(
+                "RUN_NOT_TERMINAL",
+                "blueprint rollback requires a completed, cancelled, or failed run",
+                details={"status": status or "unknown"},
+            )
 
     async def _start_live_runtime(
         self,

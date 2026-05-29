@@ -1,6 +1,6 @@
 # Current Short-Term Goals
 
-Last cleaned: 2026-05-27
+Last cleaned: 2026-05-28
 
 ## Current Main Line
 
@@ -234,50 +234,144 @@ internal traversal logs.
 
 ## Active Priorities
 
-2026-05-27 P0 mobile productization priorities:
+Highest priority as of 2026-05-29:
 
-The next two tasks are now the highest-priority workstreams. Treat older
-blueprint Diff/runtime stabilization checks as important follow-up work, but
-do not let them displace these two tracks unless the user explicitly redirects.
+1. 前后端联调测试.
+   - Use the `调试启动` workflow to start the Collaboration Server, GuLiCode
+     desktop, mock mobile `/mobile` client, and `/console` together.
+   - Exercise the account-level desktop bridge loop end to end: mobile chat
+     submit -> Collaboration Server -> active desktop bridge -> desktop
+     PromptInput submit -> desktop session snapshot -> mobile chat refresh.
+   - Exercise blueprint planning from mobile: mobile goal -> desktop Top Agent
+     planning with `[来自移动端]` marker -> pending question/plan sync ->
+     mobile approval -> live run start.
+   - Verify mobile agent message send, run cancel, diff approve audit-only,
+     real rollback, viewer/logged-out read-only fallback, CSRF failures,
+     runtime failure propagation, audit logs, client logs, and payload
+     scrubbing.
+   - Verify mobile chat UX remains stable while `/api/mobile/tick` refreshes:
+     structured Markdown, reasoning/tool disclosure state, disclosure width,
+     and scroll position.
+   - Capture any routing/auth/runtime-binding gaps as integration blockers
+     before adding more features.
 
-1. P0-A GuLiCode mobile PWA frontend development.
+Latest detailed archive:
+
+- [`../archive/future-server/collaboration_server_desktop_bridge_mobile_chat_2026-05-29.md`](../archive/future-server/collaboration_server_desktop_bridge_mobile_chat_2026-05-29.md)
+- [`../archive/future-server/collaboration_server_mobile_write_loop_2026-05-28.md`](../archive/future-server/collaboration_server_mobile_write_loop_2026-05-28.md)
+
+2026-05-29 completed: account-level desktop bridge + mobile chat:
+
+The Collaboration Server now supports account-level mobile-to-desktop control:
+multiple mobile sessions may connect to one account while only one active
+desktop session is allowed. Desktop registers a loopback bridge; mobile chat and
+blueprint-planning writes go through the server and are forwarded to the active
+desktop bridge. Desktop session snapshots mirror session summaries, current
+messages, structured segments, and PromptInput composer modes. `/mobile`
+renders the desktop current conversation, sends with desktop-equivalent
+`promptMode/agentName`, supports `build` / `plan` / `蓝图规划`, and preserves
+reasoning/tool disclosure state, width, and scroll position across ticks.
+
+Validation from the pass:
+
+- `python -m pytest -q test_collaboration_server.py` passed: 18 passed.
+- `cd GuLiCode/packages/app && bun test --preload ./happydom.ts ./src/mobile ./src/components/collaboration-auth.test.ts ./src/pages/session/blueprint-planning-session.test.ts` passed.
+- `cd GuLiCode/packages/app && bun run typecheck` passed.
+- `cd GuLiCode/packages/desktop-electron && bun run typecheck` passed.
+- Live smoke confirmed `/mobile` message send, desktop reply snapshot, structured
+  segment rendering, disclosure persistence, stable expanded width, and stable
+  scrollTop across ticks.
+
+2026-05-28 completed: mobile mock + Collaboration Server phase 1:
+
+The first FastAPI Collaboration Server and `/mobile` read-only loop are now
+implemented at code/test level. The server is a gateway only: auth/session,
+admin management, project membership, runtime binding, safe projection,
+event journal/replay/SSE, runtime bridge reads, audit records, and disabled
+phase-2 write gates. The `/mobile` surface keeps its existing three-tab mock UI
+while loading same-origin `/api` data with mock fallback.
+
+The same pass added observability: structured rotating server logs,
+runtime bridge and SSE/event logs, mobile ring-buffer logs, default mobile
+log upload to `POST /api/client-logs`, sqlite `client_logs`, and
+admin-only `GET /api/admin/logs/client`. This is operational monitoring, not
+server-owned runtime scheduling.
+
+Validated commands:
+
+- `pytest -q test_collaboration_server.py test_desktop_blueprint_service.py`
+  passed: 46 passed, 1 skipped.
+- `cd GuLiCode/packages/app && bun test --preload ./happydom.ts ./src/mobile ./src/pwa.ts`
+  passed: 9 passed.
+- `cd GuLiCode/packages/app && bun run typecheck` passed.
+- `git diff --check` passed with only existing CRLF warnings.
+
+Immediate next Collaboration Server tasks:
+
+1. Add retention/pruning for sqlite operational logs:
+   `client_logs` default 30 days, audit logs retained longer or manually
+   pruned, startup prune plus periodic 24h prune.
+2. Add admin/system diagnostics for log health and runtime bridge availability
+   without exposing bridge tokens, cookies, local paths, or raw runtime payloads.
+3. Run a manual same-origin smoke with a real desktop runtime binding:
+   login, project list, latest run, status, events, diff, reports/artifacts,
+   mobile fallback after bridge outage, and admin client-log query.
+4. Keep phase-2 write endpoints gated until the product decision for mobile
+   send/approval/run-control permissions is explicit.
+
+Historical implementation checklist from the completed pass:
+
+1. Preserve the current mobile mock UI while replacing data sources.
    - Continue from the implemented `/mobile` mock-first SolidJS entry in
      `GuLiCode/packages/app`.
-   - Keep the mobile route independent from desktop runtime providers until a
-     Collaboration Server API boundary is ready.
-   - Replace mock state incrementally with authenticated project, run, event,
-     approval, report, and artifact clients.
+   - Keep the current three-tab product shape: `Top Agent`, `蓝图`, and `待定`.
+   - Avoid frontend redesign, navigation changes, new approval controls, node
+     editing, runtime start/stop buttons, or message-send UX unless the user
+     explicitly asks.
+   - Replace `mobileMockData` incrementally behind the existing components with
+     Collaboration Server responses.
+   - Keep the Agent sheet, structure map, run status, and Diff presentation
+     visually aligned with the current mock.
    - Preserve the PWA rule that `/auth/*`, `/api/*`, `/runs/*`, and `/stream`
      stay `NetworkOnly`; cache only app shell and static assets.
-   - Keep mobile UX constraints in force: `100dvh`, safe-area padding,
-     16px inputs, stable run-status area height, bottom actions, and touch
-     targets at least 44px.
+
+2. Build the service/API boundary in parallel with the mock frontend.
+   - Treat `docs/gulicode_collaboration_server_design.md` as the current API
+     and implementation boundary.
+   - Implement the Python Collaboration Server path the mobile mock will call;
+     the PWA must never talk directly to Python Runtime, Workspace RPC, MCP
+     bearer endpoints, private checkouts, or service tokens.
+   - Prioritize read-only/mobile-safe endpoints first: auth/session, project
+     list, run list/detail/status, Agent snapshot, Diff summary, reports,
+     artifacts, event history, and SSE stream.
+   - Keep run creation, mobile message send, approvals, and run control behind
+     explicit capability gates after the read-only loop works.
+   - Keep GraphRuntimeControlPlane/Python Runtime access server-side behind a
+     service-token bridge with explicit audit records.
+   - Make event streaming cursor-based and idempotent so the mobile client can
+     reconnect after backgrounding or network loss.
+
+3. Validate frontend/server together, not as separate tracks.
+   - Add backend tests for auth, token/path scrubbing, runtime bridge
+     forwarding, event replay, and report/artifact exposure.
+   - Add mobile tests that keep the current mock UI stable while the data
+     source switches from local mock data to API fixtures/live server data.
    - Current source focus:
      `GuLiCode/packages/app/src/mobile/*`,
      `GuLiCode/packages/app/src/pwa.ts`,
      `GuLiCode/packages/app/src/entry.tsx`,
      `GuLiCode/packages/app/vite.config.ts`,
-     and `GuLiCode/packages/app/e2e/mobile.spec.ts`.
+     `GuLiCode/packages/app/e2e/mobile.spec.ts`,
+     `docs/gulicode_collaboration_server_design.md`,
+     and the future `collaboration_*` Python service files.
 
-2. P0-B Python service-side development for the mobile Collaboration Server.
-   - Build the Python service boundary that the mobile PWA will call; the PWA
-     must never talk directly to Python Runtime, Workspace RPC, MCP bearer
-     endpoints, private checkouts, or service tokens.
-   - Define and implement auth/session, project listing, run listing, run
-     detail, run creation, run control, event stream, approval, report, and
-     artifact endpoints.
-   - Keep GraphRuntimeControlPlane/Python Runtime access server-side behind a
-     service-token bridge with explicit audit records.
-   - Make event streaming cursor-based and idempotent so the mobile client can
-     reconnect after backgrounding or network loss.
-   - Add backend tests for token boundaries, network/cache assumptions, run
-     control authorization, and report/artifact exposure.
-   - Treat `docs/gulicode_collaboration_server_design.md` and the new mobile
-     PWA archive as the service/API boundary inputs.
+Detailed context:
 
-Detailed archive:
-
-- [`../archive/frontend/gulicode_mobile_pwa_mock_first_pass_2026-05-27.md`](../archive/frontend/gulicode_mobile_pwa_mock_first_pass_2026-05-27.md)
+- [`../archive/future-server/collaboration_server_phase1_mobile_observability_2026-05-28.md`](../archive/future-server/collaboration_server_phase1_mobile_observability_2026-05-28.md)
+- `docs/gulicode_collaboration_server_design.md`
+- Repo-local mock archive: `archive/frontend/mock/`
+- Installed-skill historical first pass:
+  [`../archive/frontend/gulicode_mobile_pwa_mock_first_pass_2026-05-27.md`](../archive/frontend/gulicode_mobile_pwa_mock_first_pass_2026-05-27.md)
 
 2026-05-26 Blueprint runtime and Diff stabilization:
 

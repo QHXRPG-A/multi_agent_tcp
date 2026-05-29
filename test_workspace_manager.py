@@ -14,6 +14,11 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
 def test_dulwich_backend_is_vendored() -> None:
     info = describe_dulwich_backend()
 
@@ -129,6 +134,113 @@ def test_project_reference_checkout_fetches_specific_paths_and_submits_to_projec
     assert result.merged_files == ["src/a.txt"]
     assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "changed\n"
     assert not (run.integration_dir / "src" / "a.txt").exists()
+
+
+def test_blueprint_changeset_rollback_and_restore_use_reversible_archive(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-rollback", code_mode="project_reference")
+
+    first = manager.checkout_agent(run, "agent-a", checkout_paths=["src/a.txt"])
+    _write(first.checkout_dir / "src" / "a.txt", "one\n")
+    first_result = manager.submit_checkout(run, first, task_id="task-1", summary="one")
+    second = manager.checkout_agent(run, "agent-b", checkout_paths=["src/a.txt"])
+    _write(second.checkout_dir / "src" / "a.txt", "two\n")
+    second_result = manager.submit_checkout(run, second, task_id="task-2", summary="two")
+
+    assert (first_result.archive_path / "reversible.json").is_file()
+    assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "two\n"
+
+    rollback = manager.rollback_changesets(run, second_result.changeset_id, actor="test").to_dict()
+    diff = manager.blueprint_run_diff(run).to_dict()
+
+    assert rollback["ok"] is True
+    assert rollback["changesetIds"] == [second_result.changeset_id]
+    assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "one\n"
+    assert diff["summary"]["accepted"] == 1
+    assert diff["summary"]["rolledBack"] == 1
+    assert [item["status"] for item in diff["changesets"]] == ["accepted", "rolled_back"]
+    assert diff["changesets"][1]["restorable"] is True
+    assert diff["acceptedDiffs"][0]["file"] == "src/a.txt"
+
+    restore = manager.restore_latest_rollback(run, actor="test").to_dict()
+    restored_diff = manager.blueprint_run_diff(run).to_dict()
+
+    assert restore["ok"] is True
+    assert restore["restoredRollbackId"] == rollback["rollbackId"]
+    assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "two\n"
+    assert restored_diff["summary"]["accepted"] == 2
+    assert restored_diff["summary"]["rolledBack"] == 0
+
+
+def test_blueprint_changeset_rollback_handles_added_deleted_and_binary_files(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "delete.txt", "delete me\n")
+    _write_bytes(tmp_path / "src" / "asset.bin", b"\x00base\xff")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-rollback-binary", code_mode="project_reference")
+    checkout = manager.checkout_agent(run, "agent-a", checkout_paths=["src/delete.txt", "src/asset.bin", "src/add.txt"])
+
+    (checkout.checkout_dir / "src" / "delete.txt").unlink()
+    _write(checkout.checkout_dir / "src" / "add.txt", "added\n")
+    _write_bytes(checkout.checkout_dir / "src" / "asset.bin", b"\x00changed\xff")
+    result = manager.submit_checkout(run, checkout)
+
+    assert result.ok is True
+    assert not (tmp_path / "src" / "delete.txt").exists()
+    assert (tmp_path / "src" / "add.txt").read_text(encoding="utf-8") == "added\n"
+    assert (tmp_path / "src" / "asset.bin").read_bytes() == b"\x00changed\xff"
+
+    rollback = manager.rollback_changesets(run, result.changeset_id).to_dict()
+
+    assert rollback["ok"] is True
+    assert (tmp_path / "src" / "delete.txt").read_text(encoding="utf-8") == "delete me\n"
+    assert not (tmp_path / "src" / "add.txt").exists()
+    assert (tmp_path / "src" / "asset.bin").read_bytes() == b"\x00base\xff"
+
+    restore = manager.restore_latest_rollback(run).to_dict()
+
+    assert restore["ok"] is True
+    assert not (tmp_path / "src" / "delete.txt").exists()
+    assert (tmp_path / "src" / "add.txt").read_text(encoding="utf-8") == "added\n"
+    assert (tmp_path / "src" / "asset.bin").read_bytes() == b"\x00changed\xff"
+
+
+def test_blueprint_changeset_rollback_hash_guard_rejects_external_edits(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-rollback-conflict", code_mode="project_reference")
+    checkout = manager.checkout_agent(run, "agent-a", checkout_paths=["src/a.txt"])
+    _write(checkout.checkout_dir / "src" / "a.txt", "changed\n")
+    result = manager.submit_checkout(run, checkout)
+    _write(tmp_path / "src" / "a.txt", "external\n")
+
+    rollback = manager.rollback_changesets(run, result.changeset_id).to_dict()
+
+    assert rollback["ok"] is False
+    assert rollback["status"] == "conflict"
+    assert rollback["conflicts"][0]["reason"] == "hash_mismatch"
+    assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "external\n"
+
+
+def test_legacy_blueprint_changeset_without_reversible_manifest_is_not_rollbackable(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "a.txt", "base\n")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    run = manager.create_run(run_id="run-rollback-legacy", code_mode="project_reference")
+    checkout = manager.checkout_agent(run, "agent-a", checkout_paths=["src/a.txt"])
+    _write(checkout.checkout_dir / "src" / "a.txt", "changed\n")
+    result = manager.submit_checkout(run, checkout)
+    assert result.archive_path is not None
+    (result.archive_path / "reversible.json").unlink()
+
+    diff = manager.blueprint_run_diff(run).to_dict()
+    rollback = manager.rollback_changesets(run, result.changeset_id).to_dict()
+
+    assert diff["changesets"][0]["reversible"] is False
+    assert diff["changesets"][0]["rollbackable"] is False
+    assert "reversible changeset manifest is missing" in diff["changesets"][0]["rollbackDisabledReason"]
+    assert rollback["ok"] is False
+    assert rollback["status"] == "conflict"
+    assert rollback["conflicts"][0]["reason"] == "not_reversible"
 
 
 def test_checkout_refresh_preserves_framework_agents_md(tmp_path: Path) -> None:

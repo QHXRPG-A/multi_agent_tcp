@@ -2,11 +2,13 @@
 
 import { render } from "solid-js/web"
 import { AppBaseProviders, AppInterface } from "@/app"
+import { CollaborationAuthGate } from "@/components/collaboration-auth"
 import { type Platform, PlatformProvider } from "@/context/platform"
 import { dict as en } from "@/i18n/en"
 import { dict as zh } from "@/i18n/zh"
 import { MobileApp } from "@/mobile/mobile-app"
 import { registerPwa } from "@/pwa"
+import { ServerConsoleApp } from "@/server-console/server-console-app"
 import { handleNotificationClick } from "@/utils/notification-click"
 import pkg from "../package.json"
 import { ServerConnection } from "./context/server"
@@ -130,12 +132,25 @@ const platform: Platform = {
 registerPwa()
 
 if (root instanceof HTMLElement) {
-  if (location.pathname === "/mobile" || location.pathname.startsWith("/mobile/")) {
+  if (location.pathname === "/console" || location.pathname.startsWith("/console/")) {
     render(
       () => (
         <PlatformProvider value={platform}>
           <AppBaseProviders>
-            <MobileApp />
+            <ServerConsoleApp />
+          </AppBaseProviders>
+        </PlatformProvider>
+      ),
+      root,
+    )
+  } else if (location.pathname === "/mobile" || location.pathname.startsWith("/mobile/")) {
+    render(
+      () => (
+        <PlatformProvider value={platform}>
+          <AppBaseProviders>
+            <CollaborationAuthGate clientKind="mobile" defaultUsername="1">
+              <MobileApp />
+            </CollaborationAuthGate>
           </AppBaseProviders>
         </PlatformProvider>
       ),

@@ -1,81 +1,58 @@
 import { describe, expect, test } from "bun:test"
-import { mockProjects, mockRuns } from "./mock-data"
-import {
-  applyRunAction,
-  createMobileState,
-  createRun,
-  getSelectedRun,
-  selectProject,
-  selectRun,
-} from "./mobile-state"
+import { mobileMockData } from "./mock-data"
+import { mobileTabs, nodeStateLabel, nodeStateTone } from "./mobile-state"
 
-const now = new Date("2026-05-27T12:00:00.000+08:00")
+describe("mobile display mock state", () => {
+  test("defines the three top-level mobile tabs", () => {
+    expect(mobileTabs.map((tab) => tab.id)).toEqual(["chat", "blueprint", "pending"])
+    expect(mobileTabs.map((tab) => tab.label)).toEqual(["聊天", "蓝图", "待定"])
+  })
 
-describe("mobile mock state", () => {
-  test("creates a run and selects it", () => {
-    const initial = createMobileState(mockProjects, mockRuns)
-    const next = createRun(
-      initial,
-      {
-        projectId: "proj-gulicode",
-        title: "Mobile smoke",
-        instruction: "Run a mobile-only smoke flow",
-        blueprint: "runtime-control-plane",
-      },
-      now,
+  test("keeps Top Agent messages read-only display data", () => {
+    expect(mobileMockData.messages).toHaveLength(5)
+    expect(mobileMockData.messages.some((message) => message.speaker === "user")).toBe(true)
+    expect(mobileMockData.messages.some((message) => message.speaker === "top-agent")).toBe(true)
+    expect(mobileMockData.messages[0]?.body).toContain("暂时不要从手机端改蓝图")
+  })
+
+  test("describes a read-only blueprint overview and diff summary", () => {
+    expect(mobileMockData.blueprint.nodes.map((node) => node.label)).toEqual([
+      "Start",
+      "Top Agent",
+      "Planner",
+      "Coder",
+      "Review",
+      "Summary",
+    ])
+    expect(mobileMockData.blueprint.run.currentNode).toBe("Coder")
+    expect(mobileMockData.blueprint.diff.fileCount).toBe(5)
+    expect(mobileMockData.blueprint.diff.additions).toBe(128)
+    expect(mobileMockData.blueprint.diff.deletions).toBe(34)
+    expect(mobileMockData.blueprint.nodes.every((node) => node.role && node.detail && node.note)).toBe(true)
+    expect(
+      mobileMockData.blueprint.nodes.every(
+        (node) =>
+          node.agentPanel.agentId &&
+          node.agentPanel.cliKind &&
+          node.agentPanel.taskStatus &&
+          node.agentPanel.statusDetails.length > 0 &&
+          node.agentPanel.events.length > 0,
+      ),
+    ).toBe(true)
+    expect(mobileMockData.blueprint.nodes.find((node) => node.id === "coder")?.detail).toContain("点击反馈")
+    expect(mobileMockData.blueprint.nodes.find((node) => node.id === "coder")?.agentPanel.taskStatus).toBe("running")
+    expect(mobileMockData.blueprint.nodes.find((node) => node.id === "coder")?.agentPanel.messagesSent).toBeGreaterThan(0)
+    expect(mobileMockData.blueprint.nodes.find((node) => node.id === "coder")?.agentPanel.inputPlaceholder).toContain(
+      "live runtime",
     )
-
-    const selected = getSelectedRun(next)
-    expect(selected?.title).toBe("Mobile smoke")
-    expect(selected?.status).toBe("running")
-    expect(selected?.events[0]?.title).toBe("Run created")
-    expect(next.runs).toHaveLength(initial.runs.length + 1)
+    expect(mobileMockData.blueprint.diff.files.every((file) => file.previewLines.length > 0)).toBe(true)
+    expect(mobileMockData.blueprint.diff.files[0]?.previewLines.some((line) => line.type === "add")).toBe(true)
   })
 
-  test("switches project and run selection together", () => {
-    const initial = createMobileState(mockProjects, mockRuns)
-    const next = selectProject(initial, "proj-sdk")
-
-    expect(next.selectedProjectId).toBe("proj-sdk")
-    expect(getSelectedRun(next)?.projectId).toBe("proj-sdk")
-
-    const selected = selectRun(next, "run-docs-release")
-    expect(selected.selectedProjectId).toBe("proj-docs")
-    expect(selected.selectedRunId).toBe("run-docs-release")
-  })
-
-  test("confirms a run and exposes a summary report", () => {
-    const initial = createMobileState(mockProjects, mockRuns)
-    const withRun = createRun(
-      initial,
-      {
-        projectId: "proj-gulicode",
-        title: "Approval flow",
-        instruction: "Create a run that needs approval",
-        blueprint: "panel-review",
-      },
-      now,
-    )
-    const run = getSelectedRun(withRun)!
-
-    const confirmed = applyRunAction(withRun, run.id, "confirm", now)
-    const selected = getSelectedRun(confirmed)!
-
-    expect(selected.status).toBe("completed")
-    expect(selected.progress).toBe(100)
-    expect(selected.reports.some((report) => report.kind === "summary" && report.ready)).toBe(true)
-    expect(selected.events[0]?.title).toBe("Approved")
-  })
-
-  test("supports pause cancel and archive state transitions", () => {
-    const initial = createMobileState(mockProjects, mockRuns)
-    const paused = applyRunAction(initial, "run-runtime-smoke", "pause", now)
-    expect(paused.runs.find((run) => run.id === "run-runtime-smoke")?.status).toBe("paused")
-
-    const canceled = applyRunAction(paused, "run-runtime-smoke", "cancel", now)
-    expect(canceled.runs.find((run) => run.id === "run-runtime-smoke")?.status).toBe("canceled")
-
-    const archived = applyRunAction(canceled, "run-runtime-smoke", "archive", now)
-    expect(archived.runs.find((run) => run.id === "run-runtime-smoke")?.status).toBe("archived")
+  test("maps blueprint node states to display labels and tones", () => {
+    expect(nodeStateLabel("done")).toBe("已完成")
+    expect(nodeStateLabel("running")).toBe("运行中")
+    expect(nodeStateLabel("queued")).toBe("排队中")
+    expect(nodeStateTone("running")).toContain("rose")
   })
 })

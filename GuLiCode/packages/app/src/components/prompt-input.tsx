@@ -52,6 +52,7 @@ import {
   type BlueprintPlanningSubmitRequest,
   type FollowupDraft,
   type PromptInputMode,
+  type RemotePromptSubmitRequest,
   type PromptSubmitOverrideInput,
 } from "./prompt-input/submit"
 import { PromptPopover, type AtOption, type SlashCommand } from "./prompt-input/slash-popover"
@@ -76,6 +77,8 @@ interface PromptInputProps {
   onSubmit?: () => void
   submitOverride?: (input: PromptSubmitOverrideInput) => Promise<boolean> | boolean
   blueprintPlanningSubmitRequest?: BlueprintPlanningSubmitRequest
+  remoteSubmitRequest?: RemotePromptSubmitRequest
+  onComposerModeChange?: (mode: { id: string; kind: "agent" | "blueprintPlanning" }) => void
 }
 
 const EXAMPLES = [
@@ -583,6 +586,15 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
   const currentAgentOption = createMemo(() =>
     store.mode === "blueprintPlanning" ? BLUEPRINT_PLANNING_AGENT_OPTION : (local.agent.current()?.name ?? ""),
   )
+  createEffect(() => {
+    const current = currentAgentOption()
+    if (!current) return
+    props.onComposerModeChange?.(
+      current === BLUEPRINT_PLANNING_AGENT_OPTION
+        ? { id: "blueprintPlanning", kind: "blueprintPlanning" }
+        : { id: current, kind: "agent" },
+    )
+  })
 
   const handleAtSelect = (option: AtOption | undefined) => {
     if (!option) return
@@ -1112,10 +1124,9 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
   })
 
   let handledBlueprintPlanningSubmitRequestId = 0
-  createEffect(() => {
-    const request = props.blueprintPlanningSubmitRequest
-    if (!request || request.id === handledBlueprintPlanningSubmitRequestId) return
-    handledBlueprintPlanningSubmitRequestId = request.id
+  const handleRemoteSubmitRequest = (request: RemotePromptSubmitRequest | undefined, handledId: () => number, setHandledId: (id: number) => void) => {
+    if (!request || request.id === handledId()) return
+    setHandledId(request.id)
     const text = request.text.trim()
     if (!text) return
     const currentText = prompt
@@ -1127,14 +1138,36 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
       request.onBlocked?.()
       return
     }
-    setMode("blueprintPlanning")
+    setMode(request.mode ?? "blueprintPlanning")
     setEditorText(text)
     prompt.set([{ type: "text", content: text, start: 0, end: text.length }], text.length)
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         void handleSubmit(new Event("submit", { cancelable: true }))
+        request.onAccepted?.()
       })
     })
+  }
+
+  createEffect(() => {
+    handleRemoteSubmitRequest(
+      props.blueprintPlanningSubmitRequest,
+      () => handledBlueprintPlanningSubmitRequestId,
+      (id) => {
+        handledBlueprintPlanningSubmitRequestId = id
+      },
+    )
+  })
+
+  let handledRemoteSubmitRequestId = 0
+  createEffect(() => {
+    handleRemoteSubmitRequest(
+      props.remoteSubmitRequest,
+      () => handledRemoteSubmitRequestId,
+      (id) => {
+        handledRemoteSubmitRequestId = id
+      },
+    )
   })
 
   const handleKeyDown = (event: KeyboardEvent) => {

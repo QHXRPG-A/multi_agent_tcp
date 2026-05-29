@@ -35,6 +35,7 @@ const deepLinkEvent = "opencode:deep-link"
 const blueprintWindowDockEvent = "gulicode:blueprint-window-dock"
 const blueprintWindowClosedEvent = "gulicode:blueprint-window-closed"
 const blueprintWindowPlanningSubmitEvent = "gulicode:blueprint-planning-submit"
+const desktopControlBridgeCommandEvent = "gulicode:desktop-control-bridge-command"
 
 function base64Encode(value: string) {
   const bytes = new TextEncoder().encode(value)
@@ -59,6 +60,16 @@ const createPlatform = (): Platform => {
   const api = window.api as typeof window.api & {
     blueprintRunDiff?: (runId: string) => Promise<Record<string, unknown>>
     blueprintChangesetDiff?: (runId: string, changesetId: string) => Promise<Record<string, unknown>>
+    blueprintRollbackChangesets?: (
+      runId: string,
+      toChangesetId: string,
+      reason?: string,
+    ) => Promise<Record<string, unknown>>
+    blueprintRestoreRollback?: (
+      runId: string,
+      rollbackId?: string,
+      reason?: string,
+    ) => Promise<Record<string, unknown>>
   }
   const os = (() => {
     const ua = navigator.userAgent
@@ -189,6 +200,20 @@ const createPlatform = (): Platform => {
       ? {
           blueprintChangesetDiff: (runId: string, changesetId: string) =>
             api.blueprintChangesetDiff!(runId, changesetId),
+        }
+      : {}),
+
+    ...(typeof api.blueprintRollbackChangesets === "function"
+      ? {
+          rollbackBlueprintChangesets: (runId: string, toChangesetId: string, reason?: string) =>
+            api.blueprintRollbackChangesets!(runId, toChangesetId, reason),
+        }
+      : {}),
+
+    ...(typeof api.blueprintRestoreRollback === "function"
+      ? {
+          restoreBlueprintRollback: (runId: string, rollbackId?: string, reason?: string) =>
+            api.blueprintRestoreRollback!(runId, rollbackId, reason),
         }
       : {}),
 
@@ -367,6 +392,18 @@ window.api.onBlueprintWindowPlanningSubmitRequest((request) => {
   queueMicrotask(() => {
     if (!responded) respond(false)
   })
+})
+window.api.onDesktopControlBridgeCommand((request) => {
+  let responded = false
+  const respond = (response: { ok?: boolean; accepted?: boolean; result?: unknown; code?: string; message?: string }) => {
+    if (responded) return
+    responded = true
+    void window.api.respondDesktopControlBridgeCommand(request.requestId, response)
+  }
+  window.dispatchEvent(new CustomEvent(desktopControlBridgeCommandEvent, { detail: { ...request, respond } }))
+  window.setTimeout(() => {
+    if (!responded) respond({ ok: true, accepted: false, code: "DESKTOP_COMMAND_UNHANDLED", message: "command was not handled" })
+  }, 4500)
 })
 
 render(() => {

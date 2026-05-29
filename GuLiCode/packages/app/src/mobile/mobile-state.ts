@@ -1,301 +1,226 @@
-export type MobileProject = {
+export type MobileTab = "chat" | "blueprint" | "pending"
+
+export type TopAgentMessage = {
   id: string
-  name: string
-  description: string
-  owner: string
-  activeRunCount: number
-}
-
-export type MobileRunStatus = "running" | "needs-review" | "paused" | "completed" | "canceled" | "archived"
-
-export type MobileRunPriority = "normal" | "high"
-
-export type MobileRunEventKind = "status" | "agent" | "tool" | "report" | "action"
-
-export type MobileRunEvent = {
-  id: string
-  kind: MobileRunEventKind
-  title: string
+  speaker: "user" | "top-agent"
+  label: string
   body: string
+  segments?: MobileDesktopMessageSegment[]
   time: string
 }
 
-export type MobileToolCard = {
+export type MobileDesktopMessageSegment = {
   id: string
-  title: string
-  state: "pending" | "running" | "done" | "blocked"
-  description: string
+  type: "text" | "reasoning" | "tool"
+  title?: string | null
+  body?: string
+  status?: string | null
+  toolName?: string | null
 }
 
-export type MobileReport = {
+export type BlueprintNodeState = "done" | "running" | "queued" | "idle" | "failed"
+
+export type BlueprintAgentPanelEventTone = "user" | "reply" | "reasoning" | "tool" | "error" | "event"
+
+export type BlueprintAgentPanelEvent = {
   id: string
   title: string
-  kind: "summary" | "changeset" | "artifact"
-  ready: boolean
+  text: string
+  tone: BlueprintAgentPanelEventTone
+  status?: string
+  detail?: string
+  time?: string
 }
 
-export type MobileRun = {
-  id: string
-  projectId: string
-  title: string
-  instruction: string
-  blueprint: string
-  status: MobileRunStatus
-  priority: MobileRunPriority
-  progress: number
-  cursor: number
+export type BlueprintAgentPanel = {
+  agentId: string
+  cliKind: string
+  taskStatus: string
+  queueSize: number
+  messagesSent: number
+  busyCount: number
   updatedAt: string
-  agents: string[]
-  events: MobileRunEvent[]
-  tools: MobileToolCard[]
-  reports: MobileReport[]
+  statusDetails: Array<{
+    label: string
+    value: string
+  }>
+  events: BlueprintAgentPanelEvent[]
+  inputPlaceholder: string
+  disabledNotice: string
+  canMessage?: boolean
 }
 
-export type MobileRunAction = "confirm" | "reject" | "pause" | "cancel" | "archive"
-
-export type MobileState = {
-  projects: MobileProject[]
-  runs: MobileRun[]
-  selectedProjectId: string
-  selectedRunId: string
+export type BlueprintNode = {
+  id: string
+  label: string
+  state: BlueprintNodeState
+  role: string
+  detail: string
+  note: string
+  layout?: {
+    x: number
+    y: number
+  }
+  agentPanel: BlueprintAgentPanel
 }
 
-type CreateRunInput = {
+export type BlueprintEdge = {
+  source: string
+  target: string
+  kind?: string
+}
+
+export type BlueprintRunStatus = {
+  label: string
+  progress: number
+  currentNode: string
+  updatedAt: string
+  agents: Array<{
+    name: string
+    state: BlueprintNodeState
+  }>
+}
+
+export type BlueprintDiffFile = {
+  path: string
+  summary: string
+  additions: number
+  deletions: number
+  changesetId?: string
+  changesetStatus?: string
+  rollbackable?: boolean
+  previewLines: BlueprintDiffPreviewLine[]
+}
+
+export type BlueprintDiffPreviewLine = {
+  type: "context" | "add" | "delete"
+  text: string
+}
+
+export type BlueprintDiffSummary = {
+  fileCount: number
+  additions: number
+  deletions: number
+  files: BlueprintDiffFile[]
+}
+
+export type MobilePlanningRequest = {
+  id: string
   projectId: string
-  title: string
-  instruction: string
-  blueprint: string
-  priority?: MobileRunPriority
+  blueprintId: string
+  goal: string
+  status: string
+  desktopSessionId?: string | null
+  planningSessionId?: string | null
+  pendingQuestion?: Record<string, unknown> | null
+  pendingPlan?: Record<string, unknown> | null
+  mobileAnswer?: Record<string, unknown> | null
+  activeRunId?: string | null
+  error?: string | null
+  createdAt?: string | number | null
+  updatedAt?: string | number | null
 }
 
-const cloneEvent = (event: MobileRunEvent): MobileRunEvent => ({ ...event })
-const cloneTool = (tool: MobileToolCard): MobileToolCard => ({ ...tool })
-const cloneReport = (report: MobileReport): MobileReport => ({ ...report })
+export type MobileDesktopSessionSummary = {
+  id: string
+  title?: string | null
+  parentId?: string | null
+  createdAt?: string | null
+  updatedAt?: string | null
+  messageCount?: number
+}
 
-export function cloneRun(run: MobileRun): MobileRun {
-  return {
-    ...run,
-    agents: [...run.agents],
-    events: run.events.map(cloneEvent),
-    tools: run.tools.map(cloneTool),
-    reports: run.reports.map(cloneReport),
+export type MobileDesktopSessionMessage = {
+  id: string
+  sessionId?: string | null
+  role: string
+  label?: string | null
+  body: string
+  segments?: MobileDesktopMessageSegment[]
+  createdAt?: string | null
+}
+
+export type MobileDesktopComposerMode = {
+  id: string
+  label: string
+  kind: "agent" | "blueprintPlanning"
+}
+
+export type MobileDesktopComposerMirror = {
+  modes: MobileDesktopComposerMode[]
+  activeModeId?: string | null
+}
+
+export type MobileDesktopSessionMirror = {
+  online: boolean
+  loggedIn: boolean
+  stale: boolean
+  updatedAt?: string | null
+  activeSessionId?: string | null
+  sessions: MobileDesktopSessionSummary[]
+  currentMessages: MobileDesktopSessionMessage[]
+  composer?: MobileDesktopComposerMirror
+}
+
+export type MobileServerState = {
+  csrfToken?: string
+  projectId?: string
+  runId?: string
+  clients?: {
+    mobile: boolean
+    desktop: boolean
   }
+  syncReady?: boolean
+  capabilities: string[]
+  planningRequests: MobilePlanningRequest[]
+  desktopSessions?: MobileDesktopSessionMirror
 }
 
-export function cloneMobileState(state: MobileState): MobileState {
-  return {
-    projects: state.projects.map((project) => ({ ...project })),
-    runs: state.runs.map(cloneRun),
-    selectedProjectId: state.selectedProjectId,
-    selectedRunId: state.selectedRunId,
+export type MobileMockData = {
+  messages: TopAgentMessage[]
+  blueprint: {
+    title: string
+    description: string
+    nodes: BlueprintNode[]
+    edges: BlueprintEdge[]
+    run: BlueprintRunStatus
+    diff: BlueprintDiffSummary
   }
+  server?: MobileServerState
 }
 
-export function createMobileState(projects: MobileProject[], runs: MobileRun[]): MobileState {
-  const selectedProjectId = projects[0]?.id ?? ""
-  const selectedRunId = runs.find((run) => run.projectId === selectedProjectId)?.id ?? runs[0]?.id ?? ""
-  return {
-    projects: projects.map((project) => ({ ...project })),
-    runs: runs.map(cloneRun),
-    selectedProjectId,
-    selectedRunId,
-  }
-}
+export const mobileTabs: Array<{ id: MobileTab; label: string }> = [
+  { id: "chat", label: "聊天" },
+  { id: "blueprint", label: "蓝图" },
+  { id: "pending", label: "待定" },
+]
 
-export function getProjectRuns(state: MobileState, projectId = state.selectedProjectId) {
-  return state.runs.filter((run) => run.projectId === projectId)
-}
-
-export function getSelectedRun(state: MobileState) {
-  return state.runs.find((run) => run.id === state.selectedRunId)
-}
-
-export function getSelectedProject(state: MobileState) {
-  return state.projects.find((project) => project.id === state.selectedProjectId)
-}
-
-export function selectProject(state: MobileState, projectId: string): MobileState {
-  const next = cloneMobileState(state)
-  const fallbackRun = next.runs.find((run) => run.projectId === projectId) ?? next.runs[0]
-  next.selectedProjectId = projectId
-  next.selectedRunId = fallbackRun?.id ?? ""
-  return next
-}
-
-export function selectRun(state: MobileState, runId: string): MobileState {
-  const next = cloneMobileState(state)
-  const run = next.runs.find((item) => item.id === runId)
-  if (!run) return next
-  next.selectedRunId = run.id
-  next.selectedProjectId = run.projectId
-  return next
-}
-
-export function createRun(state: MobileState, input: CreateRunInput, now = new Date()): MobileState {
-  const next = cloneMobileState(state)
-  const projectRuns = next.runs.filter((run) => run.projectId === input.projectId)
-  const id = `run-${input.projectId}-${projectRuns.length + 1}`
-  const timestamp = now.toISOString()
-  const run: MobileRun = {
-    id,
-    projectId: input.projectId,
-    title: input.title.trim() || "Untitled mobile run",
-    instruction: input.instruction.trim(),
-    blueprint: input.blueprint,
-    status: "running",
-    priority: input.priority ?? "normal",
-    progress: 8,
-    cursor: 1,
-    updatedAt: timestamp,
-    agents: ["top-agent"],
-    events: [
-      {
-        id: `${id}-event-1`,
-        kind: "status",
-        title: "Run created",
-        body: "Mock top-agent accepted the mobile instruction.",
-        time: timestamp,
-      },
-    ],
-    tools: [
-      {
-        id: `${id}-tool-1`,
-        title: "Runtime start",
-        state: "running",
-        description: "Waiting for the future Collaboration Server bridge.",
-      },
-    ],
-    reports: [],
-  }
-
-  next.runs = [run, ...next.runs]
-  next.selectedProjectId = input.projectId
-  next.selectedRunId = id
-  return next
-}
-
-export function applyRunAction(state: MobileState, runId: string, action: MobileRunAction, now = new Date()): MobileState {
-  const next = cloneMobileState(state)
-  const timestamp = now.toISOString()
-  next.runs = next.runs.map((run) => {
-    if (run.id !== runId) return run
-    const status = statusForAction(run.status, action)
-    const cursor = run.cursor + 1
-    return {
-      ...run,
-      status,
-      progress: progressForStatus(status, run.progress),
-      cursor,
-      updatedAt: timestamp,
-      events: [
-        {
-          id: `${run.id}-event-${cursor}`,
-          kind: "action",
-          title: actionTitle(action),
-          body: actionBody(action),
-          time: timestamp,
-        },
-        ...run.events,
-      ],
-      tools: run.tools.map((tool) =>
-        action === "pause" && tool.state === "running" ? { ...tool, state: "blocked" as const } : tool,
-      ),
-      reports: reportsForAction(run, action),
-    }
-  })
-  return next
-}
-
-function statusForAction(current: MobileRunStatus, action: MobileRunAction): MobileRunStatus {
-  if (current === "archived") return current
-  if (action === "archive") return "archived"
-  if (action === "confirm") return "completed"
-  if (action === "reject" || action === "cancel") return "canceled"
-  if (action === "pause") return "paused"
-  return current
-}
-
-function progressForStatus(status: MobileRunStatus, current: number) {
-  if (status === "completed" || status === "archived") return 100
-  if (status === "canceled") return current
-  if (status === "paused") return Math.max(current, 35)
-  return current
-}
-
-function reportsForAction(run: MobileRun, action: MobileRunAction) {
-  if (action !== "confirm") return run.reports
-  if (run.reports.some((report) => report.kind === "summary")) return run.reports
-  return [
-    {
-      id: `${run.id}-report-summary`,
-      title: "Mock final report",
-      kind: "summary" as const,
-      ready: true,
-    },
-    ...run.reports,
-  ]
-}
-
-function actionTitle(action: MobileRunAction) {
-  switch (action) {
-    case "confirm":
-      return "Approved"
-    case "reject":
-      return "Rejected"
-    case "pause":
-      return "Paused"
-    case "cancel":
-      return "Canceled"
-    case "archive":
-      return "Archived"
-  }
-}
-
-function actionBody(action: MobileRunAction) {
-  switch (action) {
-    case "confirm":
-      return "User approved the current run result."
-    case "reject":
-      return "User rejected the current run result."
-    case "pause":
-      return "User paused the run for later review."
-    case "cancel":
-      return "User canceled the run from the mobile control surface."
-    case "archive":
-      return "User archived the run from the mobile control surface."
-  }
-}
-
-export function statusLabel(status: MobileRunStatus) {
-  switch (status) {
+export function nodeStateLabel(state: BlueprintNodeState) {
+  switch (state) {
+    case "done":
+      return "已完成"
     case "running":
-      return "Running"
-    case "needs-review":
-      return "Needs review"
-    case "paused":
-      return "Paused"
-    case "completed":
-      return "Completed"
-    case "canceled":
-      return "Canceled"
-    case "archived":
-      return "Archived"
+      return "运行中"
+    case "queued":
+      return "排队中"
+    case "idle":
+      return "空闲"
+    case "failed":
+      return "失败"
   }
 }
 
-export function statusTone(status: MobileRunStatus) {
-  switch (status) {
+export function nodeStateTone(state: BlueprintNodeState) {
+  switch (state) {
+    case "done":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700"
     case "running":
-      return "text-text-interactive-base bg-surface-info-weak border-border-base"
-    case "needs-review":
-      return "text-icon-warning-base bg-surface-warning-weak border-border-warning-base"
-    case "paused":
-      return "text-text-weak bg-surface-raised-base border-border-subtle"
-    case "completed":
-      return "text-icon-success-base bg-surface-base border-border-base"
-    case "canceled":
-      return "text-icon-critical-base bg-surface-critical-weak border-border-base"
-    case "archived":
-      return "text-text-muted bg-surface-base border-border-subtle"
+      return "border-rose-200 bg-rose-50 text-rose-700"
+    case "queued":
+      return "border-stone-200 bg-stone-50 text-stone-500"
+    case "idle":
+      return "border-stone-200 bg-white text-stone-500"
+    case "failed":
+      return "border-red-200 bg-red-50 text-red-700"
   }
 }

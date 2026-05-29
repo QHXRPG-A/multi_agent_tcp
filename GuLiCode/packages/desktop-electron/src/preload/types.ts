@@ -84,6 +84,25 @@ export type BlueprintWindowPlanningSubmitRequest = BlueprintWindowContext & {
   input: BlueprintWindowPlanningSubmitInput
 }
 
+export type DesktopControlBridgeInfo = {
+  bridgeUrl: string
+  bridgeToken: string
+}
+
+export type DesktopControlBridgeCommandResponse = {
+  ok?: boolean
+  accepted?: boolean
+  result?: unknown
+  code?: string
+  message?: string
+}
+
+export type DesktopControlBridgeCommandRequest = {
+  requestId: string
+  command: string
+  args: Record<string, unknown>
+}
+
 export type ElectronAPI = {
   killSidecar: () => Promise<void>
   installCli: () => Promise<string>
@@ -137,6 +156,16 @@ export type ElectronAPI = {
   blueprintStatus: (runId: string) => Promise<Record<string, unknown>>
   blueprintRunDiff: (runId: string) => Promise<Record<string, unknown>>
   blueprintChangesetDiff: (runId: string, changesetId: string) => Promise<Record<string, unknown>>
+  blueprintRollbackChangesets: (
+    runId: string,
+    toChangesetId: string,
+    reason?: string,
+  ) => Promise<Record<string, unknown>>
+  blueprintRestoreRollback: (
+    runId: string,
+    rollbackId?: string,
+    reason?: string,
+  ) => Promise<Record<string, unknown>>
   blueprintEnd: (runId: string, action: BlueprintRunEndAction, reason?: string) => Promise<Record<string, unknown>>
   blueprintRecentEvents: (runId: string, limit?: number) => Promise<Record<string, unknown>>
   blueprintAgentInfo: (runId: string | undefined, nodeId: string) => Promise<Record<string, unknown>>
@@ -216,4 +245,7 @@ export type ElectronAPI = {
   checkUpdate: () => Promise<{ updateAvailable: boolean; version?: string }>
   installUpdate: () => Promise<void>
   setBackgroundColor: (color: string) => Promise<void>
+  getDesktopControlBridge: () => Promise<DesktopControlBridgeInfo>
+  respondDesktopControlBridgeCommand: (requestId: string, response: DesktopControlBridgeCommandResponse) => Promise<void>
+  onDesktopControlBridgeCommand: (cb: (request: DesktopControlBridgeCommandRequest) => void) => () => void
 }

@@ -1,6 +1,19 @@
 import { defineConfig, devices } from "@playwright/test"
 
-const port = Number(process.env.PLAYWRIGHT_PORT ?? 3000)
+const DEFAULT_PLAYWRIGHT_PORT = 3040
+
+function readPort(raw: string | undefined, fallback: number) {
+  if (!raw) return fallback
+
+  const port = Number(raw)
+  if (Number.isInteger(port) && port > 0 && port < 65536) return port
+  return fallback
+}
+
+const port = readPort(
+  process.env.PLAYWRIGHT_PORT ?? process.env.GULICODE_APP_PORT ?? process.env.PORT,
+  DEFAULT_PLAYWRIGHT_PORT,
+)
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${port}`
 const serverHost = process.env.PLAYWRIGHT_SERVER_HOST ?? "127.0.0.1"
 const serverPort = process.env.PLAYWRIGHT_SERVER_PORT ?? "4096"

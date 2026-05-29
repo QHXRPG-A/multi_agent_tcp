@@ -21,11 +21,15 @@ import { formatServerError } from "@/utils/server-errors"
 
 export type PromptInputMode = "normal" | "shell" | "blueprintPlanning"
 
-export type BlueprintPlanningSubmitRequest = {
+export type RemotePromptSubmitRequest = {
   id: number
   text: string
+  mode?: PromptInputMode
+  onAccepted?: () => void
   onBlocked?: () => void
 }
+
+export type BlueprintPlanningSubmitRequest = RemotePromptSubmitRequest
 
 type PendingPrompt = {
   abort: AbortController

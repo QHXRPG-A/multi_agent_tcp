@@ -214,6 +214,113 @@ def test_blueprint_service_exposes_run_and_changeset_diff_commands(tmp_path: Pat
     assert exc.value.code == "CHANGESET_PATCH_MISSING"
 
 
+def test_blueprint_service_exposes_rollback_and_restore_commands(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src" / "a.txt").write_text("base\n", encoding="utf-8")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    workspace_run = manager.create_run(run_id="run-service-rollback-workspace", code_mode="project_reference")
+    checkout = manager.checkout_agent(workspace_run, "agent-a", checkout_paths=["src/a.txt"])
+    (checkout.checkout_dir / "src" / "a.txt").write_text("changed\n", encoding="utf-8")
+    result = manager.submit_checkout(workspace_run, checkout, task_id="task-1", summary="change a")
+
+    class FakeRuntime:
+        archive_manager = manager
+        archive_run = workspace_run
+        private_context_manager = None
+        private_context_run = None
+
+        def status_snapshot(self, graph: object | None = None) -> dict:
+            return {"run": {"status": "completed"}}
+
+    service = DesktopBlueprintService()
+    service._runs["run-service-rollback"] = DesktopBlueprintRun(
+        run_id="run-service-rollback",
+        project_dir=tmp_path.resolve(),
+        blueprint_id="default",
+        document=_document(tmp_path),
+        graph=None,
+        runtime=FakeRuntime(),
+        control=None,
+        execution_mode="status",
+        created_at=1.0,
+        updated_at=1.0,
+    )
+
+    rollback = service.handle_request(
+        {
+            "command": "blueprint.rollbackChangesets",
+            "args": {
+                "runId": "run-service-rollback",
+                "toChangesetId": result.changeset_id,
+                "reason": "test",
+            },
+        }
+    )
+    rolled_diff = service.handle_request({"command": "blueprint.runDiff", "args": {"runId": "run-service-rollback"}})
+
+    assert rollback["ok"] is True
+    assert rollback["rollback"]["status"] == "rolled_back"
+    assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "base\n"
+    assert rolled_diff["summary"]["rolledBack"] == 1
+
+    restore = service.handle_request(
+        {
+            "command": "blueprint.restoreRollback",
+            "args": {
+                "runId": "run-service-rollback",
+                "rollbackId": rollback["rollback"]["rollbackId"],
+            },
+        }
+    )
+
+    assert restore["ok"] is True
+    assert restore["restore"]["status"] == "restored"
+    assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "changed\n"
+
+
+def test_blueprint_service_rejects_rollback_for_active_run(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src" / "a.txt").write_text("base\n", encoding="utf-8")
+    manager = DulwichWorkspaceManager.open_or_init(tmp_path)
+    workspace_run = manager.create_run(run_id="run-service-active-workspace", code_mode="project_reference")
+    checkout = manager.checkout_agent(workspace_run, "agent-a", checkout_paths=["src/a.txt"])
+    (checkout.checkout_dir / "src" / "a.txt").write_text("changed\n", encoding="utf-8")
+    result = manager.submit_checkout(workspace_run, checkout)
+
+    class FakeRuntime:
+        archive_manager = manager
+        archive_run = workspace_run
+        private_context_manager = None
+        private_context_run = None
+
+        def status_snapshot(self, graph: object | None = None) -> dict:
+            return {"run": {"status": "running"}}
+
+    service = DesktopBlueprintService()
+    service._runs["run-service-active"] = DesktopBlueprintRun(
+        run_id="run-service-active",
+        project_dir=tmp_path.resolve(),
+        blueprint_id="default",
+        document=_document(tmp_path),
+        graph=None,
+        runtime=FakeRuntime(),
+        control=None,
+        execution_mode="status",
+        created_at=1.0,
+        updated_at=1.0,
+    )
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.handle_request(
+            {
+                "command": "blueprint.rollbackChangesets",
+                "args": {"runId": "run-service-active", "toChangesetId": result.changeset_id},
+            }
+        )
+
+    assert exc.value.code == "RUN_NOT_TERMINAL"
+
+
 def _wait_for_live_run_idle(
     service: DesktopBlueprintService,
     run_id: str,

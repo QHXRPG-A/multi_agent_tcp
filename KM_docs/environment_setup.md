@@ -1,6 +1,7 @@
 # Environment Setup for Agents
 
-Last refreshed: 2026-05-20 on `D:\agent\multi_agent_tcp`.
+Last refreshed: 2026-05-29 on
+`F:\src\Package\Script\Python\multi_agent_tcp`.
 
 This is the fast path for bringing up the current `multi_agent_tcp` repo from
 the archived GuLiCode / blueprint runtime handoff notes. The active product
@@ -11,13 +12,13 @@ center is the GuLiCode desktop app plus the framework-owned blueprint runtime.
 Current root on this machine:
 
 ```powershell
-D:\agent\multi_agent_tcp
+F:\src\Package\Script\Python\multi_agent_tcp
 ```
 
 Run package imports either from this repo root or from its parent:
 
 ```powershell
-cd D:\agent
+cd F:\src\Package\Script\Python
 python -m multi_agent_tcp doctor --json
 ```
 
@@ -34,16 +35,17 @@ python -m multi_agent_tcp <command>
 Current observed local tools:
 
 ```powershell
-python --version      # Python 3.13.13
+python --version      # Python 3.13.5
 git --version         # git version 2.54.0.windows.1
-bun --version         # 1.3.14
-codex.cmd --version   # codex-cli 0.130.0
+node --version        # v24.15.0
+bun --version         # 1.3.13
+codex.cmd --version   # codex-cli 0.125.0
 ```
 
 Notes:
 
 - `GuLiCode/package.json` declares `packageManager` as `bun@1.3.11`; Bun
-  `1.3.14` has been used here successfully for focused tests.
+  `1.3.13` has been used here successfully for focused tests.
 - PowerShell script execution is disabled on this machine, so `codex` resolves
   first to `codex.ps1` and fails. Use `codex.cmd` or the WindowsApps
   `codex.exe` path for direct checks.
@@ -56,14 +58,26 @@ When bringing this repo up on another Windows computer, treat paths, console
 wrappers, PowerShell policy, and proxy state as machine-local. Before running
 MCP tests or GuLiCode desktop smoke:
 
-1. Install the checkout in editable mode with `python -m pip install -e .`.
-2. Prefer `python -m multi_agent_tcp <command>` over the generated
+1. Install Python 3.10+; the current local machine uses Python 3.13.5.
+2. Install Git for Windows.
+3. Install Bun. `GuLiCode/package.json` pins `bun@1.3.11`; Bun 1.3.13 is
+   confirmed working here.
+4. Install Node.js 22+ for ecosystem tooling; Node v24.15.0 is confirmed here.
+5. Install Codex CLI when running live Codex workers; use `codex.cmd` on
+   PowerShell-restricted Windows systems.
+6. Install this checkout in editable mode with `python -m pip install -e .`.
+7. Install focused test helpers with `python -m pip install pytest merge3`.
+8. Install GuLiCode JS dependencies with `cd GuLiCode; bun install
+   --frozen-lockfile`.
+9. Install Playwright browsers when running browser/e2e smoke tests:
+   `cd GuLiCode\packages\app; bunx playwright install chromium`.
+10. Prefer `python -m multi_agent_tcp <command>` over the generated
    `multi-agent-tcp.exe` wrapper in automation.
-3. Use `codex.cmd` or the WindowsApps `codex.exe` path when PowerShell blocks
+11. Use `codex.cmd` or the WindowsApps `codex.exe` path when PowerShell blocks
    `codex.ps1`.
-4. Run `python -m multi_agent_tcp doctor --json` and confirm the expected
+12. Run `python -m multi_agent_tcp doctor --json` and confirm the expected
    worker CLI reports `true`.
-5. Set localhost proxy bypass variables before MCP HTTP tests:
+13. Set localhost proxy bypass variables before MCP HTTP tests:
 
 ```powershell
 $env:NO_PROXY = '127.0.0.1,localhost,::1'
@@ -80,7 +94,7 @@ check the proxy bypass first. Windows system proxy settings can be inherited by
 The repo has a real `pyproject.toml`. Install this checkout in editable mode:
 
 ```powershell
-cd D:\agent\multi_agent_tcp
+cd F:\src\Package\Script\Python\multi_agent_tcp
 python -m pip install -e .
 python -m pip install pytest merge3
 ```
@@ -88,23 +102,25 @@ python -m pip install pytest merge3
 Current installed Python packages relevant to the archive:
 
 ```text
-multi-agent-tcp 0.5.0, editable at D:\agent\multi_agent_tcp
+multi-agent-tcp 0.5.0, editable at F:\src\Package\Script\Python\multi_agent_tcp
 pytest 9.0.3
 merge3 0.0.16
+fastapi 0.136.3
 mcp 1.27.1
 uvicorn 0.47.0
 starlette 0.52.1
 httpx 0.28.1
 ```
 
-`pyproject.toml` currently declares the MCP/live blueprint dependencies:
-`mcp`, `uvicorn`, `starlette`, and `httpx`. `merge3` is still recommended for
-Dulwich-backed three-way text merges in the workspace changeset flow.
+`pyproject.toml` currently declares the Collaboration Server and MCP/live
+blueprint dependencies: `fastapi`, `mcp`, `uvicorn`, `starlette`, and `httpx`.
+`merge3` is still recommended for Dulwich-backed three-way text merges in the
+workspace changeset flow.
 
 Useful Python checks:
 
 ```powershell
-cd D:\agent\multi_agent_tcp
+cd F:\src\Package\Script\Python\multi_agent_tcp
 python -m py_compile __init__.py blueprint_mcp_runtime.py agent_launch_context.py graph_runtime.py graph_control.py workspace_rpc.py desktop_blueprint_service.py test_desktop_blueprint_service.py test_agent_runtime.py test_workspace_api.py test_workspace_manager.py codex_bridge.py
 python -m multi_agent_tcp doctor --json
 ```
@@ -135,14 +151,14 @@ python -m pytest -q test_desktop_blueprint_service.py::test_run_mcp_streamable_h
 The repo-local `skill_list` has been initialized:
 
 ```powershell
-cd D:\agent\multi_agent_tcp
+cd F:\src\Package\Script\Python\multi_agent_tcp
 python -m multi_agent_tcp.init_skill_list
 ```
 
 Current result:
 
 ```text
-D:\agent\multi_agent_tcp\skill_list\manifest.json
+F:\src\Package\Script\Python\multi_agent_tcp\skill_list\manifest.json
 ```
 
 The generated manifest is currently `{}` because no additional business skill
@@ -153,7 +169,7 @@ entries were discovered by the initializer in this checkout.
 Install or verify JavaScript dependencies from the GuLiCode workspace root:
 
 ```powershell
-cd D:\agent\multi_agent_tcp\GuLiCode
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode
 bun install --frozen-lockfile
 ```
 
@@ -171,10 +187,10 @@ Important:
 Focused UI/runtime checks from the current archive:
 
 ```powershell
-cd D:\agent\multi_agent_tcp\GuLiCode\packages\app
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app
 bun test --preload ./happydom.ts ./src/pages/session/blueprint-model.test.ts ./src/pages/session/blueprint-side-panel.test.ts
 
-cd D:\agent\multi_agent_tcp\GuLiCode\packages\desktop-electron
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
 bun test ./src/main/blueprint-catalog.test.ts ./src/main/blueprint-runtime.test.ts ./src/main/ipc-blueprint-runtime.test.ts
 ```
 
@@ -186,28 +202,39 @@ blueprint/runtime IPC tests passed.
 Preferred Windows launcher:
 
 ```powershell
-cd D:\agent\multi_agent_tcp
+cd F:\src\Package\Script\Python\multi_agent_tcp
 .\start-gulicode-desktop.cmd
 ```
+
+Full local collaboration debug startup:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp
+.\start-gulicode-debug.cmd
+```
+
+This starts or verifies the Collaboration Server on `127.0.0.1:8787`, the app
+dev server on `127.0.0.1:3040`, GuLiCode desktop/sidecar, and opens `/mobile`
+plus `/console`.
 
 Packaged smoke path:
 
 ```powershell
-cd D:\agent\multi_agent_tcp
+cd F:\src\Package\Script\Python\multi_agent_tcp
 .\start-gulicode-desktop.cmd --packaged
 ```
 
 Direct Bun entry:
 
 ```powershell
-cd D:\agent\multi_agent_tcp\GuLiCode
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode
 bun run desktop
 ```
 
 Clean debug startup after Electron main/preload IPC changes:
 
 ```powershell
-cd D:\agent\multi_agent_tcp\GuLiCode\packages\desktop-electron
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
 $env:ELECTRON_ENABLE_LOGGING = '1'
 $env:ELECTRON_ENABLE_STACK_DUMPING = '1'
 Remove-Item Env:\DEBUG -ErrorAction SilentlyContinue
@@ -236,7 +263,7 @@ configured python_path -> GULICODE_PYTHON -> python -> python3 -> py -3 -> proje
 The current interpreter path reported by `doctor` is:
 
 ```text
-C:\Users\13429\AppData\Local\Programs\Python\Python313\python.exe
+C:\Users\qiuhaoxuan\AppData\Local\Programs\Python\Python313\python.exe
 ```
 
 ## Packaging Notes on Windows
@@ -244,7 +271,7 @@ C:\Users\13429\AppData\Local\Programs\Python\Python313\python.exe
 Normal packaging command:
 
 ```powershell
-cd D:\agent\multi_agent_tcp\GuLiCode\packages\desktop-electron
+cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
 bun run build
 bun run package:win
 ```
@@ -264,13 +291,13 @@ from that output directory, then rerun the same packaging command.
 The active Codex skill directory for this user is:
 
 ```powershell
-C:\Users\13429\.codex\skills\multi-agent-tcp
+C:\Users\qiuhaoxuan\.codex\skills\multi-agent-tcp
 ```
 
 It has been overwritten with the repository snapshot from:
 
 ```powershell
-D:\agent\multi_agent_tcp\KM_docs\skills-snapshot
+F:\src\Package\Script\Python\multi_agent_tcp\KM_docs\skills-snapshot
 ```
 
 When updating the skill again, mirror the full snapshot tree, not only

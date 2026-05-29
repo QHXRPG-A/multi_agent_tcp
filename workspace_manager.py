@@ -70,6 +70,8 @@ DEFAULT_SNAPSHOT_EXCLUDE_PATTERNS = (
     "target",
     "coverage",
 )
+REVERSIBLE_CHANGESET_MANIFEST = "reversible.json"
+ROLLBACK_JOURNAL_DIR = "rollback_journal"
 
 
 def _utc_now() -> str:
@@ -431,6 +433,16 @@ def _safe_id(value: str, *, field_name: str = "id") -> str:
     return safe
 
 
+def _safe_relative_path(value: str, *, field_name: str = "path") -> str:
+    normalized = str(value).replace("\\", "/").strip("/")
+    if not normalized or normalized in {".", ".."} or ":" in normalized:
+        raise ValueError(f"{field_name} must be a safe relative path: {value!r}")
+    parts = normalized.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"{field_name} must be a safe relative path: {value!r}")
+    return normalized
+
+
 def _sha256_file(path: Path) -> Optional[str]:
     if not path.is_file():
         return None
@@ -439,6 +451,12 @@ def _sha256_file(path: Path) -> Optional[str]:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _sha256_bytes(value: Optional[bytes]) -> Optional[str]:
+    if value is None:
+        return None
+    return hashlib.sha256(value).hexdigest()
 
 
 def _count_patch_lines(patch: str) -> tuple[int, int]:
@@ -768,6 +786,8 @@ class BlueprintRunDiff:
                 "rejected": 0,
                 "pending": 0,
                 "failed": 0,
+                "rolledBack": 0,
+                "restorable": 0,
                 "files": 0,
                 "textFiles": 0,
                 "binaryFiles": 0,
@@ -784,6 +804,46 @@ class BlueprintRunDiff:
             "acceptedDiffs": list(self.accepted_diffs),
             "binaryFiles": list(self.binary_files),
         }
+
+
+@dataclass
+class ChangesetRollbackResult:
+    ok: bool
+    status: str
+    run_id: str
+    rollback_id: Optional[str] = None
+    restore_id: Optional[str] = None
+    restored_rollback_id: Optional[str] = None
+    changeset_ids: List[str] = field(default_factory=list)
+    files: List[str] = field(default_factory=list)
+    conflicts: List[Dict[str, Any]] = field(default_factory=list)
+    events: List[str] = field(default_factory=list)
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "ok": self.ok,
+            "status": self.status,
+            "runId": self.run_id,
+            "run_id": self.run_id,
+            "changesetIds": list(self.changeset_ids),
+            "changeset_ids": list(self.changeset_ids),
+            "files": list(self.files),
+            "conflicts": list(self.conflicts),
+            "events": list(self.events),
+        }
+        if self.rollback_id is not None:
+            data["rollbackId"] = self.rollback_id
+            data["rollback_id"] = self.rollback_id
+        if self.restore_id is not None:
+            data["restoreId"] = self.restore_id
+            data["restore_id"] = self.restore_id
+        if self.restored_rollback_id is not None:
+            data["restoredRollbackId"] = self.restored_rollback_id
+            data["restored_rollback_id"] = self.restored_rollback_id
+        if self.reason:
+            data["reason"] = self.reason
+        return data
 
 
 @dataclass
@@ -1201,16 +1261,11 @@ class DulwichWorkspaceManager:
     def diff_checkout(self, run: RunWorkspace, checkout: AgentCheckout) -> List[FileChange]:
         return self._diff_dirs(checkout.base_dir, checkout.checkout_dir, include_patch=True)
 
-    def blueprint_run_diff(self, run: RunWorkspace) -> BlueprintRunDiff:
+    def _changeset_archive_records(self, run: RunWorkspace) -> List[Dict[str, Any]]:
         changesets_dir = run.path / "changesets"
         if not changesets_dir.exists():
-            return BlueprintRunDiff.empty(run.run_id)
-
-        summary = BlueprintRunDiff.empty(run.run_id).summary
-        changesets: List[Dict[str, Any]] = []
-        accepted_diffs: List[Dict[str, Any]] = []
-        binary_files: List[Dict[str, Any]] = []
-
+            return []
+        records: List[Dict[str, Any]] = []
         for root in sorted(changesets_dir.iterdir()):
             if not root.is_dir():
                 continue
@@ -1229,10 +1284,149 @@ class DulwichWorkspaceManager:
                 submit_result,
                 patch_exists=patch_exists,
             )
+            records.append(
+                {
+                    "root": root,
+                    "changeset": changeset,
+                    "submit_result": submit_result,
+                    "patch_exists": patch_exists,
+                    "detail": detail,
+                    "created_at": changeset.get("created_at") or submit_result.get("created_at") or root.name,
+                }
+            )
+        records.sort(key=lambda item: (str(item.get("created_at") or ""), str(item["root"].name)))
+        return records
+
+    def _rollback_journal_events(self, run: RunWorkspace) -> List[Dict[str, Any]]:
+        journal = run.path / ROLLBACK_JOURNAL_DIR
+        if not journal.exists():
+            return []
+        events: List[Dict[str, Any]] = []
+        for path in sorted(journal.glob("*.json")):
+            event = _read_json(path, {})
+            if not isinstance(event, dict):
+                continue
+            event["_journal_path"] = str(path)
+            events.append(event)
+        events.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("_journal_path") or "")))
+        return events
+
+    def _rollback_projection(self, run: RunWorkspace) -> Dict[str, Any]:
+        rolled: Dict[str, Dict[str, Any]] = {}
+        rollback_events: Dict[str, Dict[str, Any]] = {}
+        events = self._rollback_journal_events(run)
+        for event in events:
+            event_type = str(event.get("event_type") or event.get("type") or "").strip()
+            rollback_id = str(event.get("rollback_id") or "").strip()
+            changeset_ids = [
+                str(item)
+                for item in event.get("changeset_ids", [])
+                if isinstance(item, str) and item.strip()
+            ]
+            if event_type == "rollback" and rollback_id:
+                rollback_events[rollback_id] = event
+                for changeset_id in changeset_ids:
+                    rolled[changeset_id] = event
+            elif event_type == "restore" and rollback_id:
+                for changeset_id in changeset_ids:
+                    current = rolled.get(changeset_id)
+                    if current and current.get("rollback_id") == rollback_id:
+                        rolled.pop(changeset_id, None)
+
+        latest_restorable: Optional[Dict[str, Any]] = None
+        for event in reversed(events):
+            if str(event.get("event_type") or event.get("type") or "") != "rollback":
+                continue
+            rollback_id = str(event.get("rollback_id") or "").strip()
+            if not rollback_id:
+                continue
+            changeset_ids = [
+                str(item)
+                for item in event.get("changeset_ids", [])
+                if isinstance(item, str) and item.strip()
+            ]
+            if any(rolled.get(changeset_id, {}).get("rollback_id") == rollback_id for changeset_id in changeset_ids):
+                latest_restorable = event
+                break
+        return {
+            "rolled": rolled,
+            "rollback_events": rollback_events,
+            "latest_restorable": latest_restorable,
+            "events": events,
+        }
+
+    def _apply_rollback_metadata(
+        self,
+        detail: BlueprintChangesetDetail,
+        root: Path,
+        projection: Dict[str, Any],
+    ) -> BlueprintChangesetDetail:
+        metadata = dict(detail.metadata)
+        reversible = bool((root / REVERSIBLE_CHANGESET_MANIFEST).is_file())
+        metadata["reversible"] = reversible
+        metadata.setdefault("restorable", False)
+        status = detail.status
+        rolled_event = projection.get("rolled", {}).get(detail.changeset_id)
+        if detail.status == "accepted" and rolled_event:
+            status = "rolled_back"
+            metadata["status"] = status
+            metadata["rollbackId"] = rolled_event.get("rollback_id")
+            metadata["rollback_id"] = rolled_event.get("rollback_id")
+            metadata["rolledBackAt"] = rolled_event.get("created_at")
+            metadata["rolled_back_at"] = rolled_event.get("created_at")
+            latest = projection.get("latest_restorable")
+            metadata["restorable"] = bool(latest and latest.get("rollback_id") == rolled_event.get("rollback_id"))
+        elif detail.status == "accepted" and not reversible:
+            metadata["rollbackDisabledReason"] = "reversible changeset manifest is missing"
+            metadata["rollback_disabled_reason"] = metadata["rollbackDisabledReason"]
+        return BlueprintChangesetDetail(
+            run_id=detail.run_id,
+            changeset_id=detail.changeset_id,
+            status=status,
+            diffs=list(detail.diffs),
+            binary_files=list(detail.binary_files),
+            metadata={key: value for key, value in metadata.items() if value is not None},
+        )
+
+    def blueprint_run_diff(self, run: RunWorkspace) -> BlueprintRunDiff:
+        records = self._changeset_archive_records(run)
+        if not records:
+            return BlueprintRunDiff.empty(run.run_id)
+
+        projection = self._rollback_projection(run)
+        details = [
+            self._apply_rollback_metadata(record["detail"], record["root"], projection)
+            for record in records
+        ]
+        accepted_indexes = [idx for idx, detail in enumerate(details) if detail.status == "accepted"]
+        suffix_reversible = True
+        for idx in reversed(accepted_indexes):
+            metadata = dict(details[idx].metadata)
+            if not bool(metadata.get("reversible")):
+                suffix_reversible = False
+                metadata.setdefault("rollbackDisabledReason", "reversible changeset manifest is missing")
+                metadata.setdefault("rollback_disabled_reason", metadata["rollbackDisabledReason"])
+            elif not suffix_reversible:
+                metadata["rollbackDisabledReason"] = "a newer accepted changeset is not reversible"
+                metadata["rollback_disabled_reason"] = metadata["rollbackDisabledReason"]
+            metadata["rollbackable"] = bool(suffix_reversible and metadata.get("reversible"))
+            details[idx].metadata = metadata
+
+        summary = BlueprintRunDiff.empty(run.run_id).summary
+        changesets: List[Dict[str, Any]] = []
+        accepted_diffs: List[Dict[str, Any]] = []
+        binary_files: List[Dict[str, Any]] = []
+
+        for detail in details:
             item = detail.metadata
-            status = detail.status if detail.status in {"accepted", "conflict", "rejected", "pending", "failed"} else "pending"
+            status = detail.status if detail.status in {"accepted", "rolled_back", "conflict", "rejected", "pending", "failed"} else "pending"
             summary["total"] += 1
-            summary[status] = int(summary.get(status, 0)) + 1
+            if status == "rolled_back":
+                summary["rolledBack"] = int(summary.get("rolledBack", 0)) + 1
+            else:
+                summary[status] = int(summary.get(status, 0)) + 1
+            if item.get("restorable"):
+                summary["restorable"] = int(summary.get("restorable", 0)) + 1
             summary["files"] += int(item.get("fileCount") or 0)
             summary["textFiles"] += int(item.get("textFileCount") or 0)
             summary["binaryFiles"] += int(item.get("binaryFileCount") or 0)
@@ -1240,7 +1434,7 @@ class DulwichWorkspaceManager:
             summary["deletions"] += int(item.get("deletions") or 0)
             changesets.append(item)
             binary_files.extend(detail.binary_files)
-            if detail.status == "accepted" and patch_exists:
+            if detail.status == "accepted" and bool(item.get("patchExists")):
                 accepted_diffs.extend(detail.diffs)
 
         return BlueprintRunDiff(
@@ -1265,13 +1459,324 @@ class DulwichWorkspaceManager:
             changeset = {}
         if not isinstance(submit_result, dict):
             submit_result = {}
-        return self._blueprint_changeset_from_archive(
+        detail = self._blueprint_changeset_from_archive(
             run,
             root,
             changeset,
             submit_result,
             patch_exists=True,
         )
+        return self._apply_rollback_metadata(detail, root, self._rollback_projection(run))
+
+    def rollback_changesets(
+        self,
+        run: RunWorkspace,
+        to_changeset_id: str,
+        *,
+        actor: str = "user",
+        reason: str = "",
+    ) -> ChangesetRollbackResult:
+        target_id = _safe_id(str(to_changeset_id).strip(), field_name="changeset_id")
+        records = self._changeset_archive_records(run)
+        projection = self._rollback_projection(run)
+        details = [
+            self._apply_rollback_metadata(record["detail"], record["root"], projection)
+            for record in records
+        ]
+        accepted = [
+            (record, detail)
+            for record, detail in zip(records, details)
+            if detail.status == "accepted"
+        ]
+        target_index = next(
+            (idx for idx, (_record, detail) in enumerate(accepted) if detail.changeset_id == target_id),
+            None,
+        )
+        if target_index is None:
+            raise FileNotFoundError(f"accepted changeset was not found: {target_id}")
+        suffix = accepted[target_index:]
+        conflicts = self._validate_reversible_changesets(
+            run,
+            list(reversed(suffix)),
+            expected_side="after",
+            target_side="before",
+        )
+        if conflicts:
+            return ChangesetRollbackResult(
+                ok=False,
+                status="conflict",
+                run_id=run.run_id,
+                changeset_ids=[detail.changeset_id for _record, detail in suffix],
+                conflicts=conflicts,
+                reason=reason,
+            )
+
+        rollback_id = f"rb-{uuid.uuid4().hex[:12]}"
+        changed_files: List[str] = []
+        for record, detail in reversed(suffix):
+            changed_files.extend(
+                self._apply_reversible_changeset(
+                    run,
+                    record["root"],
+                    detail.changeset_id,
+                    target_side="before",
+                )
+            )
+        changeset_ids = [detail.changeset_id for _record, detail in suffix]
+        event = {
+            "schema_version": 1,
+            "event_type": "rollback",
+            "rollback_id": rollback_id,
+            "run_id": run.run_id,
+            "changeset_ids": changeset_ids,
+            "actor": actor,
+            "reason": reason,
+            "files": sorted(set(changed_files)),
+            "created_at": _utc_now(),
+        }
+        self._write_rollback_journal_event(run, rollback_id, event)
+        self._record_workspace_event(
+            run,
+            "ChangesetRolledBack",
+            {
+                "rollback_id": rollback_id,
+                "changeset_ids": changeset_ids,
+                "actor": actor,
+                "reason": reason,
+                "paths": sorted(set(changed_files)),
+            },
+        )
+        self._record_workspace_event(
+            run,
+            "WorkspaceChanged",
+            {
+                "rollback_id": rollback_id,
+                "changeset_ids": changeset_ids,
+                "paths": sorted(set(changed_files)),
+            },
+        )
+        return ChangesetRollbackResult(
+            ok=True,
+            status="rolled_back",
+            run_id=run.run_id,
+            rollback_id=rollback_id,
+            changeset_ids=changeset_ids,
+            files=sorted(set(changed_files)),
+            events=["ChangesetRolledBack", "WorkspaceChanged"],
+            reason=reason,
+        )
+
+    def restore_latest_rollback(
+        self,
+        run: RunWorkspace,
+        *,
+        rollback_id: Optional[str] = None,
+        actor: str = "user",
+        reason: str = "",
+    ) -> ChangesetRollbackResult:
+        projection = self._rollback_projection(run)
+        latest = projection.get("latest_restorable")
+        if not isinstance(latest, dict):
+            return ChangesetRollbackResult(
+                ok=False,
+                status="not_restorable",
+                run_id=run.run_id,
+                reason=reason,
+            )
+        expected_rollback_id = str(latest.get("rollback_id") or "")
+        if rollback_id and _safe_id(rollback_id, field_name="rollback_id") != expected_rollback_id:
+            return ChangesetRollbackResult(
+                ok=False,
+                status="not_latest_rollback",
+                run_id=run.run_id,
+                restored_rollback_id=rollback_id,
+                reason=reason,
+            )
+
+        requested_ids = [
+            str(item)
+            for item in latest.get("changeset_ids", [])
+            if isinstance(item, str) and item.strip()
+        ]
+        records_by_id = {
+            record["detail"].changeset_id: record
+            for record in self._changeset_archive_records(run)
+        }
+        suffix: List[tuple[Dict[str, Any], BlueprintChangesetDetail]] = []
+        for changeset_id in requested_ids:
+            record = records_by_id.get(changeset_id)
+            if record is None:
+                raise FileNotFoundError(f"changeset archive not found: {changeset_id}")
+            detail = self._apply_rollback_metadata(record["detail"], record["root"], projection)
+            suffix.append((record, detail))
+
+        conflicts = self._validate_reversible_changesets(
+            run,
+            suffix,
+            expected_side="before",
+            target_side="after",
+        )
+        if conflicts:
+            return ChangesetRollbackResult(
+                ok=False,
+                status="conflict",
+                run_id=run.run_id,
+                restored_rollback_id=expected_rollback_id,
+                changeset_ids=requested_ids,
+                conflicts=conflicts,
+                reason=reason,
+            )
+
+        restore_id = f"rs-{uuid.uuid4().hex[:12]}"
+        changed_files: List[str] = []
+        for record, detail in suffix:
+            changed_files.extend(
+                self._apply_reversible_changeset(
+                    run,
+                    record["root"],
+                    detail.changeset_id,
+                    target_side="after",
+                )
+            )
+        event = {
+            "schema_version": 1,
+            "event_type": "restore",
+            "restore_id": restore_id,
+            "rollback_id": expected_rollback_id,
+            "run_id": run.run_id,
+            "changeset_ids": requested_ids,
+            "actor": actor,
+            "reason": reason,
+            "files": sorted(set(changed_files)),
+            "created_at": _utc_now(),
+        }
+        self._write_rollback_journal_event(run, restore_id, event)
+        self._record_workspace_event(
+            run,
+            "ChangesetRestored",
+            {
+                "restore_id": restore_id,
+                "rollback_id": expected_rollback_id,
+                "changeset_ids": requested_ids,
+                "actor": actor,
+                "reason": reason,
+                "paths": sorted(set(changed_files)),
+            },
+        )
+        self._record_workspace_event(
+            run,
+            "WorkspaceChanged",
+            {
+                "restore_id": restore_id,
+                "rollback_id": expected_rollback_id,
+                "changeset_ids": requested_ids,
+                "paths": sorted(set(changed_files)),
+            },
+        )
+        return ChangesetRollbackResult(
+            ok=True,
+            status="restored",
+            run_id=run.run_id,
+            restore_id=restore_id,
+            restored_rollback_id=expected_rollback_id,
+            changeset_ids=requested_ids,
+            files=sorted(set(changed_files)),
+            events=["ChangesetRestored", "WorkspaceChanged"],
+            reason=reason,
+        )
+
+    def _write_rollback_journal_event(self, run: RunWorkspace, event_id: str, event: Dict[str, Any]) -> None:
+        safe_event_id = _safe_id(event_id, field_name="rollback_event_id")
+        _write_json(run.path / ROLLBACK_JOURNAL_DIR / f"{safe_event_id}.json", event)
+
+    def _read_reversible_manifest(self, root: Path, changeset_id: str) -> Dict[str, Any]:
+        manifest = _read_json(root / REVERSIBLE_CHANGESET_MANIFEST, {})
+        if not manifest:
+            raise FileNotFoundError(f"reversible changeset manifest not found: {changeset_id}")
+        files = manifest.get("files")
+        if not isinstance(files, list):
+            raise ValueError(f"reversible changeset manifest has invalid files: {changeset_id}")
+        return manifest
+
+    def _validate_reversible_changesets(
+        self,
+        run: RunWorkspace,
+        changesets: Sequence[tuple[Dict[str, Any], BlueprintChangesetDetail]],
+        *,
+        expected_side: str,
+        target_side: str,
+    ) -> List[Dict[str, Any]]:
+        conflicts: List[Dict[str, Any]] = []
+        simulated_hashes: Dict[str, Optional[str]] = {}
+        for record, detail in changesets:
+            try:
+                manifest = self._read_reversible_manifest(record["root"], detail.changeset_id)
+            except (FileNotFoundError, ValueError) as exc:
+                conflicts.append(
+                    {
+                        "changeset_id": detail.changeset_id,
+                        "reason": "not_reversible",
+                        "hint": str(exc),
+                    }
+                )
+                continue
+            for raw in manifest.get("files", []):
+                if not isinstance(raw, dict):
+                    continue
+                path = _safe_relative_path(str(raw.get("path") or ""))
+                expected_hash = raw.get(f"{expected_side}_hash")
+                if path in simulated_hashes:
+                    current_hash = simulated_hashes[path]
+                else:
+                    current_hash = _sha256_file(self._run_code_target(run) / path)
+                if current_hash != expected_hash:
+                    conflicts.append(
+                        {
+                            "changeset_id": detail.changeset_id,
+                            "path": path,
+                            "reason": "hash_mismatch",
+                            "expected_hash": expected_hash,
+                            "current_hash": current_hash,
+                        }
+                    )
+                    continue
+                simulated_hashes[path] = raw.get(f"{target_side}_hash")
+        return conflicts
+
+    def _apply_reversible_changeset(
+        self,
+        run: RunWorkspace,
+        root: Path,
+        changeset_id: str,
+        *,
+        target_side: str,
+    ) -> List[str]:
+        manifest = self._read_reversible_manifest(root, changeset_id)
+        changed: List[str] = []
+        for raw in manifest.get("files", []):
+            if not isinstance(raw, dict):
+                continue
+            path = _safe_relative_path(str(raw.get("path") or ""))
+            target = self._run_code_target(run) / path
+            target_hash = raw.get(f"{target_side}_hash")
+            snapshot_rel = raw.get(f"{target_side}_path")
+            if target_hash is None:
+                if target.exists():
+                    if target.is_dir() and not target.is_symlink():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                changed.append(path)
+                continue
+            if not isinstance(snapshot_rel, str) or not snapshot_rel.strip():
+                raise FileNotFoundError(f"reversible snapshot missing for {changeset_id}:{path}")
+            snapshot = root / _safe_relative_path(snapshot_rel, field_name=f"{target_side}_path")
+            if _sha256_file(snapshot) != target_hash:
+                raise FileNotFoundError(f"reversible snapshot hash mismatch for {changeset_id}:{path}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(snapshot, target)
+            changed.append(path)
+        return changed
 
     def submit_checkout(
         self,
@@ -1319,6 +1824,7 @@ class DulwichWorkspaceManager:
         events = ["ChangesetSubmitted"]
         merged_files: List[str] = []
         integration_ref: Optional[str] = None
+        reversible_files: List[Dict[str, Any]] = []
         if scope_violations:
             ok = False
             status = "rejected"
@@ -1338,6 +1844,22 @@ class DulwichWorkspaceManager:
             )
         else:
             for change, merged_bytes, _ in planned:
+                rel = _safe_relative_path(change.path)
+                current_file = self._run_code_target(run) / rel
+                before_bytes = current_file.read_bytes() if current_file.is_file() else None
+                reversible_files.append(
+                    {
+                        "path": rel,
+                        "status": change.status,
+                        "additions": change.additions,
+                        "deletions": change.deletions,
+                        "binary": change.binary,
+                        "before_hash": _sha256_bytes(before_bytes),
+                        "after_hash": _sha256_bytes(merged_bytes),
+                        "_before_bytes": before_bytes,
+                        "_after_bytes": merged_bytes,
+                    }
+                )
                 self._apply_checkout_change(run, change, merged_bytes)
                 merged_files.append(change.path)
             integration_ref = f"int-{uuid.uuid4().hex[:12]}"
@@ -1395,6 +1917,7 @@ class DulwichWorkspaceManager:
             summary=summary,
             test_results=list(test_results or []),
             risks=list(risks or []),
+            reversible_files=reversible_files if status == "accepted" else None,
         )
         result.archive_path = archive_path
         return result
@@ -2315,6 +2838,7 @@ class DulwichWorkspaceManager:
         summary: str,
         test_results: List[Dict[str, Any]],
         risks: List[str],
+        reversible_files: Optional[List[Dict[str, Any]]],
     ) -> Path:
         root = run.path / "changesets" / changeset_id
         root.mkdir(parents=True, exist_ok=True)
@@ -2336,7 +2860,64 @@ class DulwichWorkspaceManager:
             },
         )
         _write_json(root / "submit_result.json", result.to_dict())
+        if reversible_files is not None:
+            self._write_reversible_changeset_manifest(
+                root,
+                run,
+                changeset_id,
+                result.integration_ref,
+                reversible_files,
+            )
         return root
+
+    def _write_reversible_changeset_manifest(
+        self,
+        root: Path,
+        run: RunWorkspace,
+        changeset_id: str,
+        integration_ref: Optional[str],
+        reversible_files: List[Dict[str, Any]],
+    ) -> None:
+        files: List[Dict[str, Any]] = []
+        for raw in reversible_files:
+            path = _safe_relative_path(str(raw.get("path") or ""))
+            entry: Dict[str, Any] = {
+                "path": path,
+                "status": raw.get("status"),
+                "additions": int(raw.get("additions") or 0),
+                "deletions": int(raw.get("deletions") or 0),
+                "binary": bool(raw.get("binary")),
+                "before_hash": raw.get("before_hash"),
+                "after_hash": raw.get("after_hash"),
+                "beforeHash": raw.get("before_hash"),
+                "afterHash": raw.get("after_hash"),
+            }
+            before_bytes = raw.get("_before_bytes")
+            after_bytes = raw.get("_after_bytes")
+            if before_bytes is not None:
+                before_path = Path("snapshots") / "before" / path
+                (root / before_path).parent.mkdir(parents=True, exist_ok=True)
+                (root / before_path).write_bytes(before_bytes)
+                entry["before_path"] = before_path.as_posix()
+                entry["beforePath"] = before_path.as_posix()
+            if after_bytes is not None:
+                after_path = Path("snapshots") / "after" / path
+                (root / after_path).parent.mkdir(parents=True, exist_ok=True)
+                (root / after_path).write_bytes(after_bytes)
+                entry["after_path"] = after_path.as_posix()
+                entry["afterPath"] = after_path.as_posix()
+            files.append({key: value for key, value in entry.items() if value is not None})
+        _write_json(
+            root / REVERSIBLE_CHANGESET_MANIFEST,
+            {
+                "schema_version": 1,
+                "changeset_id": changeset_id,
+                "run_id": run.run_id,
+                "integration_ref": integration_ref,
+                "created_at": _utc_now(),
+                "files": files,
+            },
+        )
 
     def _merge_add(self, base_file: Path, current_file: Path, job_file: Path) -> bool:
         if current_file.exists():

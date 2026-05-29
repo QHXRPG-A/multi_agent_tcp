@@ -1,440 +1,672 @@
 # GuLiCode Collaboration Server 服务端开发技术设计
 
-## 目标
+## 当前结论
 
-本文定义 GuLiCode 未来远程协作服务端的工程边界、核心接口和开发约束。它结合了 `multi_agent_tcp` 当前架构，以及 dreamyouxi 博客《离开电脑也不停工：手机指挥 Claude 数字团队多 agent 干活》的实践经验。
+GuLiCode Collaboration Server 是移动端和未来远程协作入口的服务端边界。它负责账号、权限、会话、消息存盘、运行索引、事件转发、审计和移动端 API，不负责多 Agent 调度。
 
-核心结论：
-
-- GuLiCode Collaboration Server 负责账号、权限、消息存盘、运行记录索引、事件转发、移动端访问和审计。
-- Python Runtime 的 `GraphRuntimeControlPlane` / `GraphRuntime` 是调度事实源，服务端不能重新实现调度语义。
-- `CLIWorkerBackend` 只是执行适配层，Codex、CodeMaker、Claude 或其它 CLI worker 都应被视为可替换后端。
-- 远程服务应驱动现有 runtime / desktop / worker 能力，而不是另起一套并行执行系统。
-- 公网链路优先使用成熟 TLS、代理和隧道能力，不自造加密协议。
-
-本文不是数据库 schema 定稿，也不是具体框架选型文档。它的作用是让后续服务端实现保持同一组架构边界。
-
-## 背景与约束
-
-博客实践验证了一个关键产品需求：用户离开电脑后，仍然希望通过手机继续指挥本机 agent 执行代码修改、测试、部署和长任务监控。这个需求不能简单理解为“把 AI 搬到云上”，因为当前工作流存在两个硬约束。
-
-第一，本地资源不能随意搬到云端。本地仓库、未提交修改、SSH 私钥、VPN、`.env`、客户数据和内部接口都是 agent 工作上下文的一部分。把这些全部同步到云端既不现实，也会扩大合规和安全风险。
-
-第二，AI 的代码改动需要 IDE 级 review。Diff、Source Control、Go to Definition、Find References、Debugger 和全局符号搜索仍然由 GuLiCode Desktop / VSCode 类本地工具承担。远程服务端的价值是让用户可以移动端派单、看状态、做审批，而不是取代本地 IDE。
-
-因此，GuLiCode 服务端的设计原则是：
+当前事实源分层必须保持清晰：
 
 ```text
-移动端 / Web 客户端
-  -> 远程协作服务端
-  -> 本机或受控环境中的 Python Runtime
-  -> GraphRuntimeControlPlane / GraphRuntime
+Mobile PWA / Web / GuLiCode Desktop
+  -> GuLiCode Collaboration Server
+  -> DesktopBlueprintService / GraphRuntimeControlPlane
+  -> GraphRuntime
+  -> AgentNode queues / outgoing batches / joins / workspace events
   -> CLIWorkerBackend
-  -> Codex / CodeMaker / Claude 等 worker
+  -> Codex / CodeMaker / other CLI worker
 ```
 
-服务端是控制面代理、消息存盘层和协作同步层，不是调度器本身。
+核心开发原则：
 
-## 架构分层
+- `/mobile` 当前是只读前端 mock，不能作为后端 API 合同。
+- `GraphRuntimeControlPlane` / `GraphRuntime` 继续是调度事实源。
+- Collaboration Server 只代理、持久化、审计和投影 runtime 事实。
+- 移动端第一版优先实现只读查看、安全事件流和索引展示。
+- run 创建、消息发送、审批和 end/control 作为已定义但 capability-gated 的第二阶段能力。
+- 浏览器不得获得 runtime token、workspace RPC token、MCP bearer token、private checkout path、Codex home 或 service token。
 
-| 层 | 技术形态 | 职责 | 不负责 |
-| --- | --- | --- | --- |
-| Client / PWA | GuLiCode Desktop、Web、移动端 PWA | 登录、项目选择、top-agent 指令、运行状态、事件流、报告和产物入口 | 不直接访问 runtime token，不直接写项目目录 |
-| GuLiCode Collaboration Server | 长期运行的远程服务 | 用户、权限、消息存盘、run 索引、事件转发、审计、移动端入口 | 不计算队列、batch、join、workspace merge |
-| Python Runtime Service | 本机或受控运行环境中的 Python 服务 | `GraphRuntimeControlPlane`、`GraphRuntime`、workspace、MCP、run 生命周期 | 不负责多用户账号、远程会话登录态 |
-| Worker Backend | `CLIWorkerBackend`、AgentTCP、CLI adapter | 启动或绑定具体 CLI worker，传递 prompt，解析结果 | 不拥有产品调度语义 |
+## Mock 与源码观察
 
-推荐端到端形态：
+### 当前 mock 状态
 
-```text
-Browser / PWA
-  │ HTTPS + Cookie
-  ▼
-GuLiCode Collaboration Server
-  │ Server-Sent Events / WebSocket
-  │ RPC proxy with service token
-  ▼
-Python Runtime Service
-  │ GraphRuntimeControlPlane
-  ▼
-GraphRuntime
-  │ queues / outgoing batches / joins / workspace events
-  ▼
-CLIWorkerBackend
-  │ Codex / CodeMaker / Claude adapter
-  ▼
-Agent process
+`archive/frontend/mock/` 明确记录：mock 归档只描述展示状态和验证结果，不是后端合同。
+
+当前 `/mobile` mock 已从 2026-05-27 的项目/run/action 第一版，收敛到 2026-05-28 的三页只读结构：
+
+- `Top Agent`：只读 mock 对话，不发送消息。
+- `蓝图`：只读结构图、运行状态、Agent 信息 sheet、Diff 摘要。
+- `待定`：保留空状态。
+
+已移出当前 active mock 的能力不能直接进入第一阶段服务端范围：
+
+- project selector
+- create run
+- run control
+- approval / archive actions
+- long event stream cards
+- report list
+- tool cards as full mobile workflow
+
+这些能力可以进入后续 capability gate，但不能被描述成当前移动端必须立即接入的 UI 合同。
+
+### 当前源码状态
+
+`GuLiCode/packages/app/src/mobile/*` 当前只依赖 `mobileMockData` 和本地展示状态。`mobile-state.ts` 中的类型服务 mock 组件，不是公共后端 DTO。
+
+`GuLiCode/packages/app/src/entry.tsx` 对 `/mobile` 做独立入口处理，只包 `PlatformProvider` 和 `AppBaseProviders`，没有接入 desktop `AppInterface`、`GlobalSDKProvider` 或 `GlobalSyncProvider`。这意味着移动端真实接入需要一个独立的 Collaboration Server client，而不是直接复用桌面 runtime provider。
+
+`GuLiCode/packages/app/vite.config.ts` 已经把运行敏感路径配置为 `NetworkOnly`：
+
+- `/auth/*`
+- `/api/*`
+- `/runs/*`
+- `/stream`
+
+这个约束必须保留。PWA 只能缓存 shell 和静态资源，不缓存登录态、runtime status、SSE stream 或 run payload。
+
+### 当前 runtime / desktop bridge 状态
+
+Python 侧已有可复用能力：
+
+- `desktop_blueprint_service.py`
+  - `blueprint.list`
+  - `blueprint.open`
+  - `blueprint.save`
+  - `blueprint.validate`
+  - `blueprint.listRuns`
+  - `blueprint.start`
+  - `blueprint.status`
+  - `blueprint.recentEvents`
+  - `blueprint.agentInfo`
+  - `blueprint.queueAgentMessage`
+  - `blueprint.agentStreamToken`
+  - `blueprint.runDiff`
+  - `blueprint.changesetDiff`
+  - `blueprint.end`
+- `graph_control.py`
+  - `GraphRuntimeControlPlane`
+  - organization read
+  - top-agent context / explain status / utterances
+  - run validate/start/status/end
+  - message batch/stage
+  - agent dispatch
+  - join create/contribute
+- `graph_runtime.py`
+  - `status_snapshot()`
+  - `explain_status()`
+  - event journal
+  - agent stream events
+  - workspace state projection
+- `workspace_api.py` / `workspace_rpc.py`
+  - checkout/status/diff/submit
+  - publish/publish-file
+  - run-scoped reports/artifacts
+  - private checkout boundary
+
+Collaboration Server 第一版应复用这些接口，不重写调度器、workspace merge、join、batch 或 Agent queue。
+
+## 服务端需要开发的模块
+
+建议新增 Python 服务端边界，保持在 `multi_agent_tcp` 包内，避免引入第二套 Node 服务端：
+
+| 模块 | 职责 | 不负责 |
+| --- | --- | --- |
+| `collaboration_server.py` | Starlette app、路由、middleware、SSE endpoint、启动入口 | 不实现 runtime 调度 |
+| `collaboration_store.py` | sqlite3 schema、事务、查询、索引、审计写入 | 不保存 secret 明文到前端 payload |
+| `collaboration_auth.py` | 登录、session cookie、CSRF 基础策略、限速、用户上下文 | 不把 Basic Auth 作为正式移动端登录态 |
+| `collaboration_runtime_bridge.py` | 调用 `DesktopBlueprintService` / runtime RPC，做安全投影 | 不计算 queue/batch/join/final status |
+| `collaboration_events.py` | runtime event journal 镜像、cursor、SSE replay、断线重连 | 不制造 runtime event |
+| `collaboration_projection.py` | 把 runtime status/diff/report/artifact 转成移动端 DTO | 不复用 mock 类型作为合同 |
+
+### 账号与权限
+
+第一版要实现：
+
+- 用户表和密码哈希。
+- `httponly`、`secure`、`sameSite=lax` cookie session。
+- session 过期、注销和设备/IP 摘要。
+- 项目成员与角色。
+- run 读权限、控制权限和审批权限。
+- 登录失败短窗口限速与审计。
+
+调试入口可以保留 Basic Auth 兼容层，但只能用于本地开发或自动化诊断，不作为移动端正式身份体系。
+
+### 项目与 runtime binding
+
+项目记录绑定到 runtime endpoint / desktop bridge handle，而不是把真实项目物理路径直接交给浏览器。
+
+服务端持久化：
+
+- `projectId`
+- display name
+- owner / members / role
+- runtime binding id
+- blueprint ids and display metadata
+- safe last-run summary
+
+服务端内部可以保存受控 runtime endpoint、service token、项目路径或桌面 bridge 连接信息，但这些字段不得出现在前端 payload。
+
+### Run 索引与消息存盘
+
+服务端需要持久化：
+
+- server-side run id 与 runtime run id 的绑定。
+- project binding、blueprint id、owner、created/updated/ended timestamps。
+- user instruction、Top Agent message、用户确认/拒绝记录。
+- runtime status 的最近投影。
+- runtime event journal 镜像。
+- report / artifact / changeset 索引。
+- audit log。
+
+服务端不得把本地 pending/running/completed 状态当成调度事实。live run 状态以 runtime 当前响应为准；ended run 以 runtime final manifest / workspace archive 为准。
+
+### Event journal 与 SSE
+
+第一版事件流使用 SSE，不使用 WebSocket 作为移动端主事件协议。
+
+要求：
+
+- 每条前端事件有单调 cursor。
+- `GET /api/runs/:runId/events?cursor=...` 返回分页历史。
+- `GET /api/runs/:runId/stream?cursor=...` 从 cursor 后 replay，再继续推送 live events。
+- 客户端重连后不丢事件，不重复应用已确认事件。
+- 服务端断开连接时清理订阅状态。
+- 代理层关闭响应缓冲，确保事件逐条到达。
+
+桌面本地 Agent transcript 已有 WebSocket bridge，这是 desktop runtime 的既有实现；它不改变移动端第一版 SSE-first 的服务端设计。
+
+## API / DTO 草案
+
+所有正式 HTTP API 使用 `/api` 前缀。成功响应统一包含 `ok: true`，失败响应统一包含稳定错误码和 request id。
+
+成功响应示例：
+
+```json
+{
+  "ok": true,
+  "project": {
+    "id": "proj_123",
+    "name": "multi_agent_tcp"
+  }
+}
 ```
 
-在单用户自托管形态下，公网入口可以复用博客中的部署经验：公网 VPS 上 Caddy 负责 HTTPS 和反向代理，本机主动建立 SSH 反向隧道，Python 服务只监听 `127.0.0.1`。多用户托管形态下，可以把隧道替换为受控 agent gateway，但仍应保留“本地 runtime 不直接暴露公网”的边界。
-
-## 服务端职责
-
-### 必须拥有的事实
-
-GuLiCode Collaboration Server 可以持久化下列事实：
-
-- 用户、项目成员、角色、权限。
-- 登录会话、刷新令牌、设备信息、IP 限速记录。
-- user message、top-agent instruction、用户确认或拒绝记录。
-- start plan 原文、run metadata、run owner、project binding。
-- runtime event journal 的镜像副本。
-- agent utterance 摘要、工具调用卡片、错误摘要。
-- reports、artifacts、changesets 的索引和展示元数据。
-- 审计日志，包括 auth、run control、message send、runtime proxy、permission deny。
-
-这些事实服务查询、审计和跨端同步。它们不是 runtime 调度的来源。
-
-### 不能拥有的事实
-
-服务端不得自行维护或推导下列调度状态：
-
-- AgentNode 是否应该入队。
-- outgoing batch 是否完整。
-- fan-in join 是否满足。
-- Agent 任务是否可以标记 completed。
-- workspace changeset 是否可以合并。
-- project 目录中的最终代码状态。
-- 某个 runtime event 是否应该推进下一步图执行。
-
-这些判断属于 `GraphRuntime` 和 workspace API / MCP 工具边界。服务端只能转发请求、缓存响应、订阅事件和展示结果。
-
-## 核心流程
-
-### 登录与项目选择
-
-1. 用户通过 Web / PWA / Desktop 登录 Collaboration Server。
-2. 服务端校验 cookie session 或兼容 Basic Auth 的调试入口。
-3. 客户端请求 `GET /projects`，服务端返回用户可访问的项目列表。
-4. 用户选择项目后，服务端返回项目的 run 列表、可用 blueprint、最近事件和权限摘要。
-
-项目记录应绑定到一个 runtime endpoint，而不是直接绑定到项目物理路径。物理路径、runtime token、workspace RPC token 只存在于服务端和 Python Runtime 的受控通道中。
-
-### 创建运行
-
-1. 用户在客户端输入 top-agent 指令，或选择已有 blueprint 并提交 start plan。
-2. 客户端调用 `POST /runs`。
-3. 服务端写入 user message / instruction / start plan 原文。
-4. 服务端检查用户对项目和 blueprint 的权限。
-5. 服务端把 start plan 转发给 Python Runtime 的 `runtime start` 控制面。
-6. Python Runtime 校验计划并创建 live run。
-7. 服务端记录 run metadata，并把 runtime 返回的 run id、初始 status、事件 cursor 返回客户端。
-
-服务端不能在本地“模拟启动成功”。如果 runtime start 失败，`POST /runs` 必须返回明确错误，并保留审计记录。
-
-### 运行中事件回流
-
-1. 客户端建立 `GET /stream?runId=...`。
-2. 服务端校验用户是否能读取该 run。
-3. 服务端从 runtime 订阅或轮询 status / events。
-4. 服务端把 runtime events 规范化为前端事件：
-   - node queued / running / completed / failed
-   - outgoing batch open / complete
-   - join pending / satisfied / failed
-   - agent utterance
-   - tool card
-   - report / artifact / changeset index
-   - workspace conflict
-5. 客户端按事件更新 run panel、节点图、时间线和报告入口。
-
-推荐第一版使用 SSE，因为运行状态主要是 server-to-client。未来若需要多人共同编辑、实时输入、协同光标或双向 presence，再扩展 WebSocket。
-
-### 结束与归档
-
-1. 用户点击 complete / cancel / fail / pause / archive。
-2. 客户端调用 `POST /runs/:id/end`。
-3. 服务端校验权限并转发到 runtime control-plane。
-4. Runtime 执行 `end_run` 和归档逻辑。
-5. 服务端记录最终状态和审计日志。
-
-归档文件、changeset、reports、artifacts 的权威来源仍是 workspace / archive。服务端可以保存索引，不能把自己的索引当作归档事实。
-
-## API 草案
-
-所有 API 默认返回 JSON。错误格式应稳定，便于客户端展示和测试。
+失败响应示例：
 
 ```json
 {
   "ok": false,
   "code": "RUNTIME_UNAVAILABLE",
   "message": "Python runtime is not reachable",
-  "requestId": "req_..."
+  "requestId": "req_abc123"
 }
 ```
 
-### Auth
+### 第一版只读与索引 API
 
 | Method | Path | 说明 |
 | --- | --- | --- |
-| `POST` | `/auth/login` | 校验用户名密码，设置 `httponly` cookie |
-| `POST` | `/auth/logout` | 清理当前 session |
-| `GET` | `/me` | 返回当前用户、权限和设备摘要 |
+| `GET` | `/api/health` | 服务端健康检查，不泄漏 runtime secret |
+| `POST` | `/api/auth/login` | 登录并设置 `httponly` cookie |
+| `POST` | `/api/auth/logout` | 注销当前 session |
+| `GET` | `/api/me` | 当前用户、设备和权限摘要 |
+| `GET` | `/api/projects` | 当前用户可访问项目 |
+| `GET` | `/api/projects/:projectId/runs` | 项目 run 列表 |
+| `GET` | `/api/runs/:runId` | run metadata 和 safe summary |
+| `GET` | `/api/runs/:runId/status` | runtime status 投影 |
+| `GET` | `/api/runs/:runId/events?cursor=...` | runtime event journal 分页 |
+| `GET` | `/api/runs/:runId/stream?cursor=...` | SSE 事件流 |
+| `GET` | `/api/runs/:runId/agents/:nodeId` | Agent panel snapshot |
+| `GET` | `/api/runs/:runId/diff` | run-scoped diff summary |
+| `GET` | `/api/runs/:runId/changesets/:changesetId/diff` | changeset diff detail |
+| `GET` | `/api/runs/:runId/reports` | report 索引 |
+| `GET` | `/api/runs/:runId/artifacts` | artifact 索引 |
 
-登录态建议：
+### 第二阶段 capability-gated 写操作
 
-- 浏览器使用 `httponly`、`secure`、`sameSite=lax` cookie。
-- 调试、自检和脚本入口可以兼容 Basic Auth。
-- session 签名密钥保存在服务端文件或 secret manager 中，重启不应导致所有用户被迫登出。
+| Method | Path | 说明 | Gate |
+| --- | --- | --- | --- |
+| `POST` | `/api/runs` | 创建 run，转发 start plan 到 runtime | `run:create` |
+| `POST` | `/api/runs/:runId/messages` | 向 Top Agent 或指定 AgentNode 发送用户消息 | `run:message` |
+| `POST` | `/api/runs/:runId/end` | complete / cancel / fail / pause | `run:end` |
+| `POST` | `/api/runs/:runId/approvals` | 记录审批、拒绝或人工确认 | `run:approve` |
 
-### Project
+写操作处理顺序固定为：
 
-| Method | Path | 说明 |
-| --- | --- | --- |
-| `GET` | `/projects` | 返回当前用户可访问项目 |
-| `GET` | `/projects/:projectId/runs` | 返回项目 run 列表和摘要 |
-| `GET` | `/projects/:projectId/blueprints` | 返回项目 blueprint 列表 |
+1. 校验 session。
+2. 校验项目/run 权限。
+3. 校验 capability gate。
+4. 写入用户意图或审批原文。
+5. 调用 runtime bridge。
+6. 持久化 runtime 响应或错误摘要。
+7. 写审计日志。
 
-项目返回值不暴露真实 runtime token、workspace RPC token、Codex home 或 agent 私有路径。
+如果 runtime 调用失败，不得先返回本地模拟成功状态。
 
-### Run Control
+### DTO 投影
 
-| Method | Path | 说明 |
-| --- | --- | --- |
-| `POST` | `/runs` | 创建 run，并把 start plan 转发给 runtime |
-| `GET` | `/runs/:runId` | 返回 run metadata |
-| `GET` | `/runs/:runId/status` | 返回 runtime status snapshot |
-| `GET` | `/runs/:runId/events` | 返回事件分页 |
-| `POST` | `/runs/:runId/end` | complete / cancel / fail / pause / archive |
+DTO 只定义服务端投影，不复用 `mobile-state.ts` 中的 mock 类型名作为后端合同。
 
-`POST /runs` 请求示例：
+`ProjectSummary`：
 
-```json
-{
-  "projectId": "proj_123",
-  "blueprintId": "review-flow",
-  "instruction": "检查 parser 改动并补测试",
-  "startPlan": {
-    "reason": "User requested parser review",
-    "start_node_ids": ["planner"],
-    "initial_messages": []
+```ts
+type ProjectSummary = {
+  id: string
+  name: string
+  role: "owner" | "operator" | "viewer"
+  latestRun?: RunSummary
+  capabilities: string[]
+}
+```
+
+`RunSummary`：
+
+```ts
+type RunSummary = {
+  id: string
+  projectId: string
+  blueprintId: string
+  title: string
+  status: "running" | "completed" | "cancelled" | "failed" | "paused" | "unknown"
+  createdAt: string
+  updatedAt: string
+  endedAt?: string
+  currentNodeIds: string[]
+  unreadEventCount?: number
+}
+```
+
+`RunStatusProjection`：
+
+```ts
+type RunStatusProjection = {
+  run: RunSummary
+  blueprint: BlueprintStructureProjection
+  agents: AgentPanelSnapshot[]
+  pending: {
+    queuedMessages: number
+    waitingOutgoingBatches: number
+    waitingJoins: number
+    runningJobs: number
   }
+  outputs: {
+    reports: ReportIndexItem[]
+    artifacts: ArtifactIndexItem[]
+    diff?: RunDiffSummary
+  }
+  lastCursor: string
 }
 ```
 
-服务端处理顺序必须是：权限校验、写入用户指令、转发 runtime、记录 runtime 响应。不要先生成一个本地 run 状态再异步“补启动”，否则移动端会看到虚假的 running 状态。
+`BlueprintStructureProjection`：
 
-### Event Stream
+```ts
+type BlueprintStructureProjection = {
+  nodes: Array<{
+    id: string
+    label: string
+    role?: string
+    state: "idle" | "queued" | "running" | "completed" | "failed" | "unknown"
+    upstreamNodeIds: string[]
+    downstreamNodeIds: string[]
+  }>
+  edges: Array<{
+    source: string
+    target: string
+    kind: "exec" | "data" | "unknown"
+  }>
+}
+```
 
-| Method | Path | 说明 |
+`AgentPanelSnapshot`：
+
+```ts
+type AgentPanelSnapshot = {
+  nodeId: string
+  agentId: string
+  cliKind?: string
+  state: string
+  taskStatus?: string
+  queueSize: number
+  messagesSent: number
+  busyCount: number
+  updatedAt?: string
+  recentEvents: RuntimeEvent[]
+}
+```
+
+`RuntimeEvent`：
+
+```ts
+type RuntimeEvent = {
+  cursor: string
+  runId: string
+  type:
+    | "runtime.status"
+    | "agent.status"
+    | "agent.utterance"
+    | "agent.tool"
+    | "workspace.report"
+    | "workspace.artifact"
+    | "workspace.changeset"
+    | "workspace.conflict"
+    | "run.completed"
+    | "run.failed"
+  occurredAt: string
+  nodeId?: string
+  agentId?: string
+  payload: Record<string, unknown>
+}
+```
+
+`RunDiffSummary`：
+
+```ts
+type RunDiffSummary = {
+  total: number
+  accepted: number
+  conflict: number
+  rejected: number
+  pending: number
+  files: number
+  additions: number
+  deletions: number
+  changesets: Array<{
+    id: string
+    status: string
+    summary: string
+    files: string[]
+  }>
+}
+```
+
+`ReportIndexItem` / `ArtifactIndexItem`：
+
+```ts
+type ReportIndexItem = {
+  id: string
+  title: string
+  path: string
+  mediaType: string
+  createdAt?: string
+  ownerNodeId?: string
+}
+
+type ArtifactIndexItem = {
+  id: string
+  title: string
+  path: string
+  mediaType: string
+  bytes?: number
+  createdAt?: string
+  ownerNodeId?: string
+}
+```
+
+## Runtime / Desktop Bridge 集成
+
+Collaboration Server 的 bridge 层只做安全调用与投影。
+
+### 读取映射
+
+| Collaboration API | Runtime / Desktop source |
+| --- | --- |
+| project run list | `blueprint.listRuns` + server project binding |
+| run detail | server run index + `blueprint.status` |
+| run status | `GraphRuntime.status_snapshot(graph=...)` |
+| status explanation | `GraphRuntime.explain_status(graph=...)` |
+| event page | `blueprint.recentEvents` / runtime event journal mirror |
+| Agent sheet | `blueprint.agentInfo` |
+| run diff | `blueprint.runDiff` |
+| changeset diff | `blueprint.changesetDiff` |
+| reports/artifacts | runtime workspace projection / archive index |
+
+### 写入映射
+
+| Collaboration API | Runtime / Desktop source | 约束 |
 | --- | --- | --- |
-| `GET` | `/stream?runId=...&cursor=...` | SSE 事件流 |
+| create run | `blueprint.start` / `run.start` | start plan 必须完整，服务端不补计划 |
+| send message | `blueprint.queueAgentMessage` | 必须 live run + capability gate |
+| end run | `blueprint.end` / `run.end` | 不重复结束 terminal run |
+| approval | server audit + optional runtime control | 第一版只存盘，是否触发 runtime 后置 |
 
-SSE 事件建议：
+### 禁止 bridge 做的事
+
+- 自行判断 AgentNode 是否应该入队。
+- 自行补齐 outgoing batch。
+- 自行判定 fan-in join 是否满足。
+- 自行标记 Agent 任务完成。
+- 自行合并 workspace changeset。
+- 自行修改 project code root。
+- 从事件流推导并推进下一步图执行。
+
+这些语义属于 `GraphRuntime`、workspace manager、MCP 工具和 control plane。
+
+## 技术调整
+
+### 服务端技术栈
+
+第一版固定使用仓库已有 Python 依赖：
+
+- `Starlette`：HTTP app、middleware、routing、SSE `StreamingResponse`。
+- `uvicorn`：本地或远程服务启动。
+- `httpx`：服务端到 runtime / desktop bridge 的 HTTP client。
+- `sqlite3`：第一版持久化，不新增数据库依赖。
+
+不引入：
+
+- FastAPI
+- Express / Next.js 服务端
+- 新的 Vue / React / Flutter 移动端工程
+- 自定义加密协议
+- 服务端自建多 Agent 调度器
+
+### sqlite3 持久化
+
+第一版 schema 至少覆盖：
+
+- `users`
+- `sessions`
+- `projects`
+- `project_members`
+- `runtime_bindings`
+- `runs`
+- `messages`
+- `runtime_events`
+- `report_indexes`
+- `artifact_indexes`
+- `changeset_indexes`
+- `audit_logs`
+- `login_attempts`
+
+写入要求：
+
+- 所有 run control、message send、approval、runtime proxy 请求都写 audit。
+- event journal append-only。
+- token / secret 不进普通查询 payload。
+- 对外 id 使用 opaque id，不暴露本地路径推导信息。
+
+### SSE 实现要求
+
+使用 Starlette `StreamingResponse` 输出标准 SSE：
 
 ```text
-event: runtime.status
 id: 42
-data: {"runId":"run_1","status":"running","agents":{}}
-
-event: agent.utterance
-id: 43
-data: {"runId":"run_1","nodeId":"coder","taskId":"task_1","said":"..."}
-
-event: workspace.report
-id: 44
-data: {"runId":"run_1","area":"reports","path":"blueprint_result.json","version":2}
+event: runtime.status
+data: {"runId":"run_1","status":"running"}
 ```
 
-代理层必须关闭响应缓冲。使用 Caddy 时，应保留类似 `flush_interval -1` 的配置，避免流式事件等响应结束后才一次性下发。
+实现规则：
 
-## Runtime 集成约定
+- `id` 使用服务端 event cursor。
+- 支持 `cursor` query 参数。
+- 支持 heartbeat 注释行，避免代理 idle timeout。
+- 断线后客户端按最后确认 cursor 重连。
+- runtime unavailable 时发送明确错误事件并关闭流，或让 HTTP 请求返回稳定错误。
+- Caddy / Nginx 反代必须关闭 SSE 响应缓冲。
 
-服务端与 Python Runtime 的集成应复用当前控制面语义：
+### PWA / Mobile 调整
 
-- 读组织结构：`organization` / top-agent context。
-- 启动：`runtime start`。
-- 状态：`runtime status` / `explain_status`。
-- 消息：message batch、message stage、agent dispatch。
-- 汇聚：join create、join contribute。
-- 结束：`runtime end`。
-- top-agent 可见发言：`top_agent.utterances`。
+移动端接入顺序：
 
-实现时可以通过本地 RPC、HTTP bridge、Unix/Windows 本地进程通信或受控 gateway 连接 runtime。无论底层通信方式是什么，服务端接口都必须把 runtime 当作事实源。
+1. 新增 Collaboration Server client。
+2. `/mobile` 启动时先读 `/api/me` 和 `/api/projects`。
+3. 将 `mobileMockData.messages` 替换为 server message/run projection。
+4. 将蓝图结构、运行状态、Agent sheet、Diff 摘要分别替换为对应 API。
+5. 接入 SSE cursor 重连。
+6. 最后再打开消息发送、run control 或 approval gate。
 
-### 缓存规则
+保持不变：
 
-服务端可以缓存：
+- `/auth/*`、`/api/*`、`/runs/*`、`/stream` 继续 `NetworkOnly`。
+- PWA 只缓存 shell、图标、字体、CSS、JS。
+- 移动端不得直连 Python Runtime、Workspace RPC、MCP bearer endpoint 或 desktop local token。
 
-- 最近一次 status snapshot。
-- event journal 的已转发 cursor。
-- report / artifact / changeset 索引。
-- run 结束后的最终摘要。
+## 分阶段开发
 
-缓存失效或冲突时：
+### 阶段 1：只读移动协作闭环
 
-- live run 以 runtime 当前响应为准。
-- ended / archived run 以 workspace archive 和 runtime final manifest 为准。
-- 服务端缓存缺失时可以重建索引，但不能改写 workspace 事实。
+必须完成：
 
-### Workspace 规则
+- Starlette 服务入口。
+- sqlite3 store 与迁移初始化。
+- 登录、session、logout、`/api/me`。
+- 项目列表和项目权限。
+- run 列表、run detail、run status。
+- runtime event journal 镜像。
+- SSE stream + cursor replay。
+- Agent panel snapshot。
+- run diff / changeset diff summary。
+- report / artifact index。
+- 审计日志。
+- payload secret scrubber。
 
-代码协作仍遵守当前三空间模型：
+不做：
 
-- project code root 是最终代码目标，Agent 可读但不能直接写。
-- private checkout 是 Agent 可写工作区。
-- shared workspace 保存 reports、artifacts、manifest、changeset 引用和日志。
+- 移动端发消息。
+- 移动端启动 run。
+- 移动端结束 run。
+- 移动端审批触发 runtime 行为。
+- 多人实时编辑或 presence。
 
-服务端不得提供“直接写项目文件”的 API。任何代码修改必须走 Agent private checkout 和 framework workspace / MCP 工具，最终通过 changeset submit 进入项目目录。
+### 阶段 2：受控写操作
 
-## 安全设计
+在阶段 1 稳定后开启：
 
-### TLS 与公网入口
+- `POST /api/runs`
+- `POST /api/runs/:runId/messages`
+- `POST /api/runs/:runId/end`
+- `POST /api/runs/:runId/approvals`
 
-公网链路必须使用成熟 TLS。推荐路线：
+要求：
 
-```text
-Browser / PWA
-  -> HTTPS
-  -> Caddy / Nginx / managed LB
-  -> Collaboration Server
-  -> Runtime gateway / SSH reverse tunnel / local RPC
-  -> Python Runtime
-```
+- 所有写操作 capability-gated。
+- runtime unavailable 必须返回明确错误。
+- 所有用户原文、runtime 响应和失败摘要写审计。
+- 移动端 UI 必须能表达 disabled / readonly / permission denied 状态。
 
-不要使用“WebSocket + 自定义加密”替代 TLS。自定义应用层加密容易遗漏重放、防降级、证书校验、密钥轮换和错误处理。
+### 阶段 3：多人和托管化
 
-单用户自托管部署可以沿用博客实践：
+后置能力：
 
-- 本机 Python Runtime 只监听 `127.0.0.1`。
-- 本机主动发起 SSH 反向隧道到 VPS。
-- VPS 上 Caddy 负责 HTTPS、证书续期和反代。
-- 服务端和 runtime token 不进入浏览器。
-
-### 登录防护
-
-登录防护采用“宽锁不严锁”：
-
-- 第 1 层：用户名密码或 Basic Auth，成功后写 `httponly` cookie。
-- 第 2 层：同 IP 短窗口错误次数限速，例如 5 分钟内 10 次。
-- 第 3 层：单日错误次数硬锁，跨重启保留，次日重置。
-- 正确密码永远允许放行，锁定只拦截错误尝试。
-
-这样可以避免攻击者通过反复错误登录把合法用户锁在外面。
-
-### Token 隔离
-
-以下字段不得返回给浏览器：
-
-- runtime RPC token。
-- workspace RPC token。
-- MCP bearer token。
-- Codex home、agent private dir、真实 skill-space 源路径。
-- 服务端到 runtime 的 service token。
-- SSH 隧道、VPS 内部端口、反代 upstream secret。
-
-前端只拿用户态 session 和展示需要的索引。需要调用 runtime 的动作由服务端代发。
-
-### 审计
-
-至少记录：
-
-- 登录成功、失败、锁定、解锁。
-- 项目读取、run 创建、run 结束。
-- top-agent 指令和用户确认。
-- runtime proxy 请求和返回状态。
-- 权限拒绝。
-- 事件流连接、断开和重连。
-
-审计日志可以先使用 append-only 文件或数据库表。关键要求是不可被普通前端请求改写。
-
-## 移动端与 PWA 要求
-
-移动端是该服务的主场景，第一版 Web UI 至少需要：
-
-- `100dvh` 和 safe-area 处理，避免 iOS 地址栏和 Home indicator 遮挡。
-- 输入框 `font-size: 16px`，避免 iOS 聚焦自动放大。
-- 桌面端 Enter 发送，移动端 Enter 换行。
-- 事件流断线后按 cursor 重连。
-- 历史消息分页加载，首屏只拉最近记录。
-- 流式期间纯文本渲染，消息结束后再做 Markdown sanitize 和渲染。
-- 工具调用卡片和 Agent 发言可折叠。
-
-这些是产品可用性的基础，不是后期 polish。
-
-## MVP 范围
-
-第一阶段只做远程运行观察和控制闭环：
-
-- 用户登录和项目列表。
-- run 创建、status、events、end。
-- SSE 事件流。
-- runtime unavailable 的清晰错误。
-- reports / artifacts / changesets 索引展示。
-- 基础审计和登录限速。
-
-第一阶段不做：
-
-- 多人同时编辑 blueprint。
-- 服务端自行调度 Agent。
-- 直接在线改项目文件。
-- 自定义加密协议。
-- 完整数据库迁移体系。
-- 云端复制本地仓库。
-
-第二阶段再补：
-
-- 多用户项目成员和权限模型。
-- run 历史搜索。
-- 更完整的 artifact 浏览。
-- WebSocket 双向协作。
+- 多用户项目成员管理。
+- 更完整的 run 历史搜索。
+- artifact 浏览和下载策略。
 - runtime gateway 高可用。
-- 更强的审计查询和告警。
+- 告警和审计查询。
+- WebSocket 双向协作，仅当需要多人编辑、presence 或低延迟双向输入时引入。
 
 ## 测试计划
 
-### API contract
+### 文档更新验证
 
-- 未登录访问项目返回 401。
+- 用 UTF-8 读取本文，确认中文无乱码。
+- 用 `rg` 检查旧的 mock-contract、博客中心、WebSocket-first、移动端直连 runtime 等表述已清理。
+- 确认本文不把 `mobile-state.ts` 的 mock 类型当作后端合同。
+
+### 后续服务端测试
+
+Auth / permission：
+
+- 未登录访问 `/api/projects` 返回 401。
 - 无项目权限访问 run 返回 403。
-- `POST /runs` 正确转发 start plan。
-- runtime 返回失败时，服务端返回稳定错误格式。
-- `POST /runs/:id/end` 只接受受支持 action。
+- 登录失败触发 IP 短窗口限速。
+- 正确密码在错误尝试限速策略下仍有明确处理路径。
 
-### Runtime 集成
+Runtime bridge：
 
-- 使用 mock `GraphRuntimeControlPlane` 验证服务端只转发请求，不私自推进状态。
-- runtime status 改变后，服务端缓存不能覆盖新事实。
-- runtime unavailable 时，run 创建失败并写审计。
-- run ended 后继续发送控制请求返回明确错误。
+- `POST /api/runs` 在 runtime unavailable 时失败并写审计。
+- run status 来自 runtime bridge，不使用服务端本地猜测。
+- terminal run 重复 end 不重复调用 runtime。
+- mock `GraphRuntimeControlPlane` 验证服务端只转发请求，不私自推进状态。
 
-### 流式
+SSE / events：
 
-- SSE 可以连续推送 status、utterance、tool、report 事件。
-- 代理关闭缓冲后，事件逐条到达。
-- 客户端带 cursor 重连后不丢事件、不重复应用已确认事件。
-- 长连接断开时服务端清理连接状态，不泄漏订阅。
+- cursor replay 不丢事件。
+- cursor replay 不重复应用已确认事件。
+- 长连接断开后清理订阅状态。
+- 代理关闭缓冲后事件逐条到达。
 
-### 安全
+Secret boundary：
 
-- 短窗口错误密码触发 IP 限速。
-- 单日错误次数触发硬锁。
-- 正确密码在锁定状态下仍可放行。
-- token、private path、workspace RPC 信息不出现在前端 payload。
-- 审计日志记录 auth、run control、permission deny。
+- payload 不包含 runtime token。
+- payload 不包含 workspace RPC token。
+- payload 不包含 MCP bearer token。
+- payload 不包含 private checkout path。
+- payload 不包含 Codex home。
+- payload 不包含 service token。
 
-### 回归场景
+Reports / artifacts / diff：
 
-- runtime 断开。
-- runtime 重启后 run 状态恢复或返回清晰不可恢复错误。
-- event journal 重复投递。
-- workspace conflict。
-- Agent 失败。
-- report / artifact 缺失。
-- 移动端后台恢复后重连事件流。
+- diff 只暴露授权 changeset 索引和 detail。
+- rejected/conflict changeset 不进入 accepted diff 渲染输入。
+- report/artifact 缺失返回稳定 404。
+- artifact path 不能路径穿越。
 
-## 开发原则
+PWA：
 
-- 先接 runtime 控制面，再做 UI 丰富度。
-- 先保证错误清晰，再考虑自动恢复。
-- 先使用 SSE，等双向协作需求明确后再引入 WebSocket。
-- 先持久化事实索引，不复制 workspace 内容。
-- 先用成熟 TLS / 反代 / 隧道，不自造安全协议。
-- 命名上始终区分 Collaboration Server、Python Runtime、Worker Backend。
+- `/auth/*`、`/api/*`、`/runs/*`、`/stream` 不被 service worker 缓存。
+- 离线时只展示 shell 或明确离线状态，不展示过期 runtime status。
+- 背景恢复后用 cursor 重连 SSE。
 
-## 参考
+## 不做事项与边界
 
-- dreamyouxi 博客：《离开电脑也不停工：手机指挥 Claude 数字团队多 agent 干活》，https://dreamyouxi.com/blog/1724
-- `docs/gulicode_blueprint_workbench_design.md`
+第一版明确不做：
+
+- 不把 mock data shape 当后端 API。
+- 不让移动端直连 Python Runtime。
+- 不让移动端访问 workspace RPC、MCP bearer endpoint 或 desktop local service token。
+- 不在服务端直接写项目目录。
+- 不在服务端复制 `GraphRuntime` 调度语义。
+- 不在服务端合并 changeset。
+- 不把 shared workspace 描述成源码集成区；它是 reports、artifacts、manifest、changeset 引用、冲突记录和日志的协作记录区。
+- 不用 WebSocket 替代第一版 SSE 事件流。
+- 不自定义加密协议替代 TLS。
+- 不新增第二套移动端框架。
+
+命名上始终区分：
+
+- GuLiCode Collaboration Server：账号、权限、存盘、审计、移动 API、事件转发。
+- DesktopBlueprintService / Python Runtime：本地 runtime bridge 和 control-plane 实现。
+- `GraphRuntimeControlPlane` / `GraphRuntime`：调度事实源。
+- `CLIWorkerBackend`：Codex、CodeMaker 或其他 CLI worker 的执行适配层。
+
+## 参考输入
+
+- `archive/frontend/mock/README.md`
+- `archive/frontend/mock/gulicode_mobile_top_tabs_mock_2026-05-28.md`
+- `archive/frontend/mock/gulicode_mobile_blueprint_structure_map_2026-05-28.md`
+- `archive/frontend/mock/gulicode_mobile_agent_info_sheet_mock_2026-05-28.md`
+- `GuLiCode/packages/app/src/mobile/mobile-state.ts`
+- `GuLiCode/packages/app/src/mobile/mock-data.ts`
+- `GuLiCode/packages/app/src/entry.tsx`
+- `GuLiCode/packages/app/vite.config.ts`
+- `desktop_blueprint_service.py`
+- `graph_control.py`
+- `graph_runtime.py`
 - `docs/workspace_api.md`
 - `KM_docs/skills-snapshot/knowledge_base/core_architecture.md`
 - `KM_docs/skills-snapshot/knowledge_base/dispatch_workflows.md`
+- `KM_docs/skills-snapshot/archive/runtime-backend/blueprint_api_bridge_2026-05-16.md`
+- `KM_docs/skills-snapshot/archive/runtime-backend/blueprint_runtime_middle_layer_2026-05-16.md`
+- `KM_docs/skills-snapshot/archive/runtime-backend/blueprint_run_mcp_runtime_2026-05-19.md`

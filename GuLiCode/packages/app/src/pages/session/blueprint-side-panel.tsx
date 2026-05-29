@@ -11,12 +11,13 @@ import { Popover } from "@opencode-ai/ui/popover"
 import { TextField, type TextFieldProps } from "@opencode-ai/ui/text-field"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
 import { showToast } from "@opencode-ai/ui/toast"
-import { For, Index, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount, splitProps, untrack, type JSX } from "solid-js"
+import { For, Index, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount, splitProps, untrack, type JSX } from "solid-js"
 import { useNavigate } from "@solidjs/router"
 import { base64Encode } from "@opencode-ai/shared/util/encode"
 import { createStore, reconcile, type SetStoreFunction } from "solid-js/store"
 import { useLanguage } from "@/context/language"
 import { useLayout, type BlueprintFloatingRect } from "@/context/layout"
+import { BlueprintCollaborationAuthPanel, postDesktopBlueprintSnapshot, type DesktopBlueprintSnapshotPayload } from "@/components/collaboration-auth"
 import { Persist, persisted } from "@/utils/persist"
 import { decode64 } from "@/utils/base64"
 import { useSessionLayout } from "@/pages/session/session-layout"
@@ -319,6 +320,12 @@ type BlueprintDiffChangeset = {
   additions: number
   deletions: number
   patchExists: boolean
+  reversible: boolean
+  restorable: boolean
+  rollbackable: boolean
+  rollbackId?: string
+  rolledBackAt?: string
+  rollbackDisabledReason?: string
 }
 
 type BlueprintChangesetDiffDetail = {
@@ -337,6 +344,8 @@ type BlueprintDiffState = {
   acceptedDiffs: BlueprintDiffFile[]
   binaryFiles: Record<string, unknown>[]
   detailLoading?: string
+  rollingBack?: string
+  restoringRollback?: boolean
   details: Record<string, BlueprintChangesetDiffDetail | undefined>
 }
 
@@ -899,6 +908,26 @@ export function BlueprintSidePanel(props: {
   const runtimeEdgeFlowIds = createMemo(() =>
     runtimeRunActive() ? runtimeEdgeFlows(runtime().status, visibleEdges()) : new Set<string>(),
   )
+  const desktopBlueprintSnapshot = createMemo<DesktopBlueprintSnapshotPayload>(() =>
+    createDesktopBlueprintSnapshot(projectDirectory, draft, runtimeRunActive() ? runtimeAgents() : undefined),
+  )
+  let desktopBlueprintSnapshotTimer: number | undefined
+  createEffect(
+    on(
+      () => (draftReady() ? JSON.stringify(desktopBlueprintSnapshot()) : ""),
+      (payloadText) => {
+        if (!payloadText || platform.platform !== "desktop") return
+        if (desktopBlueprintSnapshotTimer) window.clearTimeout(desktopBlueprintSnapshotTimer)
+        desktopBlueprintSnapshotTimer = window.setTimeout(() => {
+          void postDesktopBlueprintSnapshot(JSON.parse(payloadText) as DesktopBlueprintSnapshotPayload).catch(() => undefined)
+        }, 400)
+      },
+      { defer: true },
+    ),
+  )
+  onCleanup(() => {
+    if (desktopBlueprintSnapshotTimer) window.clearTimeout(desktopBlueprintSnapshotTimer)
+  })
 
   const inspectedAgent = createMemo(() => {
     if (draft.inspector?.type !== "node") return
@@ -1574,6 +1603,8 @@ export function BlueprintSidePanel(props: {
         acceptedDiffs: next.acceptedDiffs,
         binaryFiles: next.binaryFiles,
         detailLoading: undefined,
+        rollingBack: undefined,
+        restoringRollback: false,
         details: blueprintDiff.details,
       })
       emitWorkspaceDiffChangedIfNeeded(runId, next.changesets, next.acceptedDiffs)
@@ -1595,6 +1626,58 @@ export function BlueprintSidePanel(props: {
     } catch (error) {
       setBlueprintDiff("detailLoading", undefined)
       setBlueprintDiff("error", readableError(error))
+    }
+  }
+
+  async function rollbackBlueprintChangesets(toChangesetId: string) {
+    const runId = runtime().runId
+    if (!runId || !platform.rollbackBlueprintChangesets) return
+    setBlueprintDiff("rollingBack", toChangesetId)
+    setBlueprintDiff("error", undefined)
+    try {
+      const response = await platform.rollbackBlueprintChangesets(
+        runId,
+        toChangesetId,
+        "requested from Blueprint Diff overlay",
+      )
+      const record = asRecord(response)
+      const rollback = asRecord(record?.rollback)
+      if (record?.ok === false || rollback?.ok === false) {
+        throw new Error(stringValue(rollback?.status) ?? stringValue(record?.status) ?? "rollback failed")
+      }
+      setBlueprintDiff("details", {})
+      setBlueprintDiffSelectedChangesetId(undefined)
+      await refreshBlueprintRunDiff(runId, { quiet: true })
+    } catch (error) {
+      setBlueprintDiff("error", readableError(error))
+    } finally {
+      setBlueprintDiff("rollingBack", undefined)
+    }
+  }
+
+  async function restoreBlueprintRollback(rollbackId?: string) {
+    const runId = runtime().runId
+    if (!runId || !platform.restoreBlueprintRollback) return
+    setBlueprintDiff("restoringRollback", true)
+    setBlueprintDiff("error", undefined)
+    try {
+      const response = await platform.restoreBlueprintRollback(
+        runId,
+        rollbackId,
+        "requested from Blueprint Diff overlay",
+      )
+      const record = asRecord(response)
+      const restore = asRecord(record?.restore)
+      if (record?.ok === false || restore?.ok === false) {
+        throw new Error(stringValue(restore?.status) ?? stringValue(record?.status) ?? "restore failed")
+      }
+      setBlueprintDiff("details", {})
+      setBlueprintDiffSelectedChangesetId(undefined)
+      await refreshBlueprintRunDiff(runId, { quiet: true })
+    } catch (error) {
+      setBlueprintDiff("error", readableError(error))
+    } finally {
+      setBlueprintDiff("restoringRollback", false)
     }
   }
 
@@ -3009,6 +3092,9 @@ export function BlueprintSidePanel(props: {
               )}
             </For>
           </div>
+          <div class="pointer-events-auto absolute bottom-4 left-4 z-30">
+            <BlueprintCollaborationAuthPanel defaultUsername="1" />
+          </div>
           <Show when={runtimeRunActive()}>
             <div
               data-blueprint-runtime-frame
@@ -3051,9 +3137,15 @@ export function BlueprintSidePanel(props: {
               onClose={() => setBlueprintDiffOpen(false)}
               onRefresh={() => void refreshBlueprintRunDiff(runtime().runId)}
               onSelectChangeset={(changesetId) => {
+                if (blueprintDiffSelectedChangesetId() === changesetId) {
+                  setBlueprintDiffSelectedChangesetId(undefined)
+                  return
+                }
                 setBlueprintDiffSelectedChangesetId(changesetId)
                 void loadBlueprintChangesetDiff(changesetId)
               }}
+              onRollbackChangeset={(changesetId) => void rollbackBlueprintChangesets(changesetId)}
+              onRestoreRollback={(rollbackId) => void restoreBlueprintRollback(rollbackId)}
             />
           </Show>
         </div>
@@ -3119,12 +3211,16 @@ function BlueprintDiffOverlay(props: {
   onClose: () => void
   onRefresh: () => void
   onSelectChangeset: (changesetId: string) => void
+  onRollbackChangeset: (changesetId: string) => void
+  onRestoreRollback: (rollbackId?: string) => void
 }) {
   const language = useLanguage()
   const groups = createMemo(() => groupBlueprintDiffChangesets(props.state.changesets))
   const selectedDetail = createMemo(() =>
     props.selectedChangesetId ? props.state.details[props.selectedChangesetId] : undefined,
   )
+  const restorableRollbackId = createMemo(() => props.state.changesets.find((item) => item.restorable)?.rollbackId)
+  const actionBusy = createMemo(() => !!props.state.rollingBack || !!props.state.restoringRollback)
 
   return (
     <div
@@ -3144,11 +3240,27 @@ function BlueprintDiffOverlay(props: {
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-1">
+          <Show when={restorableRollbackId()}>
+            {(rollbackId) => (
+              <Button
+                size="small"
+                icon="arrow-right"
+                variant="secondary"
+                class="h-7 px-2"
+                disabled={props.state.loading || actionBusy()}
+                onClick={() => props.onRestoreRollback(rollbackId())}
+              >
+                {props.state.restoringRollback
+                  ? language.t("common.loading")
+                  : language.t("blueprint.diff.restoreRollback" as never)}
+              </Button>
+            )}
+          </Show>
           <IconButton
             icon="reset"
             variant="ghost"
             class="h-7 w-7"
-            disabled={props.state.loading}
+            disabled={props.state.loading || actionBusy()}
             onClick={props.onRefresh}
             aria-label={language.t("blueprint.diff.refresh" as never)}
           />
@@ -3214,24 +3326,60 @@ function BlueprintDiffOverlay(props: {
                               </Show>
                             </div>
                           </div>
-                          <Button
-                            size="small"
-                            variant={props.selectedChangesetId === changeset.changesetId ? "secondary" : "ghost"}
-                            class="h-7 shrink-0 px-2"
-                            disabled={!changeset.patchExists}
-                            onClick={() => props.onSelectChangeset(changeset.changesetId)}
-                          >
-                            {props.state.detailLoading === changeset.changesetId
-                              ? language.t("common.loading")
-                              : language.t("blueprint.diff.view" as never)}
-                          </Button>
+                          <div class="flex shrink-0 items-center gap-1">
+                            <Tooltip
+                              value={
+                                changeset.rollbackDisabledReason ||
+                                (changeset.status !== "accepted"
+                                  ? language.t("blueprint.diff.rollbackOnlyAccepted" as never)
+                                  : "")
+                              }
+                              placement="top"
+                              gutter={4}
+                            >
+                              <span>
+                                <Button
+                                  size="small"
+                                  icon="reset"
+                                  variant="ghost"
+                                  class="h-7 px-2"
+                                  disabled={
+                                    props.state.loading ||
+                                    actionBusy() ||
+                                    changeset.status !== "accepted" ||
+                                    !changeset.rollbackable
+                                  }
+                                  onClick={() => props.onRollbackChangeset(changeset.changesetId)}
+                                >
+                                  {props.state.rollingBack === changeset.changesetId
+                                    ? language.t("common.loading")
+                                    : language.t("blueprint.diff.rollback" as never)}
+                                </Button>
+                              </span>
+                            </Tooltip>
+                            <Button
+                              size="small"
+                              variant={props.selectedChangesetId === changeset.changesetId ? "secondary" : "ghost"}
+                              class="h-7 px-2"
+                              disabled={!changeset.patchExists || actionBusy()}
+                              aria-expanded={props.selectedChangesetId === changeset.changesetId}
+                              onClick={() => props.onSelectChangeset(changeset.changesetId)}
+                            >
+                              {props.state.detailLoading === changeset.changesetId
+                                ? language.t("common.loading")
+                                : language.t("blueprint.diff.view" as never)}
+                            </Button>
+                          </div>
                         </div>
-                        <Show when={props.selectedChangesetId === changeset.changesetId && selectedDetail()}>
-                          {(detail) => (
-                            <BlueprintDiffDetailView
-                              detail={detail()}
-                            />
-                          )}
+                        <Show when={props.selectedChangesetId === changeset.changesetId}>
+                          <Show when={selectedDetail()}>
+                            {(detail) => (
+                              <BlueprintDiffDetailView
+                                detail={detail()}
+                                tone={changeset.status === "rolled_back" ? "neutral" : "diff"}
+                              />
+                            )}
+                          </Show>
                         </Show>
                       </div>
                     )}
@@ -3246,7 +3394,7 @@ function BlueprintDiffOverlay(props: {
   )
 }
 
-function BlueprintDiffDetailView(props: { detail: BlueprintChangesetDiffDetail }) {
+function BlueprintDiffDetailView(props: { detail: BlueprintChangesetDiffDetail; tone?: "diff" | "neutral" }) {
   const language = useLanguage()
   return (
     <div data-blueprint-diff-detail class="mt-3 rounded border border-[rgba(103,232,249,0.16)] bg-[#020617]/70">
@@ -3264,7 +3412,7 @@ function BlueprintDiffDetailView(props: { detail: BlueprintChangesetDiffDetail }
             </div>
             <pre class="max-h-72 overflow-auto px-3 pb-3 font-mono text-[11px] leading-5 text-[#cbd5e1]">
               <For each={diff.patch.split("\n")}>
-                {(line) => <div class={blueprintPatchLineClass(line)}>{line || " "}</div>}
+                {(line) => <div class={blueprintPatchLineClass(line, props.tone)}>{line || " "}</div>}
               </For>
             </pre>
           </div>
@@ -5659,6 +5807,12 @@ function normalizeBlueprintDiffChangeset(value: Record<string, unknown>): Bluepr
     additions: numberValue(value.additions),
     deletions: numberValue(value.deletions),
     patchExists: value.patchExists !== false,
+    reversible: value.reversible === true,
+    restorable: value.restorable === true,
+    rollbackable: value.rollbackable === true,
+    rollbackId: stringValue(value.rollbackId) ?? stringValue(value.rollback_id),
+    rolledBackAt: stringValue(value.rolledBackAt) ?? stringValue(value.rolled_back_at),
+    rollbackDisabledReason: stringValue(value.rollbackDisabledReason) ?? stringValue(value.rollback_disabled_reason),
   }
 }
 
@@ -5704,6 +5858,7 @@ function blueprintAgentColor(agentId?: string) {
 
 function blueprintDiffStatusClass(status: string) {
   if (status === "accepted") return "bg-[#064e3b] text-[#bbf7d0]"
+  if (status === "rolled_back") return "bg-[#334155] text-[#cbd5e1]"
   if (status === "conflict") return "bg-[#7f1d1d] text-[#fecaca]"
   if (status === "rejected" || status === "failed") return "bg-[#3f1d1d] text-[#fca5a5]"
   return "bg-[#1e3a8a] text-[#bfdbfe]"
@@ -5711,18 +5866,86 @@ function blueprintDiffStatusClass(status: string) {
 
 function blueprintDiffStatusLabel(t: (key: never) => string, status: string) {
   if (status === "accepted") return t("blueprint.diff.status.accepted" as never)
+  if (status === "rolled_back") return t("blueprint.diff.status.rolledBack" as never)
   if (status === "conflict") return t("blueprint.diff.status.conflict" as never)
   if (status === "rejected") return t("blueprint.diff.status.rejected" as never)
   if (status === "failed") return t("blueprint.diff.status.failed" as never)
   return t("blueprint.diff.status.pending" as never)
 }
 
-function blueprintPatchLineClass(line: string) {
+function blueprintPatchLineClass(line: string, tone: "diff" | "neutral" = "diff") {
+  if (tone === "neutral") return "text-[#cbd5e1]"
   if (line.startsWith("+++") || line.startsWith("---")) return "text-[#93c5fd]"
   if (line.startsWith("+")) return "bg-[#052e1c] text-[#86efac]"
   if (line.startsWith("-")) return "bg-[#3f1111] text-[#fca5a5]"
   if (line.startsWith("@@")) return "text-[#67e8f9]"
   return "text-[#cbd5e1]"
+}
+
+function createDesktopBlueprintSnapshot(
+  projectDirectory: string,
+  draft: BlueprintDraft,
+  runtimeAgents?: Record<string, unknown>,
+): DesktopBlueprintSnapshotPayload {
+  const agentIds = new Set(Object.keys(draft.graph.agent_nodes))
+  const upstream = new Map<string, string[]>()
+  const downstream = new Map<string, string[]>()
+  const edges = draft.graph.edges
+    .filter((edge) => agentIds.has(edge.from) && agentIds.has(edge.to))
+    .map((edge) => {
+      upstream.set(edge.to, [...(upstream.get(edge.to) ?? []), edge.from])
+      downstream.set(edge.from, [...(downstream.get(edge.from) ?? []), edge.to])
+      return {
+        source: edge.from,
+        target: edge.to,
+        kind: desktopSnapshotEdgeKind(edge.edge_type),
+      }
+    })
+
+  return {
+    projectDir: projectDirectory,
+    blueprintId: DEFAULT_BLUEPRINT_ID,
+    title: DEFAULT_BLUEPRINT_NAME,
+    description: "Desktop blueprint structure snapshot.",
+    nodes: Object.entries(draft.graph.agent_nodes).map(([id, node]) => {
+      const runtime = asRecord(runtimeAgents?.[id])
+      const layout = draft.layout.nodes[id]
+      return {
+        id,
+        label: node.agent_id?.trim() || id,
+        role: node.cli_kind || "agent",
+        state: desktopSnapshotNodeState(stringValue(runtime?.state)),
+        x: layout?.x,
+        y: layout?.y,
+        upstreamNodeIds: upstream.get(id) ?? [],
+        downstreamNodeIds: downstream.get(id) ?? [],
+        agentId: node.agent_id?.trim() || id,
+        cliKind: node.cli_kind || undefined,
+        taskStatus: stringValue(runtime?.task_status),
+        queueSize: numberValue(runtime?.queue_size),
+        messagesSent: numberValue(runtime?.messages_sent),
+        busyCount: numberValue(runtime?.busy_count),
+        updatedAt: stringValue(runtime?.updated_at),
+      }
+    }),
+    edges,
+  }
+}
+
+function desktopSnapshotNodeState(value?: string): DesktopBlueprintSnapshotPayload["nodes"][number]["state"] {
+  const state = (value ?? "").toLowerCase()
+  if (state === "completed" || state === "done" || state === "succeeded") return "completed"
+  if (RUNTIME_WORKING_AGENT_STATES.has(state) || state === "active") return "running"
+  if (state === "queued" || state === "pending") return "queued"
+  if (state === "failed" || state === "error") return "failed"
+  if (state === "unknown") return "unknown"
+  return "idle"
+}
+
+function desktopSnapshotEdgeKind(value?: string): "exec" | "data" | "unknown" {
+  const kind = (value ?? "").toLowerCase()
+  if (kind === "exec" || kind === "data") return kind
+  return "unknown"
 }
 
 function workspaceAreaTitle(t: (key: never) => string, area: WorkspacePanelArea) {

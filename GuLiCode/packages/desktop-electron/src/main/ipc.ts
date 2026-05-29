@@ -9,6 +9,8 @@ import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
 import type {
   BlueprintWindowRect,
   BlueprintWindowPlanningSubmitInput,
+  DesktopControlBridgeCommandResponse,
+  DesktopControlBridgeInfo,
   InitStep,
   ServerReadyData,
   SqliteMigrationProgress,
@@ -65,6 +67,8 @@ type Deps = {
   checkUpdate: () => Promise<{ updateAvailable: boolean; version?: string }>
   installUpdate: () => Promise<void> | void
   setBackgroundColor: (color: string) => void
+  getDesktopControlBridgeInfo?: () => Promise<DesktopControlBridgeInfo> | DesktopControlBridgeInfo
+  respondDesktopControlBridgeCommand?: (requestId: string, response: DesktopControlBridgeCommandResponse) => void
   blueprintRuntime: BlueprintRuntime
   appId?: string
 }
@@ -102,6 +106,15 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("check-update", () => deps.checkUpdate())
   ipcMain.handle("install-update", () => deps.installUpdate())
   ipcMain.handle("set-background-color", (_event: IpcMainInvokeEvent, color: string) => deps.setBackgroundColor(color))
+  ipcMain.handle("desktop-control-bridge-info", () => {
+    if (!deps.getDesktopControlBridgeInfo) throw new Error("desktop control bridge is unavailable")
+    return deps.getDesktopControlBridgeInfo()
+  })
+  ipcMain.handle(
+    "desktop-control-bridge-command-response",
+    (_event: IpcMainInvokeEvent, requestId: string, response: DesktopControlBridgeCommandResponse) =>
+      deps.respondDesktopControlBridgeCommand?.(requestId, response),
+  )
   ipcMain.handle("store-get", (_event: IpcMainInvokeEvent, name: string, key: string) => {
     const store = getStore(name)
     const value = store.get(key)
@@ -193,6 +206,16 @@ export function registerIpcHandlers(deps: Deps) {
     "blueprint-changeset-diff",
     (_event: IpcMainInvokeEvent, runId: string, changesetId: string) =>
       deps.blueprintRuntime.changesetDiff(runId, changesetId),
+  )
+  ipcMain.handle(
+    "blueprint-rollback-changesets",
+    (_event: IpcMainInvokeEvent, runId: string, toChangesetId: string, reason?: string) =>
+      deps.blueprintRuntime.rollbackChangesets(runId, toChangesetId, reason),
+  )
+  ipcMain.handle(
+    "blueprint-restore-rollback",
+    (_event: IpcMainInvokeEvent, runId: string, rollbackId?: string, reason?: string) =>
+      deps.blueprintRuntime.restoreRollback(runId, rollbackId, reason),
   )
   ipcMain.handle(
     "blueprint-end",

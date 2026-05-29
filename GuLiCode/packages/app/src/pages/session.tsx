@@ -32,7 +32,7 @@ import { previewSelectedLines } from "@opencode-ai/ui/pierre/selection-bridge"
 import { Button } from "@opencode-ai/ui/button"
 import { showToast } from "@opencode-ai/ui/toast"
 import { checksum } from "@opencode-ai/shared/util/encode"
-import { useSearchParams } from "@solidjs/router"
+import { useNavigate, useSearchParams } from "@solidjs/router"
 import { NewSessionView, SessionHeader } from "@/components/session"
 import { useComments } from "@/context/comments"
 import { getSessionPrefetch, SESSION_PREFETCH_TTL } from "@/context/global-sync/session-prefetch"
@@ -49,8 +49,14 @@ import {
   type BlueprintPlanningSubmitRequest,
   type FollowupDraft,
   type PromptSubmitOverrideInput,
+  type RemotePromptSubmitRequest,
   sendFollowupDraft,
 } from "@/components/prompt-input/submit"
+import {
+  postDesktopSessionSnapshot,
+  registerDesktopBridge,
+  type DesktopSessionMessageSegmentPayload,
+} from "@/components/collaboration-auth"
 import { createSessionComposerState, SessionComposerRegion } from "@/pages/session/composer"
 import {
   createOpenReviewFile,
@@ -103,10 +109,241 @@ type BlueprintPlanningPlan = {
   createdAt?: string
 }
 
+type CollaborationProjectSummary = {
+  id: string
+  capabilities?: string[]
+}
+
+type CollaborationPlanningRequest = {
+  id: string
+  projectId: string
+  goal: string
+  status: string
+  desktopSessionId?: string | null
+  planningSessionId?: string | null
+  mobileAnswer?: {
+    questionId?: string
+    answers?: Record<string, unknown>
+    rejected?: boolean
+    reason?: string
+  } | null
+  error?: string | null
+  createdAt?: number | null
+  updatedAt?: number | null
+}
+
 const DEFAULT_BLUEPRINT_ID = "default"
+const MOBILE_PLANNING_PREFIX = "[来自移动端]"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
+}
+
+function errorMessage(value: unknown) {
+  return value instanceof Error ? value.message : String(value)
+}
+
+function sessionSnapshotTime(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return new Date(value).toISOString()
+  if (typeof value === "string" && value) return value
+  return undefined
+}
+
+function sessionSnapshotTitle(item: { id: string; title?: string | null; time?: { updated?: number; created?: number } }) {
+  const title = typeof item.title === "string" ? item.title.trim() : ""
+  if (title) return title
+  return `Session ${item.id.slice(-6)}`
+}
+
+function sessionSnapshotMessageLabel(message: { role: string; agent?: string; model?: { modelID?: string } }) {
+  if (message.role === "user") return "User"
+  return message.agent || message.model?.modelID || "Assistant"
+}
+
+const SESSION_SNAPSHOT_SEGMENT_BODY_LIMIT = 4096
+const SESSION_SNAPSHOT_MESSAGE_BODY_LIMIT = 8192
+
+function sessionSnapshotLimitText(value: string, limit: number) {
+  return value.length > limit ? `${value.slice(0, limit).trimEnd()}\n...` : value
+}
+
+function sessionSnapshotString(value: unknown) {
+  if (typeof value === "string") return value
+  if (typeof value === "number" && Number.isFinite(value)) return String(value)
+  if (typeof value === "boolean") return String(value)
+  return undefined
+}
+
+function sessionSnapshotStringField(record: Record<string, unknown>, key: string) {
+  return sessionSnapshotString(record[key])
+}
+
+function sessionSnapshotStructuredText(value: unknown) {
+  const direct = sessionSnapshotString(value)
+  if (direct !== undefined) return direct
+  if (value === undefined || value === null) return undefined
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function sessionSnapshotRevisionText(value: unknown) {
+  const text = sessionSnapshotStructuredText(value)
+  if (!text) return ""
+  return `${text.length}:${text.slice(-96)}`
+}
+
+function sessionSnapshotPartRevisionKey(parts: unknown) {
+  if (!Array.isArray(parts)) return "0"
+  return parts
+    .map((part) => {
+      if (!isRecord(part)) return ""
+      const state = isRecord(part.state) ? part.state : undefined
+      return [
+        sessionSnapshotStringField(part, "id") ?? "",
+        sessionSnapshotStringField(part, "type") ?? "",
+        sessionSnapshotRevisionText(part.text ?? part.content ?? part.value ?? part.delta ?? part.message),
+        sessionSnapshotRevisionText(part.input ?? part.args ?? part.arguments ?? part.toolInput ?? part.tool_input),
+        sessionSnapshotRevisionText(part.output ?? part.result ?? part.toolOutput ?? part.tool_output),
+        sessionSnapshotRevisionText(part.error ?? part.toolError ?? part.tool_error),
+        sessionSnapshotStringField(part, "status") ?? "",
+        state ? sessionSnapshotRevisionText(state.input ?? state.args ?? state.arguments ?? state.toolInput ?? state.tool_input) : "",
+        state ? sessionSnapshotRevisionText(state.output ?? state.result ?? state.toolOutput ?? state.tool_output) : "",
+        state ? sessionSnapshotRevisionText(state.error ?? state.toolError ?? state.tool_error) : "",
+        state ? (sessionSnapshotStringField(state, "status") ?? sessionSnapshotStringField(state, "phase") ?? "") : "",
+      ].join("/")
+    })
+    .join("|")
+}
+
+function sessionSnapshotSegmentText(value: unknown) {
+  const text = sessionSnapshotStructuredText(value)?.trim()
+  return text ? sessionSnapshotLimitText(text, SESSION_SNAPSHOT_SEGMENT_BODY_LIMIT) : undefined
+}
+
+function sessionSnapshotPartText(part: Record<string, unknown>) {
+  for (const key of ["text", "content", "value", "delta", "message"]) {
+    const text = sessionSnapshotStringField(part, key)?.trim()
+    if (text) return sessionSnapshotLimitText(text, SESSION_SNAPSHOT_SEGMENT_BODY_LIMIT)
+  }
+  return undefined
+}
+
+function sessionSnapshotToolName(part: Record<string, unknown>) {
+  const state = isRecord(part.state) ? part.state : undefined
+  return (
+    sessionSnapshotStringField(part, "toolName") ||
+    sessionSnapshotStringField(part, "tool_name") ||
+    sessionSnapshotStringField(part, "tool") ||
+    sessionSnapshotStringField(part, "name") ||
+    (state ? sessionSnapshotStringField(state, "toolName") || sessionSnapshotStringField(state, "tool_name") || sessionSnapshotStringField(state, "name") : undefined) ||
+    "tool"
+  )
+}
+
+function sessionSnapshotToolStatus(part: Record<string, unknown>) {
+  const state = isRecord(part.state) ? part.state : undefined
+  return (
+    sessionSnapshotStringField(part, "status") ||
+    sessionSnapshotStringField(part, "state") ||
+    (state ? sessionSnapshotStringField(state, "status") || sessionSnapshotStringField(state, "phase") : undefined)
+  )
+}
+
+function sessionSnapshotToolSection(part: Record<string, unknown>, keys: string[]) {
+  const state = isRecord(part.state) ? part.state : undefined
+  for (const source of [part, state]) {
+    if (!source) continue
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(source, key)) {
+        const text = sessionSnapshotSegmentText(source[key])
+        if (text) return text
+      }
+    }
+  }
+  return undefined
+}
+
+function sessionSnapshotToolBody(part: Record<string, unknown>) {
+  const input = sessionSnapshotToolSection(part, ["input", "args", "arguments", "toolInput", "tool_input"])
+  const output = sessionSnapshotToolSection(part, ["output", "result", "toolOutput", "tool_output"])
+  const error = sessionSnapshotToolSection(part, ["error", "toolError", "tool_error"])
+  const sections: string[] = []
+  if (input) sections.push(`Input\n${input}`)
+  if (output) sections.push(`Output\n${output}`)
+  if (error) sections.push(`Error\n${error}`)
+  return sections.join("\n\n") || sessionSnapshotPartText(part) || ""
+}
+
+function sessionSnapshotFileBody(part: Record<string, unknown>) {
+  const label = sessionSnapshotStringField(part, "filename") || sessionSnapshotStringField(part, "path") || "file"
+  return `[file:${label}]`
+}
+
+function sessionSnapshotMessageSegments(
+  message: { id: string },
+  parts: unknown,
+): DesktopSessionMessageSegmentPayload[] {
+  if (!Array.isArray(parts)) return []
+  return parts
+    .flatMap((part, index): DesktopSessionMessageSegmentPayload[] => {
+      if (!isRecord(part)) return []
+      const rawType = sessionSnapshotStringField(part, "type") ?? ""
+      const id = sessionSnapshotStringField(part, "id") || sessionSnapshotStringField(part, "partID") || `${message.id}-part-${index}`
+      if (rawType === "reasoning") {
+        return [
+          {
+            id,
+            type: "reasoning",
+            title: "思考过程",
+            body: sessionSnapshotPartText(part) || "",
+          },
+        ]
+      }
+      if (rawType === "tool") {
+        const toolName = sessionSnapshotToolName(part)
+        return [
+          {
+            id,
+            type: "tool",
+            title: `工具调用 · ${toolName}`,
+            toolName,
+            status: sessionSnapshotToolStatus(part),
+            body: sessionSnapshotToolBody(part),
+          },
+        ]
+      }
+      if (rawType === "file") {
+        return [{ id, type: "text", body: sessionSnapshotFileBody(part) }]
+      }
+      const text = sessionSnapshotPartText(part)
+      if (!text) return []
+      if (rawType === "text" || rawType === "agent_message" || rawType === "" || rawType === "message") {
+        return [{ id, type: "text", body: text }]
+      }
+      return [{ id, type: "text", body: text }]
+    })
+    .filter((segment) => segment.body?.trim().length || segment.type === "tool")
+}
+
+function sessionSnapshotMessageBody(
+  message: { role: string },
+  parts: unknown,
+  segments = sessionSnapshotMessageSegments({ id: "message" }, parts),
+) {
+  const text = segments
+    .filter((segment) => segment.type === "text")
+    .map((segment) => segment.body?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n")
+    .trim()
+  if (text) return sessionSnapshotLimitText(text, SESSION_SNAPSHOT_MESSAGE_BODY_LIMIT)
+  if (message.role === "user") return "[user message]"
+  if (segments.some((segment) => segment.type === "reasoning")) return "思考过程"
+  if (segments.some((segment) => segment.type === "tool")) return "工具调用"
+  return "[assistant message]"
 }
 
 function isMcpStatus(value: unknown): value is McpStatus {
@@ -534,6 +771,7 @@ export default function Page() {
   const language = useLanguage()
   const platform = usePlatform()
   const sdk = useSDK()
+  const navigate = useNavigate()
   const settings = useSettings()
   const prompt = usePrompt()
   const comments = useComments()
@@ -581,6 +819,19 @@ export default function Page() {
   })
   const [blueprintPlanningSubmitRequest, setBlueprintPlanningSubmitRequest] =
     createSignal<BlueprintPlanningSubmitRequest>()
+  const [remoteSubmitRequest, setRemoteSubmitRequest] = createSignal<RemotePromptSubmitRequest>()
+  const [desktopComposerActiveModeId, setDesktopComposerActiveModeId] = createSignal<string | undefined>()
+  const [mobilePlanningRelay, setMobilePlanningRelay] = createStore({
+    csrfToken: undefined as string | undefined,
+    projectId: undefined as string | undefined,
+    planningRequestId: undefined as string | undefined,
+    claimedRequestId: undefined as string | undefined,
+    claimingRequestId: undefined as string | undefined,
+    lastDesktopStateKey: "",
+  })
+  const mobilePlanningSubmitted = new Set<string>()
+  const mobilePlanningAnswered = new Set<string>()
+  const mobilePlanningRejected = new Set<string>()
 
   const blueprintPlanningAvailable = () =>
     platform.platform === "desktop" &&
@@ -686,6 +937,13 @@ export default function Page() {
       if (!frameworkSystem.trim()) throw new Error("Blueprint planning framework system prompt is missing")
       input.draft.system = frameworkSystem
       return false
+    } catch (error) {
+      const requestId = mobilePlanningRelay.planningRequestId
+      if (requestId) {
+        await syncMobilePlanningDesktopError(requestId, errorMessage(error))
+        clearMobilePlanningRelayRequest(requestId)
+      }
+      throw error
     } finally {
       setBlueprintPlanning("preparing", false)
     }
@@ -699,9 +957,10 @@ export default function Page() {
     })
   }
 
-  const requestBlueprintPlanningSubmit = (input: { message: string; silentBlocked?: boolean }) => {
+  const requestBlueprintPlanningSubmit = (input: { message: string; silentBlocked?: boolean; onBlocked?: () => void }) => {
     const block = () => {
       if (!input.silentBlocked) showBlueprintPlanningSubmitBlocked()
+      input.onBlocked?.()
       return false
     }
     if (!blueprintPlanningAvailable() || isChildSession() || composer.blocked() || !prompt.ready()) {
@@ -722,10 +981,237 @@ export default function Page() {
       onBlocked: () => {
         if (!input.silentBlocked) setBlueprintPlanning("planningRequested", false)
         if (!input.silentBlocked) showBlueprintPlanningSubmitBlocked()
+        input.onBlocked?.()
       },
     })
     return true
   }
+
+  async function collaborationApiJson<T>(path: string, init: RequestInit = {}) {
+    const response = await fetch(path, {
+      ...init,
+      credentials: "include",
+      headers: {
+        accept: "application/json",
+        ...(init.body ? { "content-type": "application/json" } : {}),
+        ...(mobilePlanningRelay.csrfToken ? { "x-csrf-token": mobilePlanningRelay.csrfToken } : {}),
+        ...(init.headers ?? {}),
+      },
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(typeof data.message === "string" ? data.message : response.statusText)
+    return data as T
+  }
+
+  async function ensureCollaborationCsrf() {
+    if (mobilePlanningRelay.csrfToken) return mobilePlanningRelay.csrfToken
+    const me = await collaborationApiJson<{ csrfToken?: string }>("/api/me")
+    if (!me.csrfToken) throw new Error("Collaboration Server session is unavailable")
+    setMobilePlanningRelay("csrfToken", me.csrfToken)
+    return me.csrfToken
+  }
+
+  async function ensureMobilePlanningRelayContext() {
+    if (mobilePlanningRelay.csrfToken && mobilePlanningRelay.projectId) {
+      return { csrfToken: mobilePlanningRelay.csrfToken, projectId: mobilePlanningRelay.projectId }
+    }
+    const csrfToken = await ensureCollaborationCsrf()
+    const projects = await collaborationApiJson<{ projects?: CollaborationProjectSummary[] }>("/api/projects")
+    const project = (projects.projects ?? []).find((item) => item.capabilities?.includes("run:create"))
+    if (!project?.id) throw new Error("Collaboration Server project is unavailable")
+    setMobilePlanningRelay({ csrfToken, projectId: project.id })
+    return { csrfToken, projectId: project.id }
+  }
+
+  function clearMobilePlanningRelayRequest(requestId: string) {
+    mobilePlanningSubmitted.delete(requestId)
+    if (mobilePlanningRelay.planningRequestId !== requestId) return
+    setMobilePlanningRelay({
+      planningRequestId: undefined,
+      claimedRequestId: undefined,
+      claimingRequestId: undefined,
+      lastDesktopStateKey: "",
+    })
+  }
+
+  async function claimMobilePlanningRequest(planningRequestId: string, desktopSessionId: string) {
+    if (!planningRequestId || !desktopSessionId) return
+    if (
+      mobilePlanningRelay.claimedRequestId === planningRequestId ||
+      mobilePlanningRelay.claimingRequestId === planningRequestId
+    )
+      return
+    setMobilePlanningRelay("claimingRequestId", planningRequestId)
+    try {
+      await ensureMobilePlanningRelayContext()
+      await collaborationApiJson(`/api/planning-requests/${encodeURIComponent(planningRequestId)}/desktop-claim`, {
+        method: "POST",
+        body: JSON.stringify({ desktopSessionId }),
+      })
+      setMobilePlanningRelay("claimedRequestId", planningRequestId)
+    } finally {
+      if (mobilePlanningRelay.claimingRequestId === planningRequestId) {
+        setMobilePlanningRelay("claimingRequestId", undefined)
+      }
+    }
+  }
+
+  const syncMobilePlanningDesktopState = async (planningRequestId = mobilePlanningRelay.planningRequestId) => {
+    if (!planningRequestId || !mobilePlanningRelay.csrfToken) return
+    if (
+      !blueprintPlanning.sessionId &&
+      !blueprintPlanning.pendingQuestion &&
+      !blueprintPlanning.pendingPlan &&
+      !blueprintPlanning.activeRun
+    )
+      return
+    const payload = {
+      planningSessionId: blueprintPlanning.sessionId,
+      pendingQuestion: blueprintPlanning.pendingQuestion ? cloneBlueprintPlanningPayload(blueprintPlanning.pendingQuestion) : null,
+      pendingPlan: blueprintPlanning.pendingPlan ? cloneBlueprintPlanningPayload(blueprintPlanning.pendingPlan) : null,
+      activeRun: blueprintPlanning.activeRun ? cloneBlueprintPlanningPayload(blueprintPlanning.activeRun) : null,
+    }
+    const key = `${planningRequestId}:${JSON.stringify(payload)}`
+    if (key === mobilePlanningRelay.lastDesktopStateKey) return
+    setMobilePlanningRelay("lastDesktopStateKey", key)
+    await collaborationApiJson(`/api/planning-requests/${encodeURIComponent(planningRequestId)}/desktop-state`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }).catch(() => undefined)
+  }
+
+  async function syncMobilePlanningDesktopError(planningRequestId: string, error: string) {
+    if (!planningRequestId) return
+    await ensureMobilePlanningRelayContext().catch(() => undefined)
+    await collaborationApiJson(`/api/planning-requests/${encodeURIComponent(planningRequestId)}/desktop-state`, {
+      method: "POST",
+      body: JSON.stringify({ status: "failed", error }),
+    }).catch(() => undefined)
+  }
+
+  const processMobilePlanningAnswer = async (request: CollaborationPlanningRequest) => {
+    if (!blueprintPlanning.sessionId || !blueprintPlanning.pendingQuestion || !platform.answerBlueprintPlanningQuestion) return
+    const answer = request.mobileAnswer
+    const questionId = answer?.questionId
+    if (!questionId || questionId !== blueprintPlanning.pendingQuestion.questionId) return
+    const key = `${request.id}:${questionId}:${JSON.stringify(answer)}`
+    if (mobilePlanningAnswered.has(key)) return
+    mobilePlanningAnswered.add(key)
+    const rawAnswers = answer?.answers ?? {}
+    const answers = Object.fromEntries(Object.entries(rawAnswers).map(([name, value]) => [name, String(value)]))
+    const snapshot = await platform.answerBlueprintPlanningQuestion(
+      blueprintPlanning.sessionId,
+      questionId,
+      answers,
+      { rejected: answer?.rejected === true, reason: answer?.reason },
+    )
+    applyBlueprintPlanningSnapshot(snapshot)
+    await syncMobilePlanningDesktopState(request.id)
+  }
+
+  const processMobilePlanningRejection = async (request: CollaborationPlanningRequest) => {
+    if (!blueprintPlanning.sessionId || !platform.rejectBlueprintPlanningPlan || mobilePlanningRejected.has(request.id)) return
+    mobilePlanningRejected.add(request.id)
+    const snapshot = await platform.rejectBlueprintPlanningPlan(
+      blueprintPlanning.sessionId,
+      request.error || "rejected from mobile",
+    )
+    applyBlueprintPlanningSnapshot(snapshot)
+    await syncMobilePlanningDesktopState(request.id)
+  }
+
+  const pollMobilePlanningRequests = async () => {
+    if (!blueprintPlanningAvailable() || isChildSession()) return
+    const context = await ensureMobilePlanningRelayContext()
+    if (mobilePlanningRelay.planningRequestId) {
+      const detail = await collaborationApiJson<{ planningRequest?: CollaborationPlanningRequest }>(
+        `/api/planning-requests/${encodeURIComponent(mobilePlanningRelay.planningRequestId)}`,
+      ).catch(() => undefined)
+      const request = detail?.planningRequest
+      if (request?.status === "planning" && !request.desktopSessionId && !request.planningSessionId && !blueprintPlanning.desktopSessionId) {
+        clearMobilePlanningRelayRequest(request.id)
+        return
+      }
+      if (request && ["failed", "started", "cancelled"].includes(request.status)) {
+        clearMobilePlanningRelayRequest(request.id)
+        return
+      }
+      if (request?.status === "question_answered") await processMobilePlanningAnswer(request)
+      if (request?.status === "plan_rejected") await processMobilePlanningRejection(request)
+      return
+    }
+    const pending = await collaborationApiJson<{ planningRequests?: CollaborationPlanningRequest[] }>(
+      `/api/projects/${encodeURIComponent(context.projectId)}/planning-requests`,
+    )
+    const request = (pending.planningRequests ?? [])
+      .filter((item) => {
+        if (!item.goal.trim() || mobilePlanningSubmitted.has(item.id)) return false
+        if (item.status === "pending_desktop") return true
+        return item.status === "planning" && !item.desktopSessionId && !item.planningSessionId
+      })
+      .sort((left, right) => Number(right.createdAt ?? 0) - Number(left.createdAt ?? 0))[0]
+    if (!request) return
+    setMobilePlanningRelay({
+      planningRequestId: request.id,
+      claimedRequestId: undefined,
+      claimingRequestId: undefined,
+      lastDesktopStateKey: "",
+    })
+    const submitted = requestBlueprintPlanningSubmit({
+      message: `${MOBILE_PLANNING_PREFIX} ${request.goal.trim()}`,
+      silentBlocked: true,
+      onBlocked: () => clearMobilePlanningRelayRequest(request.id),
+    })
+    if (!submitted) {
+      clearMobilePlanningRelayRequest(request.id)
+      return
+    }
+    mobilePlanningSubmitted.add(request.id)
+  }
+
+  createEffect(() => {
+    if (!blueprintPlanningAvailable() || isChildSession()) return
+    void pollMobilePlanningRequests().catch(() => undefined)
+    const timer = window.setInterval(() => {
+      void pollMobilePlanningRequests().catch(() => undefined)
+    }, 5000)
+    onCleanup(() => window.clearInterval(timer))
+  })
+
+  createEffect(
+    on(
+      () => ({
+        requestId: mobilePlanningRelay.planningRequestId,
+        desktopSessionId: blueprintPlanning.desktopSessionId,
+        claimedRequestId: mobilePlanningRelay.claimedRequestId,
+      }),
+      ({ requestId, desktopSessionId, claimedRequestId }) => {
+        if (!requestId || !desktopSessionId || claimedRequestId === requestId) return
+        void claimMobilePlanningRequest(requestId, desktopSessionId)
+          .then(() => syncMobilePlanningDesktopState(requestId))
+          .catch(() => undefined)
+      },
+      { defer: true },
+    ),
+  )
+
+  createEffect(
+    on(
+      () => ({
+        requestId: mobilePlanningRelay.planningRequestId,
+        sessionId: blueprintPlanning.sessionId,
+        pendingQuestion: blueprintPlanning.pendingQuestion
+          ? JSON.stringify(cloneBlueprintPlanningPayload(blueprintPlanning.pendingQuestion))
+          : "",
+        pendingPlan: blueprintPlanning.pendingPlan ? JSON.stringify(cloneBlueprintPlanningPayload(blueprintPlanning.pendingPlan)) : "",
+        activeRun: blueprintPlanning.activeRun ? JSON.stringify(cloneBlueprintPlanningPayload(blueprintPlanning.activeRun)) : "",
+      }),
+      () => {
+        void syncMobilePlanningDesktopState().catch(() => undefined)
+      },
+      { defer: true },
+    ),
+  )
 
   createEffect(() => {
     const sessionId = blueprintPlanning.sessionId
@@ -963,6 +1449,109 @@ export default function Page() {
     },
   )
   const lastUserMessage = createMemo(() => visibleUserMessages().at(-1))
+
+  const desktopSessionSnapshotPayload = () => {
+    const composerModes = [
+      ...local.agent.list().map((agent) => ({
+        id: agent.name,
+        label: agent.name,
+        kind: "agent" as const,
+      })),
+      { id: "blueprintPlanning", label: "蓝图规划", kind: "blueprintPlanning" as const },
+    ]
+    const currentAgentName = local.agent.current()?.name ?? null
+    const currentComposerModeId = desktopComposerActiveModeId()
+    const activeModeId =
+      currentComposerModeId && composerModes.some((mode) => mode.id === currentComposerModeId)
+        ? currentComposerModeId
+        : currentAgentName && composerModes.some((mode) => mode.id === currentAgentName)
+          ? currentAgentName
+          : (composerModes[0]?.id ?? null)
+    const sessions = [...sync.data.session]
+      .filter((item) => !item.parentID)
+      .sort((left, right) => Number(right.time?.updated ?? right.time?.created ?? 0) - Number(left.time?.updated ?? left.time?.created ?? 0))
+      .slice(0, 50)
+      .map((item) => ({
+        id: item.id,
+        title: sessionSnapshotTitle(item),
+        parentId: item.parentID ?? null,
+        createdAt: sessionSnapshotTime(item.time?.created),
+        updatedAt: sessionSnapshotTime(item.time?.updated ?? item.time?.created),
+        messageCount: sync.data.message[item.id]?.length ?? 0,
+      }))
+    const activeSessionId = params.id ?? null
+    const currentMessages = (activeSessionId ? (sync.data.message[activeSessionId] ?? []) : [])
+      .slice(-40)
+      .map((message) => {
+        const parts = sync.data.part[message.id]
+        const segments = sessionSnapshotMessageSegments(message, parts)
+        return {
+          id: message.id,
+          sessionId: activeSessionId ?? undefined,
+          role: message.role,
+          label: sessionSnapshotMessageLabel(message),
+          body: sessionSnapshotMessageBody(message, parts, segments),
+          segments,
+          createdAt: sessionSnapshotTime(message.time?.created),
+        }
+      })
+      .filter((message) => message.body.trim().length > 0 || message.segments.length > 0)
+    return {
+      activeSessionId,
+      sessions,
+      currentMessages,
+      composer: {
+        modes: composerModes,
+        activeModeId,
+      },
+      updatedAt: new Date().toISOString(),
+    }
+  }
+
+  let desktopSessionSnapshotTimer: number | undefined
+  const scheduleDesktopSessionSnapshot = () => {
+    if (platform.platform !== "desktop") return
+    if (desktopSessionSnapshotTimer !== undefined) window.clearTimeout(desktopSessionSnapshotTimer)
+    desktopSessionSnapshotTimer = window.setTimeout(() => {
+      desktopSessionSnapshotTimer = undefined
+      void postDesktopSessionSnapshot(desktopSessionSnapshotPayload()).catch(() => undefined)
+    }, 800)
+  }
+
+  onMount(() => {
+    if (platform.platform !== "desktop") return
+    void registerDesktopBridge().catch(() => undefined)
+    scheduleDesktopSessionSnapshot()
+  })
+
+  createEffect(
+    on(
+      () => ({
+        sessionId: params.id,
+        sessionCount: sync.data.session.length,
+        messageCount: params.id ? (sync.data.message[params.id]?.length ?? 0) : 0,
+        lastMessageId: params.id ? sync.data.message[params.id]?.at(-1)?.id : undefined,
+        partsKey: params.id
+          ? (sync.data.message[params.id] ?? [])
+              .slice(-40)
+              .map((message) => `${message.id}:${sessionSnapshotPartRevisionKey(sync.data.part[message.id])}`)
+              .join("\u0000")
+          : "",
+        agentNames: local.agent
+          .list()
+          .map((agent) => agent.name)
+          .join("\u0000"),
+        currentAgent: local.agent.current()?.name ?? "",
+        composerMode: desktopComposerActiveModeId() ?? "",
+      }),
+      () => scheduleDesktopSessionSnapshot(),
+      { defer: true },
+    ),
+  )
+
+  onCleanup(() => {
+    if (desktopSessionSnapshotTimer !== undefined) window.clearTimeout(desktopSessionSnapshotTimer)
+  })
 
   createEffect(() => {
     const tab = activeFileTab()
@@ -2359,11 +2948,153 @@ export default function Page() {
     respond(requestBlueprintPlanningSubmit({ message, silentBlocked }))
   }
 
+  const deleteCurrentSessionFromBridge = async (sessionId?: string) => {
+    const targetSessionId = sessionId || params.id
+    if (!targetSessionId) return { ok: true, accepted: false, code: "NO_SESSION", message: "desktop session is unavailable" }
+    if (targetSessionId !== params.id) {
+      return { ok: true, accepted: false, code: "SESSION_NOT_CURRENT", message: "target session is not current" }
+    }
+    const session = sync.session.get(targetSessionId)
+    if (!session) return { ok: true, accepted: false, code: "SESSION_NOT_FOUND", message: "desktop session is not found" }
+
+    const sessions = (sync.data.session ?? []).filter((item) => !item.parentID && !item.time?.archived)
+    const index = sessions.findIndex((item) => item.id === targetSessionId)
+    const nextSession = index === -1 ? undefined : (sessions[index + 1] ?? sessions[index - 1])
+    const result = await sdk.client.session
+      .delete({ sessionID: targetSessionId })
+      .then((response) => response.data)
+      .catch((error: unknown) => ({ error }))
+    if (isRecord(result) && "error" in result) {
+      return {
+        ok: true,
+        accepted: false,
+        code: "SESSION_DELETE_FAILED",
+        message: formatServerError(result.error),
+      }
+    }
+    if (!result) return { ok: true, accepted: false, code: "SESSION_DELETE_FAILED", message: "desktop session delete failed" }
+
+    const removed = new Set<string>([targetSessionId])
+    const byParent = new Map<string, string[]>()
+    for (const item of sync.data.session) {
+      const parentID = item.parentID
+      if (!parentID) continue
+      const existing = byParent.get(parentID)
+      if (existing) {
+        existing.push(item.id)
+        continue
+      }
+      byParent.set(parentID, [item.id])
+    }
+    const stack = [targetSessionId]
+    while (stack.length) {
+      const parentID = stack.pop()
+      if (!parentID) continue
+      const children = byParent.get(parentID)
+      if (!children) continue
+      for (const child of children) {
+        if (removed.has(child)) continue
+        removed.add(child)
+        stack.push(child)
+      }
+    }
+    sync.set("session", (list) => list.filter((item) => !removed.has(item.id)))
+    const nextSessionId = nextSession?.id
+    if (nextSessionId) navigate(`/${params.dir}/session/${nextSessionId}`)
+    else navigate(`/${params.dir}/session`)
+    scheduleDesktopSessionSnapshot()
+    return { ok: true, accepted: true, result: { sessionId: targetSessionId, nextSessionId: nextSessionId ?? null } }
+  }
+
+  const handleDesktopControlBridgeCommand = (event: Event) => {
+    const detail = blueprintWindowEventDetail(event)
+    const command = typeof detail?.command === "string" ? detail.command : ""
+    const args = isRecord(detail?.args) ? detail.args : {}
+    const respond =
+      typeof detail?.respond === "function"
+        ? (detail.respond as (response: { ok?: boolean; accepted?: boolean; result?: unknown; code?: string; message?: string }) => void)
+        : undefined
+    if (!command || !respond) return
+
+    if (command === "desktop.mobilePlanning.submit") {
+      const planningRequest = isRecord(args.planningRequest) ? args.planningRequest : undefined
+      const requestId = typeof planningRequest?.id === "string" ? planningRequest.id : undefined
+      const rawGoal = typeof args.goal === "string" ? args.goal : typeof planningRequest?.goal === "string" ? planningRequest.goal : ""
+      const goal = rawGoal.trim()
+      if (!goal) {
+        respond({ ok: true, accepted: false, code: "EMPTY_GOAL", message: "planning goal is empty" })
+        return
+      }
+      if (requestId) {
+        setMobilePlanningRelay({
+          planningRequestId: requestId,
+          claimedRequestId: undefined,
+          claimingRequestId: undefined,
+          lastDesktopStateKey: "",
+        })
+      }
+      const accepted = requestBlueprintPlanningSubmit({
+        message: `${MOBILE_PLANNING_PREFIX} ${goal}`,
+        silentBlocked: true,
+        onBlocked: () => {
+          if (requestId) clearMobilePlanningRelayRequest(requestId)
+        },
+      })
+      if (accepted && requestId) mobilePlanningSubmitted.add(requestId)
+      respond({ ok: true, accepted, result: { planningRequestId: requestId } })
+      return
+    }
+
+    if (command === "desktop.session.submit") {
+      const sessionId = typeof args.sessionId === "string" && args.sessionId.trim() ? args.sessionId.trim() : undefined
+      const text = typeof args.text === "string" ? args.text.trim() : ""
+      const promptMode = args.promptMode === "blueprintPlanning" ? "blueprintPlanning" : "normal"
+      const agentName = typeof args.agentName === "string" && args.agentName.trim() ? args.agentName.trim() : undefined
+      if (!text) {
+        respond({ ok: true, accepted: false, code: "EMPTY_TEXT", message: "message text is empty" })
+        return
+      }
+      if (sessionId && sessionId !== params.id) {
+        respond({ ok: true, accepted: false, code: "SESSION_NOT_CURRENT", message: "target session is not current" })
+        return
+      }
+      if (isChildSession() || composer.blocked() || !prompt.ready()) {
+        respond({ ok: true, accepted: false, code: "COMPOSER_BLOCKED", message: "desktop composer is unavailable" })
+        return
+      }
+      if (promptMode === "normal" && agentName) {
+        const hasAgent = local.agent.list().some((agent) => agent.name === agentName)
+        if (!hasAgent) {
+          respond({ ok: true, accepted: false, code: "AGENT_NOT_FOUND", message: "desktop agent is not available" })
+          return
+        }
+        local.agent.set(agentName)
+      }
+      setRemoteSubmitRequest({
+        id: Date.now(),
+        text,
+        mode: promptMode,
+        onAccepted: () => respond({ ok: true, accepted: true, result: { sessionId: params.id ?? null } }),
+        onBlocked: () => respond({ ok: true, accepted: false, code: "COMPOSER_BLOCKED", message: "desktop composer is blocked" }),
+      })
+      return
+    }
+
+    if (command === "desktop.session.delete") {
+      const sessionId = typeof args.sessionId === "string" && args.sessionId.trim() ? args.sessionId.trim() : undefined
+      void deleteCurrentSessionFromBridge(sessionId).then(respond)
+      return
+    }
+
+    respond({ ok: true, accepted: false, code: "BAD_COMMAND", message: "desktop command is not supported" })
+  }
+
   onMount(() => {
     makeEventListener(document, "keydown", handleKeyDown)
     makeEventListener(window, "gulicode:blueprint-window-dock", handleBlueprintWindowDock)
     makeEventListener(window, "gulicode:blueprint-window-closed", handleBlueprintWindowClosed)
     makeEventListener(window, "gulicode:blueprint-planning-submit", handleBlueprintWindowPlanningSubmit)
+    makeEventListener(window, "gulicode:desktop-control-bridge-command", handleDesktopControlBridgeCommand)
   })
 
   onCleanup(() => {
@@ -2494,6 +3225,8 @@ export default function Page() {
             onResponseSubmit={resumeScroll}
             submitOverride={prepareBlueprintPlanningMessage}
             blueprintPlanningSubmitRequest={blueprintPlanningSubmitRequest()}
+            remoteSubmitRequest={remoteSubmitRequest()}
+            onComposerModeChange={(mode) => setDesktopComposerActiveModeId(mode.id)}
             blueprintPlanningDock={blueprintPlanningDock}
             followup={
               params.id && !isChildSession()

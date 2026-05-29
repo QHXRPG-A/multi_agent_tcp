@@ -14,7 +14,12 @@ import { SessionFollowupDock } from "@/pages/session/composer/session-followup-d
 import { SessionRevertDock } from "@/pages/session/composer/session-revert-dock"
 import type { SessionComposerState } from "@/pages/session/composer/session-composer-state"
 import { SessionTodoDock } from "@/pages/session/composer/session-todo-dock"
-import type { BlueprintPlanningSubmitRequest, FollowupDraft, PromptSubmitOverrideInput } from "@/components/prompt-input/submit"
+import type {
+  BlueprintPlanningSubmitRequest,
+  FollowupDraft,
+  PromptSubmitOverrideInput,
+  RemotePromptSubmitRequest,
+} from "@/components/prompt-input/submit"
 import { createResizeObserver } from "@solid-primitives/resize-observer"
 
 export function SessionComposerRegion(props: {
@@ -28,6 +33,8 @@ export function SessionComposerRegion(props: {
   onResponseSubmit: () => void
   submitOverride?: (input: PromptSubmitOverrideInput) => Promise<boolean> | boolean
   blueprintPlanningSubmitRequest?: BlueprintPlanningSubmitRequest
+  remoteSubmitRequest?: RemotePromptSubmitRequest
+  onComposerModeChange?: (mode: { id: string; kind: "agent" | "blueprintPlanning" }) => void
   blueprintPlanningDock?: () => any
   followup?: {
     queue: () => boolean
@@ -267,6 +274,8 @@ export function SessionComposerRegion(props: {
                       onSubmit={props.onSubmit}
                       submitOverride={props.submitOverride}
                       blueprintPlanningSubmitRequest={props.blueprintPlanningSubmitRequest}
+                      remoteSubmitRequest={props.remoteSubmitRequest}
+                      onComposerModeChange={props.onComposerModeChange}
                     />
                   </Show>
                 }

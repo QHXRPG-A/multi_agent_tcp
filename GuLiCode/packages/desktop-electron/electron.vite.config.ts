@@ -12,8 +12,17 @@ const channel = (() => {
 const OPENCODE_SERVER_DIST = "../opencode/dist/node"
 const OPENCODE_MIGRATION_DIR = "../opencode/migration"
 const DESKTOP_OUT_MIGRATION_DIR = "./out/migration"
+const DEFAULT_COLLABORATION_PROXY_TARGET = "http://127.0.0.1:8787"
 
 const nodePtyPkg = `@lydell/node-pty-${process.platform}-${process.arch}`
+
+function readCollaborationProxyTarget() {
+  return (
+    process.env.GULICODE_COLLABORATION_API_URL ??
+    process.env.VITE_COLLABORATION_API_URL ??
+    DEFAULT_COLLABORATION_PROXY_TARGET
+  ).replace(/\/+$/, "")
+}
 
 export default defineConfig({
   main: {
@@ -69,6 +78,15 @@ export default defineConfig({
     plugins: [appPlugin],
     publicDir: "../../../app/public",
     root: "src/renderer",
+    server: {
+      proxy: {
+        "/api": {
+          target: readCollaborationProxyTarget(),
+          changeOrigin: true,
+          secure: false,
+        },
+      },
+    },
     resolve: {
       alias: {
         "ghostty-web": fileURLToPath(new URL("../app/node_modules/ghostty-web/dist/ghostty-web.js", import.meta.url)),

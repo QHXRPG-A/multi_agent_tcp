@@ -37,6 +37,7 @@ const { autoUpdater } = pkg
 import type { InitStep, ServerReadyData, SqliteMigrationProgress, WslConfig } from "../preload/types"
 import { checkAppExists, resolveAppPath, wslPath } from "./apps"
 import { CHANNEL, UPDATER_ENABLED } from "./constants"
+import { DesktopControlBridge } from "./desktop-control-bridge"
 import { registerIpcHandlers, sendDeepLinks, sendMenuCommand, sendSqliteMigrationProgress } from "./ipc"
 import { initLogging } from "./logging"
 import { parseMarkdown } from "./markdown"
@@ -65,6 +66,7 @@ const pendingDeepLinks: string[] = []
 const serverReady = defer<ServerReadyData>()
 const logger = initLogging()
 const blueprintRuntime = new BlueprintRuntime()
+const desktopControlBridge = new DesktopControlBridge(() => mainWindow)
 
 logger.log("app starting", {
   version: app.getVersion(),
@@ -99,17 +101,20 @@ function setupApp() {
 
   app.on("before-quit", () => {
     killSidecar()
+    desktopControlBridge.stop()
     blueprintRuntime.close()
   })
 
   app.on("will-quit", () => {
     killSidecar()
+    desktopControlBridge.stop()
     blueprintRuntime.close()
   })
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
       killSidecar()
+      desktopControlBridge.stop()
       blueprintRuntime.close()
       app.exit(0)
     })
@@ -151,6 +156,7 @@ async function initialize() {
   const hostname = "127.0.0.1"
   const url = `http://${hostname}:${port}`
   const password = randomUUID()
+  await desktopControlBridge.start()
 
   const loadingTask = (async () => {
     logger.log("sidecar connection started", { url })
@@ -247,6 +253,7 @@ function wireMenu() {
     reload: () => mainWindow?.reload(),
     relaunch: () => {
       killSidecar()
+      desktopControlBridge.stop()
       blueprintRuntime.close()
       app.relaunch()
       app.exit(0)
@@ -286,6 +293,8 @@ registerIpcHandlers({
   checkUpdate: async () => checkUpdate(),
   installUpdate: async () => installUpdate(),
   setBackgroundColor: (color) => setBackgroundColor(color),
+  getDesktopControlBridgeInfo: () => desktopControlBridge.info(),
+  respondDesktopControlBridgeCommand: (requestId, response) => desktopControlBridge.respond(requestId, response),
   blueprintRuntime,
   appId,
 })
@@ -402,6 +411,7 @@ async function checkUpdate() {
 async function installUpdate() {
   if (!updateReady) return
   killSidecar()
+  desktopControlBridge.stop()
   blueprintRuntime.close()
   autoUpdater.quitAndInstall()
 }

@@ -162,6 +162,12 @@ export type Platform = {
   /** Read one changeset's blueprint diff detail (desktop only) */
   blueprintChangesetDiff?(runId: string, changesetId: string): Promise<Record<string, unknown>>
 
+  /** Roll back accepted blueprint changesets from the selected changeset through the latest one. */
+  rollbackBlueprintChangesets?(runId: string, toChangesetId: string, reason?: string): Promise<Record<string, unknown>>
+
+  /** Restore the latest blueprint rollback marker. */
+  restoreBlueprintRollback?(runId: string, rollbackId?: string, reason?: string): Promise<Record<string, unknown>>
+
   /** Reserved runtime API for the next status UI pass (desktop only) */
   endBlueprintRun?(runId: string, action: BlueprintRunEndAction, reason?: string): Promise<Record<string, unknown>>
 

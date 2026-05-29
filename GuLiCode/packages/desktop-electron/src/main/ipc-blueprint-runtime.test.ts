@@ -93,11 +93,17 @@ describe("blueprint runtime IPC handlers", () => {
     expect(ipcSource).toContain('"blueprint-window-submit-planning"')
     expect(ipcSource).toContain('"blueprint-run-diff"')
     expect(ipcSource).toContain('"blueprint-changeset-diff"')
+    expect(ipcSource).toContain('"blueprint-rollback-changesets"')
+    expect(ipcSource).toContain('"blueprint-restore-rollback"')
     expect(preloadSource).toContain("openBlueprintWindow")
     expect(preloadSource).toContain("blueprintRunDiff")
     expect(preloadSource).toContain("blueprintChangesetDiff")
+    expect(preloadSource).toContain("blueprintRollbackChangesets")
+    expect(preloadSource).toContain("blueprintRestoreRollback")
     expect(rendererSource).toContain("typeof api.blueprintRunDiff")
     expect(rendererSource).toContain("typeof api.blueprintChangesetDiff")
+    expect(rendererSource).toContain("typeof api.blueprintRollbackChangesets")
+    expect(rendererSource).toContain("typeof api.blueprintRestoreRollback")
     expect(preloadSource).toContain("onBlueprintWindowDock")
     expect(preloadSource).toContain("onBlueprintWindowPlanningSubmitRequest")
     expect(ipcSource).toContain('"reveal-path-in-file-manager"')
@@ -164,6 +170,14 @@ describe("blueprint runtime IPC handlers", () => {
       changesetDiff: (runId: string, changesetId: string) => {
         calls.push(`changeset-diff:${runId}:${changesetId}`)
         return { changesetId }
+      },
+      rollbackChangesets: (runId: string, toChangesetId: string, reason?: string) => {
+        calls.push(`rollback:${runId}:${toChangesetId}:${reason ?? ""}`)
+        return { ok: true }
+      },
+      restoreRollback: (runId: string, rollbackId?: string, reason?: string) => {
+        calls.push(`restore:${runId}:${rollbackId ?? ""}:${reason ?? ""}`)
+        return { ok: true }
       },
       end: (runId: string, action: string, reason?: string) => {
         calls.push(`end:${runId}:${action}:${reason}`)
@@ -258,6 +272,8 @@ describe("blueprint runtime IPC handlers", () => {
     await handlers.get("blueprint-status")?.({}, "run-1")
     await handlers.get("blueprint-run-diff")?.({}, "run-1")
     await handlers.get("blueprint-changeset-diff")?.({}, "run-1", "cs-1")
+    await handlers.get("blueprint-rollback-changesets")?.({}, "run-1", "cs-1", "undo")
+    await handlers.get("blueprint-restore-rollback")?.({}, "run-1", "rb-1", "redo")
     await handlers.get("blueprint-end")?.({}, "run-1", "cancel", "user")
     await handlers.get("blueprint-recent-events")?.({}, "run-1", 10)
     await handlers.get("blueprint-agent-info")?.({}, "run-1", "coder")
@@ -340,6 +356,8 @@ describe("blueprint runtime IPC handlers", () => {
       "status:run-1",
       "run-diff:run-1",
       "changeset-diff:run-1:cs-1",
+      "rollback:run-1:cs-1:undo",
+      "restore:run-1:rb-1:redo",
       "end:run-1:cancel:user",
       "events:run-1:10",
       "agent-info:run-1:coder",

@@ -2,6 +2,26 @@ import { defineConfig } from "vite"
 import { VitePWA } from "vite-plugin-pwa"
 import desktopPlugin from "./vite"
 
+const DEFAULT_DEV_PORT = 3040
+const DEFAULT_COLLABORATION_PROXY_TARGET = "http://127.0.0.1:8787"
+
+function readCollaborationProxyTarget() {
+  return (
+    process.env.GULICODE_COLLABORATION_API_URL ??
+    process.env.VITE_COLLABORATION_API_URL ??
+    DEFAULT_COLLABORATION_PROXY_TARGET
+  ).replace(/\/+$/, "")
+}
+
+function readDevPort() {
+  const raw = process.env.GULICODE_APP_PORT ?? process.env.PORT
+  if (!raw) return DEFAULT_DEV_PORT
+
+  const port = Number(raw)
+  if (Number.isInteger(port) && port > 0 && port < 65536) return port
+  return DEFAULT_DEV_PORT
+}
+
 export default defineConfig({
   plugins: [
     desktopPlugin,
@@ -19,7 +39,7 @@ export default defineConfig({
         id: "/",
         name: "GuLiCode",
         short_name: "GuLiCode",
-        description: "GuLiCode mobile collaboration client",
+        description: "GuLiCode 移动协作客户端",
         start_url: "/mobile",
         scope: "/",
         display: "standalone",
@@ -81,7 +101,14 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     allowedHosts: true,
-    port: 3000,
+    port: readDevPort(),
+    proxy: {
+      "/api": {
+        target: readCollaborationProxyTarget(),
+        changeOrigin: true,
+        secure: false,
+      },
+    },
   },
   build: {
     target: "esnext",

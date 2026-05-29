@@ -1,0 +1,40 @@
+{
+  "admin": {
+    "id": "debug-admin",
+    "username": "1",
+    "password": "1",
+    "role": "admin"
+  },
+  "users": [
+    {
+      "id": "debug-viewer",
+      "username": "viewer",
+      "password": "viewer-pass-123",
+      "role": "user"
+    }
+  ],
+  "projects": [
+    {
+      "id": "proj-debug",
+      "name": "GuLiCode Debug Project",
+      "members": [
+        {
+          "userId": "debug-admin",
+          "role": "owner"
+        },
+        {
+          "userId": "debug-viewer",
+          "role": "viewer"
+        }
+      ],
+      "runtimeBinding": {
+        "id": "binding-debug",
+        "blueprintId": "default",
+        "projectDir": "F:\\src\\Package\\Script\\Python\\multi_agent_tcp",
+        "bridgeUrl": "",
+        "bridgeToken": "",
+        "active": true
+      }
+    }
+  ]
+}

@@ -1118,6 +1118,17 @@ def main(argv: Optional[List[str]] = None) -> None:
     p_desktop_blueprint.add_argument("--host", default="127.0.0.1")
     p_desktop_blueprint.add_argument("--port", type=int, default=0)
     p_desktop_blueprint.add_argument("--token")
+    p_collab = sub.add_parser(
+        "collaboration-server",
+        help="run the GuLiCode Collaboration Server HTTP API",
+    )
+    p_collab.add_argument("--host", default="127.0.0.1")
+    p_collab.add_argument("--port", type=int, default=8787)
+    p_collab.add_argument("--db", type=Path, default=Path("logs/collaboration_server.sqlite3"))
+    p_collab.add_argument("--seed-config", type=Path)
+    p_collab.add_argument("--secure-cookies", action="store_true")
+    p_collab.add_argument("--log-dir", type=Path, default=Path("logs"))
+    p_collab.add_argument("--log-level", default="INFO")
 
     # -- show-registry / dispatch (recommended LLM flow) ---------------------
     p_sr = sub.add_parser(
@@ -1417,6 +1428,17 @@ def main(argv: Optional[List[str]] = None) -> None:
         if args.token:
             service_args.extend(["--token", args.token])
         _serve_desktop_blueprint(service_args)
+        return
+
+    if args.cmd == "collaboration-server":
+        from .collaboration_server.cli import serve_forever as _serve_collaboration
+        service_args = ["--host", args.host, "--port", str(args.port), "--db", str(args.db)]
+        if args.seed_config:
+            service_args.extend(["--seed-config", str(args.seed_config)])
+        if args.secure_cookies:
+            service_args.append("--secure-cookies")
+        service_args.extend(["--log-dir", str(args.log_dir), "--log-level", str(args.log_level)])
+        _serve_collaboration(service_args)
         return
 
     if args.cmd == "doctor":
