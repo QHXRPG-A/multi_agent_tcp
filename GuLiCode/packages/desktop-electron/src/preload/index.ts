@@ -45,6 +45,12 @@ const api: ElectronAPI = {
   blueprintList: (projectDir) => ipcRenderer.invoke("blueprint-list", projectDir),
   blueprintOpen: (projectDir, blueprintId) => ipcRenderer.invoke("blueprint-open", projectDir, blueprintId),
   blueprintSave: (projectDir, document) => ipcRenderer.invoke("blueprint-save", projectDir, document),
+  blueprintScriptNodes: (projectDir) => ipcRenderer.invoke("blueprint-script-nodes", projectDir),
+  blueprintCreateScriptNode: (projectDir, name, description) =>
+    ipcRenderer.invoke("blueprint-create-script-node", projectDir, name, description),
+  blueprintListEditors: () => ipcRenderer.invoke("blueprint-list-editors"),
+  blueprintOpenScriptInEditor: (projectDir, modulePath, editorId) =>
+    ipcRenderer.invoke("blueprint-open-script-in-editor", projectDir, modulePath, editorId),
   blueprintRelocateProjectWorkdir: (projectDir, blueprintId, document, targetProjectWorkdir, conflictPolicy) =>
     ipcRenderer.invoke(
       "blueprint-relocate-project-workdir",

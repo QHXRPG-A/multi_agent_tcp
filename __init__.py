@@ -42,6 +42,7 @@ from .graph_runtime import (
     AgentSkillSelection,
     BlueprintTerminalNode,
     BrokerAgentRuntime,
+    CommonNode,
     GuLiCodeTopAgentProfile,
     GraphDefinition,
     GraphEdge,
@@ -53,9 +54,11 @@ from .graph_runtime import (
     JoinContribution,
     MultiModalEnvelope,
     OutgoingMessageBatch,
+    PendingCommonNodeMessage,
     PendingAgentMessage,
     RouteNode,
     RunEndResult,
+    ScriptNode,
     StagedOutgoingMessage,
     TopAgentPlanValidation,
     TopAgentStartPlan,
@@ -77,6 +80,7 @@ from .graph_control import (
     ordinary_agent_framework_context,
     scoped_organization_view,
 )
+from .blueprint_script_nodes import blueprint_node
 from .desktop_blueprint_service import (
     DEFAULT_BLUEPRINT_ID,
     DEFAULT_BLUEPRINT_NAME,
@@ -132,6 +136,7 @@ __all__ = (
     "TopAgentStartPlan",
     "TopAgentPlanValidation",
     "BlueprintTerminalNode",
+    "CommonNode",
     "AgentInstance",
     "GraphRuntime",
     "BrokerAgentRuntime",
@@ -140,6 +145,7 @@ __all__ = (
     "RunEndResult",
     "WorkdirAssignmentResult",
     "PendingAgentMessage",
+    "PendingCommonNodeMessage",
     "OutgoingMessageBatch",
     "StagedOutgoingMessage",
     "MultiModalEnvelope",
@@ -148,6 +154,7 @@ __all__ = (
     "GraphJob",
     "WorkspaceManifest",
     "RouteNode",
+    "ScriptNode",
     "GraphEdge",
     "GraphDefinition",
     "GraphExecutor",
@@ -186,6 +193,7 @@ __all__ = (
     "AgentSession",
     "SkillInfo",
     "show_registry_response",
+    "blueprint_node",
     "__version__",
 )
 __version__ = "0.5.0"

@@ -198,6 +198,7 @@ bun run typecheck
 
 - `docs/workspace_api.md`：Workspace 三个区、checkout/status/diff/submit/publish 的当前契约。
 - `docs/gulicode_blueprint_workbench_design.md`：GuLiCode 蓝图工作台的产品和技术边界。
+- `docs/external_app_openclaw_channel_patterns.md`：外部聊天 App 拉起 OpenClaw 对话的 channel 接入模式，以及它和 UI deep link 的区别。
 - `KM_docs/environment_setup.md`：当前机器环境、依赖安装、调试启动和 Windows 注意事项。
 - `KM_docs/skills-snapshot/knowledge_base/core_architecture.md`：当前核心架构快照。
 - `KM_docs/skills-snapshot/knowledge_base/dispatch_workflows.md`：runtime control-plane 和消息分发工作流。

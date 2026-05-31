@@ -139,6 +139,31 @@ class RunMCPTokenStore:
             self._scopes_by_token[token] = scope
             return scope
 
+    def create_message_scope(
+        self,
+        *,
+        agent_node_id: str,
+        agent_id: str,
+        ttl_sec: float = 24 * 60 * 60,
+    ) -> MCPTokenScope:
+        with self._lock:
+            token = self._ordinary_token_by_node.get(agent_node_id)
+            if token is None:
+                token = secrets.token_urlsafe(32)
+                self._ordinary_token_by_node[agent_node_id] = token
+            scope = MCPTokenScope(
+                token=token,
+                run_id=self.run_id,
+                server_kind="ordinary",
+                agent_node_id=agent_node_id,
+                agent_id=agent_id,
+                workspace_rpc_token=None,
+                allowed_tools=ORDINARY_MESSAGE_TOOL_NAMES,
+                expires_at=float(self.now()) + float(ttl_sec),
+            )
+            self._scopes_by_token[token] = scope
+            return scope
+
     def create_control_scope(
         self,
         *,
@@ -586,6 +611,22 @@ class RunMCPRuntimeHandle:
                 token=scope.token,
                 tools=scope.allowed_tools,
             )
+        if str(getattr(node, "node_type", "worker_agent")) == "agent":
+            access_policy = getattr(node, "access_policy", {}) or {}
+            if isinstance(access_policy, dict) and access_policy.get("framework_message_tools") is False:
+                return {}
+            scope = self.token_store.create_message_scope(
+                agent_node_id=node_id,
+                agent_id=agent_id,
+            )
+            return _mcp_private_context(
+                server_kind="ordinary",
+                server_name=ORDINARY_SERVER_NAME,
+                url=self.ordinary_url,
+                token_env=ORDINARY_TOKEN_ENV,
+                token=scope.token,
+                tools=scope.allowed_tools,
+            )
         workspace_rpc_token = self.workspace_rpc_server.token_for(agent_id)
         scope = self.token_store.create_ordinary_scope(
             agent_node_id=node_id,
@@ -712,13 +753,10 @@ class RunMCPRuntimeHandle:
         )
 
     def _install_tool_filter(self, mcp: Any) -> None:
-        original_list_tools = mcp.list_tools
-
-        async def list_tools() -> list[Any]:
-            tools = await original_list_tools()
+        def filter_tools(tools: Sequence[Any]) -> list[Any]:
             scope = _current_scope.get()
             if scope is None:
-                return tools
+                return list(tools)
             allowed = set(scope.allowed_tools)
             return [
                 tool
@@ -726,7 +764,20 @@ class RunMCPRuntimeHandle:
                 if str(getattr(tool, "name", "")) in allowed
             ]
 
+        original_list_tools = mcp.list_tools
+
+        async def list_tools() -> list[Any]:
+            return filter_tools(await original_list_tools())
+
         mcp.list_tools = list_tools
+        tool_manager = getattr(mcp, "_tool_manager", None)
+        if tool_manager is not None and hasattr(tool_manager, "list_tools"):
+            original_manager_list_tools = tool_manager.list_tools
+
+            def manager_list_tools() -> list[Any]:
+                return filter_tools(original_manager_list_tools())
+
+            tool_manager.list_tools = manager_list_tools
 
     def _register_ordinary_tools(self, mcp: Any) -> None:
         @mcp.tool()
@@ -844,6 +895,22 @@ class RunMCPRuntimeHandle:
         async def agent_context(batch_id: Optional[str] = None) -> Dict[str, Any]:
             scope = _require_scope("ordinary", "agent_context")
             return await self._ordinary_agent_context(scope, batch_id=batch_id)
+
+        @mcp.tool()
+        async def blueprint_script_call(
+            function_name: str,
+            arguments: Optional[dict[str, Any]] = None,
+            script_node_id: Optional[str] = None,
+            batch_id: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            scope = _require_scope("ordinary", "blueprint_script_call")
+            return await self._ordinary_blueprint_script_call(
+                scope,
+                function_name=function_name,
+                arguments=arguments or {},
+                script_node_id=script_node_id,
+                batch_id=batch_id,
+            )
 
         @mcp.tool()
         async def agent_task_status(
@@ -1465,6 +1532,51 @@ class RunMCPRuntimeHandle:
             lambda: self.control.handle_request({"command": "agent.context", "args": args})
         )
 
+    async def _ordinary_blueprint_script_call(
+        self,
+        scope: MCPTokenScope,
+        *,
+        function_name: str,
+        arguments: Dict[str, Any],
+        script_node_id: Optional[str],
+        batch_id: Optional[str],
+    ) -> Dict[str, Any]:
+        if scope.agent_node_id is None:
+            raise PermissionError("ordinary MCP token is not bound to an AgentNode")
+        _require_allowed_tool(scope, "blueprint_script_call")
+        context = scope.current_message_context
+        if context is None:
+            raise PermissionError(
+                "blueprint_script_call requires an active message context with an outgoing batch_id"
+            )
+        if context.expires_at < float(self.token_store.now()):
+            raise PermissionError("active message context has expired")
+        effective_batch_id = str(batch_id or context.outgoing_batch_id or "").strip()
+        if not effective_batch_id:
+            raise PermissionError(
+                "blueprint_script_call has no current outgoing_batch_id; "
+                "only call it when framework_context.message_envelope.required_script_calls is non-empty"
+            )
+        if batch_id is not None and str(batch_id) != str(context.outgoing_batch_id or ""):
+            raise PermissionError("blueprint_script_call cannot call another batch_id")
+        clean_args = {
+            "source_node_id": scope.agent_node_id,
+            "function_name": str(function_name),
+            "arguments": dict(arguments or {}),
+            "script_node_id": script_node_id,
+            "batch_id": effective_batch_id,
+        }
+        self._record_mcp_tool_call(scope, "blueprint_script_call", clean_args)
+        return await self._runtime_coro(
+            lambda: self.control.call_script_node(
+                scope.agent_node_id or "",
+                str(function_name),
+                dict(arguments or {}),
+                script_node_id=script_node_id,
+                batch_id=effective_batch_id,
+            )
+        )
+
     async def _ordinary_agent_task_status(
         self,
         scope: MCPTokenScope,
@@ -1677,7 +1789,7 @@ class RunMCPRuntimeHandle:
         return await asyncio.to_thread(lambda: self.runtime_loop.run(fn()))
 
 
-ORDINARY_TOOL_NAMES = [
+ORDINARY_WORKSPACE_TOOL_NAMES = [
     "workspace_checkout",
     "workspace_status",
     "workspace_diff",
@@ -1685,10 +1797,19 @@ ORDINARY_TOOL_NAMES = [
     "workspace_sync",
     "workspace_publish",
     "workspace_publish_file",
+]
+
+ORDINARY_MESSAGE_TOOL_NAMES = [
     "agent_dispatch",
     "agent_context",
+    "blueprint_script_call",
     "agent_task_status",
     "join_contribute",
+]
+
+ORDINARY_TOOL_NAMES = [
+    *ORDINARY_WORKSPACE_TOOL_NAMES,
+    *ORDINARY_MESSAGE_TOOL_NAMES,
 ]
 
 DEFAULT_CONTROL_PERMISSIONS = ["ask", "start", "status", "end", "utterances"]

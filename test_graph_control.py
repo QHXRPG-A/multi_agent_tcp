@@ -10,6 +10,7 @@ import pytest
 from multi_agent_tcp import (
     body_to_agent_message,
     AgentNode,
+    CommonNode,
     GuLiCodeTopAgentProfile,
     GraphDefinition,
     GraphEdge,
@@ -97,6 +98,220 @@ def test_graph_definition_json_and_scoped_organization_view() -> None:
     assert scoped["agent"]["upstream_agents"] == ["planner"]
     assert scoped["agent"]["downstream_agents"] == ["reviewer"]
     assert scoped["graph"]["agent_nodes"] == ["coder"]
+
+
+def test_control_plane_executes_script_nodes_between_agents(tmp_path: Path) -> None:
+    script_root = tmp_path / ".multi_agent_workspace" / "scripts"
+    script_root.mkdir(parents=True)
+    (script_root / "score.py").write_text(
+        "\n".join(
+            [
+                "from multi_agent_tcp.blueprint_script_nodes import blueprint_node",
+                "",
+                "@blueprint_node(name='Format score')",
+                "def format_score(count: int, ratio: float) -> str:",
+                "    return f'{count}:{ratio:.2f}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    graph = graph_definition_from_dict(
+        {
+            "agent_nodes": {
+                "planner": {"agent_id": "planner"},
+                "writer": {"agent_id": "writer"},
+            },
+            "script_nodes": {
+                "format": {
+                    "script_id": "score.py:format_score",
+                    "module_path": "score.py",
+                    "function_name": "format_score",
+                    "title": "Format score",
+                    "inputs": [
+                        {"name": "count", "type": "int"},
+                        {"name": "ratio", "type": "float"},
+                    ],
+                    "outputs": [{"name": "result", "type": "str"}],
+                }
+            },
+            "edges": [
+                {"from": "planner", "to": "format", "edge_type": "exec"},
+                {"from": "format", "to": "writer", "edge_type": "exec"},
+            ],
+        }
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph, script_root=script_root)
+
+    assert graph.agent_connections() == {"planner": ["writer"], "writer": []}
+    assert graph.script_path_between_agents("planner", "writer") == ["format"]
+
+    batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "planner",
+                "required_target_node_ids": ["writer"],
+                "batch_id": "script-batch",
+            },
+        }
+    )
+    assert batch["batch"]["script_calls"]["format"]["function_name"] == "format_score"
+    assert batch["batch"]["script_calls"]["format"]["required_target_node_ids"] == ["writer"]
+    with pytest.raises(ValueError, match="requires blueprint_script_call"):
+        control.handle_request(
+            {
+                "command": "agent.dispatch",
+                "args": {
+                    "source_node_id": "planner",
+                    "target_node_id": "writer",
+                    "batch_id": batch["batch"]["batch_id"],
+                    "body": {"count": 3, "ratio": 0.125},
+                },
+            }
+        )
+    with pytest.raises(ValueError, match="requires blueprint_script_call"):
+        control.handle_request(
+            {
+                "command": "agent.dispatch",
+                "args": {
+                    "source_node_id": "planner",
+                    "target_node_id": "writer",
+                    "batch_id": batch["batch"]["batch_id"],
+                    "body": "",
+                },
+            }
+        )
+
+    dispatched = control.handle_request(
+        {
+            "command": "script.call",
+            "args": {
+                "source_node_id": "planner",
+                "batch_id": batch["batch"]["batch_id"],
+                "function_name": "format_score",
+                "arguments": {"count": 3, "ratio": 0.125},
+            },
+        }
+    )
+
+    assert dispatched["ok"] is True
+    assert dispatched["script_call"]["status"] == "delivered"
+    assert dispatched["script_call"]["result"]["result"] == "3:0.12"
+    assert dispatched["delivery"][0]["target_node_id"] == "writer"
+    writer_body = runtime.status_snapshot()["queues"]["by_agent"]["writer"][0]["body"]
+    assert writer_body["function_name"] == "format_score"
+    assert writer_body["function_description"] == ""
+    assert writer_body["arguments_summary"] == {"count": 3, "ratio": 0.125}
+    assert writer_body["outputs"] == {"result": "3:0.12"}
+    assert writer_body["result"] == "3:0.12"
+    assert writer_body["source"]["node_id"] == "planner"
+    event_types = [event["event_type"] for event in runtime.status_snapshot()["recent_events"]]
+    assert "ScriptNodeRunning" in event_types
+    assert "ScriptNodeCompleted" in event_types
+
+
+def test_graph_definition_parses_common_nodes_and_validates_port_types() -> None:
+    graph = graph_definition_from_dict(
+        {
+            "agent_nodes": {
+                "source": {"agent_id": "source"},
+                "worker": {"agent_id": "worker"},
+            },
+            "common_nodes": {
+                "gate": {"kind": "branch"},
+                "clock": {"kind": "tick", "every_n_ticks": 0},
+            },
+            "edges": [
+                {"from": "source", "to": "gate", "input_port": "condition", "edge_type": "exec"},
+                {"from": "gate", "output_port": "true", "to": "worker", "edge_type": "exec"},
+                {"from": "clock", "output_port": "tick", "to": "worker", "edge_type": "exec"},
+            ],
+        }
+    )
+
+    assert graph.common_nodes["gate"].kind == "branch"
+    assert graph.common_nodes["clock"].every_n_ticks == 1
+    assert graph.framework_connections()["source"] == ["gate"]
+    assert graph.framework_connections()["gate"] == ["worker"]
+    organization = graph.agent_organization_view()
+    assert organization["graph"]["common_nodes"] == {
+        "gate": {"node_id": "gate", "kind": "branch"},
+        "clock": {"node_id": "clock", "kind": "tick", "every_n_ticks": 1},
+    }
+
+    with pytest.raises(ValueError, match="edge port type mismatch"):
+        graph_definition_from_dict(
+            {
+                "common_nodes": {
+                    "clock": {"kind": "tick"},
+                    "gate": {"kind": "branch"},
+                },
+                "edges": [
+                    {
+                        "from": "clock",
+                        "output_port": "tick",
+                        "to": "gate",
+                        "input_port": "condition",
+                        "edge_type": "exec",
+                    }
+                ],
+            }
+        )
+
+
+def test_control_plane_dispatches_agent_message_to_branch_common_node() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "source": AgentNode(node_id="source", agent_id="source"),
+            "yes": AgentNode(node_id="yes", agent_id="yes"),
+            "no": AgentNode(node_id="no", agent_id="no"),
+        },
+        common_nodes={
+            "gate": CommonNode(node_id="gate", kind="branch"),
+        },
+        edges=[
+            GraphEdge("source", "gate", input_port="condition", edge_type="exec"),
+            GraphEdge("gate", "yes", output_port="true", edge_type="exec"),
+            GraphEdge("gate", "no", output_port="false", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph)
+
+    organization = control.handle_request({"command": "organization.read", "args": {}})["organization"]
+    assert organization["graph"]["common_nodes"]["gate"] == {"node_id": "gate", "kind": "branch"}
+    assert organization["framework_connections"]["source"] == ["gate"]
+    batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "source",
+                "required_target_node_ids": ["gate"],
+                "batch_id": "source-to-branch",
+            },
+        }
+    )
+    dispatched = control.handle_request(
+        {
+            "command": "agent.dispatch",
+            "args": {
+                "source_node_id": "source",
+                "target_node_id": "gate",
+                "batch_id": batch["batch"]["batch_id"],
+                "body": {"condition": True, "prompt": "go yes"},
+            },
+        }
+    )
+
+    assert dispatched["ok"] is True
+    assert runtime.status_snapshot(graph=graph)["queues"]["by_common_node"]["gate"][0]["body"]["condition"] is True
+    asyncio.run(runtime.tick())
+    snapshot = runtime.status_snapshot(graph=graph)
+    assert [item["body"]["prompt"] for item in snapshot["queues"]["by_agent"]["yes"]] == ["go yes"]
+    assert snapshot["queues"]["by_agent"].get("no", []) == []
+    event_types = [event["event_type"] for event in snapshot["recent_events"]]
+    assert "BranchNodeCompleted" in event_types
 
 
 def test_organization_and_validate_start_cli(tmp_path: Path, capsys: Any) -> None:

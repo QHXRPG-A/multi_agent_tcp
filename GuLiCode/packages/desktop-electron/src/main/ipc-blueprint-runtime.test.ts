@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test"
-import { readdir, readFile, rm } from "node:fs/promises"
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -95,12 +95,25 @@ describe("blueprint runtime IPC handlers", () => {
     expect(ipcSource).toContain('"blueprint-changeset-diff"')
     expect(ipcSource).toContain('"blueprint-rollback-changesets"')
     expect(ipcSource).toContain('"blueprint-restore-rollback"')
+    expect(ipcSource).toContain('"blueprint-create-script-node"')
+    expect(ipcSource).toContain('"blueprint-list-editors"')
+    expect(ipcSource).toContain('"blueprint-open-script-in-editor"')
+    expect(ipcSource).toContain("shell.openPath(scriptRoot)")
+    expect(ipcSource).toContain("await launchEditor(editor, scriptRoot)")
+    expect(ipcSource).toContain("windowsHide: false")
+    expect(ipcSource).toContain("editorForegroundArgs")
     expect(preloadSource).toContain("openBlueprintWindow")
+    expect(preloadSource).toContain("blueprintCreateScriptNode")
+    expect(preloadSource).toContain("blueprintListEditors")
+    expect(preloadSource).toContain("blueprintOpenScriptInEditor")
     expect(preloadSource).toContain("blueprintRunDiff")
     expect(preloadSource).toContain("blueprintChangesetDiff")
     expect(preloadSource).toContain("blueprintRollbackChangesets")
     expect(preloadSource).toContain("blueprintRestoreRollback")
     expect(rendererSource).toContain("typeof api.blueprintRunDiff")
+    expect(rendererSource).toContain("typeof blueprintCreateScriptNode === \"function\"")
+    expect(rendererSource).toContain("typeof blueprintListEditors === \"function\"")
+    expect(rendererSource).toContain("typeof blueprintOpenScriptInEditor === \"function\"")
     expect(rendererSource).toContain("typeof api.blueprintChangesetDiff")
     expect(rendererSource).toContain("typeof api.blueprintRollbackChangesets")
     expect(rendererSource).toContain("typeof api.blueprintRestoreRollback")
@@ -154,6 +167,14 @@ describe("blueprint runtime IPC handlers", () => {
       configure: (opts?: { pythonCommand?: string }) => {
         calls.push(`configure:${opts?.pythonCommand ?? ""}`)
         return { ok: true }
+      },
+      scriptNodes: (projectDir: string) => {
+        calls.push(`script-nodes:${projectDir}`)
+        return { ok: true, nodes: [] }
+      },
+      createScriptNode: (projectDir: string, name: string, description?: string) => {
+        calls.push(`script-create:${projectDir}:${name}:${description ?? ""}`)
+        return { ok: true, module_path: "format_score.py", function_name: "format_score" }
       },
       start: (projectDir: string, blueprintId: string, plan: Record<string, unknown>, executionMode?: string) => {
         calls.push(`start:${projectDir}:${blueprintId}:${plan.goal}:${executionMode}`)
@@ -268,6 +289,21 @@ describe("blueprint runtime IPC handlers", () => {
     await handlers.get("blueprint-list-runs")?.({}, "C:\\repo", "default")
     await handlers.get("blueprint-detect-python")?.({}, "C:\\repo", "C:\\Candidate\\python.exe")
     await handlers.get("blueprint-configure-runtime")?.({}, "C:\\Python\\python.exe")
+    await handlers.get("blueprint-script-nodes")?.({}, "C:\\repo")
+    await handlers.get("blueprint-create-script-node")?.({}, "C:\\repo", "Format Score", "Formats a score")
+    const editors = (await handlers.get("blueprint-list-editors")?.({})) as Array<Record<string, unknown>>
+    const scriptDir = join(testLogDir, ".multi_agent_workspace", "scripts")
+    await mkdir(scriptDir, { recursive: true })
+    await writeFile(join(scriptDir, "format_score.py"), "def format_score(payload):\n    return payload\n", "utf8")
+    const openedScript = (await handlers.get("blueprint-open-script-in-editor")?.(
+      {},
+      testLogDir,
+      "format_score.py",
+      "system",
+    )) as Record<string, unknown>
+    await expect(
+      handlers.get("blueprint-open-script-in-editor")?.({}, testLogDir, "../escape.py", "system"),
+    ).rejects.toThrow("modulePath must stay inside the script directory")
     await handlers.get("blueprint-start")?.({}, "C:\\repo", "default", { goal: "ship" }, "live")
     await handlers.get("blueprint-status")?.({}, "run-1")
     await handlers.get("blueprint-run-diff")?.({}, "run-1")
@@ -324,6 +360,10 @@ describe("blueprint runtime IPC handlers", () => {
     const secondPayload = secondDocument.payload as Record<string, unknown>
     const testJsonFiles = (await readdir(join(testLogDir, "agent-info-panel-tests"))).sort()
 
+    expect(editors[0]).toMatchObject({ id: "system", systemDefault: true })
+    expect(openedScript.ok).toBe(true)
+    expect(openedScript.editorId).toBe("system")
+    expect(openedScript.path).toBe(scriptDir)
     expect(savedFirst.ok).toBe(true)
     expect(savedSecond.ok).toBe(true)
     expect(String(savedFirst.path)).toContain("agent-info-panel-tests")
@@ -352,6 +392,8 @@ describe("blueprint runtime IPC handlers", () => {
       "runs:C:\\repo:default",
       "detect-python:C:\\repo:C:\\Candidate\\python.exe",
       "configure:C:\\Python\\python.exe",
+      "script-nodes:C:\\repo",
+      "script-create:C:\\repo:Format Score:Formats a score",
       "start:C:\\repo:default:ship:live",
       "status:run-1",
       "run-diff:run-1",

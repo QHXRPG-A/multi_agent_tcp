@@ -108,6 +108,8 @@ does not mark the browser as a mobile or desktop client.
 - Collaboration Server health: `http://127.0.0.1:8787/api/health`
 - Mobile page: `http://127.0.0.1:3040/mobile`
 - Server console: `http://127.0.0.1:3040/console`
+- Desktop renderer health on this Windows machine:
+  `http://[::1]:5173/`
 - Desktop success markers commonly include renderer dev server, Electron app
   started, and sidecar server ready.
 
@@ -118,3 +120,8 @@ does not mark the browser as a mobile or desktop client.
 - Do not use `DEBUG=*` by default for Electron; it floods Vite/Babel logs.
 - Prefer background helper processes for servers; keep the Electron window
   visible because the user needs to inspect the desktop app.
+- If `127.0.0.1:5173` times out but `http://[::1]:5173/` returns `200`, treat
+  the desktop renderer as reachable through IPv6 loopback. A stale Windows TCP
+  listener can remain on `127.0.0.1:5173` even after its owning process exits.
+  The dev Electron window should keep the original `localhost` renderer URL
+  instead of forcing it to `127.0.0.1`.

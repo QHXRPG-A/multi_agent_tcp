@@ -1,5 +1,6 @@
 import { mobileMockData } from "./mock-data"
 import { configureMobileLogger, logMobileEvent } from "./mobile-logger"
+import { nodeKindLabel } from "./mobile-state"
 import type {
   BlueprintAgentPanelEvent,
   BlueprintEdge,
@@ -11,6 +12,7 @@ import type {
   MobileDesktopMessageSegment,
   MobileDesktopSessionMessage,
   BlueprintNode,
+  BlueprintNodeKind,
   BlueprintNodeState,
   MobileMockData,
   TopAgentMessage,
@@ -58,18 +60,25 @@ type ServerAgent = {
 type ServerBlueprintNode = {
   id: string
   label: string
+  kind?: BlueprintNodeKind
   role?: string
   state: string
+  summary?: string
   x?: number
   y?: number
   upstreamNodeIds?: string[]
   downstreamNodeIds?: string[]
+  inputPorts?: string[]
+  outputPorts?: string[]
+  everyNTicks?: number
 }
 
 type ServerBlueprintEdge = {
   source: string
   target: string
   kind?: string
+  outputPort?: string
+  inputPort?: string
 }
 
 type ServerDiff = {
@@ -427,11 +436,14 @@ export function serverStateToMobile(
 }
 
 function serverEdgeToMobile(edge: ServerBlueprintEdge): BlueprintEdge {
-  return {
+  const projected: BlueprintEdge = {
     source: edge.source,
     target: edge.target,
     kind: edge.kind,
   }
+  if (edge.outputPort) projected.outputPort = edge.outputPort
+  if (edge.inputPort) projected.inputPort = edge.inputPort
+  return projected
 }
 
 async function firstProjectRun(projectId: string, fetcher: typeof fetch) {
@@ -694,18 +706,26 @@ function emptyResult(
 
 function serverNodeToMobile(node: ServerBlueprintNode, agents: ServerAgent[], events: ServerRuntimeEvent[]): BlueprintNode {
   const agent = agents.find((item) => item.nodeId === node.id)
+  const kind = nodeKind(node.kind)
   const state = nodeState(node.state || agent?.state)
   const panelEvents = (agent?.recentEvents?.length ? agent.recentEvents : events.filter((event) => event.nodeId === node.id)).map(
     eventToPanelEvent,
   )
+  const inputPorts = portList(node.inputPorts)
+  const outputPorts = portList(node.outputPorts)
 
   return {
     id: node.id,
     label: node.label,
+    kind,
     state,
-    role: node.role ?? agent?.cliKind ?? "Agent",
-    detail: `Upstream ${node.upstreamNodeIds?.length ?? 0} / downstream ${node.downstreamNodeIds?.length ?? 0}`,
-    note: "Read-only mobile projection.",
+    role: node.role ?? agent?.cliKind ?? nodeKindLabel(kind),
+    detail: nodeDetail(node, inputPorts, outputPorts),
+    note: kind === "agent" || kind === "worker_agent" ? "桌面端运行镜像。" : "桌面端蓝图只读节点。",
+    summary: node.summary,
+    inputPorts,
+    outputPorts,
+    everyNTicks: node.everyNTicks,
     layout: serverNodeLayout(node),
     agentPanel: {
       agentId: agent?.agentId ?? node.label,
@@ -721,10 +741,32 @@ function serverNodeToMobile(node: ServerBlueprintNode, agents: ServerAgent[], ev
         { label: "state", value: agent?.state ?? node.state },
       ],
       events: panelEvents.length ? panelEvents : [fallbackPanelEvent(node.id)],
-      inputPlaceholder: "Message this agent",
-      disabledNotice: "Mobile writes require API access and run:message permission.",
+      inputPlaceholder: "发送到这个 Agent",
+      disabledNotice: "需要运行消息权限才能从移动端发送。",
     },
   }
+}
+
+function nodeKind(value: unknown): BlueprintNodeKind {
+  if (value === "agent" || value === "worker_agent" || value === "script" || value === "branch" || value === "tick") {
+    return value
+  }
+  return "worker_agent"
+}
+
+function portList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    const text = typeof item === "string" ? item.trim() : ""
+    return text ? [text] : []
+  })
+}
+
+function nodeDetail(node: ServerBlueprintNode, inputPorts: string[], outputPorts: string[]) {
+  const upstream = node.upstreamNodeIds?.length ?? 0
+  const downstream = node.downstreamNodeIds?.length ?? 0
+  const ports = inputPorts.length || outputPorts.length ? `，输入 ${inputPorts.length} / 输出 ${outputPorts.length}` : ""
+  return `上游 ${upstream} / 下游 ${downstream}${ports}`
 }
 
 function serverNodeLayout(node: ServerBlueprintNode) {
@@ -910,12 +952,12 @@ function nodeState(value?: string): BlueprintNodeState {
 }
 
 function runStatusLabel(status: string) {
-  if (status === "running") return "Running"
-  if (status === "completed") return "Completed"
-  if (status === "failed") return "Failed"
-  if (status === "cancelled") return "Cancelled"
+  if (status === "running") return "运行中"
+  if (status === "completed") return "已完成"
+  if (status === "failed") return "失败"
+  if (status === "cancelled") return "已取消"
   if (status === "unknown") return "未运行"
-  return "Unknown"
+  return "未知"
 }
 
 function diffToMobile(diff: ServerDiff | undefined): MobileMockData["blueprint"]["diff"] {

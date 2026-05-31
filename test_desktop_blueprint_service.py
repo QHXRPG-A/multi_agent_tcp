@@ -22,6 +22,7 @@ from multi_agent_tcp.desktop_blueprint_service import (
     DesktopBlueprintNoopBackend,
     DesktopBlueprintService,
 )
+from multi_agent_tcp import blueprint_script_nodes
 from multi_agent_tcp.blueprint_mcp_runtime import (
     MCP_TOOL_AUDIT_EVENT,
     MCPTokenScope,
@@ -93,6 +94,174 @@ def _plan() -> dict:
         },
         "run_policy": {},
     }
+
+
+def test_blueprint_service_lists_script_nodes_without_importing_user_code(tmp_path: Path) -> None:
+    script_dir = tmp_path / ".multi_agent_workspace" / "scripts"
+    script_dir.mkdir(parents=True)
+    (script_dir / "score.py").write_text(
+        "\n".join(
+            [
+                "raise RuntimeError('imported during scan')",
+                "",
+                "@blueprint_node(name='Format score', description='Build a display string')",
+                "def format_score(count: int, ratio: float) -> str:",
+                "    return f'{count}:{ratio:.2f}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = DesktopBlueprintService()
+    result = service.handle_request({"command": "blueprint.scriptNodes", "args": {"projectDir": str(tmp_path)}})
+
+    assert result["ok"] is True
+    assert Path(result["script_dir"]) == script_dir.resolve()
+    assert result["diagnostics"] == []
+    assert result["nodes"] == [
+        {
+            "script_id": "score.py:format_score",
+            "module_path": "score.py",
+            "function_name": "format_score",
+            "title": "Format score",
+            "description": "Build a display string",
+            "inputs": [
+                {"name": "count", "type": "int", "required": True},
+                {"name": "ratio", "type": "float", "required": True},
+            ],
+            "outputs": [{"name": "result", "type": "str", "required": True}],
+        }
+    ]
+
+
+def test_blueprint_service_creates_script_node_template_and_catalog_item(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+
+    result = service.handle_request(
+        {
+            "command": "blueprint.createScriptNode",
+            "args": {
+                "projectDir": str(tmp_path),
+                "name": "Format Score",
+                "description": "Formats a score for display",
+            },
+        }
+    )
+    second = service.handle_request(
+        {"command": "blueprint.createScriptNode", "args": {"projectDir": str(tmp_path), "name": "Format Score"}}
+    )
+
+    script_dir = tmp_path / ".multi_agent_workspace" / "scripts"
+    script_path = script_dir / "format_score.py"
+    second_path = script_dir / "format_score_2.py"
+    framework_source_dir = Path(blueprint_script_nodes.__file__).resolve().parent
+    framework_import_root = framework_source_dir.parent.resolve()
+    pyright = json.loads((script_dir / "pyrightconfig.json").read_text(encoding="utf-8"))
+    vscode_settings = json.loads((script_dir / ".vscode" / "settings.json").read_text(encoding="utf-8"))
+    workspace = json.loads((script_dir / "blueprint-scripts.code-workspace").read_text(encoding="utf-8"))
+    assert result["ok"] is True
+    assert Path(result["script_dir"]) == script_dir.resolve()
+    assert Path(result["file_path"]) == script_path.resolve()
+    assert result["module_path"] == "format_score.py"
+    assert result["function_name"] == "format_score"
+    assert second["module_path"] == "format_score_2.py"
+    assert second["function_name"] == "format_score"
+    assert script_path.read_text(encoding="utf-8") == "\n".join(
+        [
+            "from multi_agent_tcp.blueprint_script_nodes import blueprint_node",
+            "",
+            '@blueprint_node(name="Format Score", description="Formats a score for display")',
+            "def format_score(payload: dict) -> dict:",
+            "    return payload",
+            "",
+        ]
+    )
+    assert second_path.exists()
+    assert pyright["include"] == ["."]
+    assert pyright["extraPaths"] == [str(framework_import_root)]
+    assert vscode_settings["python.analysis.extraPaths"] == [str(framework_import_root)]
+    assert vscode_settings["python.defaultInterpreterPath"] == sys.executable
+    assert workspace["folders"] == [
+        {"name": "Blueprint Scripts", "path": "."},
+        {"name": "multi_agent_tcp source", "path": str(framework_source_dir)},
+    ]
+    assert workspace["settings"]["python.analysis.extraPaths"] == [str(framework_import_root)]
+    assert result["dev_environment"]["workspace_file"] == str((script_dir / "blueprint-scripts.code-workspace").resolve())
+    assert result["dev_environment"]["framework_source_dir"] == str(framework_source_dir)
+    assert result["dev_environment"]["framework_import_root"] == str(framework_import_root)
+    assert result["node"] == {
+        "script_id": "format_score.py:format_score",
+        "module_path": "format_score.py",
+        "function_name": "format_score",
+        "title": "Format Score",
+        "description": "Formats a score for display",
+        "inputs": [{"name": "payload", "type": "dict", "required": True}],
+        "outputs": [{"name": "result", "type": "dict", "required": True}],
+    }
+
+
+def test_blueprint_service_rejects_blank_script_node_name(tmp_path: Path) -> None:
+    with pytest.raises(BlueprintServiceError) as exc:
+        DesktopBlueprintService().handle_request(
+            {"command": "blueprint.createScriptNode", "args": {"projectDir": str(tmp_path), "name": "  "}}
+        )
+
+    assert exc.value.code == "BAD_REQUEST"
+    assert "name must be a non-empty string" in str(exc.value)
+
+
+def test_blueprint_service_reports_script_annotation_diagnostics(tmp_path: Path) -> None:
+    script_dir = tmp_path / ".multi_agent_workspace" / "scripts"
+    script_dir.mkdir(parents=True)
+    (script_dir / "bad.py").write_text(
+        "\n".join(
+            [
+                "@blueprint_node",
+                "def summarize(count, payload: set) -> tuple:",
+                "    return count, payload",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = DesktopBlueprintService().handle_request(
+        {"command": "blueprint.scriptNodes", "args": {"projectDir": str(tmp_path)}}
+    )
+
+    messages = [item["message"] for item in result["diagnostics"]]
+    assert any("missing type annotation" in message and "count" in message for message in messages)
+    assert any("unsupported type annotation 'set'" in message for message in messages)
+    assert any("unsupported type annotation 'tuple'" in message for message in messages)
+    node = result["nodes"][0]
+    assert node["inputs"][0] == {"name": "count", "type": "Any", "required": True}
+    assert node["inputs"][1] == {"name": "payload", "type": "Any", "required": True}
+    assert node["outputs"] == [{"name": "result", "type": "Any", "required": True}]
+
+
+def test_blueprint_validate_rejects_missing_script_node_function(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    document["graph"]["script_nodes"] = {
+        "format": {
+            "script_id": "missing.py:format_score",
+            "module_path": "missing.py",
+            "function_name": "format_score",
+            "title": "Format score",
+            "inputs": [{"name": "count", "type": "int"}],
+            "outputs": [{"name": "result", "type": "str"}],
+        }
+    }
+    document["graph"]["edges"] = [
+        {"from": "start", "to": "planner", "edge_type": "exec"},
+        {"from": "planner", "to": "format", "edge_type": "exec"},
+        {"from": "format", "to": "end", "edge_type": "exec"},
+    ]
+
+    result = DesktopBlueprintService().handle_request(
+        {"command": "blueprint.validate", "args": {"projectDir": str(tmp_path), "document": document}}
+    )
+
+    assert result["ok"] is False
+    assert "missing script node function" in result["errors"][0]
 
 
 def _codex_real_flow_config_overrides() -> list[str]:
@@ -1071,6 +1240,7 @@ def test_run_mcp_ordinary_agent_context_and_join_contribute_are_scope_bound() ->
     class FakeControl:
         def __init__(self) -> None:
             self.requests = []
+            self.script_calls = []
 
         def handle_request(self, payload):
             self.requests.append(payload)
@@ -1080,6 +1250,18 @@ def test_run_mcp_ordinary_agent_context_and_join_contribute_are_scope_bound() ->
             ):
                 raise KeyError("unknown join barrier: out-batch")
             return {"ok": True, "payload": payload}
+
+        async def call_script_node(self, source_node_id, function_name, arguments, *, script_node_id=None, batch_id=None):
+            self.script_calls.append(
+                {
+                    "source_node_id": source_node_id,
+                    "function_name": function_name,
+                    "arguments": dict(arguments),
+                    "script_node_id": script_node_id,
+                    "batch_id": batch_id,
+                }
+            )
+            return {"ok": True, "script_call": self.script_calls[-1]}
 
     control = FakeControl()
     handle = RunMCPRuntimeHandle(
@@ -1114,6 +1296,24 @@ def test_run_mcp_ordinary_agent_context_and_join_contribute_are_scope_bound() ->
     assert context["ok"] is True
     assert control.requests[-1]["command"] == "agent.context"
     assert control.requests[-1]["args"] == {"source_node_id": "planner", "batch_id": "batch-1"}
+
+    script_call = asyncio.run(
+        handle._ordinary_blueprint_script_call(
+            scope,
+            function_name="format_score",
+            arguments={"count": 3},
+            script_node_id="format",
+            batch_id=None,
+        )
+    )
+    assert script_call["ok"] is True
+    assert control.script_calls[-1] == {
+        "source_node_id": "planner",
+        "function_name": "format_score",
+        "arguments": {"count": 3},
+        "script_node_id": "format",
+        "batch_id": "batch-1",
+    }
 
     task_status = asyncio.run(
         handle._ordinary_agent_task_status(
@@ -1328,6 +1528,98 @@ def test_run_mcp_provisions_control_context_without_workspace_read_tools(tmp_pat
     ]
 
 
+def test_run_mcp_provisions_full_agent_message_only_context(tmp_path: Path) -> None:
+    class FakeWorkspaceRPCServer:
+        def __init__(self) -> None:
+            self.tokens = []
+
+        def token_for(self, agent_id):
+            self.tokens.append(agent_id)
+            return f"token-for-{agent_id}"
+
+    class FullAgentNode:
+        node_id = "shell"
+        runtime_agent_id = "agent-shell"
+        node_type = "agent"
+        access_policy = {
+            "direct_project_io": True,
+            "outside_project_io": True,
+            "unrestricted_commands": True,
+            "disable_sandbox": True,
+            "framework_message_tools": True,
+        }
+
+    rpc = FakeWorkspaceRPCServer()
+    handle = RunMCPRuntimeHandle(
+        run_id="run-1",
+        runtime=object(),
+        control=object(),
+        graph=object(),
+        workspace_rpc_server=rpc,
+        manager=object(),
+        workspace_run=object(),
+        runtime_loop=None,
+    )
+
+    context = handle.provision_context_for_node(
+        node=FullAgentNode(),
+        private_dir=tmp_path / "support",
+        checkout_dir=tmp_path / "project",
+        codex_home=tmp_path / "support" / "codex_home",
+    )
+
+    assert context["server_kind"] == "ordinary"
+    assert context["server_name"] == "framework_ordinary"
+    assert context["tools"] == [
+        "agent_dispatch",
+        "agent_context",
+        "blueprint_script_call",
+        "agent_task_status",
+        "join_contribute",
+    ]
+    assert "workspace_checkout" not in context["tools"]
+    assert "workspace_submit" not in context["tools"]
+    assert rpc.tokens == []
+    scope = handle.token_store.authenticate(
+        server_kind="ordinary",
+        token=context["bearer_token"],
+        session_id=None,
+    )
+    assert scope.workspace_rpc_token is None
+    assert scope.checkout_dir is None
+    assert scope.private_dir is None
+    assert scope.allowed_tools == context["tools"]
+
+
+def test_run_mcp_skips_full_agent_context_when_message_tools_disabled(tmp_path: Path) -> None:
+    class FullAgentNode:
+        node_id = "shell"
+        runtime_agent_id = "agent-shell"
+        node_type = "agent"
+        access_policy = {"framework_message_tools": False}
+
+    handle = RunMCPRuntimeHandle(
+        run_id="run-1",
+        runtime=object(),
+        control=object(),
+        graph=object(),
+        workspace_rpc_server=object(),
+        manager=object(),
+        workspace_run=object(),
+        runtime_loop=None,
+    )
+
+    context = handle.provision_context_for_node(
+        node=FullAgentNode(),
+        private_dir=tmp_path / "support",
+        checkout_dir=tmp_path / "project",
+        codex_home=tmp_path / "support" / "codex_home",
+    )
+
+    assert context == {}
+    assert handle.token_store.summary()["ordinaryScopes"] == []
+
+
 def test_run_mcp_tool_audit_records_safe_manifest_entries(tmp_path: Path) -> None:
     class FakeManager:
         def __init__(self) -> None:
@@ -1425,6 +1717,10 @@ def test_run_mcp_streamable_http_tools_are_split_by_token(tmp_path: Path) -> Non
         private_dir=tmp_path / "private",
         allowed_file_roots=[tmp_path / "checkout"],
     )
+    message_only = handle.token_store.create_message_scope(
+        agent_node_id="shell",
+        agent_id="agent-shell",
+    )
     control = handle.token_store.create_control_scope(
         agent_node_id="top-agent-gulicode",
         agent_id="gulicode",
@@ -1432,7 +1728,10 @@ def test_run_mcp_streamable_http_tools_are_split_by_token(tmp_path: Path) -> Non
     handle.start()
 
     async def list_tool_names(url: str, token: str) -> list[str]:
-        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}) as client:
+        async with httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {token}"},
+            trust_env=False,
+        ) as client:
             async with streamable_http_client(
                 url,
                 http_client=client,
@@ -1444,6 +1743,7 @@ def test_run_mcp_streamable_http_tools_are_split_by_token(tmp_path: Path) -> Non
 
     try:
         ordinary_tools = asyncio.run(list_tool_names(handle.ordinary_url, ordinary.token))
+        message_only_tools = asyncio.run(list_tool_names(handle.ordinary_url, message_only.token))
         control_tools = asyncio.run(list_tool_names(handle.control_url, control.token))
     finally:
         handle.close()
@@ -1459,6 +1759,15 @@ def test_run_mcp_streamable_http_tools_are_split_by_token(tmp_path: Path) -> Non
     assert "workspace_extract_archive" not in ordinary_tools
     assert "runtime_status" not in ordinary_tools
     assert "organization_read" not in ordinary_tools
+    assert message_only_tools == [
+        "agent_context",
+        "agent_dispatch",
+        "agent_task_status",
+        "blueprint_script_call",
+        "join_contribute",
+    ]
+    assert "workspace_checkout" not in message_only_tools
+    assert "workspace_status" not in message_only_tools
     assert "runtime_status" in control_tools
     assert "organization_read" in control_tools
     assert "agent_dispatch" in control_tools
@@ -1751,7 +2060,7 @@ def test_run_mcp_runtime_end_closes_tokens_and_records_control_audit() -> None:
 
     async def scenario() -> dict:
         headers = {"Authorization": f"Bearer {scope.token}"}
-        async with httpx.AsyncClient(headers=headers, timeout=20.0) as client:
+        async with httpx.AsyncClient(headers=headers, timeout=20.0, trust_env=False) as client:
             async with streamable_http_client(
                 handle.control_url,
                 http_client=client,
@@ -2317,6 +2626,8 @@ def test_blueprint_service_live_mode_prestarts_all_agents_with_private_context(
             private / "workspace_api_context.json"
         )
         assert "MULTI_AGENT_MCP_ORDINARY_TOKEN" in worker.extra_env
+        assert "127.0.0.1" in worker.extra_env["NO_PROXY"].split(",")
+        assert "localhost" in worker.extra_env["no_proxy"].split(",")
         assert (private / "workspace_api_context.json").is_file()
         assert (private / "checkout" / "AGENTS.md").is_file()
         config_text = (private / "codex_home" / "config.toml").read_text(encoding="utf-8")
@@ -2373,7 +2684,7 @@ def test_live_blueprint_mcp_workspace_dispatch_flow_with_agent_backend(
             "framework_ordinary",
         )
         headers = {"Authorization": f"Bearer {token}"}
-        async with httpx.AsyncClient(headers=headers, timeout=20.0) as client:
+        async with httpx.AsyncClient(headers=headers, timeout=20.0, trust_env=False) as client:
             async with streamable_http_client(url, http_client=client) as (
                 read_stream,
                 write_stream,

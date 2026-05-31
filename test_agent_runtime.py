@@ -18,6 +18,7 @@ from multi_agent_tcp import (
     AgentSkillSelection,
     BlueprintTerminalNode,
     CLIWorkerBackend,
+    CommonNode,
     CodexAdapter,
     CodeMakerAdapter,
     GuLiCodeTopAgentProfile,
@@ -50,7 +51,11 @@ from multi_agent_tcp.codex_bridge import _write_codex_diagnostics
 from multi_agent_tcp.codex_bridge import _CodexStderrStreamLimiter
 from multi_agent_tcp.codex_bridge import compact_codex_result_for_transport
 from multi_agent_tcp.codex_bridge import load_codex_runtime
-from multi_agent_tcp.agent_launch_context import initialize_private_codex_home
+from multi_agent_tcp.agent_launch_context import (
+    _apply_local_mcp_proxy_env,
+    initialize_private_codex_home,
+)
+from multi_agent_tcp.blueprint_mcp_runtime import RunMCPRuntimeHandle
 from multi_agent_tcp.ryven_blueprint import _apply_run_workspace_to_node
 from multi_agent_tcp.workspace_api import CONTEXT_ENV as WORKSPACE_API_CONTEXT_ENV
 from multi_agent_tcp.workspace_api import main as workspace_api_main
@@ -204,6 +209,34 @@ def test_initialize_private_codex_home_seeds_runtime_state_only(tmp_path: Path) 
     assert not (private / "sessions").exists()
 
 
+def test_local_mcp_proxy_env_preserves_proxy_compatibility(monkeypatch) -> None:
+    monkeypatch.setenv("NO_PROXY", "env.local;localhost")
+    monkeypatch.setattr(
+        "multi_agent_tcp.agent_launch_context.urllib.request.getproxies",
+        lambda: {
+            "http": "http://system-proxy:8080",
+            "https": "http://system-proxy:8443",
+            "no": "registry.local",
+        },
+    )
+    extra_env = {
+        "NO_PROXY": "internal.local,127.0.0.1",
+        "HTTPS_PROXY": "http://custom-proxy:9443",
+    }
+
+    _apply_local_mcp_proxy_env(extra_env)
+
+    no_proxy_hosts = extra_env["NO_PROXY"].split(",")
+    assert extra_env["no_proxy"] == extra_env["NO_PROXY"]
+    assert no_proxy_hosts.count("127.0.0.1") == 1
+    assert no_proxy_hosts.count("localhost") == 1
+    assert {"internal.local", "env.local", "registry.local", "::1"}.issubset(no_proxy_hosts)
+    assert extra_env["HTTP_PROXY"] == "http://system-proxy:8080"
+    assert extra_env["http_proxy"] == "http://system-proxy:8080"
+    assert extra_env["HTTPS_PROXY"] == "http://custom-proxy:9443"
+    assert extra_env["https_proxy"] == "http://custom-proxy:9443"
+
+
 def test_worker_config_serializes_adapter_fields() -> None:
     cfg = WorkerConfig(
         "agent-a",
@@ -283,11 +316,44 @@ def test_agent_node_from_dict_and_worker_config() -> None:
     assert node.execution_mode == "nonblocking"
     assert worker.agent_id == "agent-1"
     assert worker.cli_kind == "codemaker"
-    assert worker.adapter_options == {"prompt_via_file": "always"}
+    assert worker.adapter_options["prompt_via_file"] == "always"
+    assert worker.adapter_options["node_type"] == "worker_agent"
+    assert worker.adapter_options["access_policy"] == {
+        "direct_project_io": False,
+        "outside_project_io": False,
+        "unrestricted_commands": False,
+        "disable_sandbox": False,
+        "framework_message_tools": True,
+    }
     assert worker.extra_env == {"A": "1"}
     assert node.read_scope == ["src"]
     assert node.write_scope == ["out"]
     assert node.artifact_scope == ["artifacts"]
+
+
+def test_agent_node_from_dict_defaults_full_agent_to_codex_access() -> None:
+    node = AgentNode.from_dict(
+        {
+            "node_id": "shell",
+            "node_type": "agent",
+            "cwd": ".",
+        }
+    )
+
+    assert node.node_type == "agent"
+    assert node.cli_kind == "codex"
+    assert node.model == "gpt-5.4"
+    assert node.command == "codex"
+    assert node.access_policy == {
+        "direct_project_io": True,
+        "outside_project_io": True,
+        "unrestricted_commands": True,
+        "disable_sandbox": True,
+        "framework_message_tools": True,
+    }
+    worker = node.to_worker_config()
+    assert worker.adapter_options["node_type"] == "agent"
+    assert worker.adapter_options["access_policy"]["disable_sandbox"] is True
 
 
 def test_agent_node_from_dict_auto_generates_node_id() -> None:
@@ -546,6 +612,99 @@ async def test_graph_runtime_enforces_independent_overlapping_ring_circulations(
         )
 
 
+@pytest.mark.asyncio
+async def test_graph_runtime_branch_routes_true_false_and_rejects_non_bool() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "yes": AgentNode.from_dict({"node_id": "yes", "agent_id": "worker-yes"}),
+            "no": AgentNode.from_dict({"node_id": "no", "agent_id": "worker-no"}),
+        },
+        common_nodes={
+            "gate": CommonNode(node_id="gate", kind="branch"),
+        },
+        edges=[
+            GraphEdge("gate", "yes", output_port="true", edge_type="exec"),
+            GraphEdge("gate", "no", output_port="false", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    runtime.configure_common_nodes(graph)
+
+    runtime.queue_common_node_message("gate", {"condition": True, "prompt": "true branch"})
+    await runtime.tick()
+    assert [message.body["prompt"] for message in runtime.agent_message_queues["yes"]] == ["true branch"]
+    assert runtime.agent_message_queues.get("no", []) == []
+
+    runtime.queue_common_node_message("gate", {"condition": False, "prompt": "false branch"})
+    await runtime.tick()
+    assert [message.body["prompt"] for message in runtime.agent_message_queues["no"]] == ["false branch"]
+
+    runtime.queue_common_node_message("gate", {"condition": "true", "prompt": "bad branch"})
+    await runtime.tick()
+    snapshot = runtime.status_snapshot(graph=graph)
+    event_types = [event["event_type"] for event in snapshot["recent_events"]]
+    assert "BranchNodeFailed" in event_types
+    assert len(runtime.agent_message_queues["yes"]) == 1
+    assert len(runtime.agent_message_queues["no"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_tick_emits_on_interval_and_applies_backpressure() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "worker": AgentNode.from_dict({"node_id": "worker", "agent_id": "worker"}),
+        },
+        common_nodes={
+            "clock": CommonNode(node_id="clock", kind="tick", every_n_ticks=2),
+        },
+        edges=[
+            GraphEdge("clock", "worker", output_port="tick", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    runtime.configure_common_nodes(graph)
+
+    await runtime.tick()
+    assert runtime.agent_message_queues.get("worker", []) == []
+
+    await runtime.tick()
+    queued = runtime.agent_message_queues["worker"]
+    assert len(queued) == 1
+    assert queued[0].body["type"] == "tick"
+    assert queued[0].body["tick_count"] == 2
+
+    await runtime.tick()
+    await runtime.tick()
+    assert len(runtime.agent_message_queues["worker"]) == 1
+    event_types = [event["event_type"] for event in runtime.status_snapshot(graph=graph)["recent_events"]]
+    assert "TickNodeSkipped" in event_types
+
+
+def test_top_agent_start_plan_allows_tick_only_runs() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "worker": AgentNode.from_dict({"node_id": "worker"}),
+        },
+        common_nodes={
+            "clock": CommonNode(node_id="clock", kind="tick"),
+        },
+        edges=[
+            GraphEdge("clock", "worker", output_port="tick", edge_type="exec"),
+        ],
+    )
+    plan = TopAgentStartPlan.from_dict(
+        {
+            "user_goal": "Run from tick source.",
+            "agent_descriptions": {"worker": "Handles ticks."},
+            "start_nodes": [],
+            "tasks": {},
+        }
+    )
+
+    assert GuLiCodeTopAgentProfile().validate_start_plan(graph, plan).ok is True
+    assert graph.has_tick_source() is True
+
+
 def test_agent_skill_selection_serializes() -> None:
     selection = AgentSkillSelection(
         mode="selected",
@@ -596,6 +755,54 @@ def test_codex_runtime_rejects_danger_full_access() -> None:
                 "agent_id": "agent-cx",
                 "codex": {
                     "cwd": ".",
+                    "sandbox": "danger-full-access",
+                },
+            }
+        )
+
+
+def test_codex_runtime_allows_danger_full_access_for_full_agent_only(tmp_path: Path) -> None:
+    runtime = load_codex_runtime(
+        {
+            "agent_id": "agent-cx",
+            "codex": {
+                "cwd": str(tmp_path),
+                "node_type": "agent",
+                "access_policy": {"disable_sandbox": True},
+                "dangerous_access": True,
+                "sandbox": "danger-full-access",
+                "extra_args": ["--dangerously-bypass-approvals-and-sandbox"],
+            },
+        }
+    )
+
+    assert runtime["sandbox"] == "danger-full-access"
+    assert runtime["node_type"] == "agent"
+    assert runtime["dangerous_access"] is True
+
+    with pytest.raises(ValueError, match="danger-full-access"):
+        load_codex_runtime(
+            {
+                "agent_id": "agent-cx",
+                "codex": {
+                    "cwd": str(tmp_path),
+                    "node_type": "worker_agent",
+                    "access_policy": {"disable_sandbox": True},
+                    "dangerous_access": True,
+                    "sandbox": "danger-full-access",
+                },
+            }
+        )
+
+    with pytest.raises(ValueError, match="danger-full-access"):
+        load_codex_runtime(
+            {
+                "agent_id": "agent-cx",
+                "codex": {
+                    "cwd": str(tmp_path),
+                    "node_type": "agent",
+                    "access_policy": {"disable_sandbox": False},
+                    "dangerous_access": True,
                     "sandbox": "danger-full-access",
                 },
             }
@@ -1744,6 +1951,57 @@ async def test_graph_runtime_reminds_idle_source_about_remaining_outgoing_target
 
 
 @pytest.mark.asyncio
+async def test_graph_runtime_reminds_idle_source_about_required_script_calls() -> None:
+    graph = graph_definition_from_dict(
+        {
+            "agent_nodes": {
+                "planner": {"agent_id": "agent-planner"},
+                "writer": {"agent_id": "agent-writer"},
+            },
+            "script_nodes": {
+                "format": {
+                    "script_id": "score.py:format_score",
+                    "module_path": "score.py",
+                    "function_name": "format_score",
+                    "title": "Format score",
+                    "description": "Format the score payload.",
+                    "inputs": [
+                        {"name": "count", "type": "int"},
+                        {"name": "ratio", "type": "float"},
+                    ],
+                    "outputs": [{"name": "result", "type": "str"}],
+                }
+            },
+            "edges": [
+                {"from": "planner", "to": "format", "edge_type": "exec"},
+                {"from": "format", "to": "writer", "edge_type": "exec"},
+            ],
+        }
+    )
+    runtime = GraphRuntime(_FakeCluster())
+
+    batch = await runtime.create_outgoing_batch_from_graph(graph, "planner", batch_id="batch-script")
+    assert batch.script_calls["format"]["status"] == "pending"
+
+    await runtime.tick()
+    await runtime.tick()
+
+    reminders = [
+        event for event in runtime.events if event.event_type == "AgentScriptCallReminder"
+    ]
+    assert len(reminders) == 1
+    reminder = reminders[0]
+    assert reminder.payload["batch_id"] == "batch-script"
+    assert reminder.payload["required_script_calls"][0]["function_name"] == "format_score"
+    assert reminder.payload["required_script_calls"][0]["description"] == "Format the score payload."
+    pending = runtime.pending_messages[reminder.payload["message_id"]]
+    assert pending.body["type"] == "blueprint_script_call_reminder"
+    envelope = pending.body["context"]["framework_context"]["message_envelope"]
+    assert envelope["outgoing_batch_id"] == "batch-script"
+    assert envelope["required_script_calls"][0]["script_node_id"] == "format"
+
+
+@pytest.mark.asyncio
 async def test_graph_runtime_prompts_idle_agent_summary_after_threshold(monkeypatch) -> None:
     now = {"value": 1000.0}
     monkeypatch.setattr("multi_agent_tcp.graph_runtime.time.monotonic", lambda: now["value"])
@@ -2416,6 +2674,208 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert "submit_command" not in prompt_context["code_workspace"]
         assert prompt_context["shared_workspace"]["root"] == str(run.shared_dir.resolve())
         assert (private / "workspace_api_context.json").is_file()
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_full_agent_skips_private_workspace(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    manager = DulwichWorkspaceManager.open_or_init(project)
+    run = manager.create_run(run_id="run-full-agent")
+    cluster = _RestartableCluster()
+
+    def mcp_provider(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "server_kind": "ordinary",
+            "server_name": "framework_ordinary",
+            "url": "http://127.0.0.1:9876/ordinary/mcp",
+            "bearer_token_env_var": "MULTI_AGENT_MCP_ORDINARY_TOKEN",
+            "bearer_token": "message-token",
+            "tools": ["agent_dispatch", "agent_context", "agent_task_status", "join_contribute"],
+        }
+
+    runtime = GraphRuntime(
+        cluster,
+        enforce_private_agent_context=True,
+        private_context_manager=manager,
+        private_context_run=run,
+        private_context_mcp_provider=mcp_provider,
+    )
+    node = AgentNode(
+        node_id="shell",
+        node_type="agent",
+        agent_id="agent-shell",
+        cli_kind="codex",
+        cwd=Path("."),
+    )
+
+    inst = await runtime.ensure_agent(node)
+
+    assert inst.node.node_type == "agent"
+    assert inst.node.cwd == project.resolve()
+    assert cluster.worker_cwds["agent-shell"] == project.resolve()
+    assert not (run.agents_dir / "agent-shell").exists()
+    assert (run.path / "runtime_agent_context" / "agent-shell" / "codex_home").is_dir()
+    assert inst.node.workspace_id is None
+    assert inst.node.workspace_root is None
+    assert inst.node.read_scope == []
+    assert inst.node.write_scope == []
+    assert inst.node.artifact_scope == []
+    assert inst.node.adapter_options["sandbox"] == "danger-full-access"
+    assert inst.node.adapter_options["dangerous_access"] is True
+    assert "--dangerously-bypass-approvals-and-sandbox" in inst.node.adapter_options["extra_args"]
+    assert inst.node.adapter_options["execution_context"]["agent_access"]["workspace_tools"] is False
+    assert inst.node.adapter_options["execution_context"]["mcp"]["tools"] == [
+        "agent_dispatch",
+        "agent_context",
+        "agent_task_status",
+        "join_contribute",
+    ]
+    assert "MULTI_AGENT_WORKSPACE_CONTEXT" not in inst.node.extra_env
+    assert inst.node.extra_env["MULTI_AGENT_MCP_ORDINARY_TOKEN"] == "message-token"
+
+
+@pytest.mark.asyncio
+async def test_full_agent_receives_standard_context_and_dispatches_via_message_mcp(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    manager = DulwichWorkspaceManager.open_or_init(project)
+    run = manager.create_run(run_id="run-full-agent-mcp", code_mode="project_reference")
+    server = WorkspaceRPCServer(manager, run)
+    server.start()
+    cluster = _RestartableCluster()
+    try:
+        graph = GraphDefinition(
+            agent_nodes={
+                "shell": AgentNode.from_dict(
+                    {
+                        "node_id": "shell",
+                        "node_type": "agent",
+                        "agent_id": "agent-shell",
+                        "cwd": ".",
+                    }
+                ),
+                "worker": AgentNode.from_dict(
+                    {
+                        "node_id": "worker",
+                        "node_type": "worker_agent",
+                        "agent_id": "agent-worker",
+                        "cwd": ".",
+                    }
+                ),
+            },
+            edges=[GraphEdge("shell", "worker", edge_type="exec")],
+        )
+        runtime = GraphRuntime(
+            cluster,
+            enforce_private_agent_context=True,
+            private_context_manager=manager,
+            private_context_run=run,
+            private_context_rpc_server=server,
+        )
+        control = GraphRuntimeControlPlane(runtime, graph)
+        mcp = RunMCPRuntimeHandle(
+            run_id="run-full-agent-mcp",
+            runtime=runtime,
+            control=control,
+            graph=graph,
+            workspace_rpc_server=server,
+            manager=manager,
+            workspace_run=run,
+            runtime_loop=None,
+        )
+        runtime.private_context_mcp_provider = mcp.provision_context_for_node
+        runtime.agent_message_context_callback = mcp.refresh_message_context
+        plan = TopAgentStartPlan.from_dict(
+            {
+                "user_goal": "Run shell then worker.",
+                "agent_descriptions": {
+                    "shell": "Full CLI agent with direct project access.",
+                    "worker": "Framework-managed worker agent.",
+                },
+                "start_nodes": ["shell"],
+                "tasks": {
+                    "shell": {
+                        "goal": "Use MCP to hand off to worker.",
+                        "expected_output": "Worker receives a delegated task.",
+                        "acceptance": "The delegated task is queued for worker.",
+                    }
+                },
+            }
+        )
+
+        started = await control.start_run(plan, prestart_all_agents=True)
+        assert started["ok"] is True
+        queued = started["queued_messages"][0]
+        assert queued["node_id"] == "shell"
+        shell_body = queued["body"]
+        shell_context = shell_body["context"]["framework_context"]
+        shell_batch_id = shell_context["message_envelope"]["outgoing_batch_id"]
+        assert shell_context["agent_node_id"] == "shell"
+        assert shell_context["agent_id"] == "agent-shell"
+        assert shell_context["message_envelope"]["required_outgoing_targets"] == ["worker"]
+        assert shell_context["message_envelope"]["remaining_targets"] == ["worker"]
+
+        full_worker = cluster.worker_configs["agent-shell"]
+        full_worker_json = full_worker.to_agent_json("127.0.0.1", 9140)
+        assert full_worker.cwd == project.resolve()
+        assert full_worker_json["codex"]["cwd"] == str(project.resolve())
+        assert full_worker_json["codex"]["sandbox"] == "danger-full-access"
+        assert full_worker_json["codex"]["dangerous_access"] is True
+        assert "--dangerously-bypass-approvals-and-sandbox" in full_worker_json["codex"]["extra_args"]
+        assert "MULTI_AGENT_WORKSPACE_CONTEXT" not in full_worker.extra_env
+        token = full_worker.extra_env["MULTI_AGENT_MCP_ORDINARY_TOKEN"]
+        scope = mcp.token_store.authenticate(
+            server_kind="ordinary",
+            token=token,
+            session_id=None,
+        )
+        assert scope.workspace_rpc_token is None
+        assert scope.allowed_tools == [
+            "agent_dispatch",
+            "agent_context",
+            "blueprint_script_call",
+            "agent_task_status",
+            "join_contribute",
+        ]
+
+        pending = await runtime.dispatch_queued_message_now(queued["message_id"])
+        assert pending.status == "completed"
+        assert cluster.sent[-1][0] == "agent-shell"
+        assert cluster.sent[-1][1]["context"]["framework_context"] == shell_context
+        assert scope.current_message_context is not None
+        assert scope.current_message_context.outgoing_batch_id == shell_batch_id
+        assert scope.current_message_context.required_outgoing_targets == ["worker"]
+
+        dispatch = await mcp._agent_dispatch(
+            scope,
+            target_node_id="worker",
+            body={"prompt": "Worker task from full Agent."},
+            batch_id=None,
+            source_node_id=None,
+        )
+
+        assert dispatch["dispatch"]["ready_to_dispatch"] is True
+        worker_queue = runtime.agent_message_queues["worker"]
+        assert len(worker_queue) == 1
+        worker_body = worker_queue[0].body
+        worker_context = worker_body["context"]["framework_context"]
+        assert worker_body["prompt"] == "Worker task from full Agent."
+        assert worker_context["agent_node_id"] == "worker"
+        assert worker_context["agent_id"] == "agent-worker"
+        assert worker_context["upstream_agents"] == ["shell"]
+        assert worker_context["downstream_agents"] == []
+        assert worker_context["message_envelope"]["outgoing_batch_id"] is None
+        assert worker_context["message_envelope"]["required_outgoing_targets"] == []
+        assert worker_context["organization"]["scope"] == "agent"
     finally:
         server.close()
 

@@ -1,7 +1,7 @@
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { BrowserWindow, Notification, app, clipboard, dialog, ipcMain, shell } from "electron"
 import log from "electron-log/main.js"
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
@@ -24,6 +24,7 @@ import {
   listBlueprintRules,
   listBlueprintSkills,
 } from "./blueprint-catalog"
+import type { BlueprintEditorCandidate } from "./apps"
 import type { BlueprintDocument, BlueprintRelocateConflictPolicy, BlueprintRunEndAction, BlueprintRuntime } from "./blueprint-runtime"
 import { getStore } from "./store"
 import {
@@ -62,6 +63,8 @@ type Deps = {
   checkAppExists: (appName: string) => Promise<boolean> | boolean
   wslPath: (path: string, mode: "windows" | "linux" | null) => Promise<string>
   resolveAppPath: (appName: string) => Promise<string | null>
+  listBlueprintEditors?: () => Promise<BlueprintEditorCandidate[]> | BlueprintEditorCandidate[]
+  resolveBlueprintEditor?: (editorId?: string) => Promise<BlueprintEditorCandidate> | BlueprintEditorCandidate
   loadingWindowComplete: () => void
   runUpdater: (alertOnFail: boolean) => Promise<void> | void
   checkUpdate: () => Promise<{ updateAvailable: boolean; version?: string }>
@@ -156,6 +159,30 @@ export function registerIpcHandlers(deps: Deps) {
   )
   ipcMain.handle("blueprint-save", (_event: IpcMainInvokeEvent, projectDir: string, document: BlueprintDocument) =>
     deps.blueprintRuntime.save(projectDir, document),
+  )
+  ipcMain.handle("blueprint-script-nodes", (_event: IpcMainInvokeEvent, projectDir: string) =>
+    deps.blueprintRuntime.scriptNodes(projectDir),
+  )
+  ipcMain.handle(
+    "blueprint-create-script-node",
+    (_event: IpcMainInvokeEvent, projectDir: string, name: string, description?: string) =>
+      deps.blueprintRuntime.createScriptNode(projectDir, name, description),
+  )
+  ipcMain.handle("blueprint-list-editors", () => deps.listBlueprintEditors?.() ?? [systemDefaultEditor()])
+  ipcMain.handle(
+    "blueprint-open-script-in-editor",
+    async (_event: IpcMainInvokeEvent, projectDir: string, modulePath: string, editorId?: string) => {
+      const { root: scriptRoot } = blueprintScriptModulePath(projectDir, modulePath)
+      await mkdir(scriptRoot, { recursive: true })
+      const editor = (await deps.resolveBlueprintEditor?.(editorId)) ?? systemDefaultEditor()
+      if (editor.systemDefault || !editor.command) {
+        const error = await shell.openPath(scriptRoot)
+        if (error) throw new Error(error)
+        return { ok: true, path: scriptRoot, editorId: "system" }
+      }
+      await launchEditor(editor, scriptRoot)
+      return { ok: true, path: scriptRoot, editorId: editor.id }
+    },
   )
   ipcMain.handle(
     "blueprint-relocate-project-workdir",
@@ -529,4 +556,73 @@ function blueprintWindowRect(value: Record<string, unknown> | undefined): Bluepr
 
 function finiteNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+function systemDefaultEditor(): BlueprintEditorCandidate {
+  return {
+    id: "system",
+    label: "System default",
+    source: "system",
+    systemDefault: true,
+  }
+}
+
+function blueprintScriptRoot(projectDir: string) {
+  if (!isAbsolute(projectDir)) throw new Error("projectDir must be an absolute path")
+  return resolve(projectDir, ".multi_agent_workspace", "scripts")
+}
+
+function blueprintScriptModulePath(projectDir: string, modulePath: string) {
+  const root = blueprintScriptRoot(projectDir)
+  const normalizedModulePath = String(modulePath || "").replace(/\\/g, "/").trim()
+  const parts = normalizedModulePath.split("/").filter(Boolean)
+  if (!normalizedModulePath || isAbsolute(normalizedModulePath) || parts.some((part) => part === "..")) {
+    throw new Error("modulePath must stay inside the script directory")
+  }
+  if (!normalizedModulePath.endsWith(".py")) throw new Error("modulePath must point to a .py file")
+  const filePath = resolve(root, ...parts)
+  const rel = relative(root, filePath)
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error("modulePath escapes the script directory")
+  }
+  return { root, filePath }
+}
+
+function launchEditor(editor: BlueprintEditorCandidate, scriptRoot: string) {
+  if (!editor.command) return Promise.reject(new Error("editor command is missing"))
+  const args = [
+    ...(editor.args ?? []).filter((arg) => arg !== "--wait" && arg !== "-w"),
+    ...editorForegroundArgs(editor),
+    scriptRoot,
+  ]
+  return new Promise<void>((resolveLaunch, rejectLaunch) => {
+    const child = spawn(editor.command!, args, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+    })
+    child.once("error", rejectLaunch)
+    child.once("spawn", () => {
+      child.unref()
+      resolveLaunch()
+    })
+  })
+}
+
+function editorForegroundArgs(editor: BlueprintEditorCandidate) {
+  if (process.platform !== "win32") return []
+  const id = editor.id.toLowerCase()
+  const command = String(editor.command ?? "").toLowerCase().replace(/\\/g, "/")
+  const commandName = command.split("/").pop() ?? command
+  if (
+    id === "vscode" ||
+    id === "cursor" ||
+    id === "windsurf" ||
+    commandName === "code.exe" ||
+    commandName === "cursor.exe" ||
+    commandName === "windsurf.exe"
+  ) {
+    return ["--reuse-window"]
+  }
+  return []
 }

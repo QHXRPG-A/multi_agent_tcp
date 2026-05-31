@@ -449,7 +449,7 @@ export function registerRendererProtocol() {
 }
 
 function loadWindow(win: BrowserWindow, html: string) {
-  const devUrl = process.env.ELECTRON_RENDERER_URL
+  const devUrl = normalizedDevRendererUrl(process.env.ELECTRON_RENDERER_URL)
   if (devUrl) {
     const url = new URL(html, devUrl)
     void win.loadURL(url.toString())
@@ -458,6 +458,13 @@ function loadWindow(win: BrowserWindow, html: string) {
 
   void win.loadURL(`${rendererProtocol}://${rendererHost}/${html}`)
 }
+
+function normalizedDevRendererUrl(value: string | undefined) {
+  if (!value) return
+  const url = new URL(value)
+  return url.toString()
+}
+
 function wireZoom(win: BrowserWindow) {
   win.webContents.setZoomFactor(1)
   win.webContents.on("zoom-changed", () => {

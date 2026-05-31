@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { mobileMockData } from "./mock-data"
-import { mobileTabs, nodeStateLabel, nodeStateTone } from "./mobile-state"
+import { mobileTabs, nodeKindLabel, nodeStateLabel, nodeStateTone } from "./mobile-state"
 
 describe("mobile display mock state", () => {
   test("defines the three top-level mobile tabs", () => {
@@ -13,6 +13,18 @@ describe("mobile display mock state", () => {
     expect(mobileMockData.messages.some((message) => message.speaker === "user")).toBe(true)
     expect(mobileMockData.messages.some((message) => message.speaker === "top-agent")).toBe(true)
     expect(mobileMockData.messages[0]?.body).toContain("暂时不要从手机端改蓝图")
+    const segmented = mobileMockData.messages.find((message) => message.segments?.length)
+    expect(segmented?.segments?.map((segment) => segment.type)).toEqual(["text", "reasoning", "tool"])
+    expect(mobileMockData.server?.desktopSessions?.sessions.map((session) => session.title)).toContain("移动端镜像同步")
+    expect(mobileMockData.server?.desktopSessions?.composer?.activeModeId).toBe("mode-blueprint")
+  })
+
+  test("keeps planning requests visible but disabled without mobile write capability", () => {
+    expect(mobileMockData.server?.csrfToken).toBeUndefined()
+    expect(mobileMockData.server?.capabilities).toEqual([])
+    expect(mobileMockData.server?.planningRequests).toHaveLength(2)
+    expect(mobileMockData.server?.planningRequests[0]?.pendingQuestion?.questionId).toBe("scope")
+    expect(mobileMockData.server?.planningRequests[1]?.pendingPlan).toBeTruthy()
   })
 
   test("describes a read-only blueprint overview and diff summary", () => {
@@ -21,6 +33,9 @@ describe("mobile display mock state", () => {
       "Top Agent",
       "Planner",
       "Coder",
+      "Format Result",
+      "Branch",
+      "Tick",
       "Review",
       "Summary",
     ])
@@ -29,6 +44,20 @@ describe("mobile display mock state", () => {
     expect(mobileMockData.blueprint.diff.additions).toBe(128)
     expect(mobileMockData.blueprint.diff.deletions).toBe(34)
     expect(mobileMockData.blueprint.nodes.every((node) => node.role && node.detail && node.note)).toBe(true)
+    expect(mobileMockData.blueprint.nodes.map((node) => node.kind)).toEqual([
+      "worker_agent",
+      "worker_agent",
+      "worker_agent",
+      "agent",
+      "script",
+      "branch",
+      "tick",
+      "worker_agent",
+      "worker_agent",
+    ])
+    expect(mobileMockData.blueprint.nodes.find((node) => node.kind === "script")?.inputPorts).toContain("payload: dict")
+    expect(mobileMockData.blueprint.nodes.find((node) => node.kind === "branch")?.outputPorts).toContain("true: message")
+    expect(mobileMockData.blueprint.nodes.find((node) => node.kind === "tick")?.everyNTicks).toBe(3)
     expect(
       mobileMockData.blueprint.nodes.every(
         (node) =>
@@ -54,5 +83,7 @@ describe("mobile display mock state", () => {
     expect(nodeStateLabel("running")).toBe("运行中")
     expect(nodeStateLabel("queued")).toBe("排队中")
     expect(nodeStateTone("running")).toContain("rose")
+    expect(nodeKindLabel("script")).toBe("Script")
+    expect(nodeKindLabel("worker_agent")).toBe("Worker Agent")
   })
 })

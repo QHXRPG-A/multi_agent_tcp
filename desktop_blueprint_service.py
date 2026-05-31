@@ -30,6 +30,12 @@ from urllib.parse import parse_qs, urlparse
 
 from .cluster import CLIWorkerBackend
 from .blueprint_mcp_runtime import RunMCPRuntimeHandle, TOP_AGENT_PLANNING_CONTROL_TOOLS
+from .blueprint_script_nodes import (
+    create_script_node,
+    discover_script_nodes,
+    script_nodes_dir,
+    validate_script_node_references,
+)
 from .graph_control import GraphRuntimeControlPlane, graph_definition_from_dict
 from .graph_runtime import GraphRuntime, GuLiCodeTopAgentProfile, TopAgentStartPlan
 from ._asyncio_utils import install_asyncio_connection_reset_filter
@@ -53,10 +59,12 @@ PLANNING_STATUS_SOURCE_COMMANDS = {
 TERMINAL_RUN_STATUSES = {"completed", "cancelled", "failed"}
 
 
-def validate_desktop_blueprint_graph(graph: Any) -> None:
+def validate_desktop_blueprint_graph(graph: Any, *, project_dir: Optional[Path] = None) -> None:
     graph.validate_dag()
     if not graph.agent_nodes:
         raise ValueError("blueprint graph requires at least one AgentNode")
+    if project_dir is not None and getattr(graph, "script_nodes", None):
+        validate_script_node_references(project_dir, graph.script_nodes.values())
 
 
 class BlueprintServiceError(ValueError):
@@ -353,6 +361,18 @@ class DesktopBlueprintService:
                 raise BlueprintServiceError("BAD_REQUEST", "document must be a JSON object")
             saved = self.save_blueprint(project_dir, document)
             return {"ok": True, "document": saved}
+        if command == "blueprint.scriptNodes":
+            project_dir = request_project_dir(args)
+            return {"ok": True, **discover_script_nodes(project_dir)}
+        if command == "blueprint.createScriptNode":
+            project_dir = request_project_dir(args)
+            name = args.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise BlueprintServiceError("BAD_REQUEST", "name must be a non-empty string")
+            description = args.get("description")
+            if description is not None and not isinstance(description, str):
+                raise BlueprintServiceError("BAD_REQUEST", "description must be a string")
+            return {"ok": True, **create_script_node(project_dir, name, description or "")}
         if command == "blueprint.relocateProjectWorkdir":
             project_dir = request_project_dir(args)
             document = args.get("document")
@@ -379,7 +399,7 @@ class DesktopBlueprintService:
                     project_dir,
                     str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
                 )
-            return self.validate_blueprint(document)
+            return self.validate_blueprint(document, project_dir=project_dir)
         if command == "blueprint.listRuns":
             project_dir = args.get("projectDir")
             blueprint_id = args.get("blueprintId")
@@ -589,13 +609,13 @@ class DesktopBlueprintService:
             "document": saved,
         }
 
-    def validate_blueprint(self, document: Dict[str, Any]) -> Dict[str, Any]:
+    def validate_blueprint(self, document: Dict[str, Any], *, project_dir: Optional[Path] = None) -> Dict[str, Any]:
         errors: list[str] = []
         warnings: list[str] = []
         try:
             normalized = normalize_document(document)
             graph = graph_definition_from_dict(dict(normalized["graph"]))
-            validate_desktop_blueprint_graph(graph)
+            validate_desktop_blueprint_graph(graph, project_dir=project_dir)
         except Exception as exc:
             errors.append(str(exc))
         return {"ok": not errors, "errors": errors, "warnings": warnings}
@@ -652,7 +672,7 @@ class DesktopBlueprintService:
         document = document_with_common_config_paths(document)
         try:
             graph = graph_definition_from_dict(dict(document["graph"]))
-            validate_desktop_blueprint_graph(graph)
+            validate_desktop_blueprint_graph(graph, project_dir=validate_project_dir(project_dir))
         except Exception as exc:
             raise BlueprintServiceError(
                 "INVALID_BLUEPRINT_GRAPH",
@@ -685,7 +705,12 @@ class DesktopBlueprintService:
         else:
             backend = DesktopBlueprintNoopBackend()
             runtime = GraphRuntime(backend)
-            control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
+            control = GraphRuntimeControlPlane(
+                runtime,
+                graph,
+                top_agent=GuLiCodeTopAgentProfile(),
+                script_root=script_nodes_dir(validate_project_dir(project_dir)),
+            )
             mcp = None
             runtime.agent_stream_run_id = run_id
             started = control.handle_request({"command": "run.start", "args": {"plan": plan.to_dict()}})
@@ -1017,7 +1042,12 @@ class DesktopBlueprintService:
                 message_journal_path=workspace_run.shared_dir / "logs" / "message_journal.jsonl",
             )
             runtime.agent_stream_run_id = run_id
-            control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
+            control = GraphRuntimeControlPlane(
+                runtime,
+                graph,
+                top_agent=GuLiCodeTopAgentProfile(),
+                script_root=script_nodes_dir(project_dir),
+            )
             mcp = RunMCPRuntimeHandle(
                 run_id=run_id,
                 runtime=runtime,
@@ -1245,7 +1275,7 @@ class DesktopBlueprintService:
         document = self.open_blueprint(project_dir, blueprint_id)
         try:
             graph = graph_definition_from_dict(dict(document["graph"]))
-            validate_desktop_blueprint_graph(graph)
+            validate_desktop_blueprint_graph(graph, project_dir=project_dir)
         except Exception as exc:
             raise BlueprintServiceError(
                 "INVALID_BLUEPRINT_GRAPH",
@@ -1515,7 +1545,12 @@ class DesktopBlueprintService:
                 message_journal_path=workspace_run.shared_dir / "logs" / "message_journal.jsonl",
             )
             runtime.agent_stream_run_id = session_id
-            control = GraphRuntimeControlPlane(runtime, graph, top_agent=GuLiCodeTopAgentProfile())
+            control = GraphRuntimeControlPlane(
+                runtime,
+                graph,
+                top_agent=GuLiCodeTopAgentProfile(),
+                script_root=script_nodes_dir(project_dir),
+            )
             mcp = RunMCPRuntimeHandle(
                 run_id=session_id,
                 runtime=runtime,

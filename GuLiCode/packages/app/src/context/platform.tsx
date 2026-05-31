@@ -15,6 +15,15 @@ export type BlueprintCatalogItem = {
   description?: string
 }
 
+export type BlueprintEditorCandidate = {
+  id: string
+  label: string
+  command?: string
+  args?: string[]
+  source: string
+  systemDefault?: boolean
+}
+
 export type BlueprintDocument = {
   schema_version: 1
   id: string
@@ -58,6 +67,8 @@ export type BlueprintWindowRect = {
 
 export type BlueprintWindowPlanningSubmitInput = {
   task: string
+  blueprintId?: string
+  blueprintName?: string
   startNodeIds: string[]
   message: string
   silentBlocked?: boolean
@@ -129,6 +140,22 @@ export type Platform = {
 
   /** Save one project blueprint document (desktop only) */
   saveBlueprint?(projectDir: string, document: BlueprintDocument): Promise<BlueprintDocument>
+
+  /** Discover user-authored Python function nodes for a project blueprint (desktop only) */
+  listBlueprintScriptNodes?(projectDir: string): Promise<Record<string, unknown>>
+
+  /** Create a user-authored Python function node script for a project blueprint (desktop only) */
+  createBlueprintScriptNode?(projectDir: string, name: string, description?: string): Promise<Record<string, unknown>>
+
+  /** Discover local IDE/editor launch candidates for blueprint scripts (desktop only) */
+  listBlueprintEditors?(): Promise<BlueprintEditorCandidate[]>
+
+  /** Open the blueprint scripts folder in the selected IDE/editor (desktop only) */
+  openBlueprintScriptInEditor?(
+    projectDir: string,
+    modulePath: string,
+    editorId?: string,
+  ): Promise<Record<string, unknown>>
 
   /** Move the current blueprint document to a new project workdir and make that directory the blueprint root. */
   relocateBlueprintProjectWorkdir?(

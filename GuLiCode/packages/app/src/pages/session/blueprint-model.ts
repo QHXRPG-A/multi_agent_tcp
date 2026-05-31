@@ -7,11 +7,18 @@ export const DEFAULT_BLUEPRINT_NAME = "Default Blueprint"
 export type BlueprintExecutionMode = "blocking" | "nonblocking"
 export type BlueprintTerminalKind = "start" | "end"
 export type BlueprintRouteKind = "sequence" | "parallel" | "parallel_reduce"
+export type BlueprintCommonNodeKind = "branch" | "tick"
+export type BlueprintPortDataType = "message" | "bool" | "tick"
 export type BlueprintPromptViaFile = "auto" | "always" | "never"
-export type BlueprintNodeKind = "agent" | "route" | "terminal"
+export type BlueprintAgentNodeType = "agent" | "worker_agent"
+export type BlueprintNodeKind = "agent" | "route" | "terminal" | "script" | "common"
 export type BlueprintAddNodeKind =
   | "agent"
+  | "worker-agent"
   | "test-agent"
+  | "script"
+  | "branch"
+  | "tick"
   | "route-sequence"
   | "route-parallel"
   | "route-parallel-reduce"
@@ -23,6 +30,14 @@ export type BlueprintSkillSelection = {
   mode: "none" | "all" | "selected" | "upstream"
   skill_hashes?: string[]
   assigned_by?: string
+}
+
+export type BlueprintAgentAccessPolicy = {
+  direct_project_io: boolean
+  outside_project_io: boolean
+  unrestricted_commands: boolean
+  disable_sandbox: boolean
+  framework_message_tools: boolean
 }
 
 export type BlueprintConfig = {
@@ -41,6 +56,7 @@ export type BlueprintConfigValidationIssue = {
 
 export type BlueprintAgentNode = {
   node_id: string
+  node_type: BlueprintAgentNodeType
   agent_id?: string
   prompt: string
   run_prompt: string
@@ -62,6 +78,7 @@ export type BlueprintAgentNode = {
   read_scope: string[]
   write_scope: string[]
   artifact_scope: string[]
+  access_policy: BlueprintAgentAccessPolicy
 }
 
 export type BlueprintRouteNode = {
@@ -70,6 +87,49 @@ export type BlueprintRouteNode = {
   targets: string[]
   reduce_target?: string
   reduce_prompt?: string
+}
+
+export type BlueprintScriptPort = {
+  name: string
+  type: string
+  required?: boolean
+}
+
+export type BlueprintScriptNode = {
+  node_id: string
+  script_id: string
+  module_path: string
+  function_name: string
+  title: string
+  description: string
+  inputs: BlueprintScriptPort[]
+  outputs: BlueprintScriptPort[]
+  collapsed: boolean
+}
+
+export type BlueprintCommonNode =
+  | {
+      node_id: string
+      kind: "branch"
+    }
+  | {
+      node_id: string
+      kind: "tick"
+      every_n_ticks: number
+    }
+
+export type BlueprintPortConnectResult = {
+  ok: boolean
+  reason?: "unknown_node" | "unknown_port" | "type_mismatch"
+  sourceType?: BlueprintPortDataType
+  targetType?: BlueprintPortDataType
+}
+
+export type BlueprintScriptCompileResult = {
+  draft: BlueprintDraft
+  updated: number
+  missing: number
+  removedEdges: number
 }
 
 export type BlueprintEdge = {
@@ -119,6 +179,8 @@ export type BlueprintDraft = {
     agent_nodes: Record<string, BlueprintAgentNode>
     route_nodes: Record<string, BlueprintRouteNode>
     terminal_nodes: Record<string, BlueprintTerminalKind>
+    script_nodes: Record<string, BlueprintScriptNode>
+    common_nodes: Record<string, BlueprintCommonNode>
     edges: BlueprintEdge[]
   }
   layout: {
@@ -133,6 +195,8 @@ export type RuntimeGraphDraft = {
   terminal_nodes: Record<string, BlueprintTerminalKind>
   agent_nodes: Record<string, BlueprintAgentNode>
   route_nodes: Record<string, BlueprintRouteNode>
+  common_nodes?: Record<string, BlueprintCommonNode>
+  script_nodes?: Record<string, BlueprintScriptNode>
   edges: Array<{
     from: string
     to: string
@@ -200,6 +264,23 @@ export const DEFAULT_RULE_DIR = ""
 export const CLI_KIND_OPTIONS: BlueprintCliKind[] = ["codemaker", "codex"]
 export const TEST_AGENT_NODE_FLAG = "gulicode_test_node"
 const TEST_AGENT_TIMEOUT_SEC = 1800
+const DANGEROUS_CODEX_EXTRA_ARGS = ["--dangerously-bypass-approvals-and-sandbox"]
+
+export const DEFAULT_AGENT_ACCESS_POLICY: BlueprintAgentAccessPolicy = {
+  direct_project_io: true,
+  outside_project_io: true,
+  unrestricted_commands: true,
+  disable_sandbox: true,
+  framework_message_tools: true,
+}
+
+export const DEFAULT_WORKER_AGENT_ACCESS_POLICY: BlueprintAgentAccessPolicy = {
+  direct_project_io: false,
+  outside_project_io: false,
+  unrestricted_commands: false,
+  disable_sandbox: false,
+  framework_message_tools: true,
+}
 
 export function defaultCommandForCliKind(cliKind: string) {
   if (cliKind === "codex") return "codex"
@@ -224,6 +305,7 @@ function agentNode(input: {
   node_id: string
   agent_id: string
   prompt: string
+  node_type?: BlueprintAgentNodeType
   write_scope?: string[]
   artifact_scope?: string[]
 }): BlueprintAgentNode {
@@ -231,6 +313,7 @@ function agentNode(input: {
     node_id: input.node_id,
     agent_id: input.agent_id,
     prompt: input.prompt,
+    node_type: input.node_type ?? "worker_agent",
     write_scope: input.write_scope ?? DEFAULT_AGENT_SCOPE,
     artifact_scope: input.artifact_scope ?? [],
   })
@@ -243,6 +326,8 @@ export function createDefaultBlueprintDraft(projectWorkdir = DEFAULT_PROJECT_WOR
     graph: {
       terminal_nodes: {},
       route_nodes: {},
+      script_nodes: {},
+      common_nodes: {},
       agent_nodes: {
         planner: agentNode({
           node_id: "planner",
@@ -297,6 +382,12 @@ export function cloneBlueprintDraft(draft: BlueprintDraft): BlueprintDraft {
       route_nodes: Object.fromEntries(
         Object.entries(draft.graph.route_nodes ?? {}).map(([id, node]) => [id, normalizeRouteNode(id, node)]),
       ),
+      common_nodes: Object.fromEntries(
+        Object.entries(draft.graph.common_nodes ?? {}).map(([id, node]) => [id, normalizeCommonNode(id, node)]),
+      ),
+      script_nodes: Object.fromEntries(
+        Object.entries(draft.graph.script_nodes ?? {}).map(([id, node]) => [id, normalizeScriptNode(id, node)]),
+      ),
       agent_nodes: Object.fromEntries(
         Object.entries(draft.graph.agent_nodes).map(([id, node]) => [id, normalizeAgentNode(id, node)]),
       ),
@@ -345,6 +436,12 @@ export function fromBlueprintDocument(
       terminal_nodes: { ...(graph.terminal_nodes ?? fallback.graph.terminal_nodes) },
       route_nodes: Object.fromEntries(
         Object.entries(graph.route_nodes ?? {}).map(([id, node]) => [id, normalizeRouteNode(id, node)]),
+      ),
+      common_nodes: Object.fromEntries(
+        Object.entries(graph.common_nodes ?? {}).map(([id, node]) => [id, normalizeCommonNode(id, node)]),
+      ),
+      script_nodes: Object.fromEntries(
+        Object.entries(graph.script_nodes ?? {}).map(([id, node]) => [id, normalizeScriptNode(id, node)]),
       ),
       agent_nodes: Object.fromEntries(
         Object.entries(graph.agent_nodes ?? fallback.graph.agent_nodes).map(([id, node]) => [
@@ -409,6 +506,8 @@ export function nodeIds(draft: BlueprintDraft) {
   return [
     ...Object.keys(draft.graph.terminal_nodes),
     ...Object.keys(draft.graph.route_nodes ?? {}),
+    ...Object.keys(draft.graph.common_nodes ?? {}),
+    ...Object.keys(draft.graph.script_nodes ?? {}),
     ...Object.keys(draft.graph.agent_nodes),
   ]
 }
@@ -417,6 +516,8 @@ export function nodeKind(draft: BlueprintDraft, id: string): BlueprintNodeKind |
   if (isAgentNode(draft, id)) return "agent"
   if (isRouteNode(draft, id)) return "route"
   if (isTerminalNode(draft, id)) return "terminal"
+  if (isScriptNode(draft, id)) return "script"
+  if (isCommonNode(draft, id)) return "common"
 }
 
 export function isTerminalNode(draft: BlueprintDraft, id: string) {
@@ -431,6 +532,14 @@ export function isRouteNode(draft: BlueprintDraft, id: string) {
   return draft.graph.route_nodes?.[id] !== undefined
 }
 
+export function isScriptNode(draft: BlueprintDraft, id: string) {
+  return draft.graph.script_nodes?.[id] !== undefined
+}
+
+export function isCommonNode(draft: BlueprintDraft, id: string) {
+  return draft.graph.common_nodes?.[id] !== undefined
+}
+
 export function addNode(
   draft: BlueprintDraft,
   input: {
@@ -439,9 +548,33 @@ export function addNode(
     position?: BlueprintNodeLayout
   },
 ) {
-  if (input.kind === "agent" || input.kind === "test-agent") return addAgentNode(draft, input)
+  if (input.kind === "agent") return addFullAgentNode(draft, input)
+  if (input.kind === "worker-agent" || input.kind === "test-agent") return addAgentNode(draft, input)
+  if (input.kind === "script") return addScriptNode(draft, input)
+  if (input.kind === "branch" || input.kind === "tick") return addCommonNode(draft, input.kind, input)
   if (input.kind === "start" || input.kind === "end") return addTerminalNode(draft, input.kind, input)
   return addRouteNode(draft, routeKindFromAddKind(input.kind), input)
+}
+
+export function addFullAgentNode(
+  draft: BlueprintDraft,
+  input: {
+    node_id?: string
+    position?: BlueprintNodeLayout
+  } = {},
+) {
+  const next = cloneBlueprintDraft(draft)
+  const node_id = uniqueNodeId(next, input.node_id ?? "agent")
+  next.graph.agent_nodes[node_id] = createAgentNode({
+    node_id,
+    node_type: "agent",
+    agent_id: `agent-${node_id}`,
+    prompt: "Describe this full CLI agent's work.",
+  })
+  next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
+  next.selection = { type: "node", id: node_id }
+  next.inspector = { type: "node", id: node_id }
+  return next
 }
 
 export function addAgentNode(
@@ -455,8 +588,9 @@ export function addAgentNode(
   const node_id = uniqueNodeId(next, input.node_id ?? "agent")
   next.graph.agent_nodes[node_id] = createAgentNode({
     node_id,
+    node_type: "worker_agent",
     agent_id: `agent-${node_id}`,
-    prompt: "Describe this agent's work.",
+    prompt: "Describe this worker agent's work.",
   })
   next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
   next.selection = { type: "node", id: node_id }
@@ -497,6 +631,56 @@ export function addRouteNode(
   return next
 }
 
+export function addCommonNode(
+  draft: BlueprintDraft,
+  kind: BlueprintCommonNodeKind,
+  input: {
+    node_id?: string
+    position?: BlueprintNodeLayout
+  } = {},
+) {
+  const next = cloneBlueprintDraft(draft)
+  const node_id = uniqueNodeId(next, input.node_id ?? kind)
+  next.graph.common_nodes[node_id] = normalizeCommonNode(node_id, {
+    node_id,
+    kind,
+    every_n_ticks: kind === "tick" ? 1 : undefined,
+  })
+  next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
+  next.selection = { type: "node", id: node_id }
+  next.inspector = { type: "node", id: node_id }
+  return next
+}
+
+export function addScriptNode(
+  draft: BlueprintDraft,
+  input: {
+    node_id?: string
+    position?: BlueprintNodeLayout
+    script?: Partial<BlueprintScriptNode>
+  } = {},
+) {
+  const next = cloneBlueprintDraft(draft)
+  const script = input.script ?? {}
+  const preferred = script.function_name || script.title || input.node_id || "function"
+  const node_id = uniqueNodeId(next, input.node_id ?? sanitizeNodeId(preferred))
+  next.graph.script_nodes[node_id] = normalizeScriptNode(node_id, {
+    node_id,
+    script_id: script.script_id ?? `${script.module_path ?? ""}:${script.function_name ?? ""}`,
+    module_path: script.module_path ?? "",
+    function_name: script.function_name ?? "",
+    title: script.title ?? script.function_name ?? node_id,
+    description: script.description ?? "",
+    inputs: script.inputs ?? [],
+    outputs: script.outputs ?? [{ name: "result", type: "Any", required: true }],
+    collapsed: script.collapsed ?? true,
+  })
+  next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
+  next.selection = { type: "node", id: node_id }
+  next.inspector = { type: "node", id: node_id }
+  return next
+}
+
 export function addTerminalNode(
   draft: BlueprintDraft,
   terminal_kind: BlueprintTerminalKind,
@@ -525,22 +709,100 @@ export function addEdge(
   const next = cloneBlueprintDraft(draft)
   if (from === to) return next
   if (!nodeIds(next).includes(from) || !nodeIds(next).includes(to)) return next
-  const id = edgeId(from, to, edgeType, outputPort, inputPort)
-  if (
-    !next.graph.edges.some(
-      (edge) =>
-        edge.id === id ||
-        (edge.from === from &&
-          edge.to === to &&
-          edge.edge_type === edgeType &&
-          (edge.output_port || DEFAULT_OUTPUT_PORT) === outputPort &&
-          (edge.input_port || DEFAULT_INPUT_PORT) === inputPort),
-    )
-  ) {
-    next.graph.edges.push(createEdge(from, to, edgeType, outputPort, inputPort))
+  const ports = expandedScriptFanPorts(next, from, outputPort, to, inputPort)
+  for (const port of ports) {
+    if (!canConnectPorts(next, from, port.outputPort, to, port.inputPort).ok) return next
   }
-  next.selection = { type: "edge", id }
+  for (const port of ports) {
+    const id = edgeId(from, to, edgeType, port.outputPort, port.inputPort)
+    if (
+      !next.graph.edges.some(
+        (edge) =>
+          edge.id === id ||
+          (edge.from === from &&
+            edge.to === to &&
+            edge.edge_type === edgeType &&
+            (edge.output_port || DEFAULT_OUTPUT_PORT) === port.outputPort &&
+            (edge.input_port || DEFAULT_INPUT_PORT) === port.inputPort),
+      )
+    ) {
+      next.graph.edges.push(createEdge(from, to, edgeType, port.outputPort, port.inputPort))
+    }
+  }
+  const selectedId = ports.some((port) => port.outputPort === outputPort && port.inputPort === inputPort)
+    ? edgeId(from, to, edgeType, outputPort, inputPort)
+    : edgeId(from, to, edgeType, ports[0]?.outputPort ?? outputPort, ports[0]?.inputPort ?? inputPort)
+  next.selection = { type: "edge", id: selectedId }
   return next
+}
+
+type FanPortPair = {
+  outputPort: string
+  inputPort: string
+}
+
+function expandedScriptFanPorts(
+  draft: BlueprintDraft,
+  from: string,
+  outputPort: string,
+  to: string,
+  inputPort: string,
+): FanPortPair[] {
+  const targetScript = draft.graph.script_nodes?.[to]
+  if (targetScript && isAgentNode(draft, from)) {
+    const inputs = scriptInputPortNames(targetScript)
+    if (inputs.length > 1) return inputs.map((name) => ({ outputPort, inputPort: name }))
+  }
+
+  const sourceScript = draft.graph.script_nodes?.[from]
+  if (sourceScript && isAgentNode(draft, to)) {
+    const outputs = scriptOutputPortNames(sourceScript)
+    if (outputs.length > 1) return outputs.map((name) => ({ outputPort: name, inputPort }))
+  }
+
+  return [{ outputPort, inputPort }]
+}
+
+function scriptInputPortNames(node: BlueprintScriptNode) {
+  const names = node.inputs.map((port) => port.name).filter(Boolean)
+  return names.length ? names : [DEFAULT_INPUT_PORT]
+}
+
+function scriptOutputPortNames(node: BlueprintScriptNode) {
+  const names = node.outputs.map((port) => port.name).filter(Boolean)
+  return names.length ? names : [DEFAULT_OUTPUT_PORT]
+}
+
+export function fanEdgeGroup(draft: BlueprintDraft, edge: BlueprintEdge): BlueprintEdge[] {
+  const sourceScript = draft.graph.script_nodes?.[edge.from]
+  const targetScript = draft.graph.script_nodes?.[edge.to]
+  if (targetScript && isAgentNode(draft, edge.from) && scriptInputPortNames(targetScript).length > 1) {
+    const allowedInputs = new Set(scriptInputPortNames(targetScript))
+    const outputPort = edge.output_port || DEFAULT_OUTPUT_PORT
+    return draft.graph.edges.filter(
+      (item) =>
+        item.from === edge.from &&
+        item.to === edge.to &&
+        item.edge_type === edge.edge_type &&
+        (item.output_port || DEFAULT_OUTPUT_PORT) === outputPort &&
+        allowedInputs.has(item.input_port || DEFAULT_INPUT_PORT),
+    )
+  }
+
+  if (sourceScript && isAgentNode(draft, edge.to) && scriptOutputPortNames(sourceScript).length > 1) {
+    const allowedOutputs = new Set(scriptOutputPortNames(sourceScript))
+    const inputPort = edge.input_port || DEFAULT_INPUT_PORT
+    return draft.graph.edges.filter(
+      (item) =>
+        item.from === edge.from &&
+        item.to === edge.to &&
+        item.edge_type === edge.edge_type &&
+        (item.input_port || DEFAULT_INPUT_PORT) === inputPort &&
+        allowedOutputs.has(item.output_port || DEFAULT_OUTPUT_PORT),
+    )
+  }
+
+  return [edge]
 }
 
 export function deleteNode(draft: BlueprintDraft, id: string) {
@@ -549,7 +811,9 @@ export function deleteNode(draft: BlueprintDraft, id: string) {
 
   delete next.graph.agent_nodes[id]
   delete next.graph.route_nodes[id]
+  delete next.graph.common_nodes[id]
   delete next.graph.terminal_nodes[id]
+  delete next.graph.script_nodes[id]
   delete next.layout.nodes[id]
   next.graph.edges = next.graph.edges.filter((edge) => edge.from !== id && edge.to !== id)
   clearDanglingSelectionAndInspector(next)
@@ -558,7 +822,10 @@ export function deleteNode(draft: BlueprintDraft, id: string) {
 
 export function deleteEdge(draft: BlueprintDraft, id: string) {
   const next = cloneBlueprintDraft(draft)
-  next.graph.edges = next.graph.edges.filter((edge) => edge.id !== id)
+  const target = next.graph.edges.find((edge) => edge.id === id)
+  if (!target) return next
+  const groupIds = new Set(fanEdgeGroup(next, target).map((edge) => edge.id))
+  next.graph.edges = next.graph.edges.filter((edge) => !groupIds.has(edge.id))
   clearDanglingSelectionAndInspector(next)
   return next
 }
@@ -573,10 +840,12 @@ export function updateAgentNode(draft: BlueprintDraft, id: string, patch: Partia
   const next = cloneBlueprintDraft(draft)
   const current = next.graph.agent_nodes[id]
   if (!current) return next
+  const patchedNodeType = normalizeAgentNodeType(patch.node_type ?? current.node_type)
   next.graph.agent_nodes[id] = {
     ...current,
     ...patch,
     node_id: id,
+    node_type: patchedNodeType,
     skills: patch.skills ? [...patch.skills] : current.skills,
     skill_selection: patch.skill_selection ? cloneSkillSelection(patch.skill_selection) : cloneSkillSelection(current.skill_selection),
     rule_paths: patch.rule_paths ? [...patch.rule_paths] : current.rule_paths,
@@ -585,8 +854,32 @@ export function updateAgentNode(draft: BlueprintDraft, id: string, patch: Partia
     read_scope: patch.read_scope ? [...patch.read_scope] : current.read_scope,
     write_scope: patch.write_scope ? [...patch.write_scope] : current.write_scope,
     artifact_scope: patch.artifact_scope ? [...patch.artifact_scope] : current.artifact_scope,
+    access_policy: normalizeAgentAccessPolicy(patch.access_policy ?? current.access_policy, patchedNodeType),
   }
   return next
+}
+
+export function canConnectPorts(
+  draft: BlueprintDraft,
+  from: string,
+  outputPort = DEFAULT_OUTPUT_PORT,
+  to: string,
+  inputPort = DEFAULT_INPUT_PORT,
+): BlueprintPortConnectResult {
+  if (!nodeIds(draft).includes(from) || !nodeIds(draft).includes(to)) return { ok: false, reason: "unknown_node" }
+  const sourceType = blueprintPortDataType(draft, from, "output", outputPort)
+  const targetType = blueprintPortDataType(draft, to, "input", inputPort)
+  if (sourceType.reason || targetType.reason) return { ok: false, reason: "unknown_port", sourceType: sourceType.type, targetType: targetType.type }
+  if (sourceType.type === undefined || targetType.type === undefined) return { ok: true }
+  if (sourceType.type !== targetType.type) {
+    return {
+      ok: false,
+      reason: "type_mismatch",
+      sourceType: sourceType.type,
+      targetType: targetType.type,
+    }
+  }
+  return { ok: true, sourceType: sourceType.type, targetType: targetType.type }
 }
 
 export function updateRouteNode(draft: BlueprintDraft, id: string, patch: Partial<BlueprintRouteNode>) {
@@ -602,6 +895,71 @@ export function updateRouteNode(draft: BlueprintDraft, id: string, patch: Partia
   return next
 }
 
+export function updateScriptNode(draft: BlueprintDraft, id: string, patch: Partial<BlueprintScriptNode>) {
+  const next = cloneBlueprintDraft(draft)
+  const current = next.graph.script_nodes[id]
+  if (!current) return next
+  next.graph.script_nodes[id] = normalizeScriptNode(id, {
+    ...current,
+    ...patch,
+    inputs: patch.inputs ? [...patch.inputs] : current.inputs,
+    outputs: patch.outputs ? [...patch.outputs] : current.outputs,
+  })
+  return next
+}
+
+export function compileScriptNodesFromCatalog(
+  draft: BlueprintDraft,
+  catalogNodes: BlueprintScriptNode[],
+): BlueprintScriptCompileResult {
+  const next = cloneBlueprintDraft(draft)
+  const byScriptId = new Map<string, BlueprintScriptNode>()
+  const byLocation = new Map<string, BlueprintScriptNode>()
+
+  for (const node of catalogNodes) {
+    const normalized = normalizeScriptNode(node.node_id || node.script_id || node.function_name, node)
+    if (normalized.script_id) byScriptId.set(normalized.script_id, normalized)
+    const location = scriptNodeLocationKey(normalized)
+    if (location) byLocation.set(location, normalized)
+  }
+
+  let updated = 0
+  let missing = 0
+  const updatedNodeIds = new Set<string>()
+
+  for (const [id, node] of Object.entries(next.graph.script_nodes ?? {})) {
+    const current = normalizeScriptNode(id, node)
+    const fresh = byScriptId.get(current.script_id) ?? byLocation.get(scriptNodeLocationKey(current))
+    if (!fresh) {
+      missing += 1
+      continue
+    }
+    next.graph.script_nodes[id] = normalizeScriptNode(id, {
+      ...fresh,
+      node_id: id,
+      collapsed: current.collapsed,
+    })
+    updated += 1
+    updatedNodeIds.add(id)
+  }
+
+  const edgeCountBefore = next.graph.edges.length
+  if (updatedNodeIds.size > 0) {
+    next.graph.edges = next.graph.edges.filter((edge) =>
+      scriptEdgePortsStillValid(edge, next.graph.script_nodes, updatedNodeIds),
+    )
+  }
+  const removedEdges = edgeCountBefore - next.graph.edges.length
+  clearDanglingSelectionAndInspector(next)
+
+  return {
+    draft: next,
+    updated,
+    missing,
+    removedEdges,
+  }
+}
+
 export function updateEdge(draft: BlueprintDraft, id: string, patch: Partial<BlueprintEdge>) {
   const next = cloneBlueprintDraft(draft)
   const index = next.graph.edges.findIndex((edge) => edge.id === id)
@@ -612,6 +970,7 @@ export function updateEdge(draft: BlueprintDraft, id: string, patch: Partial<Blu
   const to = patch.to ?? current.to
   const output_port = patch.output_port ?? current.output_port ?? DEFAULT_OUTPUT_PORT
   const input_port = patch.input_port ?? current.input_port ?? DEFAULT_INPUT_PORT
+  if (!canConnectPorts(next, from, output_port, to, input_port).ok) return next
   const updated = {
     ...current,
     ...patch,
@@ -731,6 +1090,12 @@ export function toRuntimeGraphDraft(draft: BlueprintDraft): RuntimeGraphDraft {
     route_nodes: Object.fromEntries(
       Object.entries(draft.graph.route_nodes ?? {}).map(([id, node]) => [id, normalizeRouteNode(id, node)]),
     ),
+    common_nodes: Object.fromEntries(
+      Object.entries(draft.graph.common_nodes ?? {}).map(([id, node]) => [id, normalizeCommonNode(id, node)]),
+    ),
+    script_nodes: Object.fromEntries(
+      Object.entries(draft.graph.script_nodes ?? {}).map(([id, node]) => [id, normalizeScriptNode(id, node)]),
+    ),
     agent_nodes: Object.fromEntries(
       Object.entries(draft.graph.agent_nodes).map(([id, node]) => [
         id,
@@ -807,7 +1172,16 @@ function normalizeStartNodes(startNodes: string[] | undefined, draft: BlueprintD
 }
 
 function visibleNodeIdSet(draft: BlueprintDraft) {
-  return new Set([...Object.keys(draft.graph.route_nodes ?? {}), ...Object.keys(draft.graph.agent_nodes)])
+  return new Set([
+    ...Object.keys(draft.graph.route_nodes ?? {}),
+    ...Object.keys(draft.graph.common_nodes ?? {}),
+    ...Object.keys(draft.graph.script_nodes ?? {}),
+    ...Object.keys(draft.graph.agent_nodes),
+  ])
+}
+
+export function hasTickSourceNode(draft: BlueprintDraft) {
+  return Object.values(draft.graph.common_nodes ?? {}).some((node) => node.kind === "tick")
 }
 
 function visibleLayoutNodes(draft: BlueprintDraft): Record<string, BlueprintNodeLayout> {
@@ -834,33 +1208,66 @@ function visibleInspectable<T extends BlueprintSelection | BlueprintInspectable 
 
 function createAgentNode(input: {
   node_id: string
+  node_type?: BlueprintAgentNodeType
   agent_id: string
   prompt: string
   run_prompt?: string
   write_scope?: string[]
   artifact_scope?: string[]
 }): BlueprintAgentNode {
+  const nodeType = input.node_type ?? "worker_agent"
+  const fullAgent = nodeType === "agent"
+  const cliKind = fullAgent ? "codex" : "codemaker"
+  const accessPolicy = fullAgent ? DEFAULT_AGENT_ACCESS_POLICY : DEFAULT_WORKER_AGENT_ACCESS_POLICY
   return {
     node_id: input.node_id,
+    node_type: nodeType,
     agent_id: input.agent_id,
     prompt: input.prompt,
     run_prompt: input.run_prompt ?? "",
     execution_mode: "blocking",
-    cli_kind: "codemaker",
-    model: DEFAULT_MODEL,
+    cli_kind: cliKind,
+    model: defaultModelForCliKind(cliKind),
     cwd: DEFAULT_PROJECT_WORKDIR,
     skills: [],
     skill_selection: { mode: "none" },
     rule_paths: [],
     timeout_sec: 1800,
     prompt_via_file: "auto",
-    command: "codemaker",
-    adapter_options: {},
+    command: defaultCommandForCliKind(cliKind),
+    adapter_options: fullAgent
+      ? {
+          sandbox: "danger-full-access",
+          dangerous_access: true,
+          extra_args: [...DANGEROUS_CODEX_EXTRA_ARGS],
+        }
+      : {},
     extra_env: {},
     external: false,
     read_scope: [],
     write_scope: input.write_scope ?? DEFAULT_AGENT_SCOPE,
     artifact_scope: input.artifact_scope ?? [],
+    access_policy: { ...accessPolicy },
+  }
+}
+
+function normalizeAgentNodeType(value: unknown): BlueprintAgentNodeType {
+  return value === "agent" ? "agent" : "worker_agent"
+}
+
+function normalizeAgentAccessPolicy(
+  value: unknown,
+  nodeType: BlueprintAgentNodeType,
+): BlueprintAgentAccessPolicy {
+  const defaults = nodeType === "agent" ? DEFAULT_AGENT_ACCESS_POLICY : DEFAULT_WORKER_AGENT_ACCESS_POLICY
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { ...defaults }
+  const raw = value as Partial<Record<keyof BlueprintAgentAccessPolicy, unknown>>
+  return {
+    direct_project_io: Boolean(raw.direct_project_io ?? defaults.direct_project_io),
+    outside_project_io: Boolean(raw.outside_project_io ?? defaults.outside_project_io),
+    unrestricted_commands: Boolean(raw.unrestricted_commands ?? defaults.unrestricted_commands),
+    disable_sandbox: Boolean(raw.disable_sandbox ?? defaults.disable_sandbox),
+    framework_message_tools: Boolean(raw.framework_message_tools ?? defaults.framework_message_tools),
   }
 }
 
@@ -876,10 +1283,12 @@ function normalizeBlueprintConfig(config?: Partial<BlueprintConfig>): BlueprintC
 }
 
 function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): BlueprintAgentNode {
+  const nodeType = normalizeAgentNodeType(node.node_type)
   const defaults = createAgentNode({
     node_id: id,
+    node_type: nodeType,
     agent_id: node.agent_id ?? `agent-${id}`,
-    prompt: node.prompt ?? "Describe this agent's work.",
+    prompt: node.prompt ?? (nodeType === "agent" ? "Describe this full CLI agent's work." : "Describe this worker agent's work."),
     run_prompt: node.run_prompt ?? "",
   })
   const skills = [...(node.skills ?? node.skill_selection?.skill_hashes ?? defaults.skills)]
@@ -905,6 +1314,7 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
     ...defaults,
     ...node,
     node_id: id,
+    node_type: nodeType,
     run_prompt: String(node.run_prompt ?? defaults.run_prompt),
     skills,
     skill_selection: skillSelection,
@@ -917,6 +1327,7 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
     read_scope: [...(node.read_scope ?? defaults.read_scope)],
     write_scope: [...writeScope],
     artifact_scope: [...(node.artifact_scope ?? defaults.artifact_scope)],
+    access_policy: normalizeAgentAccessPolicy(node.access_policy ?? defaults.access_policy, nodeType),
   }
 }
 
@@ -926,10 +1337,39 @@ function normalizeAgentNodeForRuntime(
   config: BlueprintConfig,
 ): BlueprintAgentNode {
   const normalized = normalizeAgentNode(id, node)
+  const adapter_options = { ...normalized.adapter_options }
+  if (normalized.node_type === "agent" && normalized.cli_kind === "codex") {
+    if (normalized.access_policy.disable_sandbox) {
+      adapter_options.sandbox = "danger-full-access"
+      adapter_options.dangerous_access = true
+      const extraArgs = Array.isArray(adapter_options.extra_args) ? adapter_options.extra_args.map(String) : []
+      for (const arg of DANGEROUS_CODEX_EXTRA_ARGS) {
+        if (!extraArgs.includes(arg)) extraArgs.push(arg)
+      }
+      adapter_options.extra_args = extraArgs
+    } else {
+      adapter_options.dangerous_access = false
+      adapter_options.sandbox = normalized.access_policy.direct_project_io ? "workspace-write" : "read-only"
+      if (Array.isArray(adapter_options.extra_args)) {
+        adapter_options.extra_args = adapter_options.extra_args
+          .map(String)
+          .filter((arg) => !DANGEROUS_CODEX_EXTRA_ARGS.includes(arg))
+      }
+    }
+  } else if (normalized.node_type === "agent") {
+    delete adapter_options.sandbox
+    delete adapter_options.dangerous_access
+    if (Array.isArray(adapter_options.extra_args)) {
+      adapter_options.extra_args = adapter_options.extra_args
+        .map(String)
+        .filter((arg) => !DANGEROUS_CODEX_EXTRA_ARGS.includes(arg))
+    }
+  }
   return {
     ...normalized,
     cwd: config.project_workdir || DEFAULT_PROJECT_WORKDIR,
     command: defaultCommandForCliKind(normalized.cli_kind),
+    adapter_options,
   }
 }
 
@@ -941,6 +1381,107 @@ function normalizeRouteNode(id: string, node: Partial<BlueprintRouteNode>): Blue
     reduce_target: node.reduce_target,
     reduce_prompt: node.reduce_prompt,
   }
+}
+
+function normalizeCommonNode(id: string, node: Partial<BlueprintCommonNode> & { every_n_ticks?: number }): BlueprintCommonNode {
+  const kind = node.kind === "tick" ? "tick" : "branch"
+  if (kind === "tick") {
+    return {
+      node_id: id,
+      kind,
+      every_n_ticks: Math.max(1, Math.floor(Number(node.every_n_ticks ?? 1) || 1)),
+    }
+  }
+  return {
+    node_id: id,
+    kind,
+  }
+}
+
+function blueprintPortDataType(
+  draft: BlueprintDraft,
+  nodeId: string,
+  side: "input" | "output",
+  portName: string,
+): { type?: BlueprintPortDataType; reason?: "unknown_node" | "unknown_port" } {
+  if (isAgentNode(draft, nodeId) || isScriptNode(draft, nodeId)) return {}
+  const common = draft.graph.common_nodes?.[nodeId]
+  if (common) {
+    if (common.kind === "branch") {
+      if (side === "input" && portName === "condition") return { type: "bool" }
+      if (side === "output" && (portName === "true" || portName === "false")) return { type: "message" }
+      return { reason: "unknown_port" }
+    }
+    if (side === "output" && portName === "tick") return { type: "tick" }
+    return { reason: "unknown_port" }
+  }
+  if (isRouteNode(draft, nodeId) || isTerminalNode(draft, nodeId)) return { type: "message" }
+  return { reason: "unknown_node" }
+}
+
+function normalizeScriptPort(port: Partial<BlueprintScriptPort>, fallbackName: string): BlueprintScriptPort {
+  const name = String(port.name || fallbackName).trim() || fallbackName
+  const rawType = String(port.type || "Any").trim() || "Any"
+  return {
+    name,
+    type: normalizeScriptPortType(rawType),
+    required: port.required !== false,
+  }
+}
+
+function normalizeScriptPortType(value: string) {
+  if (value === "int" || value === "float" || value === "str" || value === "bool" || value === "dict" || value === "list") {
+    return value
+  }
+  return "Any"
+}
+
+function normalizeScriptNode(id: string, node: Partial<BlueprintScriptNode>): BlueprintScriptNode {
+  const functionName = String(node.function_name || "").trim()
+  const modulePath = String(node.module_path || "").replace(/\\/g, "/").trim()
+  return {
+    node_id: id,
+    script_id: String(node.script_id || `${modulePath}:${functionName}`).trim(),
+    module_path: modulePath,
+    function_name: functionName,
+    title: String(node.title || functionName || id).trim(),
+    description: String(node.description || ""),
+    inputs: (node.inputs ?? []).map((port, index) => normalizeScriptPort(port, `arg${index + 1}`)),
+    outputs: (node.outputs?.length ? node.outputs : [{ name: "result", type: "Any", required: true }]).map((port, index) =>
+      normalizeScriptPort(port, index === 0 ? "result" : `out${index + 1}`),
+    ),
+    collapsed: node.collapsed !== false,
+  }
+}
+
+function scriptNodeLocationKey(node: Pick<BlueprintScriptNode, "module_path" | "function_name">) {
+  const modulePath = String(node.module_path || "").replace(/\\/g, "/").trim()
+  const functionName = String(node.function_name || "").trim()
+  return modulePath && functionName ? `${modulePath}:${functionName}` : ""
+}
+
+function scriptEdgePortsStillValid(
+  edge: BlueprintEdge,
+  scriptNodes: Record<string, BlueprintScriptNode>,
+  updatedNodeIds: Set<string>,
+) {
+  const source = scriptNodes[edge.from]
+  if (source && updatedNodeIds.has(edge.from) && !scriptPortStillExists(source.outputs, edge.output_port, DEFAULT_OUTPUT_PORT)) {
+    return false
+  }
+
+  const target = scriptNodes[edge.to]
+  if (target && updatedNodeIds.has(edge.to) && !scriptPortStillExists(target.inputs, edge.input_port, DEFAULT_INPUT_PORT)) {
+    return false
+  }
+
+  return true
+}
+
+function scriptPortStillExists(ports: BlueprintScriptPort[], portName: string | undefined, defaultPort: string) {
+  const name = portName || defaultPort
+  if (name === defaultPort) return true
+  return ports.some((port) => port.name === name)
 }
 
 function routeKindFromAddKind(kind: BlueprintAddNodeKind): BlueprintRouteKind {

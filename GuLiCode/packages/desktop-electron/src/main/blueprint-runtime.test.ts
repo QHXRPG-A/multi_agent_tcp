@@ -150,12 +150,30 @@ describe("blueprint runtime bridge", () => {
     try {
       const saved = await runtime.save(projectDir, document)
       expect(saved.id).toBe("default")
+      const alternateDocument = {
+        ...document,
+        id: "alternate",
+        name: "Alternate Blueprint",
+        graph: {
+          ...document.graph,
+          agent_nodes: {
+            planner: {
+              ...document.graph.agent_nodes.planner,
+              prompt: "Alternate plan",
+            },
+          },
+        },
+      }
+      const alternateSaved = await runtime.save(projectDir, alternateDocument)
+      expect(alternateSaved.id).toBe("alternate")
 
       const listed = await runtime.list(projectDir)
-      expect(listed.map((item: { id: string }) => item.id)).toEqual(["default"])
+      expect(listed.map((item: { id: string }) => item.id).sort()).toEqual(["alternate", "default"])
 
       const opened = await runtime.open(projectDir, "default")
       expect(opened.graph.agent_nodes.planner.prompt).toBe("Plan")
+      const alternateOpened = await runtime.open(projectDir, "alternate")
+      expect(alternateOpened.graph.agent_nodes.planner.prompt).toBe("Alternate plan")
 
       const validation = await runtime.validate(projectDir, "default", opened)
       expect(validation.ok).toBe(true)
@@ -170,9 +188,16 @@ describe("blueprint runtime bridge", () => {
     const runtime = new BlueprintRuntime()
     try {
       await runtime.save(projectDir, documentWithConfig(projectDir))
+      await runtime.save(projectDir, {
+        ...documentWithConfig(projectDir),
+        id: "alternate",
+        name: "Alternate Blueprint",
+      })
 
       const started = (await runtime.start(projectDir, "default", plan)) as Record<string, unknown>
+      const alternateStarted = (await runtime.start(projectDir, "alternate", plan)) as Record<string, unknown>
       expect(String(started.runId)).toStartWith("run-")
+      expect(String(alternateStarted.runId)).toStartWith("run-")
       expect((started.validation as { ok: boolean }).ok).toBe(true)
       expect(((started.queuedMessages as Array<{ node_id: string }>)[0]).node_id).toBe("planner")
 
@@ -182,6 +207,8 @@ describe("blueprint runtime bridge", () => {
 
       const runs = (await runtime.listRuns(projectDir, "default")) as Array<{ runId: string }>
       expect(runs.map((run) => run.runId)).toEqual([started.runId])
+      const alternateRuns = (await runtime.listRuns(projectDir, "alternate")) as Array<{ runId: string }>
+      expect(alternateRuns.map((run) => run.runId)).toEqual([alternateStarted.runId])
 
       const events = (await runtime.recentEvents(String(started.runId), 10)) as Record<string, unknown>
       expect(events.limit).toBe(10)
@@ -199,6 +226,7 @@ describe("blueprint runtime bridge", () => {
       const ended = (await runtime.end(String(started.runId), "cancel", "user cancelled")) as Record<string, unknown>
       expect(((ended.end as { run_status: string }).run_status)).toBe("cancelled")
       expect(((ended.status as { run: { final_status: string } }).run).final_status).toBe("cancelled")
+      await runtime.end(String(alternateStarted.runId), "cancel", "user cancelled")
     } finally {
       runtime.close()
       await rm(projectDir, { recursive: true, force: true })

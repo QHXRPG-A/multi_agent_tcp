@@ -5,6 +5,11 @@ describe mock UI states and validation results, not live backend contracts.
 
 ## Mobile PWA Mock
 
+- `gulicode_mobile_desktop_mirror_full_graph_2026-05-31.md`
+  - Current `/mobile` desktop mirror mock.
+  - Records typed full-graph Blueprint projection, desktop session/composer
+    mirror data, segmented chat messages, typed node sheets, Pending planning
+    cards, and the narrow tick merge behavior.
 - `gulicode_mobile_agent_info_sheet_mock_2026-05-28.md`
   - Current Blueprint tab click/accordion interaction pass.
   - Records clickable nodes, the light mobile Agent information sheet,

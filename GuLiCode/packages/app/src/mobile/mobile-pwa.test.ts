@@ -145,4 +145,20 @@ describe("mobile PWA cache boundary", () => {
     expect(source).not.toContain("Describe what Top Agent should plan")
     expect(source).not.toContain("Start planning")
   })
+
+  test("renders typed blueprint node details for full desktop mirrors", () => {
+    const source = readFileSync(join(import.meta.dir, "mobile-app.tsx"), "utf8")
+    const stateSource = readFileSync(join(import.meta.dir, "mobile-state.ts"), "utf8")
+    const apiSource = readFileSync(join(import.meta.dir, "mobile-api.ts"), "utf8")
+
+    expect(stateSource).toContain('export type BlueprintNodeKind = "agent" | "worker_agent" | "script" | "branch" | "tick"')
+    expect(source).toContain("function NodeTypeDetails")
+    expect(source).toContain('data-testid="node-type-details"')
+    expect(source).toContain("nodeKindLabel(props.node.kind)")
+    expect(source).toContain('props.node.kind === "agent" || props.node.kind === "worker_agent"')
+    expect(source).toContain("移动端只展示同步信息，不提供编辑或执行入口")
+    expect(apiSource).toContain("projected.outputPort = edge.outputPort")
+    expect(apiSource).toContain("projected.inputPort = edge.inputPort")
+    expect(apiSource).toContain("everyNTicks: node.everyNTicks")
+  })
 })

@@ -28,17 +28,23 @@ import {
   GRID_SIZE,
   addEdge,
   addNode,
+  addScriptNode,
+  canConnectPorts,
   CLI_KIND_OPTIONS,
   DEFAULT_BLUEPRINT_ID,
   DEFAULT_BLUEPRINT_NAME,
+  compileScriptNodesFromCatalog,
+  createBlueprintStartPlan,
   createDefaultBlueprintDraft,
   defaultCommandForCliKind,
   defaultModelForCliKind,
   deleteEdge,
   deleteNode,
   deleteSelection,
+  fanEdgeGroup,
   jsonText,
   nodeKind,
+  hasTickSourceNode,
   parseJsonObject,
   parseScopeText,
   parseStringRecord,
@@ -51,6 +57,7 @@ import {
   toBlueprintDocument,
   toRuntimeGraphDraft,
   updateEdge,
+  updateScriptNode,
   validateBlueprintConfigForStart,
   type BlueprintAddNodeKind,
   type BlueprintAgentNode,
@@ -58,22 +65,36 @@ import {
   type BlueprintConfig,
   type BlueprintConfigField,
   type BlueprintConfigValidationIssue,
+  type BlueprintCommonNode,
   type BlueprintDraft,
   type BlueprintEdge,
   type BlueprintNodeLayout,
   type BlueprintRouteNode,
+  type BlueprintScriptCompileResult,
+  type BlueprintScriptNode,
+  type BlueprintScriptPort,
   type BlueprintTerminalKind,
 } from "@/pages/session/blueprint-model"
 import { createTestAgentPanelSnapshot } from "@/pages/session/blueprint-test-agent-snapshot"
 import {
   usePlatform,
   type BlueprintCatalogItem,
+  type BlueprintEditorCandidate,
   type BlueprintRelocateConflictPolicy,
   type BlueprintRunEndAction,
+  type BlueprintSummary,
 } from "@/context/platform"
 
 const NODE_WIDTH = 172
 const NODE_HEIGHT = 72
+const SCRIPT_NODE_WIDTH = 228
+const SCRIPT_NODE_HEADER_HEIGHT = 48
+const SCRIPT_NODE_PORT_ROW_HEIGHT = 22
+const SCRIPT_NODE_MIN_EXPANDED_HEIGHT = 102
+const COMMON_BRANCH_WIDTH = SCRIPT_NODE_WIDTH
+const COMMON_BRANCH_HEIGHT = SCRIPT_NODE_MIN_EXPANDED_HEIGHT
+const SCRIPT_NODE_BLUE_CLIP_PATH = "polygon(0 0, 42% 0, 55% 30%, 47% 30%, 60% 58%, 52% 58%, 64% 100%, 0 100%)"
+const SCRIPT_NODE_SPLIT_LINE_POINTS = "42,0 55,30 47,30 60,58 52,58 64,100"
 const TERMINAL_WIDTH = 92
 const TERMINAL_HEIGHT = 44
 const MIN_ZOOM = 0.35
@@ -88,6 +109,9 @@ const AGENT_PANEL_MIN_WIDTH = 320
 const AGENT_PANEL_MIN_HEIGHT = 300
 const AGENT_PANEL_MARGIN = 8
 const BLUEPRINT_FLOAT_DRAG_THRESHOLD = 8
+const RIGHT_CLICK_PAN_THRESHOLD = 5
+const NODE_SEARCH_CARD_WIDTH = 320
+const NODE_SEARCH_CARD_MAX_HEIGHT = 360
 const RUNTIME_WORKING_AGENT_STATES = new Set(["dispatching", "running", "waiting_for_reply", "processing_reply"])
 const RUNTIME_FLOW_MESSAGE_STATUSES = new Set(["queued", "dispatching"])
 const BLUEPRINT_RUNTIME_FLOW_DOTS = [0, 1, 2, 3, 4]
@@ -189,11 +213,16 @@ const MODEL_LIST_FALLBACKS: Record<string, string[]> = {
 export type CatalogState = {
   skillDir: string
   ruleDir: string
+  scriptDir: string
   skills: BlueprintCatalogItem[]
   rules: BlueprintCatalogItem[]
+  scriptNodes: BlueprintScriptCatalogNode[]
   skillError?: string
   ruleError?: string
+  scriptError?: string
 }
+
+export type BlueprintScriptCatalogNode = BlueprintScriptNode
 
 export type ModelCatalogState = {
   cliKind: string
@@ -221,6 +250,8 @@ type RuntimePanelMode = "runtime" | "inspector"
 
 export type BlueprintPlanningSubmitInput = {
   task: string
+  blueprintId: string
+  blueprintName: string
   startNodeIds: string[]
   message: string
   silentBlocked?: boolean
@@ -238,6 +269,14 @@ type BlueprintFlowLockState = {
   planningSeen?: boolean
   startSeen?: boolean
   submittedAt?: number
+}
+
+type BlueprintDocumentPickerState = {
+  id: string
+  name: string
+  items: BlueprintSummary[]
+  loading: boolean
+  error?: string
 }
 
 const blueprintFlowLockStore = new Map<string, BlueprintFlowLockState>()
@@ -347,6 +386,17 @@ type BlueprintDiffState = {
   rollingBack?: string
   restoringRollback?: boolean
   details: Record<string, BlueprintChangesetDiffDetail | undefined>
+}
+
+function emptyBlueprintDiffState(): BlueprintDiffState {
+  return {
+    loading: false,
+    summary: {},
+    changesets: [],
+    acceptedDiffs: [],
+    binaryFiles: [],
+    details: {},
+  }
 }
 
 type AgentStreamEvent = Record<string, unknown> & {
@@ -493,6 +543,26 @@ const INSPECTOR_TIPS = {
     what: "blueprint.tip.external.what",
     usage: "blueprint.tip.external.usage",
   },
+  directProjectIo: {
+    what: "blueprint.tip.directProjectIo.what",
+    usage: "blueprint.tip.directProjectIo.usage",
+  },
+  outsideProjectIo: {
+    what: "blueprint.tip.outsideProjectIo.what",
+    usage: "blueprint.tip.outsideProjectIo.usage",
+  },
+  unrestrictedCommands: {
+    what: "blueprint.tip.unrestrictedCommands.what",
+    usage: "blueprint.tip.unrestrictedCommands.usage",
+  },
+  disableSandbox: {
+    what: "blueprint.tip.disableSandbox.what",
+    usage: "blueprint.tip.disableSandbox.usage",
+  },
+  frameworkMessageTools: {
+    what: "blueprint.tip.frameworkMessageTools.what",
+    usage: "blueprint.tip.frameworkMessageTools.usage",
+  },
   skills: {
     what: "blueprint.tip.skills.what",
     usage: "blueprint.tip.skills.usage",
@@ -549,6 +619,10 @@ const INSPECTOR_TIPS = {
     what: "blueprint.tip.reducePrompt.what",
     usage: "blueprint.tip.reducePrompt.usage",
   },
+  everyNTicks: {
+    what: "blueprint.tip.everyNTicks.what",
+    usage: "blueprint.tip.everyNTicks.usage",
+  },
   edge: {
     what: "blueprint.tip.edge.what",
     usage: "blueprint.tip.edge.usage",
@@ -574,6 +648,13 @@ const INSPECTOR_TIPS = {
 type InspectorTipKey = keyof typeof INSPECTOR_TIPS
 
 type DragState =
+  | {
+      type: "pan-pending"
+      startClientX: number
+      startClientY: number
+      startX: number
+      startY: number
+    }
   | {
       type: "pan"
       startClientX: number
@@ -622,6 +703,21 @@ type AgentPanelPressState = {
   progress: number
 }
 
+type NodeSearchState = {
+  clientX: number
+  clientY: number
+}
+
+type ScriptEditorPreferences = {
+  editorId: string
+}
+
+type EditorCatalogState = {
+  items: BlueprintEditorCandidate[]
+  loading: boolean
+  error?: string
+}
+
 type NodeItem =
   | {
       type: "terminal"
@@ -634,9 +730,32 @@ type NodeItem =
       node: BlueprintRouteNode
     }
   | {
+      type: "common"
+      id: string
+      node: BlueprintCommonNode
+    }
+  | {
       type: "agent"
       id: string
       node: BlueprintAgentNode
+    }
+  | {
+      type: "script"
+      id: string
+      node: BlueprintScriptNode
+    }
+
+type AddNodeOption =
+  | {
+      kind: Exclude<BlueprintAddNodeKind, "script">
+      label: string
+      description: string
+    }
+  | {
+      kind: "script"
+      label: string
+      description: string
+      script: BlueprintScriptCatalogNode
     }
 
 type RuntimeNodeVisualState = "idle" | "active" | "working"
@@ -659,7 +778,15 @@ export function BlueprintSidePanel(props: {
   const dialog = useDialog()
   const { params, view } = useSessionLayout()
   const projectDirectory = decode64(params.dir) ?? "global"
-  const blueprintFlowLockKey = `${projectDirectory}:${DEFAULT_BLUEPRINT_ID}`
+  const [blueprintPicker, setBlueprintPicker] = createSignal<BlueprintDocumentPickerState>({
+    id: DEFAULT_BLUEPRINT_ID,
+    name: DEFAULT_BLUEPRINT_NAME,
+    items: [],
+    loading: false,
+  })
+  const currentBlueprintId = () => blueprintPicker().id || DEFAULT_BLUEPRINT_ID
+  const currentBlueprintName = () => blueprintPicker().name || DEFAULT_BLUEPRINT_NAME
+  const blueprintFlowLockKey = () => `${projectDirectory}:${currentBlueprintId()}`
   const [draft, setDraft, _, draftReady] = persisted(
     Persist.workspace(projectDirectory, "blueprint-draft.v1"),
     createStore<BlueprintDraft>(createDefaultBlueprintDraft(projectDirectory)),
@@ -668,17 +795,25 @@ export function BlueprintSidePanel(props: {
     Persist.global("blueprint-agent-panel-test-log.v1"),
     createStore({ enabled: true }),
   )
+  const [scriptEditorPreferences, setScriptEditorPreferences] = persisted(
+    Persist.global("blueprint.scriptEditor.v1"),
+    createStore<ScriptEditorPreferences>({ editorId: "" }),
+  )
   const [drag, setDrag] = createSignal<DragState>()
   const [connection, setConnection] = createSignal<ConnectionState>()
   const [agentPanelPress, setAgentPanelPress] = createSignal<AgentPanelPressState>()
-  const [addMenuOpen, setAddMenuOpen] = createSignal(false)
+  const [nodeSearch, setNodeSearch] = createSignal<NodeSearchState>()
+  const [nodeSearchQuery, setNodeSearchQuery] = createSignal("")
+  const [scriptEditorMenuOpen, setScriptEditorMenuOpen] = createSignal(false)
   const [globalConfigOpen, setGlobalConfigOpen] = createSignal(false)
+  const [catalogRefreshVersion, setCatalogRefreshVersion] = createSignal(0)
+  const [scriptCompiling, setScriptCompiling] = createSignal(false)
   const [configIssues, setConfigIssues] = createSignal<BlueprintConfigValidationIssue[]>([])
   const [pythonDetecting, setPythonDetecting] = createSignal(false)
   const [pythonDetectFailed, setPythonDetectFailed] = createSignal(false)
   const [projectWorkdirRelocating, setProjectWorkdirRelocating] = createSignal(false)
   const [blueprintFlowLock, writeBlueprintFlowLock] = createSignal<BlueprintFlowLockState>(
-    blueprintFlowLockStore.get(blueprintFlowLockKey) ?? { active: false },
+    blueprintFlowLockStore.get(blueprintFlowLockKey()) ?? { active: false },
   )
   const [autoCompletingRuntimeKey, setAutoCompletingRuntimeKey] = createSignal<string>()
   const [progressAnchorVersion, setProgressAnchorVersion] = createSignal(0)
@@ -686,12 +821,25 @@ export function BlueprintSidePanel(props: {
   const [catalog, setCatalog] = createSignal<CatalogState>({
     skillDir: "",
     ruleDir: "",
+    scriptDir: "",
     skills: [],
     rules: [],
+    scriptNodes: [],
   })
   const [modelCatalog, setModelCatalog] = createSignal<ModelCatalogState>({
     cliKind: "",
     models: [],
+    loading: false,
+  })
+  const [editorCatalog, setEditorCatalog] = createSignal<EditorCatalogState>({
+    items: [
+      {
+        id: "system",
+        label: language.t("blueprint.editor.systemDefault" as never),
+        source: language.t("blueprint.editor.systemDefaultDescription" as never),
+        systemDefault: true,
+      },
+    ],
     loading: false,
   })
   const [persistence, setPersistence] = createSignal<PersistenceState>({
@@ -707,16 +855,10 @@ export function BlueprintSidePanel(props: {
   })
   const [blueprintDiffOpen, setBlueprintDiffOpen] = createSignal(false)
   const [blueprintDiffSelectedChangesetId, setBlueprintDiffSelectedChangesetId] = createSignal<string>()
-  const [blueprintDiff, setBlueprintDiff] = createStore<BlueprintDiffState>({
-    loading: false,
-    summary: {},
-    changesets: [],
-    acceptedDiffs: [],
-    binaryFiles: [],
-    details: {},
-  })
+  const [blueprintDiff, setBlueprintDiff] = createStore<BlueprintDiffState>(emptyBlueprintDiffState())
   const [runtimeTask, setRuntimeTask] = createSignal("")
   const [runtimeStartNodeIds, setRuntimeStartNodeIds] = createSignal<string[]>([])
+  const [hoveredEdgeGroupId, setHoveredEdgeGroupId] = createSignal<string>()
   const [agentPanel, setAgentPanel] = createStore<AgentPanelState>({
     panels: {},
     streamEvents: {},
@@ -742,6 +884,7 @@ export function BlueprintSidePanel(props: {
   })
   let rootRef: HTMLDivElement | undefined
   let canvasRef: HTMLDivElement | undefined
+  let nodeSearchInputRef: HTMLInputElement | undefined
   let runtimeTaskInputRef: HTMLTextAreaElement | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
   const testAgentPersistTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {}
@@ -766,6 +909,13 @@ export function BlueprintSidePanel(props: {
     clearAgentPanelTestPersistTimers()
   })
 
+  createEffect(
+    on(nodeSearch, (state) => {
+      if (!state) return
+      queueMicrotask(() => nodeSearchInputRef?.focus())
+    }),
+  )
+
   createEffect(() => {
     if (agentPanelTestLogActive()) return
     clearAgentPanelTestPersistTimers()
@@ -779,11 +929,17 @@ export function BlueprintSidePanel(props: {
   ) {
     writeBlueprintFlowLock((current) => {
       const resolved = typeof next === "function" ? next(current) : next
-      if (resolved.active) blueprintFlowLockStore.set(blueprintFlowLockKey, resolved)
-      else blueprintFlowLockStore.delete(blueprintFlowLockKey)
+      const key = blueprintFlowLockKey()
+      if (resolved.active) blueprintFlowLockStore.set(key, resolved)
+      else blueprintFlowLockStore.delete(key)
       return resolved
     })
   }
+
+  createEffect(() => {
+    currentBlueprintId()
+    writeBlueprintFlowLock(blueprintFlowLockStore.get(blueprintFlowLockKey()) ?? { active: false })
+  })
 
   function unlockRuntimeForManualControl(runId: string) {
     blueprintRuntimeManualUnlockKeys.add(runId)
@@ -799,11 +955,26 @@ export function BlueprintSidePanel(props: {
     return props.blueprintPlanningProgress?.active === true
   }
 
-  const addOptions = createMemo(() => [
+  const addOptions = createMemo<AddNodeOption[]>(() => [
     {
       kind: "agent" as const,
       label: language.t("blueprint.node.agent"),
       description: language.t("blueprint.add.agent.description"),
+    },
+    {
+      kind: "worker-agent" as const,
+      label: language.t("blueprint.node.workerAgent" as never),
+      description: language.t("blueprint.add.workerAgent.description" as never),
+    },
+    {
+      kind: "branch" as const,
+      label: language.t("blueprint.node.branch" as never),
+      description: language.t("blueprint.add.branch.description" as never),
+    },
+    {
+      kind: "tick" as const,
+      label: language.t("blueprint.node.tick" as never),
+      description: language.t("blueprint.add.tick.description" as never),
     },
     {
       kind: "route-sequence" as const,
@@ -820,13 +991,76 @@ export function BlueprintSidePanel(props: {
       label: language.t("blueprint.node.route.parallelReduce"),
       description: language.t("blueprint.add.route.parallelReduce.description"),
     },
+    ...catalog().scriptNodes.map((script) => ({
+      kind: "script" as const,
+      label: script.title || script.function_name || language.t("blueprint.node.script" as never),
+      description: scriptSignature(script),
+      script,
+    })),
   ])
+
+  const scriptEditorCandidates = createMemo(() => {
+    const fallback: BlueprintEditorCandidate = {
+      id: "system",
+      label: language.t("blueprint.editor.systemDefault" as never),
+      source: language.t("blueprint.editor.systemDefaultDescription" as never),
+      systemDefault: true,
+    }
+    const items = editorCatalog().items.length ? editorCatalog().items : [fallback]
+    const selectedId = scriptEditorPreferences.editorId
+    if (!selectedId) return items
+    const selected = items.find((item) => item.id === selectedId)
+    if (!selected) return items
+    return [selected, ...items.filter((item) => item.id !== selectedId)]
+  })
+
+  const selectedScriptEditor = createMemo(() => {
+    const items = editorCatalog().items
+    const selectedId = scriptEditorPreferences.editorId
+    return (
+      items.find((item) => item.id === selectedId) ??
+      items.find((item) => !item.systemDefault) ??
+      items[0] ?? {
+        id: "system",
+        label: language.t("blueprint.editor.systemDefault" as never),
+        source: language.t("blueprint.editor.systemDefaultDescription" as never),
+        systemDefault: true,
+      }
+    )
+  })
+
+  const filteredAddOptions = createMemo(() => {
+    const query = nodeSearchQuery().trim().toLowerCase()
+    if (!query) return addOptions()
+    return addOptions().filter((option) => {
+      const haystack = [
+        option.label,
+        option.description,
+        option.kind === "script" ? option.script.function_name : "",
+        option.kind === "script" ? option.script.module_path : "",
+        option.kind === "script" ? option.script.description : "",
+      ]
+        .join(" ")
+        .toLowerCase()
+      return haystack.includes(query)
+    })
+  })
 
   const nodes = createMemo<NodeItem[]>(() => [
     ...Object.entries(draft.graph.route_nodes ?? {}).map(([id, node]) => ({
       id,
       node,
       type: "route" as const,
+    })),
+    ...Object.entries(draft.graph.common_nodes ?? {}).map(([id, node]) => ({
+      id,
+      node,
+      type: "common" as const,
+    })),
+    ...Object.entries(draft.graph.script_nodes ?? {}).map(([id, node]) => ({
+      id,
+      node,
+      type: "script" as const,
     })),
     ...Object.entries(draft.graph.agent_nodes).map(([id, node]) => ({
       id,
@@ -838,6 +1072,23 @@ export function BlueprintSidePanel(props: {
   const visibleEdges = createMemo(() =>
     draft.graph.edges.filter((edge) => visibleNodeIds().has(edge.from) && visibleNodeIds().has(edge.to)),
   )
+  const visibleEdgeGroups = createMemo(() => {
+    const visible = visibleEdges()
+    const visibleIds = new Set(visible.map((edge) => edge.id))
+    const seen = new Set<string>()
+    const groups: Array<{ id: string; edges: BlueprintEdge[] }> = []
+    for (const edge of visible) {
+      if (seen.has(edge.id)) continue
+      const group = fanEdgeGroup(draft, edge).filter((item) => visibleIds.has(item.id))
+      const edges = group.length ? group : [edge]
+      for (const item of edges) seen.add(item.id)
+      groups.push({
+        id: edges.map((item) => item.id).sort().join("|"),
+        edges,
+      })
+    }
+    return groups
+  })
   const incomingNodeIds = createMemo(() => new Set(visibleEdges().map((edge) => edge.to)))
   const outgoingNodeIds = createMemo(() => new Set(visibleEdges().map((edge) => edge.from)))
   const runtimeRunActive = createMemo(() => {
@@ -919,7 +1170,13 @@ export function BlueprintSidePanel(props: {
     runtimeRunActive() ? runtimeEdgeFlows(runtime().status, visibleEdges()) : new Set<string>(),
   )
   const desktopBlueprintSnapshot = createMemo<DesktopBlueprintSnapshotPayload>(() =>
-    createDesktopBlueprintSnapshot(projectDirectory, draft, runtimeRunActive() ? runtimeAgents() : undefined),
+    createDesktopBlueprintSnapshot(
+      projectDirectory,
+      currentBlueprintId(),
+      currentBlueprintName(),
+      draft,
+      runtimeRunActive() ? runtimeAgents() : undefined,
+    ),
   )
   let desktopBlueprintSnapshotTimer: number | undefined
   createEffect(
@@ -947,12 +1204,22 @@ export function BlueprintSidePanel(props: {
     if (draft.inspector?.type !== "node") return
     return draft.graph.route_nodes?.[draft.inspector.id]
   })
+  const inspectedCommon = createMemo(() => {
+    if (draft.inspector?.type !== "node") return
+    return draft.graph.common_nodes?.[draft.inspector.id]
+  })
+  const inspectedScript = createMemo(() => {
+    if (draft.inspector?.type !== "node") return
+    return draft.graph.script_nodes?.[draft.inspector.id]
+  })
   const inspectedTerminal = createMemo(() => undefined as BlueprintTerminalKind | undefined)
   const inspectedEdge = createMemo(() => {
     if (draft.inspector?.type !== "edge") return
     return visibleEdges().find((edge) => edge.id === draft.inspector?.id)
   })
-  const inspectorOpen = createMemo(() => !!inspectedAgent() || !!inspectedRoute() || !!inspectedEdge())
+  const inspectorOpen = createMemo(
+    () => !!inspectedAgent() || !!inspectedRoute() || !!inspectedCommon() || !!inspectedScript() || !!inspectedEdge(),
+  )
   const runtimeGraph = createMemo(() => toRuntimeGraphDraft(draft))
   const currentConfig = createMemo(() => ({
     python_path: draft.config?.python_path ?? "",
@@ -973,6 +1240,14 @@ export function BlueprintSidePanel(props: {
   const runtimeBusy = createMemo(
     () => runtime().loading || (!!runtime().runId && !isTerminalRuntimeStatus(runtimeStatus(runtime().status))),
   )
+  const scriptCompileDisabled = createMemo(
+    () => scriptCompiling() || runtimeBusy() || !draftReady() || !platform.listBlueprintScriptNodes,
+  )
+  const scriptCompileTooltip = createMemo(() => {
+    if (scriptCompiling()) return language.t("blueprint.script.compiling" as never)
+    if (!platform.listBlueprintScriptNodes || runtimeBusy()) return language.t("blueprint.script.compileUnavailable" as never)
+    return language.t("blueprint.script.compile" as never)
+  })
   const blueprintConfigLocked = createMemo(() => {
     if (projectWorkdirRelocating() || runtime().loading || persistence().loading) return true
     const runId = runtime().runId
@@ -1007,6 +1282,14 @@ export function BlueprintSidePanel(props: {
         detail: state.error,
       }
     }
+    if (blueprintPicker().error) {
+      return {
+        tone: "error",
+        title: language.t("blueprint.headerStatus.errorTitle" as never),
+        label: blueprintPicker().error ?? "",
+        detail: blueprintPicker().error ?? "",
+      }
+    }
     return undefined
   })
 
@@ -1022,7 +1305,101 @@ export function BlueprintSidePanel(props: {
 
   const persistProjectDraft = async (next: BlueprintDraft) => {
     if (!platform.saveBlueprint) return
-    await platform.saveBlueprint(projectDirectory, toBlueprintDocument(next, DEFAULT_BLUEPRINT_ID, DEFAULT_BLUEPRINT_NAME))
+    await platform.saveBlueprint(projectDirectory, toBlueprintDocument(next, currentBlueprintId(), currentBlueprintName()))
+  }
+
+  const resetBlueprintRunState = () => {
+    previousBlueprintDiffRunId = undefined
+    previousAcceptedDiffSignature = undefined
+    syncedAcceptedDiffSignature = undefined
+    setRuntime({ runs: [], events: [], loading: false })
+    setBlueprintDiffOpen(false)
+    setBlueprintDiffSelectedChangesetId(undefined)
+    setBlueprintDiff(reconcile(emptyBlueprintDiffState()))
+    setRuntimeTask("")
+    setRuntimeStartNodeIds([])
+    setAgentPanel("panels", reconcile({}))
+    setAgentPanel("streamEvents", reconcile({}))
+    setAgentPanel("streamCursor", 0)
+    setAgentPanel("streamError", undefined)
+    setWorkspacePanelArea(undefined)
+    setPanelMode("runtime")
+  }
+
+  const upsertBlueprintItem = (items: BlueprintSummary[], id: string, name: string): BlueprintSummary[] => {
+    const existing = items.find((item) => item.id === id)
+    const next = {
+      id,
+      name,
+      path: existing?.path ?? "",
+      updated_at: Date.now(),
+    }
+    return [next, ...items.filter((item) => item.id !== id)]
+  }
+
+  const blueprintNameForId = (blueprintId: string) =>
+    blueprintPicker().items.find((item) => item.id === blueprintId)?.name || blueprintId || DEFAULT_BLUEPRINT_NAME
+
+  const refreshProjectBlueprints = async (selectedId = currentBlueprintId()) => {
+    if (!platform.listBlueprints) return blueprintPicker().items
+    setBlueprintPicker((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      const items = await platform.listBlueprints(projectDirectory)
+      const selected = items.find((item) => item.id === selectedId) ?? items[0]
+      setBlueprintPicker((current) => ({
+        ...current,
+        id: selected?.id ?? current.id,
+        name: selected?.name ?? current.name,
+        items,
+        loading: false,
+        error: undefined,
+      }))
+      return items
+    } catch (error) {
+      const message = readableError(error)
+      setBlueprintPicker((current) => ({ ...current, loading: false, error: message }))
+      return blueprintPicker().items
+    }
+  }
+
+  const loadProjectBlueprint = async (blueprintId: string, fallbackName = blueprintNameForId(blueprintId)) => {
+    const openBlueprint = platform.openBlueprint
+    if (!openBlueprint) return
+    resetBlueprintRunState()
+    setBlueprintPicker((current) => ({
+      ...current,
+      id: blueprintId,
+      name: fallbackName,
+      loading: true,
+      error: undefined,
+    }))
+    setPersistence({ loaded: false, loading: true, saving: false, source: "local" })
+    try {
+      const document = await openBlueprint(projectDirectory, blueprintId)
+      const documentRecord = document as { id?: string; name?: string }
+      const documentId = typeof documentRecord.id === "string" && documentRecord.id.trim() ? documentRecord.id.trim() : blueprintId
+      const documentName =
+        typeof documentRecord.name === "string" && documentRecord.name.trim() ? documentRecord.name.trim() : fallbackName
+      applyingRemote = true
+      replaceDraft(fromBlueprintDocument(document as Parameters<typeof fromBlueprintDocument>[0], projectDirectory))
+      queueMicrotask(() => {
+        applyingRemote = false
+      })
+      setBlueprintPicker((current) => ({
+        ...current,
+        id: documentId,
+        name: documentName,
+        items: upsertBlueprintItem(current.items, documentId, documentName),
+        loading: false,
+        error: undefined,
+      }))
+      setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+    } catch (error) {
+      const message = readableError(error)
+      setBlueprintPicker((current) => ({ ...current, loading: false, error: message }))
+      setPersistence({ loaded: true, loading: false, saving: false, source: "local", error: message })
+      throw error
+    }
   }
 
   const saveProjectDraft = async (next: BlueprintDraft) => {
@@ -1060,6 +1437,95 @@ export function BlueprintSidePanel(props: {
     if (!ruleDir) return [] as BlueprintCatalogItem[]
     const items = await platform.listBlueprintRules?.(ruleDir)
     return items ?? []
+  }
+
+  const listScriptNodes = async () => {
+    const result = await platform.listBlueprintScriptNodes?.(projectDirectory)
+    const nodes = Array.isArray(result?.nodes) ? result.nodes : []
+    return {
+      scriptDir: typeof result?.script_dir === "string" ? result.script_dir : "",
+      nodes: nodes.map(normalizeScriptCatalogNode).filter(Boolean) as BlueprintScriptCatalogNode[],
+    }
+  }
+
+  const refreshScriptCatalog = () => setCatalogRefreshVersion((version) => version + 1)
+
+  const scriptCompileSummary = (result: BlueprintScriptCompileResult) =>
+    [
+      `${language.t("blueprint.script.compileUpdated" as never)}: ${result.updated}`,
+      `${language.t("blueprint.script.compileMissing" as never)}: ${result.missing}`,
+      `${language.t("blueprint.script.compileRemovedEdges" as never)}: ${result.removedEdges}`,
+    ].join(" · ")
+
+  const compileBlueprintScripts = async () => {
+    if (scriptCompiling()) return
+    if (!platform.listBlueprintScriptNodes || runtimeBusy()) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.script.compileFailed" as never),
+        description: language.t("blueprint.script.compileUnavailable" as never),
+      })
+      return
+    }
+    setScriptCompiling(true)
+    try {
+      const scripts = await listScriptNodes()
+      setCatalog((current) => ({
+        ...current,
+        scriptDir: scripts.scriptDir,
+        scriptNodes: scripts.nodes,
+        scriptError: undefined,
+      }))
+      const result = compileScriptNodesFromCatalog(draft, scripts.nodes)
+      replaceDraft(result.draft)
+      showToast({
+        variant: result.missing > 0 ? "default" : "success",
+        title: language.t((result.missing > 0 ? "blueprint.script.compileWarning" : "blueprint.script.compileSuccess") as never),
+        description: scriptCompileSummary(result),
+      })
+    } catch (error) {
+      const message = readableError(error)
+      setCatalog((current) => ({ ...current, scriptError: message }))
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.script.compileFailed" as never),
+        description: message,
+      })
+    } finally {
+      setScriptCompiling(false)
+    }
+  }
+
+  const refreshEditorCatalog = async () => {
+    if (!platform.listBlueprintEditors) return
+    setEditorCatalog((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      const items = await platform.listBlueprintEditors()
+      const normalized = items.filter((item) => item.id && item.label).map((item) =>
+        item.systemDefault
+          ? {
+              ...item,
+              label: language.t("blueprint.editor.systemDefault" as never),
+              source: language.t("blueprint.editor.systemDefaultDescription" as never),
+            }
+          : item,
+      )
+      setEditorCatalog({
+        items: normalized.length
+          ? normalized
+          : [
+              {
+                id: "system",
+                label: language.t("blueprint.editor.systemDefault" as never),
+                source: language.t("blueprint.editor.systemDefaultDescription" as never),
+                systemDefault: true,
+              },
+            ],
+        loading: false,
+      })
+    } catch (error) {
+      setEditorCatalog((current) => ({ ...current, loading: false, error: readableError(error) }))
+    }
   }
 
   let attemptedCommonConfigBackfill = false
@@ -1130,8 +1596,8 @@ export function BlueprintSidePanel(props: {
     setProjectWorkdirRelocating(true)
     setPersistence((current) => ({ ...current, saving: true, error: undefined }))
     try {
-      const document = toBlueprintDocument(draft, DEFAULT_BLUEPRINT_ID, DEFAULT_BLUEPRINT_NAME)
-      const result = await relocate(projectDirectory, DEFAULT_BLUEPRINT_ID, document, target, conflictPolicy)
+      const document = toBlueprintDocument(draft, currentBlueprintId(), currentBlueprintName())
+      const result = await relocate(projectDirectory, currentBlueprintId(), document, target, conflictPolicy)
       if (result.conflict === "target_exists") {
         setPersistence((current) => ({ ...current, saving: false, error: undefined }))
         showProjectWorkdirConflictDialog(result.targetProjectDir || target)
@@ -1167,6 +1633,87 @@ export function BlueprintSidePanel(props: {
       defaultPath,
     })
     if (typeof result === "string" && result.trim()) await relocateProjectWorkdir(result)
+  }
+
+  function openCreateBlueprintDialog() {
+    dialog.show(() => (
+      <BlueprintCreateDialog
+        existingIds={blueprintPicker().items.map((item) => item.id)}
+        onCreate={(name) => void createProjectBlueprint(name)}
+      />
+    ))
+  }
+
+  async function selectProjectBlueprint(blueprintId: string) {
+    const targetId = blueprintId.trim()
+    if (!targetId || targetId === currentBlueprintId() || runtimeBusy() || blueprintPicker().loading || persistence().saving) return
+    if (!platform.openBlueprint || !platform.saveBlueprint) {
+      setBlueprintPicker((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable" as never) }))
+      return
+    }
+    const previous = blueprintPicker()
+    const targetName = blueprintNameForId(targetId)
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+    }
+    setPersistence((current) => ({ ...current, saving: true, error: undefined }))
+    try {
+      await persistProjectDraft(draft)
+      setPersistence((current) => ({ ...current, saving: false, source: "project" }))
+      await loadProjectBlueprint(targetId, targetName)
+    } catch (error) {
+      const message = readableError(error)
+      setBlueprintPicker({ ...previous, loading: false, error: message })
+      setPersistence((current) => ({ ...current, loading: false, saving: false, error: message }))
+    }
+  }
+
+  async function createProjectBlueprint(name: string) {
+    if (runtimeBusy() || blueprintPicker().loading || persistence().saving) return
+    if (!platform.saveBlueprint) {
+      setBlueprintPicker((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable" as never) }))
+      return
+    }
+    const blueprintName = name.trim() || language.t("blueprint.document.new" as never)
+    const blueprintId = uniqueBlueprintId(blueprintName, blueprintPicker().items.map((item) => item.id))
+    const next = createDefaultBlueprintDraft(projectDirectory)
+    next.config = { ...currentConfig() }
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+    }
+    setPersistence((current) => ({ ...current, saving: true, error: undefined }))
+    setBlueprintPicker((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      await persistProjectDraft(draft)
+      await platform.saveBlueprint(projectDirectory, toBlueprintDocument(next, blueprintId, blueprintName))
+      resetBlueprintRunState()
+      applyingRemote = true
+      replaceDraft(next)
+      queueMicrotask(() => {
+        applyingRemote = false
+      })
+      setBlueprintPicker((current) => ({
+        ...current,
+        id: blueprintId,
+        name: blueprintName,
+        items: upsertBlueprintItem(current.items, blueprintId, blueprintName),
+        loading: false,
+        error: undefined,
+      }))
+      setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+      void refreshProjectBlueprints(blueprintId)
+    } catch (error) {
+      const message = readableError(error)
+      setBlueprintPicker((current) => ({ ...current, loading: false, error: message }))
+      setPersistence((current) => ({ ...current, saving: false, error: message }))
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.document.createFailed" as never),
+        description: message,
+      })
+    }
   }
 
   const detectAndApplyPythonPath = async () => {
@@ -1231,17 +1778,21 @@ export function BlueprintSidePanel(props: {
   createEffect(() => {
     const skillDir = currentConfig().skill_dir
     const ruleDir = currentConfig().rule_dir
+    catalogRefreshVersion()
     let cancelled = false
 
-    void Promise.allSettled([listSkills(skillDir), listRules(ruleDir)]).then(([skills, rules]) => {
+    void Promise.allSettled([listSkills(skillDir), listRules(ruleDir), listScriptNodes()]).then(([skills, rules, scripts]) => {
       if (cancelled) return
       setCatalog({
         skillDir,
         ruleDir,
+        scriptDir: scripts.status === "fulfilled" ? scripts.value.scriptDir : "",
         skills: skills.status === "fulfilled" ? skills.value : [],
         rules: rules.status === "fulfilled" ? rules.value : [],
+        scriptNodes: scripts.status === "fulfilled" ? scripts.value.nodes : [],
         skillError: skills.status === "rejected" ? readableError(skills.reason) : undefined,
         ruleError: rules.status === "rejected" ? readableError(rules.reason) : undefined,
+        scriptError: scripts.status === "rejected" ? readableError(scripts.reason) : undefined,
       })
     })
 
@@ -1263,17 +1814,16 @@ export function BlueprintSidePanel(props: {
     void (async () => {
       try {
         await platform.configureBlueprintRuntime?.(currentConfig().python_path)
-        const document = await openBlueprint(projectDirectory, DEFAULT_BLUEPRINT_ID)
-        applyingRemote = true
-        replaceDraft(fromBlueprintDocument(document as Parameters<typeof fromBlueprintDocument>[0], projectDirectory))
-        queueMicrotask(() => {
-          applyingRemote = false
-        })
-        setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+        const items = platform.listBlueprints ? await refreshProjectBlueprints(DEFAULT_BLUEPRINT_ID) : []
+        const selected = items.find((item) => item.id === DEFAULT_BLUEPRINT_ID) ?? items[0]
+        const targetBlueprintId = selected?.id ?? DEFAULT_BLUEPRINT_ID
+        const targetBlueprintName = selected?.name ?? DEFAULT_BLUEPRINT_NAME
+        await loadProjectBlueprint(targetBlueprintId, targetBlueprintName)
       } catch (error) {
         const code = typeof error === "object" && error !== null ? (error as { code?: string }).code : undefined
         if (code === "NOT_FOUND" || readableError(error).includes("NOT_FOUND")) {
           await saveProjectDraft(draft)
+          void refreshProjectBlueprints(currentBlueprintId())
           return
         }
         setPersistence({
@@ -1431,8 +1981,9 @@ export function BlueprintSidePanel(props: {
   createEffect(() => {
     if (!persistence().loaded || !platform.listBlueprintRuns || runtime().runId || runtime().runs.length) return
     let cancelled = false
+    const blueprintId = currentBlueprintId()
     void platform
-      .listBlueprintRuns(projectDirectory, DEFAULT_BLUEPRINT_ID)
+      .listBlueprintRuns(projectDirectory, blueprintId)
       .then((runs) => {
         if (cancelled) return
         const latest = runs[0]
@@ -1940,6 +2491,8 @@ export function BlueprintSidePanel(props: {
       const startNodeIds = runtimeStartNodeIds().slice()
       const accepted = await props.onBlueprintPlanningSubmit({
         task,
+        blueprintId: currentBlueprintId(),
+        blueprintName: currentBlueprintName(),
         startNodeIds,
         message: buildBlueprintPlanningMessage(task, startNodeIds),
       })
@@ -1954,6 +2507,74 @@ export function BlueprintSidePanel(props: {
       const message = readableError(error)
       setPersistence((current) => ({ ...current, saving: false, error: message }))
       setBlueprintFlowLock({ active: false })
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
+    }
+  }
+
+  async function startBlueprintRunDirect() {
+    const startNodes = runtimeStartNodeIds().slice()
+    const taskText = runtimeTask().trim()
+    if (!startNodes.length && !hasTickSourceNode(draft)) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.startNodeRequired" as never) }))
+      openRuntimePlanningPanel()
+      return
+    }
+    if (runtimeBusy()) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.busy" as never) }))
+      return
+    }
+    if (!platform.saveBlueprint || !platform.startBlueprintRun) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
+      return
+    }
+    const startDraft = await ensureDetectedPythonPath()
+    const configIssues = validateBlueprintConfigForStart(startDraft)
+    if (configIssues.length) {
+      setConfigIssues(configIssues)
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.configMissing" as never) }))
+      dialog.show(() => <BlueprintConfigRequiredDialog issues={configIssues} />)
+      return
+    }
+    const plan = createBlueprintStartPlan(startDraft, { startNodes, taskText })
+    if (!plan.start_nodes.length && !hasTickSourceNode(startDraft)) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.startNodeRequired" as never) }))
+      return
+    }
+    setConfigIssues([])
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+    }
+    setPanelMode("runtime")
+    setPersistence((current) => ({ ...current, saving: true, error: undefined }))
+    setRuntime((current) => ({ ...current, loading: true, action: "start", error: undefined }))
+    try {
+      await platform.configureBlueprintRuntime?.(startDraft.config.python_path)
+      await persistProjectDraft(startDraft)
+      setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+      const started = await platform.startBlueprintRun(projectDirectory, currentBlueprintId(), plan, "live")
+      const status = asRecord(started.status)
+      const recentEvents = arrayOfRecords(status?.recent_events)
+      const runId = stringValue(started.runId) ?? stringValue(asRecord(started.run)?.runId) ?? stringValue(asRecord(status?.run)?.runId)
+      syncAgentPanelUserMessagesFromRuntimeEvents(recentEvents)
+      setRuntime((current) => ({
+        ...current,
+        runId,
+        runs: mergeRuntimeRunsWithStatus(current.runs, started),
+        status,
+        explanation: asRecord(started.explanation),
+        events: recentEvents,
+        loading: false,
+        action: undefined,
+        error: undefined,
+        lastUpdatedAt: Date.now(),
+      }))
+      setRuntimeTask("")
+      scheduleOpenTestAgentPanelPersists()
+      if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
+    } catch (error) {
+      const message = readableError(error)
+      setPersistence((current) => ({ ...current, saving: false, error: message }))
       setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
     }
   }
@@ -2437,9 +3058,104 @@ export function BlueprintSidePanel(props: {
     })
   }
 
-  const addNodeAtCenter = (kind: BlueprintAddNodeKind) => {
-    replaceDraft(addNode(draft, { kind, position: positionAtCenter(kind) }))
+  const addNodeFromOption = (option: AddNodeOption, position?: BlueprintNodeLayout) => {
+    replaceDraft(
+      option.kind === "script"
+        ? addScriptNode(draft, { position, script: option.script })
+        : addNode(draft, { kind: option.kind, position }),
+    )
     setConnection(undefined)
+    setNodeSearch(undefined)
+  }
+
+  const openNodeSearch = (clientX: number, clientY: number) => {
+    setGlobalConfigOpen(false)
+    setScriptEditorMenuOpen(false)
+    setNodeSearchQuery("")
+    setNodeSearch({ clientX, clientY })
+  }
+
+  const addNodeFromSearch = (option: AddNodeOption) => {
+    const current = nodeSearch()
+    addNodeFromOption(
+      option,
+      current ? positionForClient(option.kind, current.clientX, current.clientY) : positionAtCenter(option.kind),
+    )
+  }
+
+  const openScriptNodeInEditor = async (script: Pick<BlueprintScriptNode, "module_path">) => {
+    if (!script.module_path || !platform.openBlueprintScriptInEditor) return
+    try {
+      const result = await platform.openBlueprintScriptInEditor(projectDirectory, script.module_path, selectedScriptEditor().id)
+      const path = typeof result?.path === "string" ? result.path : projectDirectory
+      showToast({
+        variant: "success",
+        title: language.t("blueprint.script.openSuccess" as never),
+        description: language.t("blueprint.script.openSuccessDescription" as never, { path }),
+      })
+    } catch (error) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.script.openFailed" as never),
+        description: readableError(error),
+      })
+    }
+  }
+
+  const createScriptNodeAtSearch = async (name: string, description: string, anchor?: NodeSearchState) => {
+    if (!platform.createBlueprintScriptNode) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.script.createFailed" as never),
+        description: language.t("blueprint.runtime.unavailable" as never),
+      })
+      return
+    }
+    try {
+      const result = await platform.createBlueprintScriptNode(projectDirectory, name, description)
+      const discoveredScript =
+        normalizeScriptCatalogNode(result?.node) ??
+        normalizeScriptCatalogNode({
+          module_path: result?.module_path,
+          function_name: result?.function_name,
+          title: name,
+          description,
+          inputs: [{ name: "payload", type: "dict", required: true }],
+          outputs: [{ name: "result", type: "dict", required: true }],
+        })
+      const script =
+        discoveredScript && description && !discoveredScript.description
+          ? { ...discoveredScript, description }
+          : discoveredScript
+      refreshScriptCatalog()
+      if (script) {
+        addNodeFromOption(
+          { kind: "script", label: script.title, description: scriptSignature(script), script },
+          anchor ? positionForClient("script", anchor.clientX, anchor.clientY) : positionAtCenter("script"),
+        )
+        await openScriptNodeInEditor(script)
+      }
+    } catch (error) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.script.createFailed" as never),
+        description: readableError(error),
+      })
+    }
+  }
+
+  const openCreateScriptNodeDialog = () => {
+    if (!platform.createBlueprintScriptNode) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.script.createFailed" as never),
+        description: language.t("blueprint.script.bridgeUnavailable" as never),
+      })
+      return
+    }
+    const anchor = nodeSearch()
+    setNodeSearch(undefined)
+    dialog.show(() => <BlueprintScriptCreateDialog onCreate={(name, description) => createScriptNodeAtSearch(name, description, anchor)} />)
   }
 
   const deleteCurrent = () => {
@@ -2491,6 +3207,7 @@ export function BlueprintSidePanel(props: {
 
   const handleWheel = (event: WheelEvent) => {
     event.preventDefault()
+    setNodeSearch(undefined)
     const rect = canvasRef?.getBoundingClientRect()
     if (!rect) return
 
@@ -2511,6 +3228,7 @@ export function BlueprintSidePanel(props: {
   const handleCanvasPointerDown = (event: PointerEvent) => {
     closeFloatingAgentPanels()
     cancelAgentPanelLongPress()
+    setNodeSearch(undefined)
     if (event.button === 0) {
       replaceDraft(setInspector(setSelection(draft, undefined), undefined))
       return
@@ -2519,7 +3237,7 @@ export function BlueprintSidePanel(props: {
     event.preventDefault()
     replaceDraft(setSelection(draft, undefined))
     setDrag({
-      type: "pan",
+      type: "pan-pending",
       startClientX: event.clientX,
       startClientY: event.clientY,
       startX: draft.layout.viewport.x,
@@ -2538,11 +3256,26 @@ export function BlueprintSidePanel(props: {
     event.preventDefault()
   }
 
+  const addNodeFromDragEvent = (event: DragEvent, position: BlueprintNodeLayout | undefined) => {
+    const kind = event.dataTransfer?.getData("application/x-gulicode-blueprint-node") as BlueprintAddNodeKind
+    if (!kind) return false
+    if (kind === "script") {
+      const scriptText = event.dataTransfer?.getData("application/x-gulicode-blueprint-script-node")
+      const script = scriptText ? normalizeScriptCatalogNodeFromJson(scriptText) : undefined
+      if (!script) return false
+      addNodeFromOption({ kind: "script", label: script.title, description: scriptSignature(script), script }, position)
+      return true
+    }
+    replaceDraft(addNode(draft, { kind, position }))
+    setConnection(undefined)
+    return true
+  }
+
   const handleCanvasDrop = (event: DragEvent) => {
     const kind = event.dataTransfer?.getData("application/x-gulicode-blueprint-node") as BlueprintAddNodeKind
     if (!kind) return
     event.preventDefault()
-    replaceDraft(addNode(draft, { kind, position: positionForClient(kind, event.clientX, event.clientY) }))
+    addNodeFromDragEvent(event, positionForClient(kind, event.clientX, event.clientY))
   }
 
   const isAddNodeDrag = (dataTransfer?: DataTransfer | null) =>
@@ -2552,6 +3285,21 @@ export function BlueprintSidePanel(props: {
     const rect = canvasRef?.getBoundingClientRect()
     if (!rect) return false
     return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom
+  }
+
+  const nodeSearchStyle = () => {
+    const current = nodeSearch()
+    const rect = canvasRef?.getBoundingClientRect()
+    if (!current || !rect) return {}
+    const localX = current.clientX - rect.left
+    const localY = current.clientY - rect.top
+    const x = clamp(localX, 8, Math.max(8, rect.width - NODE_SEARCH_CARD_WIDTH - 8))
+    const y = clamp(localY, 8, Math.max(8, rect.height - NODE_SEARCH_CARD_MAX_HEIGHT - 8))
+    return {
+      left: `${x}px`,
+      top: `${y}px`,
+      width: `${NODE_SEARCH_CARD_WIDTH}px`,
+    } as JSX.CSSProperties
   }
 
   const handleWindowDragOver = (event: DragEvent) => {
@@ -2565,13 +3313,13 @@ export function BlueprintSidePanel(props: {
     if (!kind || !clientInsideCanvas(event.clientX, event.clientY)) return
     event.preventDefault()
     event.stopPropagation()
-    replaceDraft(addNode(draft, { kind, position: positionForClient(kind, event.clientX, event.clientY) }))
-    setConnection(undefined)
+    addNodeFromDragEvent(event, positionForClient(kind, event.clientX, event.clientY))
   }
 
   const handleNodePointerDown = (event: PointerEvent, item: NodeItem) => {
     const id = item.id
     closeFloatingAgentPanels()
+    setNodeSearch(undefined)
     if (event.button === 2) {
       cancelAgentPanelLongPress()
       event.stopPropagation()
@@ -2635,7 +3383,7 @@ export function BlueprintSidePanel(props: {
     })
   }
 
-  const handleOutputPortPointerDown = (event: PointerEvent, id: string) => {
+  const handleOutputPortPointerDown = (event: PointerEvent, id: string, portName = DEFAULT_OUTPUT_PORT) => {
     if (event.button !== 0) return
     cancelAgentPanelLongPress()
     event.preventDefault()
@@ -2643,19 +3391,38 @@ export function BlueprintSidePanel(props: {
     selectNode(id)
     setConnection({
       source: id,
-      output_port: DEFAULT_OUTPUT_PORT,
+      output_port: portName,
       pointer: worldPointFromClient(event.clientX, event.clientY),
     })
   }
 
-  const handleInputPortPointerUp = (event: PointerEvent, id: string) => {
+  const connectPorts = (source: string, outputPort: string, target: string, inputPort: string) => {
+    const result = canConnectPorts(draft, source, outputPort, target, inputPort)
+    if (!result.ok) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.connection.invalid" as never),
+        description:
+          result.reason === "type_mismatch"
+            ? language.t("blueprint.connection.typeMismatch" as never, {
+                source: result.sourceType ?? "?",
+                target: result.targetType ?? "?",
+              } as never)
+            : language.t("blueprint.connection.unknownPort" as never),
+      })
+      return
+    }
+    replaceDraft(addEdge(draft, source, target, "exec", outputPort, inputPort))
+  }
+
+  const handleInputPortPointerUp = (event: PointerEvent, id: string, portName = DEFAULT_INPUT_PORT) => {
     const current = connection()
     if (!current) return
     cancelAgentPanelLongPress()
     event.preventDefault()
     event.stopPropagation()
     if (current.source !== id) {
-      replaceDraft(addEdge(draft, current.source, id, "exec", current.output_port, DEFAULT_INPUT_PORT))
+      connectPorts(current.source, current.output_port, id, portName)
     }
     setConnection(undefined)
   }
@@ -2670,6 +3437,16 @@ export function BlueprintSidePanel(props: {
 
     const current = drag()
     if (!current) return
+
+    if (current.type === "pan-pending") {
+      const dx = event.clientX - current.startClientX
+      const dy = event.clientY - current.startClientY
+      if (Math.hypot(dx, dy) < RIGHT_CLICK_PAN_THRESHOLD) return
+      setDrag({ ...current, type: "pan" })
+      setDraft("layout", "viewport", "x", current.startX + dx)
+      setDraft("layout", "viewport", "y", current.startY + dy)
+      return
+    }
 
     if (current.type === "pan") {
       setDraft("layout", "viewport", "x", current.startX + event.clientX - current.startClientX)
@@ -2707,15 +3484,24 @@ export function BlueprintSidePanel(props: {
 
   const handlePointerUp = (event: PointerEvent) => {
     endAgentPanelLongPress(event)
+    const currentDrag = drag()
 
     const currentConnection = connection()
     if (currentConnection) {
       const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null
       const inputPort = target?.closest("[data-blueprint-port='input']") as HTMLElement | null
       const targetNode = inputPort?.dataset.blueprintNodeId
+      const targetPort = inputPort?.dataset.blueprintPortName || DEFAULT_INPUT_PORT
       if (targetNode && targetNode !== currentConnection.source) {
-        replaceDraft(addEdge(draft, currentConnection.source, targetNode, "exec", currentConnection.output_port, DEFAULT_INPUT_PORT))
+        connectPorts(currentConnection.source, currentConnection.output_port, targetNode, targetPort)
       }
+    }
+    if (currentDrag?.type === "pan-pending") {
+      event.preventDefault()
+      setDrag(undefined)
+      setConnection(undefined)
+      openNodeSearch(currentDrag.startClientX, currentDrag.startClientY)
+      return
     }
     setDrag(undefined)
     setConnection(undefined)
@@ -2728,6 +3514,11 @@ export function BlueprintSidePanel(props: {
   }
 
   const handleKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape" && nodeSearch()) {
+      event.preventDefault()
+      setNodeSearch(undefined)
+      return
+    }
     if (event.key !== "Delete" && event.key !== "Backspace") return
     if (!draft.selection) return
     const target = event.target as HTMLElement | null
@@ -2740,6 +3531,7 @@ export function BlueprintSidePanel(props: {
   const refreshProgressAnchor = () => setProgressAnchorVersion((version) => version + 1)
 
   onMount(() => {
+    void refreshEditorCatalog()
     window.addEventListener("pointermove", handlePointerMove)
     window.addEventListener("pointerup", handlePointerUp)
     window.addEventListener("pointercancel", handlePointerCancel)
@@ -2836,38 +3628,58 @@ export function BlueprintSidePanel(props: {
         style={BLUEPRINT_CHROME_THEME}
       >
         <div class="flex min-w-0 items-center gap-1">
+          <BlueprintDocumentSelect
+            items={blueprintPicker().items}
+            selectedId={currentBlueprintId()}
+            selectedName={currentBlueprintName()}
+            loading={blueprintPicker().loading}
+            disabled={runtimeBusy() || persistence().loading || persistence().saving || projectWorkdirRelocating() || blueprintPicker().loading}
+            onSelect={(blueprintId) => void selectProjectBlueprint(blueprintId)}
+            onCreate={openCreateBlueprintDialog}
+          />
           <DropdownMenu
-            open={addMenuOpen()}
+            open={scriptEditorMenuOpen()}
             onOpenChange={(open) => {
-              setAddMenuOpen(open)
-              if (open) setGlobalConfigOpen(false)
+              setScriptEditorMenuOpen(open)
+              if (open) {
+                setGlobalConfigOpen(false)
+                setNodeSearch(undefined)
+                void refreshEditorCatalog()
+              }
             }}
           >
-            <DropdownMenu.Trigger as={Button} size="small" variant="ghost" icon="plus-small" class="h-7 px-2">
-              <span class="hidden lg:inline">{language.t("blueprint.toolbar.addNode")}</span>
-              <Icon size="small" name="chevron-down" class="text-icon-weak" />
+            <DropdownMenu.Trigger
+              data-blueprint-script-editor-select
+              as={Button}
+              size="small"
+              variant="ghost"
+              icon="code"
+              class="h-7 max-w-56 px-2"
+              title={language.t("blueprint.editor.select" as never)}
+            >
+              <span class="hidden min-w-0 truncate lg:inline">{selectedScriptEditor().label}</span>
+              <Icon size="small" name="chevron-down" class="shrink-0 text-icon-weak" />
             </DropdownMenu.Trigger>
             <DropdownMenu.Portal>
-              <DropdownMenu.Content class="mt-1 w-56">
-                <For each={addOptions()}>
-                  {(option) => (
-                    <DropdownMenu.Item
-                      draggable
-                      onDragStart={(event: DragEvent) => {
-                        event.dataTransfer?.setData("application/x-gulicode-blueprint-node", option.kind)
-                        event.dataTransfer?.setData("text/plain", option.label)
-                        setAddMenuOpen(false)
-                      }}
-                      onSelect={() => addNodeAtCenter(option.kind)}
-                    >
-                      <Icon size="small" name={addNodeIcon(option.kind)} />
-                      <div class="flex min-w-0 flex-col">
-                        <DropdownMenu.ItemLabel>{option.label}</DropdownMenu.ItemLabel>
-                        <DropdownMenu.ItemDescription>{option.description}</DropdownMenu.ItemDescription>
-                      </div>
-                    </DropdownMenu.Item>
-                  )}
-                </For>
+              <DropdownMenu.Content class="mt-1 w-60">
+                <Show when={!editorCatalog().loading} fallback={<div class="px-2 py-2 text-12-regular text-text-weaker">{language.t("blueprint.editor.loading" as never)}</div>}>
+                  <For each={scriptEditorCandidates()}>
+                    {(editor) => (
+                      <DropdownMenu.Item
+                        onSelect={() => {
+                          setScriptEditorPreferences("editorId", editor.id)
+                          setScriptEditorMenuOpen(false)
+                        }}
+                      >
+                        <Icon size="small" name={editor.id === selectedScriptEditor().id ? "check-small" : "code"} />
+                        <div class="flex min-w-0 flex-col">
+                          <DropdownMenu.ItemLabel class="truncate">{editor.label}</DropdownMenu.ItemLabel>
+                          <DropdownMenu.ItemDescription class="truncate">{editor.source}</DropdownMenu.ItemDescription>
+                        </div>
+                      </DropdownMenu.Item>
+                    )}
+                  </For>
+                </Show>
               </DropdownMenu.Content>
             </DropdownMenu.Portal>
           </DropdownMenu>
@@ -2888,7 +3700,8 @@ export function BlueprintSidePanel(props: {
               }
               onClick={() => {
                 if (blueprintConfigLocked()) return
-                setAddMenuOpen(false)
+                setNodeSearch(undefined)
+                setScriptEditorMenuOpen(false)
                 setGlobalConfigOpen((open) => !open)
               }}
             >
@@ -2948,7 +3761,7 @@ export function BlueprintSidePanel(props: {
               aria-expanded={blueprintDiffOpen()}
               onClick={() => {
                 if (!blueprintDiffAvailable()) return
-                setAddMenuOpen(false)
+                setNodeSearch(undefined)
                 setGlobalConfigOpen(false)
                 setBlueprintDiffOpen((open) => !open)
                 void refreshBlueprintRunDiff(runtime().runId, { quiet: true })
@@ -3037,6 +3850,25 @@ export function BlueprintSidePanel(props: {
           onDragOver={handleCanvasDragOver}
           onDrop={handleCanvasDrop}
         >
+          <div class="pointer-events-auto absolute left-3 top-3 z-30">
+            <Tooltip placement="right" value={scriptCompileTooltip()}>
+              <Button
+                data-blueprint-script-compile
+                size="small"
+                variant="secondary"
+                icon="code"
+                class="h-8 border border-[rgba(103,232,249,0.34)] bg-[#071019]/92 px-3 text-[#e8f7ff] shadow-[0_10px_28px_rgba(0,0,0,0.28)] hover:bg-[#0d1b2a]"
+                disabled={scriptCompileDisabled()}
+                onPointerDown={(event: PointerEvent) => event.stopPropagation()}
+                onClick={(event: MouseEvent) => {
+                  event.stopPropagation()
+                  void compileBlueprintScripts()
+                }}
+              >
+                {language.t((scriptCompiling() ? "blueprint.script.compiling" : "blueprint.script.compile") as never)}
+              </Button>
+            </Tooltip>
+          </div>
           <div
             class="absolute left-0 top-0"
             style={{
@@ -3045,48 +3877,84 @@ export function BlueprintSidePanel(props: {
             }}
           >
             <svg class="absolute left-0 top-0 overflow-visible" width="1" height="1" aria-hidden="true">
-              <For each={visibleEdges()}>
-                {(edge) => {
-                  const path = () => edgePath(draft, edge)
-                  const selected = () => draft.selection?.type === "edge" && draft.selection.id === edge.id
-                  const flowing = () => runtimeEdgeFlowIds().has(edge.id)
+              <For each={visibleEdgeGroups()}>
+                {(group) => {
+                  const geometry = () => edgeGroupGeometry(draft, group.edges)
+                  const primaryEdge = () => group.edges[0]
+                  const selected = () =>
+                    draft.selection?.type === "edge" && group.edges.some((edge) => edge.id === draft.selection?.id)
+                  const flowing = () => group.edges.some((edge) => runtimeEdgeFlowIds().has(edge.id))
+                  const hovered = () => hoveredEdgeGroupId() === group.id
+                  const active = () => selected() || hovered() || flowing()
+                  const strokeColor = () => (active() ? "var(--blueprint-edge-active)" : "var(--blueprint-edge)")
+                  const marker = () => (active() ? "url(#blueprint-arrow-active)" : "url(#blueprint-arrow)")
                   return (
-                    <g>
-                      <path
-                        d={path()}
-                        fill="none"
-                        stroke="transparent"
-                        stroke-width="14"
-                        style={{ "pointer-events": "stroke" }}
-                        class="cursor-pointer"
-                        onPointerDown={(event) => {
-                          event.stopPropagation()
-                          inspectEdge(edge.id)
-                        }}
-                      />
-                      <path
-                        d={path()}
-                        fill="none"
-                        stroke={selected() || flowing() ? "var(--blueprint-edge-active)" : "var(--blueprint-edge)"}
-                        stroke-width={selected() || flowing() ? 2 : 1.5}
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        marker-end="url(#blueprint-arrow)"
-                        style={{ "pointer-events": "none" }}
-                      />
+                    <g
+                      data-blueprint-edge-group={group.id}
+                      data-blueprint-edge-count={group.edges.length}
+                      onPointerEnter={() => setHoveredEdgeGroupId(group.id)}
+                      onPointerLeave={() => setHoveredEdgeGroupId((current) => (current === group.id ? undefined : current))}
+                    >
+                      <For each={geometry().segments}>
+                        {(segment) => (
+                          <>
+                            <path
+                              d={segment.d}
+                              fill="none"
+                              stroke="transparent"
+                              stroke-width="14"
+                              style={{ "pointer-events": "stroke" }}
+                              class="cursor-pointer"
+                              onPointerDown={(event) => {
+                                event.stopPropagation()
+                                const edge = primaryEdge()
+                                if (edge) inspectEdge(edge.id)
+                              }}
+                            />
+                            <path
+                              d={segment.d}
+                              fill="none"
+                              stroke={strokeColor()}
+                              stroke-width={active() ? 2 : 1.5}
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                              marker-end={segment.markerEnd ? marker() : undefined}
+                              style={{ "pointer-events": "none" }}
+                            />
+                          </>
+                        )}
+                      </For>
+                      <Show when={geometry().hub}>
+                        {(hub) => (
+                          <circle
+                            data-blueprint-edge-fan-hub
+                            cx={hub().x}
+                            cy={hub().y}
+                            r={3.2}
+                            fill={strokeColor()}
+                            stroke="#071019"
+                            stroke-width="1.2"
+                            style={{ "pointer-events": "none" }}
+                          />
+                        )}
+                      </Show>
                       <Show when={flowing()}>
                         <g data-blueprint-runtime-flow style={{ "pointer-events": "none" }}>
-                          <For each={BLUEPRINT_RUNTIME_FLOW_DOTS}>
-                            {(dot) => (
-                              <circle r="2.7" fill="#bbf7d0" opacity="0.95">
-                                <animateMotion
-                                  path={path()}
-                                  dur="1.45s"
-                                  begin={`-${dot * 0.16}s`}
-                                  repeatCount="indefinite"
-                                  calcMode="linear"
-                                />
-                              </circle>
+                          <For each={group.edges}>
+                            {(edge) => (
+                              <For each={BLUEPRINT_RUNTIME_FLOW_DOTS}>
+                                {(dot) => (
+                                  <circle r="2.7" fill="#bbf7d0" opacity="0.95">
+                                    <animateMotion
+                                      path={edgePath(draft, edge)}
+                                      dur="1.45s"
+                                      begin={`-${dot * 0.16}s`}
+                                      repeatCount="indefinite"
+                                      calcMode="linear"
+                                    />
+                                  </circle>
+                                )}
+                              </For>
                             )}
                           </For>
                         </g>
@@ -3136,16 +4004,93 @@ export function BlueprintSidePanel(props: {
                   agentPanelProgress={agentPanelPress()?.nodeId === item.id ? (agentPanelPress()?.progress ?? 0) : 0}
                   layout={draft.layout.nodes[item.id]}
                   onPointerDown={(event) => handleNodePointerDown(event, item)}
-                  onDoubleClick={() => inspectNode(item.id)}
+                  onDoubleClick={() => {
+                    if (item.type === "script") {
+                      void openScriptNodeInEditor(item.node)
+                      return
+                    }
+                    inspectNode(item.id)
+                  }}
                   onDelete={() => replaceDraft(deleteNode(draft, item.id))}
                   onEdit={() => inspectNode(item.id)}
                   onInfoPanel={() => void openAgentPanel(item.id, false)}
-                  onOutputPointerDown={(event) => handleOutputPortPointerDown(event, item.id)}
-                  onInputPointerUp={(event) => handleInputPortPointerUp(event, item.id)}
+                  onScriptCollapsedChange={(collapsed) => replaceDraft(updateScriptNode(draft, item.id, { collapsed }))}
+                  onOutputPointerDown={(event, portName) => handleOutputPortPointerDown(event, item.id, portName)}
+                  onInputPointerUp={(event, portName) => handleInputPortPointerUp(event, item.id, portName)}
                 />
               )}
             </For>
           </div>
+          <Show when={nodeSearch()}>
+            <div
+              data-blueprint-node-search
+              class="absolute z-40 flex max-h-[360px] flex-col overflow-hidden rounded-md border border-[rgba(103,232,249,0.28)] bg-[#071019]/98 shadow-[0_18px_48px_rgba(0,0,0,0.52)] backdrop-blur"
+              style={nodeSearchStyle()}
+              onPointerDown={(event) => event.stopPropagation()}
+              onWheel={(event) => event.stopPropagation()}
+              onContextMenu={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+              }}
+            >
+              <div class="flex items-center gap-2 border-b border-[rgba(103,232,249,0.16)] p-2">
+                <input
+                  ref={nodeSearchInputRef}
+                  data-blueprint-node-search-input
+                  class="h-8 min-w-0 flex-1 rounded-sm border border-[rgba(103,232,249,0.18)] bg-[#020817] px-2 text-13-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(103,232,249,0.72)]"
+                  value={nodeSearchQuery()}
+                  placeholder={language.t("blueprint.nodeSearch.placeholder" as never)}
+                  onInput={(event) => setNodeSearchQuery(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault()
+                      setNodeSearch(undefined)
+                      return
+                    }
+                    if (event.key !== "Enter") return
+                    const first = filteredAddOptions()[0]
+                    if (!first) return
+                    event.preventDefault()
+                    addNodeFromSearch(first)
+                  }}
+                />
+                <Tooltip placement="top" value={language.t("blueprint.script.create" as never)}>
+                  <IconButton
+                    data-blueprint-script-create
+                    icon="plus-small"
+                    variant="ghost"
+                    class="h-8 w-8 shrink-0 text-[#67e8f9]"
+                    onClick={openCreateScriptNodeDialog}
+                    aria-label={language.t("blueprint.script.create" as never)}
+                  />
+                </Tooltip>
+              </div>
+              <div data-blueprint-node-search-list class="max-h-[264px] overflow-y-auto py-1">
+                <Show
+                  when={filteredAddOptions().length > 0}
+                  fallback={<div class="px-3 py-3 text-12-regular text-[#95afc4]">{language.t("blueprint.nodeSearch.empty" as never)}</div>}
+                >
+                  <For each={filteredAddOptions()}>
+                    {(option) => (
+                      <button
+                        type="button"
+                        data-blueprint-node-search-option
+                        data-kind={option.kind}
+                        class="flex min-h-11 w-full items-center gap-2 px-3 py-2 text-left hover:bg-[rgba(103,232,249,0.10)] focus:bg-[rgba(103,232,249,0.14)] focus:outline-none"
+                        onClick={() => addNodeFromSearch(option)}
+                      >
+                        <Icon size="small" name={addNodeIcon(option.kind)} class="shrink-0 text-[#67e8f9]" />
+                        <span class="min-w-0 flex-1">
+                          <span class="block truncate text-13-medium text-[#f8fdff]">{option.label}</span>
+                          <span class="block truncate text-11-regular text-[#95afc4]">{option.description}</span>
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </Show>
+              </div>
+            </div>
+          </Show>
           <div class="pointer-events-auto absolute bottom-4 left-4 z-30">
             <BlueprintCollaborationAuthPanel defaultUsername="1" />
           </div>
@@ -3217,14 +4162,25 @@ export function BlueprintSidePanel(props: {
                   startNodeOptions={runtimeStartNodeOptions()}
                   selectedStartNodeIds={runtimeStartNodeIds()}
                   task={runtimeTask()}
-                  taskDisabled={runtimeBusy() || projectWorkdirRelocating() || !persistence().loaded || !props.onBlueprintPlanningSubmit}
+                  taskDisabled={runtimeBusy() || projectWorkdirRelocating() || !persistence().loaded}
                   submitDisabled={runtimeBusy() || projectWorkdirRelocating() || !persistence().loaded || !props.onBlueprintPlanningSubmit}
+                  directRunDisabled={
+                    runtimeBusy() ||
+                    projectWorkdirRelocating() ||
+                    persistence().saving ||
+                    blueprintPicker().loading ||
+                    !persistence().loaded ||
+                    (runtimeStartNodeIds().length === 0 && !hasTickSourceNode(draft)) ||
+                    !platform.saveBlueprint ||
+                    !platform.startBlueprintRun
+                  }
                   taskInputRef={(el) => {
                     runtimeTaskInputRef = el
                   }}
                   onTaskInput={setRuntimeTask}
                   onStartNodeToggle={toggleRuntimeStartNode}
                   onSubmitPlanningTask={() => void submitBlueprintPlanningTask()}
+                  onDirectRun={() => void startBlueprintRunDirect()}
                   onRefresh={() => void refreshBlueprintRuntime()}
                   onEnd={(action) => void endBlueprintRuntime(action)}
                   workspacePanelArea={workspacePanelArea()}
@@ -3237,6 +4193,8 @@ export function BlueprintSidePanel(props: {
                   draft={draft}
                   selectedAgent={inspectedAgent()}
                   selectedRoute={inspectedRoute()}
+                  selectedCommon={inspectedCommon()}
+                  selectedScript={inspectedScript()}
                   selectedTerminal={inspectedTerminal()}
                   selectedNodeId={draft.inspector?.type === "node" ? draft.inspector.id : undefined}
                   selectedEdge={inspectedEdge()}
@@ -3247,6 +4205,8 @@ export function BlueprintSidePanel(props: {
                   catalog={catalog()}
                   modelCatalog={modelCatalog()}
                   refreshModelCatalog={refreshModelCatalog}
+                  compileBlueprintScripts={compileBlueprintScripts}
+                  scriptCompiling={scriptCompiling()}
                 />
               </Match>
             </Switch>
@@ -3482,6 +4442,176 @@ function BlueprintDiffDetailView(props: { detail: BlueprintChangesetDiffDetail; 
   )
 }
 
+function BlueprintDocumentSelect(props: {
+  items: BlueprintSummary[]
+  selectedId: string
+  selectedName: string
+  loading: boolean
+  disabled: boolean
+  onSelect: (blueprintId: string) => void
+  onCreate: () => void
+}) {
+  const language = useLanguage()
+  const selectedItem = () => props.items.find((item) => item.id === props.selectedId)
+  const label = () => selectedItem()?.name || props.selectedName || props.selectedId
+
+  return (
+    <DropdownMenu placement="bottom-start">
+      <DropdownMenu.Trigger
+        data-blueprint-document-select
+        as={Button}
+        size="small"
+        variant="ghost"
+        icon="blueprint"
+        class="h-7 max-w-[220px] px-2"
+        disabled={props.disabled || props.loading}
+        title={language.t("blueprint.document.select" as never)}
+      >
+        <span class="min-w-0 truncate">{props.loading ? language.t("common.loading") : label()}</span>
+        <Icon size="small" name="chevron-down" class="shrink-0 text-icon-weak" />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content class="mt-1 max-h-72 w-72 overflow-y-auto">
+          <Show
+            when={props.items.length > 0}
+            fallback={<div class="px-2 py-2 text-12-regular text-text-weaker">{language.t("blueprint.document.empty" as never)}</div>}
+          >
+            <For each={props.items}>
+              {(item) => (
+                <DropdownMenu.Item
+                  onSelect={() => props.onSelect(item.id)}
+                  class="gap-2"
+                >
+                  <Icon
+                    size="small"
+                    name={item.id === props.selectedId ? "check-small" : "blueprint"}
+                    class={item.id === props.selectedId ? "text-icon-strong-base" : "text-icon-weak"}
+                  />
+                  <div class="flex min-w-0 flex-col">
+                    <DropdownMenu.ItemLabel class="truncate">{item.name || item.id}</DropdownMenu.ItemLabel>
+                    <DropdownMenu.ItemDescription class="truncate">{item.id}</DropdownMenu.ItemDescription>
+                  </div>
+                </DropdownMenu.Item>
+              )}
+            </For>
+          </Show>
+          <DropdownMenu.Separator />
+          <DropdownMenu.Item data-blueprint-document-create onSelect={props.onCreate}>
+            <Icon size="small" name="plus-small" />
+            <DropdownMenu.ItemLabel>{language.t("blueprint.document.new" as never)}</DropdownMenu.ItemLabel>
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu>
+  )
+}
+
+function BlueprintCreateDialog(props: {
+  existingIds: string[]
+  onCreate: (name: string) => void | Promise<void>
+}) {
+  const language = useLanguage()
+  const dialog = useDialog()
+  const [name, setName] = createSignal("")
+  const previewId = () => uniqueBlueprintId(name() || language.t("blueprint.document.new" as never), props.existingIds)
+  const submit = () => {
+    const value = name().trim()
+    if (!value) return
+    dialog.close()
+    void props.onCreate(value)
+  }
+
+  return (
+    <Dialog title={language.t("blueprint.document.createTitle" as never)} action={<span aria-hidden="true" />} fit>
+      <div data-blueprint-create-dialog class="flex w-[420px] max-w-[calc(100vw-2rem)] flex-col gap-4 px-6 pb-4">
+        <label class="flex flex-col gap-1">
+          <span class="text-12-medium text-text-strong">{language.t("blueprint.document.name" as never)}</span>
+          <input
+            data-blueprint-create-name
+            class="h-9 rounded-md border border-border-weaker-base bg-background-stronger px-2 text-13-regular text-text-strong outline-none focus:border-border-selected"
+            value={name()}
+            autofocus
+            onInput={(event) => setName(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") submit()
+            }}
+          />
+        </label>
+        <div class="rounded-sm border border-border-weaker-base bg-background-stronger px-2 py-1.5 font-mono text-11-regular text-text-weaker">
+          {language.t("blueprint.document.id" as never)}: {previewId()}
+        </div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" size="large" onClick={() => dialog.close()}>
+            {language.t("common.cancel")}
+          </Button>
+          <Button variant="primary" size="large" disabled={!name().trim()} onClick={submit}>
+            {language.t("blueprint.document.create" as never)}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
+function BlueprintScriptCreateDialog(props: {
+  onCreate: (name: string, description: string) => void | Promise<void>
+}) {
+  const language = useLanguage()
+  const dialog = useDialog()
+  const [name, setName] = createSignal("")
+  const [description, setDescription] = createSignal("")
+  const submit = () => {
+    const value = name().trim()
+    if (!value) return
+    dialog.close()
+    void props.onCreate(value, description().trim())
+  }
+
+  return (
+    <Dialog title={language.t("blueprint.script.createTitle" as never)} action={<span aria-hidden="true" />} fit>
+      <div data-blueprint-script-create-dialog class="flex w-[420px] max-w-[calc(100vw-2rem)] flex-col gap-4 px-6 pb-4">
+        <label class="flex flex-col gap-1">
+          <span class="text-12-medium text-text-strong">{language.t("blueprint.script.name" as never)}</span>
+          <input
+            data-blueprint-script-name
+            class="h-9 rounded-md border border-border-weaker-base bg-background-stronger px-2 text-13-regular text-text-strong outline-none focus:border-border-selected"
+            value={name()}
+            autofocus
+            onInput={(event) => setName(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") submit()
+            }}
+          />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-12-medium text-text-strong">{language.t("blueprint.script.description" as never)}</span>
+          <textarea
+            data-blueprint-script-description
+            class="h-20 resize-none rounded-md border border-border-weaker-base bg-background-stronger px-2 py-1.5 text-13-regular text-text-strong outline-none placeholder:text-text-weaker focus:border-border-selected"
+            value={description()}
+            placeholder={language.t("blueprint.script.descriptionPlaceholder" as never)}
+            onInput={(event) => setDescription(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) submit()
+            }}
+          />
+        </label>
+        <div class="rounded-sm border border-border-weaker-base bg-background-stronger px-2 py-1.5 text-12-regular text-text-weaker">
+          {language.t("blueprint.script.templateHint" as never)}
+        </div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" size="large" onClick={() => dialog.close()}>
+            {language.t("common.cancel")}
+          </Button>
+          <Button variant="primary" size="large" disabled={!name().trim()} onClick={submit}>
+            {language.t("blueprint.script.create" as never)}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
 function BlueprintHeaderStatus(props: { status: BlueprintHeaderStatusState }) {
   const language = useLanguage()
   const [open, setOpen] = createSignal(false)
@@ -3573,10 +4703,12 @@ function BlueprintRuntimePanel(props: {
   task: string
   taskDisabled: boolean
   submitDisabled: boolean
+  directRunDisabled: boolean
   taskInputRef: (el: HTMLTextAreaElement) => void
   onTaskInput: (value: string) => void
   onStartNodeToggle: (nodeId: string) => void
   onSubmitPlanningTask: () => void
+  onDirectRun: () => void
   onRefresh: () => void
   onEnd: (action: BlueprintRunEndAction) => void
   workspacePanelArea?: WorkspacePanelArea
@@ -3734,7 +4866,17 @@ function BlueprintRuntimePanel(props: {
                 onInput={(event) => props.onTaskInput(event.currentTarget.value)}
               />
             </label>
-            <div class="flex justify-end">
+            <div class="flex justify-end gap-2">
+              <Button
+                data-blueprint-runtime-direct-run
+                size="small"
+                variant="secondary"
+                class="h-8 px-3"
+                disabled={props.directRunDisabled}
+                onClick={props.onDirectRun}
+              >
+                {language.t("blueprint.runtime.directRun" as never)}
+              </Button>
               <Button
                 data-blueprint-runtime-task-submit
                 size="small"
@@ -4719,18 +5861,31 @@ function BlueprintNodeView(props: {
   onDelete: () => void
   onEdit: () => void
   onInfoPanel: () => void
-  onOutputPointerDown: (event: PointerEvent) => void
-  onInputPointerUp: (event: PointerEvent) => void
+  onScriptCollapsedChange: (collapsed: boolean) => void
+  onOutputPointerDown: (event: PointerEvent, portName: string) => void
+  onInputPointerUp: (event: PointerEvent, portName: string) => void
 }) {
   const language = useLanguage()
   const [hovering, setHovering] = createSignal(false)
-  const width = () => (props.item.type === "terminal" ? TERMINAL_WIDTH : NODE_WIDTH)
-  const height = () => (props.item.type === "terminal" ? TERMINAL_HEIGHT : NODE_HEIGHT)
+  const size = () => nodeItemSize(props.item)
+  const width = () => size().width
+  const height = () => size().height
   const interactive = () => props.selected || props.inspecting || props.connecting || hovering()
-  const supportsInput = () => props.item.type !== "terminal" || props.item.kind === "end"
+  const supportsInput = () =>
+    props.item.type === "common"
+      ? props.item.node.kind !== "tick"
+      : props.item.type !== "terminal" || props.item.kind === "end"
   const supportsOutput = () => props.item.type !== "terminal" || props.item.kind === "start"
-  const showInput = () => supportsInput() && (props.hasIncomingEdge || props.isConnectTargetVisible || interactive())
-  const showOutput = () => supportsOutput() && (props.hasOutgoingEdge || interactive())
+  const expandedScript = () => props.item.type === "script" && !props.item.node.collapsed
+  const portShape = (side: "input" | "output") =>
+    props.item.type === "script" || (props.item.type === "common" && props.item.node.kind === "branch" && side === "input")
+      ? "triangle"
+      : "circle"
+  const inputPorts = () => nodePorts(props.item, "input")
+  const outputPorts = () => nodePorts(props.item, "output")
+  const showBranchPortLabels = () => props.item.type === "common" && props.item.node.kind === "branch"
+  const showInput = () => supportsInput() && (props.hasIncomingEdge || props.isConnectTargetVisible || interactive() || expandedScript())
+  const showOutput = () => supportsOutput() && (props.hasOutgoingEdge || interactive() || expandedScript())
   const agentPanelProgress = () => clamp(props.agentPanelProgress, 0, 1)
   const nodeTone = createMemo(() => {
     if (props.item.type === "terminal") {
@@ -4739,11 +5894,15 @@ function BlueprintNodeView(props: {
             background: "linear-gradient(135deg, rgba(15, 82, 70, 0.96), rgba(8, 36, 45, 0.96))",
             border: props.selected ? "rgba(45, 212, 191, 0.92)" : "rgba(45, 212, 191, 0.48)",
             icon: "#5eead4",
+            text: "#f8fdff",
+            subtitle: "#d6e9f5",
           }
         : {
             background: "linear-gradient(135deg, rgba(72, 36, 89, 0.96), rgba(22, 22, 44, 0.96))",
             border: props.selected ? "rgba(216, 180, 254, 0.92)" : "rgba(192, 132, 252, 0.48)",
             icon: "#d8b4fe",
+            text: "#f8fdff",
+            subtitle: "#d6e9f5",
           }
     }
     if (props.item.type === "route") {
@@ -4751,12 +5910,51 @@ function BlueprintNodeView(props: {
         background: "linear-gradient(135deg, rgba(18, 46, 66, 0.98), rgba(8, 24, 36, 0.98))",
         border: props.selected ? "rgba(125, 211, 252, 0.94)" : "rgba(56, 189, 248, 0.5)",
         icon: "#7dd3fc",
+        text: "#f8fdff",
+        subtitle: "#d6e9f5",
+      }
+    }
+    if (props.item.type === "common") {
+      return props.item.node.kind === "tick"
+        ? {
+            background: "linear-gradient(135deg, rgba(22, 78, 99, 0.98), rgba(8, 47, 73, 0.98))",
+            border: props.selected ? "rgba(103, 232, 249, 0.96)" : "rgba(34, 211, 238, 0.54)",
+            icon: "#67e8f9",
+            text: "#f8fdff",
+            subtitle: "#d6e9f5",
+          }
+        : {
+            background: "linear-gradient(135deg, rgba(63, 63, 70, 0.98), rgba(24, 24, 27, 0.98))",
+            border: props.selected ? "rgba(245, 158, 11, 0.96)" : "rgba(245, 158, 11, 0.52)",
+            icon: "#f59e0b",
+            text: "#f8fdff",
+            subtitle: "#e4e4e7",
+          }
+    }
+    if (props.item.type === "script") {
+      return {
+        background: "linear-gradient(135deg, #ffe06a, #f6c945)",
+        border: props.selected ? "#f8fafc" : "rgba(247, 210, 75, 0.88)",
+        icon: "#1f4e79",
+        text: "#082f49",
+        subtitle: "#2f3a18",
+      }
+    }
+    if (props.item.node.node_type === "agent") {
+      return {
+        background: "linear-gradient(135deg, #bbf7d0, #86efac)",
+        border: props.selected ? "#dcfce7" : "#4ade80",
+        icon: "#14532d",
+        text: "#052e16",
+        subtitle: "#14532d",
       }
     }
     return {
       background: "linear-gradient(135deg, rgba(25, 39, 62, 0.98), rgba(10, 20, 34, 0.98))",
       border: props.selected ? "rgba(103, 232, 249, 0.96)" : "rgba(99, 179, 215, 0.46)",
       icon: "#67e8f9",
+      text: "#f8fdff",
+      subtitle: "#d6e9f5",
     }
   })
 
@@ -4791,28 +5989,220 @@ function BlueprintNodeView(props: {
           aria-pressed={props.selected}
         >
           <Show when={showInput()}>
-            <PortButton
-              nodeId={props.item.id}
-              side="input"
-              title="Input"
-              onPointerUp={props.onInputPointerUp}
-              onPointerDown={(event) => event.stopPropagation()}
-            />
+            <For each={inputPorts()}>
+              {(port) => (
+                <PortButton
+                  nodeId={props.item.id}
+                  side="input"
+                  portName={port.name}
+                  title={port.title}
+                  top={port.top}
+                  shape={portShape("input")}
+                  onPointerUp={(event) => props.onInputPointerUp(event, port.name)}
+                  onPointerDown={(event) => event.stopPropagation()}
+                />
+              )}
+            </For>
           </Show>
           <Show when={showOutput()}>
-            <PortButton nodeId={props.item.id} side="output" title="Output" onPointerDown={props.onOutputPointerDown} />
+            <For each={outputPorts()}>
+              {(port) => (
+                <PortButton
+                  nodeId={props.item.id}
+                  side="output"
+                  portName={port.name}
+                  title={port.title}
+                  top={port.top}
+                  shape={portShape("output")}
+                  onPointerDown={(event) => props.onOutputPointerDown(event, port.name)}
+                />
+              )}
+            </For>
           </Show>
-          <div class="flex w-full min-w-0 items-center gap-2">
-            <Icon
-              size="small"
-              name={props.item.type === "terminal" ? "selector" : props.item.type === "route" ? "branch" : "blueprint"}
-              class="shrink-0"
-              style={{ color: nodeTone().icon }}
-            />
-            <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{props.title}</div>
-          </div>
-          <Show when={props.item.type !== "terminal"}>
-            <div class="w-full truncate text-11-regular text-[#d6e9f5]">{props.subtitle}</div>
+          <Show
+            when={props.item.type === "script" ? props.item : undefined}
+            fallback={
+              <Show
+                when={showBranchPortLabels()}
+                fallback={
+                  <>
+                    <div class="flex w-full min-w-0 items-center gap-2">
+                      <Icon
+                        size="small"
+                        name={props.item.type === "terminal" ? "selector" : props.item.type === "route" || props.item.type === "common" ? "branch" : "blueprint"}
+                        class="shrink-0"
+                        style={{ color: nodeTone().icon }}
+                      />
+                      <div class="min-w-0 truncate text-12-medium" style={{ color: nodeTone().text }}>{props.title}</div>
+                    </div>
+                    <Show when={props.item.type !== "terminal"}>
+                      <div class="w-full truncate text-11-regular" style={{ color: nodeTone().subtitle }}>{props.subtitle}</div>
+                    </Show>
+                  </>
+                }
+              >
+                <div class="pointer-events-none absolute left-3 right-3 top-3 z-10 flex min-w-0 items-center gap-2">
+                  <Icon
+                    size="small"
+                    name="branch"
+                    class="shrink-0"
+                    style={{ color: nodeTone().icon }}
+                  />
+                  <div class="min-w-0 truncate text-12-medium" style={{ color: nodeTone().text }}>{props.title}</div>
+                </div>
+                <For each={inputPorts()}>
+                  {(port) => (
+                    <div
+                      data-blueprint-common-port-label="input"
+                      class="pointer-events-none absolute left-4 z-10 h-[18px] max-w-[90px] truncate text-10-medium leading-[18px]"
+                      style={{
+                        top: `${(port.top ?? COMMON_BRANCH_HEIGHT / 2) - 9}px`,
+                        color: nodeTone().text,
+                      }}
+                    >
+                      {port.title}
+                    </div>
+                  )}
+                </For>
+                <For each={outputPorts()}>
+                  {(port) => (
+                    <div
+                      data-blueprint-common-port-label="output"
+                      class="pointer-events-none absolute right-4 z-10 h-[18px] max-w-[108px] truncate text-right text-10-medium leading-[18px]"
+                      style={{
+                        top: `${(port.top ?? COMMON_BRANCH_HEIGHT / 2) - 9}px`,
+                        color: nodeTone().subtitle,
+                      }}
+                    >
+                      {port.title}
+                    </div>
+                  )}
+                </For>
+              </Show>
+            }
+          >
+            {(scriptItem) => (
+              <>
+                <div data-blueprint-script-background class="pointer-events-none absolute inset-0 z-0 overflow-hidden rounded-md">
+                  <div class="absolute inset-0 bg-[linear-gradient(135deg,#ffe06a,#f6c945)]" />
+                  <div
+                    class="absolute inset-0 bg-[linear-gradient(135deg,#45b7ea,#2e9fd4)] drop-shadow-[3px_0_7px_rgba(8,47,73,0.18)]"
+                    style={{ "clip-path": SCRIPT_NODE_BLUE_CLIP_PATH }}
+                  />
+                  <svg
+                    data-blueprint-script-split-line
+                    class="absolute inset-0 h-full w-full"
+                    viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
+                    aria-hidden="true"
+                  >
+                    <polyline
+                      data-blueprint-script-split-shadow
+                      points={SCRIPT_NODE_SPLIT_LINE_POINTS}
+                      fill="none"
+                      stroke="rgba(8,47,73,0.2)"
+                      stroke-width="5.2"
+                      stroke-linejoin="miter"
+                      stroke-linecap="square"
+                      vector-effect="non-scaling-stroke"
+                      style={{ filter: "drop-shadow(2px 0 4px rgba(8,47,73,0.42))" }}
+                    />
+                    <polyline
+                      points={SCRIPT_NODE_SPLIT_LINE_POINTS}
+                      fill="none"
+                      stroke="rgba(8,47,73,0.38)"
+                      stroke-width="1.15"
+                      stroke-linejoin="miter"
+                      stroke-linecap="square"
+                      vector-effect="non-scaling-stroke"
+                    />
+                    <polyline
+                      points={SCRIPT_NODE_SPLIT_LINE_POINTS}
+                      fill="none"
+                      stroke="rgba(255,255,255,0.28)"
+                      stroke-width="0.65"
+                      stroke-linejoin="miter"
+                      stroke-linecap="square"
+                      vector-effect="non-scaling-stroke"
+                      transform="translate(-0.45 0)"
+                    />
+                  </svg>
+                  <div class="absolute inset-0 bg-[linear-gradient(155deg,rgba(255,255,255,0.14),transparent_36%,rgba(0,0,0,0.04)_100%)]" />
+                </div>
+                <div class="pointer-events-none absolute left-3 right-3 top-3 z-10 flex min-w-0 items-center gap-2">
+                  <span
+                    class="grid h-6 w-8 shrink-0 place-items-center rounded-sm text-13-medium"
+                    style={{ color: "#1f4e79", background: "rgba(255,255,255,0.58)" }}
+                  >
+                    Py
+                  </span>
+                  <div class="min-w-0 truncate text-13-medium" style={{ color: nodeTone().text }}>{props.title}</div>
+                </div>
+                <Show
+                  when={scriptItem().node.collapsed === false}
+                  fallback={
+                    <div
+                      class="pointer-events-none absolute left-3 right-7 top-[42px] z-10 truncate text-12-regular"
+                      style={{ color: nodeTone().subtitle }}
+                    >
+                      {scriptNodeDescription(language.t, scriptItem().node)}
+                    </div>
+                  }
+                >
+                  <For each={scriptItem().node.inputs}>
+                    {(port) => (
+                      <div
+                        data-blueprint-script-port-label="input"
+                        class="pointer-events-none absolute left-4 z-10 h-[18px] max-w-[calc(50%_-_28px)] truncate text-10-medium leading-[18px]"
+                        style={{
+                          top: `${scriptPortY(scriptItem().node, "input", port.name) - 9}px`,
+                          color: nodeTone().text,
+                        }}
+                      >
+                        {scriptPortLabel(port)}
+                      </div>
+                    )}
+                  </For>
+                  <For each={scriptItem().node.outputs}>
+                    {(port) => (
+                      <div
+                        data-blueprint-script-port-label="output"
+                        class="pointer-events-none absolute right-4 z-10 h-[18px] max-w-[calc(50%_-_28px)] truncate text-right text-10-medium leading-[18px]"
+                        style={{
+                          top: `${scriptPortY(scriptItem().node, "output", port.name) - 9}px`,
+                          color: nodeTone().subtitle,
+                        }}
+                      >
+                        {scriptPortLabel(port)}
+                      </div>
+                    )}
+                  </For>
+                </Show>
+                <button
+                  type="button"
+                  data-blueprint-script-collapse-toggle
+                  class="absolute bottom-0 left-1/2 z-20 grid size-4 -translate-x-1/2 translate-y-1/2 place-items-center rounded-full border border-[rgba(186,230,253,0.74)] bg-[#071019] text-[#bae6fd] shadow-[0_4px_12px_rgba(0,0,0,0.3)] hover:bg-[#0f2434]"
+                  title={language.t((scriptItem().node.collapsed === false ? "blueprint.script.collapse" : "blueprint.script.expand") as never)}
+                  aria-label={language.t((scriptItem().node.collapsed === false ? "blueprint.script.collapse" : "blueprint.script.expand") as never)}
+                  aria-expanded={scriptItem().node.collapsed === false}
+                  onPointerDown={(event: PointerEvent) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                  }}
+                  onClick={(event: MouseEvent) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    props.onScriptCollapsedChange(scriptItem().node.collapsed === false)
+                  }}
+                >
+                  <Icon
+                    size="small"
+                    name="chevron-down"
+                    class={scriptItem().node.collapsed === false ? "rotate-180" : ""}
+                  />
+                </button>
+              </>
+            )}
           </Show>
           <Show when={props.item.type === "agent" && agentPanelProgress() > 0}>
             <div class="pointer-events-none absolute right-2 top-2 size-5 rounded-full bg-[#071019]/80 shadow-[0_0_12px_rgba(103,232,249,0.28)]">
@@ -4866,7 +6256,10 @@ function BlueprintNodeView(props: {
 function PortButton(props: {
   nodeId: string
   side: "input" | "output"
+  portName: string
   title: string
+  shape: "circle" | "triangle"
+  top?: number
   onPointerDown?: (event: PointerEvent) => void
   onPointerUp?: (event: PointerEvent) => void
 }) {
@@ -4876,14 +6269,31 @@ function PortButton(props: {
       title={props.title}
       data-blueprint-port={props.side}
       data-blueprint-node-id={props.nodeId}
-      class="absolute top-1/2 z-10 size-3 -translate-y-1/2 rounded-full border border-[rgba(103,232,249,0.82)] bg-[var(--blueprint-canvas-base)] shadow-[0_0_0_3px_rgba(8,24,36,0.92),0_0_12px_rgba(103,232,249,0.38)] transition-colors hover:bg-[rgba(103,232,249,0.22)]"
+      data-blueprint-port-name={props.portName}
+      data-blueprint-port-shape={props.shape}
+      class="absolute z-10 grid size-4 -translate-y-1/2 place-items-center bg-transparent"
       classList={{
-        "-left-1.5 cursor-crosshair": props.side === "input",
-        "-right-1.5 cursor-crosshair": props.side === "output",
+        "-left-2 cursor-crosshair": props.side === "input",
+        "-right-2 cursor-crosshair": props.side === "output",
       }}
+      style={{ top: props.top === undefined ? "50%" : `${props.top}px` }}
       onPointerDown={props.onPointerDown}
       onPointerUp={props.onPointerUp}
-    />
+    >
+      <span
+        class="block"
+        classList={{
+          "h-0 w-0 border-y-[4px] border-r-[7px] border-y-transparent border-r-[#facc15] drop-shadow-[0_0_5px_rgba(250,204,21,0.58)]":
+            props.shape === "triangle" && props.side === "input",
+          "h-0 w-0 border-y-[4px] border-l-[7px] border-y-transparent border-l-[#7dd3fc] drop-shadow-[0_0_5px_rgba(103,232,249,0.46)]":
+            props.shape === "triangle" && props.side === "output",
+          "h-2.5 w-2.5 rounded-full border border-[#facc15] bg-[#facc15] shadow-[0_0_6px_rgba(250,204,21,0.48)]":
+            props.shape === "circle" && props.side === "input",
+          "h-2.5 w-2.5 rounded-full border border-[#7dd3fc] bg-[#7dd3fc] shadow-[0_0_6px_rgba(103,232,249,0.42)]":
+            props.shape === "circle" && props.side === "output",
+        }}
+      />
+    </button>
   )
 }
 
@@ -4891,6 +6301,8 @@ export function BlueprintInspector(props: {
   draft: BlueprintDraft
   selectedAgent?: BlueprintAgentNode
   selectedRoute?: BlueprintRouteNode
+  selectedCommon?: BlueprintCommonNode
+  selectedScript?: BlueprintScriptNode
   selectedTerminal?: BlueprintTerminalKind
   selectedNodeId?: string
   selectedEdge?: BlueprintEdge
@@ -4901,6 +6313,8 @@ export function BlueprintInspector(props: {
   catalog: CatalogState
   modelCatalog: ModelCatalogState
   refreshModelCatalog: (cliKind: string) => Promise<void>
+  compileBlueprintScripts: () => Promise<void>
+  scriptCompiling: boolean
 }) {
   const language = useLanguage()
 
@@ -4908,6 +6322,14 @@ export function BlueprintInspector(props: {
     const id = props.selectedNodeId
     if (!id || !props.selectedAgent) return
     props.setStore("graph", "agent_nodes", id, field, value as never)
+  }
+
+  const updateAgentAccessPolicy = (field: keyof BlueprintAgentNode["access_policy"], value: boolean) => {
+    if (!props.selectedAgent) return
+    updateAgentField("access_policy", {
+      ...props.selectedAgent.access_policy,
+      [field]: value,
+    })
   }
 
   const updateAgentCliKind = (value: string) => {
@@ -4938,6 +6360,41 @@ export function BlueprintInspector(props: {
     const id = props.selectedNodeId
     if (!id || !props.selectedRoute) return
     props.setStore("graph", "route_nodes", id, field, value as never)
+  }
+
+  const updateCommonField = (field: string, value: unknown) => {
+    const id = props.selectedNodeId
+    if (!id || !props.selectedCommon) return
+    props.setStore("graph", "common_nodes", id, field as never, value as never)
+  }
+
+  const updateSelectedEdge = (edge: BlueprintEdge, patch: Partial<BlueprintEdge>) => {
+    const from = patch.from ?? edge.from
+    const to = patch.to ?? edge.to
+    const outputPort = patch.output_port ?? edge.output_port ?? DEFAULT_OUTPUT_PORT
+    const inputPort = patch.input_port ?? edge.input_port ?? DEFAULT_INPUT_PORT
+    const result = canConnectPorts(props.draft, from, outputPort, to, inputPort)
+    if (!result.ok) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.connection.invalid" as never),
+        description:
+          result.reason === "type_mismatch"
+            ? language.t("blueprint.connection.typeMismatch" as never, {
+                source: result.sourceType ?? "?",
+                target: result.targetType ?? "?",
+              } as never)
+            : language.t("blueprint.connection.unknownPort" as never),
+      })
+      return
+    }
+    props.setDraft(updateEdge(props.draft, edge.id, patch))
+  }
+
+  const updateScriptField = <K extends keyof BlueprintScriptNode>(field: K, value: BlueprintScriptNode[K]) => {
+    const id = props.selectedNodeId
+    if (!id || !props.selectedScript) return
+    props.setDraft(updateScriptNode(props.draft, id, { [field]: value } as Partial<BlueprintScriptNode>))
   }
 
   const updateTerminal = (kind: BlueprintTerminalKind) => {
@@ -5041,6 +6498,40 @@ export function BlueprintInspector(props: {
                 checked={!!props.selectedAgent?.external}
                 onChange={(checked) => updateAgentField("external", checked)}
               />
+              <Show when={props.selectedAgent?.node_type === "agent"}>
+                <div class="flex flex-col gap-2 border-t border-[rgba(103,232,249,0.14)] pt-3">
+                  <CheckboxField
+                    tip="directProjectIo"
+                    label={language.t("blueprint.field.directProjectIo" as never)}
+                    checked={props.selectedAgent?.access_policy.direct_project_io !== false}
+                    onChange={(checked) => updateAgentAccessPolicy("direct_project_io", checked)}
+                  />
+                  <CheckboxField
+                    tip="outsideProjectIo"
+                    label={language.t("blueprint.field.outsideProjectIo" as never)}
+                    checked={props.selectedAgent?.access_policy.outside_project_io !== false}
+                    onChange={(checked) => updateAgentAccessPolicy("outside_project_io", checked)}
+                  />
+                  <CheckboxField
+                    tip="unrestrictedCommands"
+                    label={language.t("blueprint.field.unrestrictedCommands" as never)}
+                    checked={props.selectedAgent?.access_policy.unrestricted_commands !== false}
+                    onChange={(checked) => updateAgentAccessPolicy("unrestricted_commands", checked)}
+                  />
+                  <CheckboxField
+                    tip="disableSandbox"
+                    label={language.t("blueprint.field.disableSandbox" as never)}
+                    checked={props.selectedAgent?.access_policy.disable_sandbox !== false}
+                    onChange={(checked) => updateAgentAccessPolicy("disable_sandbox", checked)}
+                  />
+                  <CheckboxField
+                    tip="frameworkMessageTools"
+                    label={language.t("blueprint.field.frameworkMessageTools" as never)}
+                    checked={props.selectedAgent?.access_policy.framework_message_tools !== false}
+                    onChange={(checked) => updateAgentAccessPolicy("framework_message_tools", checked)}
+                  />
+                </div>
+              </Show>
               <MultiSelectField
                 tip="skills"
                 label={language.t("blueprint.field.skills")}
@@ -5110,6 +6601,73 @@ export function BlueprintInspector(props: {
             </div>
           </Match>
 
+          <Match when={props.selectedCommon && props.selectedNodeId}>
+            <div class="flex flex-col gap-3">
+              <InspectorIdentity tip="nodeId" label={language.t("blueprint.field.nodeId")} value={props.selectedNodeId ?? ""} />
+              <ReadonlyInspectorField
+                label={language.t("blueprint.field.commonKind" as never)}
+                value={
+                  props.selectedCommon?.kind === "tick"
+                    ? language.t("blueprint.node.tick" as never)
+                    : language.t("blueprint.node.branch" as never)
+                }
+              />
+              <Show when={props.selectedCommon?.kind === "tick"}>
+                <InspectorTextField
+                  tip="everyNTicks"
+                  label={language.t("blueprint.field.everyNTicks" as never)}
+                  type="number"
+                  value={String(props.selectedCommon?.kind === "tick" ? props.selectedCommon.every_n_ticks : 1)}
+                  onChange={(value) => {
+                    const next = Math.max(1, Math.floor(Number(value) || 1))
+                    updateCommonField("every_n_ticks" as never, next as never)
+                  }}
+                />
+              </Show>
+            </div>
+          </Match>
+
+          <Match when={props.selectedScript && props.selectedNodeId}>
+            <div class="flex flex-col gap-3">
+              <InspectorIdentity tip="nodeId" label={language.t("blueprint.field.nodeId")} value={props.selectedNodeId ?? ""} />
+              <ReadonlyInspectorField label={language.t("blueprint.field.scriptSignature" as never)} value={scriptSignature(props.selectedScript!)} />
+              <ReadonlyInspectorField
+                label={language.t("blueprint.field.scriptSource" as never)}
+                value={`${props.selectedScript?.module_path ?? ""}:${props.selectedScript?.function_name ?? ""}`}
+              />
+              <ReadonlyInspectorField label={language.t("blueprint.field.scriptDir" as never)} value={props.catalog.scriptDir || ".multi_agent_workspace/scripts"} />
+              <Show when={props.selectedScript?.description}>
+                {(description) => (
+                  <ReadonlyInspectorField label={language.t("blueprint.field.scriptDescription" as never)} value={description()} multiline />
+                )}
+              </Show>
+              <ScriptPortsInspector
+                label={language.t("blueprint.field.scriptInputs" as never)}
+                ports={props.selectedScript?.inputs ?? []}
+                emptyLabel={language.t("blueprint.catalog.empty")}
+              />
+              <ScriptPortsInspector
+                label={language.t("blueprint.field.scriptOutputs" as never)}
+                ports={props.selectedScript?.outputs ?? []}
+                emptyLabel={language.t("blueprint.catalog.empty")}
+              />
+              <CheckboxField
+                label={language.t("blueprint.field.collapsed" as never)}
+                checked={props.selectedScript?.collapsed !== false}
+                onChange={(checked) => updateScriptField("collapsed", checked)}
+              />
+              <Button
+                size="small"
+                variant="ghost"
+                icon="reset"
+                disabled={props.scriptCompiling}
+                onClick={() => void props.compileBlueprintScripts()}
+              >
+                {language.t((props.scriptCompiling ? "blueprint.script.compiling" : "blueprint.script.compile") as never)}
+              </Button>
+            </div>
+          </Match>
+
           <Match when={props.selectedEdge}>
             {(edge) => (
               <div class="flex flex-col gap-3">
@@ -5124,19 +6682,19 @@ export function BlueprintInspector(props: {
                   tip="edgeType"
                   label={language.t("blueprint.field.edgeType")}
                   value={edge().edge_type}
-                  onChange={(value) => props.setDraft(updateEdge(props.draft, edge().id, { edge_type: value }))}
+                  onChange={(value) => updateSelectedEdge(edge(), { edge_type: value })}
                 />
                 <InspectorTextField
                   tip="outputPort"
                   label={language.t("blueprint.field.outputPort")}
                   value={edge().output_port ?? DEFAULT_OUTPUT_PORT}
-                  onChange={(value) => props.setDraft(updateEdge(props.draft, edge().id, { output_port: value }))}
+                  onChange={(value) => updateSelectedEdge(edge(), { output_port: value })}
                 />
                 <InspectorTextField
                   tip="inputPort"
                   label={language.t("blueprint.field.inputPort")}
                   value={edge().input_port ?? DEFAULT_INPUT_PORT}
-                  onChange={(value) => props.setDraft(updateEdge(props.draft, edge().id, { input_port: value }))}
+                  onChange={(value) => updateSelectedEdge(edge(), { input_port: value })}
                 />
                 <Button size="small" variant="ghost" icon="trash" onClick={() => props.setDraft(deleteEdge(props.draft, edge().id))}>
                   {language.t("common.delete")}
@@ -5499,6 +7057,45 @@ function InspectorIdentity(props: { label: string; value: string; tip?: Inspecto
   )
 }
 
+function ReadonlyInspectorField(props: { label: string; value: string; multiline?: boolean }) {
+  return (
+    <div class="rounded-md border border-[rgba(103,232,249,0.14)] bg-[#06101a] px-3 py-2">
+      <InspectorFieldHeader label={props.label} />
+      <div
+        class={props.multiline ? "mt-1 whitespace-pre-wrap break-words text-12-regular text-[#d6e9f5]" : "mt-1 truncate font-mono text-11-regular text-[#95afc4]"}
+        title={props.value}
+      >
+        {props.value}
+      </div>
+    </div>
+  )
+}
+
+function ScriptPortsInspector(props: { label: string; ports: BlueprintScriptPort[]; emptyLabel: string }) {
+  return (
+    <div class="rounded-md border border-[rgba(103,232,249,0.14)] bg-[#06101a] px-3 py-2">
+      <InspectorFieldHeader label={props.label} />
+      <Show
+        when={props.ports.length > 0}
+        fallback={<div class="mt-1 text-11-regular text-[#95afc4]">{props.emptyLabel}</div>}
+      >
+        <div class="mt-2 flex flex-col gap-1">
+          <For each={props.ports}>
+            {(port) => (
+              <div class="flex min-w-0 items-center justify-between gap-2 text-11-regular">
+                <span class="min-w-0 truncate text-[#f8fdff]">{port.name}</span>
+                <span class="shrink-0 rounded-sm bg-[rgba(103,232,249,0.12)] px-1.5 py-0.5 font-mono text-[#95afc4]">
+                  {port.type}
+                </span>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
+    </div>
+  )
+}
+
 function InspectorTextField(props: TextFieldProps & { tip?: InspectorTipKey }) {
   const [local, rest] = splitProps(props, ["label", "tip"])
   const fieldClass = () =>
@@ -5755,12 +7352,22 @@ function InspectorTipButton(props: { label: string; tip: InspectorTipKey; placem
 
 function nodeTitle(t: (key: never, params?: Record<string, string | number | boolean>) => string, item: NodeItem) {
   if (item.type === "terminal") return item.kind === "start" ? t("blueprint.node.start" as never) : t("blueprint.node.end" as never)
+  if (item.type === "common") return item.node.kind === "tick" ? t("blueprint.node.tick" as never) : t("blueprint.node.branch" as never)
+  if (item.type === "script") return item.node.title || item.node.function_name || t("blueprint.node.script" as never)
   return item.id
 }
 
 function nodeSubtitle(t: (key: never, params?: Record<string, string | number | boolean>) => string, item: NodeItem) {
-  if (item.type === "agent") return item.node.agent_id || item.node.cli_kind
+  if (item.type === "agent") {
+    const prefix = item.node.node_type === "agent" ? t("blueprint.node.agent" as never) : t("blueprint.node.workerAgent" as never)
+    return `${prefix} · ${item.node.agent_id || item.node.cli_kind}`
+  }
   if (item.type === "route") return t(`blueprint.route.${routeLabelKey(item.node.route_kind)}` as never)
+  if (item.type === "common") {
+    if (item.node.kind === "tick") return t("blueprint.common.tickSubtitle" as never, { n: item.node.every_n_ticks } as never)
+    return t("blueprint.common.branchSubtitle" as never)
+  }
+  if (item.type === "script") return scriptNodeDescription(t, item.node)
   return t("blueprint.node.terminal" as never)
 }
 
@@ -5770,13 +7377,117 @@ function routeLabelKey(routeKind: string) {
 }
 
 function addNodeIcon(kind: BlueprintAddNodeKind): "blueprint" | "branch" | "selector" {
-  if (kind === "agent" || kind === "test-agent") return "blueprint"
+  if (kind === "agent" || kind === "worker-agent" || kind === "test-agent" || kind === "script") return "blueprint"
   if (kind === "start" || kind === "end") return "selector"
   return "branch"
 }
 
+function scriptSignature(node: Pick<BlueprintScriptNode, "function_name" | "title" | "inputs" | "outputs">) {
+  const name = node.function_name || node.title || "function"
+  const inputs = node.inputs.map((port) => port.type || "Any").join(", ")
+  const output =
+    node.outputs.length === 1
+      ? node.outputs[0].type || "Any"
+      : `{${node.outputs.map((port) => `${port.name}: ${port.type || "Any"}`).join(", ")}}`
+  return `${name}(${inputs}) -> ${output || "Any"}`
+}
+
+function scriptNodeDescription(
+  t: (key: never, params?: Record<string, string | number | boolean>) => string,
+  node: Pick<BlueprintScriptNode, "description">,
+) {
+  return node.description?.trim() || t("blueprint.script.noDescription" as never)
+}
+
+function scriptPortLabel(port: BlueprintScriptPort) {
+  return `${port.name}: ${port.type || "Any"}`
+}
+
+function nodeItemSize(item: NodeItem) {
+  if (item.type === "terminal") return { width: TERMINAL_WIDTH, height: TERMINAL_HEIGHT }
+  if (item.type === "script") return scriptNodeSize(item.node)
+  if (item.type === "common") return commonNodeSize(item.node)
+  return { width: NODE_WIDTH, height: NODE_HEIGHT }
+}
+
+function scriptNodeSize(node: BlueprintScriptNode) {
+  if (node.collapsed !== false) return { width: NODE_WIDTH, height: NODE_HEIGHT }
+  const rows = Math.max(node.inputs.length, node.outputs.length, 1)
+  return {
+    width: SCRIPT_NODE_WIDTH,
+    height: Math.max(SCRIPT_NODE_MIN_EXPANDED_HEIGHT, SCRIPT_NODE_HEADER_HEIGHT + rows * SCRIPT_NODE_PORT_ROW_HEIGHT + 14),
+  }
+}
+
+function nodePorts(item: NodeItem, side: "input" | "output") {
+  if (item.type === "common") return commonNodePorts(item.node, side)
+  if (item.type !== "script" || item.node.collapsed !== false) {
+    const name = side === "input" ? DEFAULT_INPUT_PORT : DEFAULT_OUTPUT_PORT
+    return [{ name, title: side === "input" ? "Input" : "Output", top: undefined as number | undefined }]
+  }
+  const ports = side === "input" ? item.node.inputs : item.node.outputs
+  return (ports.length ? ports : [{ name: side === "input" ? DEFAULT_INPUT_PORT : DEFAULT_OUTPUT_PORT, type: "Any" }]).map((port) => ({
+    name: port.name,
+    title: scriptPortLabel(port),
+    top: scriptPortY(item.node, side, port.name),
+  }))
+}
+
+function commonNodePorts(node: BlueprintCommonNode, side: "input" | "output") {
+  const size = commonNodeSize(node)
+  if (node.kind === "branch") {
+    if (side === "input") return [{ name: "condition", title: "condition: bool", top: size.height * 0.56 }]
+    return [
+      { name: "true", title: "true: message", top: size.height * 0.4 },
+      { name: "false", title: "false: message", top: size.height * 0.72 },
+    ]
+  }
+  if (side === "input") return []
+  return [{ name: "tick", title: "tick: tick", top: NODE_HEIGHT / 2 }]
+}
+
+function commonNodeSize(node: Pick<BlueprintCommonNode, "kind">) {
+  return node.kind === "branch"
+    ? { width: COMMON_BRANCH_WIDTH, height: COMMON_BRANCH_HEIGHT }
+    : { width: NODE_WIDTH, height: NODE_HEIGHT }
+}
+
+function scriptPortY(node: BlueprintScriptNode, side: "input" | "output", portName?: string) {
+  if (node.collapsed !== false) return scriptNodeSize(node).height / 2
+  const ports = side === "input" ? node.inputs : node.outputs
+  const fallback = side === "input" ? DEFAULT_INPUT_PORT : DEFAULT_OUTPUT_PORT
+  const index = Math.max(
+    0,
+    ports.findIndex((port) => port.name === (portName || fallback)),
+  )
+  return SCRIPT_NODE_HEADER_HEIGHT + index * SCRIPT_NODE_PORT_ROW_HEIGHT + SCRIPT_NODE_PORT_ROW_HEIGHT / 2
+}
+
 function fallbackModels(cliKind: string) {
   return MODEL_LIST_FALLBACKS[cliKind] ?? MODEL_LIST_FALLBACKS.codemaker
+}
+
+function slugBlueprintId(name: string) {
+  const slug = name
+    .trim()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .slice(0, 64)
+  return slug || "blueprint"
+}
+
+function uniqueBlueprintId(name: string, existingIds: string[]) {
+  const base = slugBlueprintId(name)
+  const used = new Set(existingIds.map((id) => id.toLowerCase()))
+  if (!used.has(base.toLowerCase())) return base
+  for (let index = 2; index < 10_000; index += 1) {
+    const candidate = `${base}-${index}`
+    if (!used.has(candidate.toLowerCase())) return candidate
+  }
+  return `${base}-${Date.now()}`
 }
 
 function modelOptions(modelCatalog: ModelCatalogState, currentModel?: string): Array<[string, string]> {
@@ -5810,6 +7521,44 @@ function numberValue(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value)
   return 0
+}
+
+function normalizeScriptCatalogNodeFromJson(text: string): BlueprintScriptCatalogNode | undefined {
+  try {
+    return normalizeScriptCatalogNode(JSON.parse(text))
+  } catch {
+    return undefined
+  }
+}
+
+function normalizeScriptCatalogNode(value: unknown): BlueprintScriptCatalogNode | undefined {
+  const record = asRecord(value)
+  if (!record) return
+  const modulePath = stringValue(record.module_path) ?? stringValue(record.modulePath) ?? ""
+  const functionName = stringValue(record.function_name) ?? stringValue(record.functionName) ?? ""
+  if (!modulePath || !functionName) return
+  const title = stringValue(record.title) ?? stringValue(record.name) ?? functionName
+  const inputs = arrayOfRecords(record.inputs).map((entry, index) => normalizeScriptCatalogPort(entry, `arg${index + 1}`))
+  const outputs = arrayOfRecords(record.outputs).map((entry, index) => normalizeScriptCatalogPort(entry, index === 0 ? "result" : `out${index + 1}`))
+  return {
+    node_id: stringValue(record.node_id) ?? stringValue(record.nodeId) ?? functionName,
+    script_id: stringValue(record.script_id) ?? stringValue(record.scriptId) ?? `${modulePath}:${functionName}`,
+    module_path: modulePath.replace(/\\/g, "/"),
+    function_name: functionName,
+    title,
+    description: stringValue(record.description) ?? "",
+    inputs,
+    outputs: outputs.length ? outputs : [{ name: "result", type: "Any", required: true }],
+    collapsed: record.collapsed !== false,
+  }
+}
+
+function normalizeScriptCatalogPort(value: Record<string, unknown>, fallbackName: string): BlueprintScriptPort {
+  return {
+    name: stringValue(value.name) ?? fallbackName,
+    type: stringValue(value.type) ?? "Any",
+    required: value.required !== false,
+  }
 }
 
 function blueprintDiffSummaryCount(summary: Record<string, unknown> | undefined, key: string) {
@@ -5935,14 +7684,20 @@ function blueprintPatchLineClass(line: string, tone: "diff" | "neutral" = "diff"
 
 function createDesktopBlueprintSnapshot(
   projectDirectory: string,
+  blueprintId: string,
+  blueprintName: string,
   draft: BlueprintDraft,
   runtimeAgents?: Record<string, unknown>,
 ): DesktopBlueprintSnapshotPayload {
-  const agentIds = new Set(Object.keys(draft.graph.agent_nodes))
+  const visibleIds = new Set([
+    ...Object.keys(draft.graph.agent_nodes),
+    ...Object.keys(draft.graph.script_nodes ?? {}),
+    ...Object.keys(draft.graph.common_nodes ?? {}),
+  ])
   const upstream = new Map<string, string[]>()
   const downstream = new Map<string, string[]>()
   const edges = draft.graph.edges
-    .filter((edge) => agentIds.has(edge.from) && agentIds.has(edge.to))
+    .filter((edge) => visibleIds.has(edge.from) && visibleIds.has(edge.to))
     .map((edge) => {
       upstream.set(edge.to, [...(upstream.get(edge.to) ?? []), edge.from])
       downstream.set(edge.from, [...(downstream.get(edge.from) ?? []), edge.to])
@@ -5950,35 +7705,81 @@ function createDesktopBlueprintSnapshot(
         source: edge.from,
         target: edge.to,
         kind: desktopSnapshotEdgeKind(edge.edge_type),
+        outputPort: edge.output_port,
+        inputPort: edge.input_port,
       }
     })
 
   return {
     projectDir: projectDirectory,
-    blueprintId: DEFAULT_BLUEPRINT_ID,
-    title: DEFAULT_BLUEPRINT_NAME,
+    blueprintId,
+    title: blueprintName,
     description: "Desktop blueprint structure snapshot.",
-    nodes: Object.entries(draft.graph.agent_nodes).map(([id, node]) => {
-      const runtime = asRecord(runtimeAgents?.[id])
-      const layout = draft.layout.nodes[id]
-      return {
-        id,
-        label: node.agent_id?.trim() || id,
-        role: node.cli_kind || "agent",
-        state: desktopSnapshotNodeState(stringValue(runtime?.state)),
-        x: layout?.x,
-        y: layout?.y,
-        upstreamNodeIds: upstream.get(id) ?? [],
-        downstreamNodeIds: downstream.get(id) ?? [],
-        agentId: node.agent_id?.trim() || id,
-        cliKind: node.cli_kind || undefined,
-        taskStatus: stringValue(runtime?.task_status),
-        queueSize: numberValue(runtime?.queue_size),
-        messagesSent: numberValue(runtime?.messages_sent),
-        busyCount: numberValue(runtime?.busy_count),
-        updatedAt: stringValue(runtime?.updated_at),
-      }
-    }),
+    nodes: [
+      ...Object.entries(draft.graph.agent_nodes).map(([id, node]) => {
+        const runtime = asRecord(runtimeAgents?.[id])
+        const layout = draft.layout.nodes[id]
+        return {
+          id,
+          label: node.agent_id?.trim() || id,
+          kind: node.node_type,
+          role: node.node_type === "agent" ? "Agent" : "Worker Agent",
+          summary: node.prompt?.trim() || node.run_prompt?.trim() || undefined,
+          state: desktopSnapshotNodeState(stringValue(runtime?.state)),
+          x: layout?.x,
+          y: layout?.y,
+          upstreamNodeIds: upstream.get(id) ?? [],
+          downstreamNodeIds: downstream.get(id) ?? [],
+          inputPorts: [DEFAULT_INPUT_PORT],
+          outputPorts: [DEFAULT_OUTPUT_PORT],
+          agentId: node.agent_id?.trim() || id,
+          cliKind: node.cli_kind || undefined,
+          taskStatus: stringValue(runtime?.task_status),
+          queueSize: numberValue(runtime?.queue_size),
+          messagesSent: numberValue(runtime?.messages_sent),
+          busyCount: numberValue(runtime?.busy_count),
+          updatedAt: stringValue(runtime?.updated_at),
+        }
+      }),
+      ...Object.entries(draft.graph.script_nodes ?? {}).map(([id, node]) => {
+        const layout = draft.layout.nodes[id]
+        return {
+          id,
+          label: node.title?.trim() || node.function_name || id,
+          kind: "script" as const,
+          role: "Script Function",
+          summary: node.description?.trim() || scriptSignature(node),
+          state: "idle" as const,
+          x: layout?.x,
+          y: layout?.y,
+          upstreamNodeIds: upstream.get(id) ?? [],
+          downstreamNodeIds: downstream.get(id) ?? [],
+          inputPorts: node.inputs.length ? node.inputs.map(scriptPortLabel) : [DEFAULT_INPUT_PORT],
+          outputPorts: node.outputs.length ? node.outputs.map(scriptPortLabel) : [DEFAULT_OUTPUT_PORT],
+        }
+      }),
+      ...Object.entries(draft.graph.common_nodes ?? {}).map(([id, node]) => {
+        const layout = draft.layout.nodes[id]
+        return {
+          id,
+          label: node.kind === "branch" ? "Branch" : "Tick",
+          kind: node.kind,
+          role: "Common Node",
+          summary:
+            node.kind === "branch"
+              ? "Routes a bool condition to true or false message outputs."
+              : `Emits a tick every ${node.every_n_ticks} framework tick(s).`,
+          state: "idle" as const,
+          x: layout?.x,
+          y: layout?.y,
+          upstreamNodeIds: upstream.get(id) ?? [],
+          downstreamNodeIds: downstream.get(id) ?? [],
+          inputPorts: commonNodePorts(node, "input").map((port) => port.title),
+          outputPorts: commonNodePorts(node, "output").map((port) => port.title),
+          everyNTicks: node.kind === "tick" ? node.every_n_ticks : undefined,
+        }
+      }),
+    ],
     edges,
   }
 }
@@ -6648,39 +8449,107 @@ function formatRuntimeTime(value: number) {
 }
 
 function edgePath(draft: BlueprintDraft, edge: BlueprintEdge) {
-  const source = portPoint(draft, edge.from, "output")
-  const target = portPoint(draft, edge.to, "input")
+  const source = portPoint(draft, edge.from, "output", edge.output_port ?? DEFAULT_OUTPUT_PORT)
+  const target = portPoint(draft, edge.to, "input", edge.input_port ?? DEFAULT_INPUT_PORT)
   if (!source || !target) return ""
+  return edgePathBetween(source, target)
+}
 
+function edgePathBetween(source: BlueprintNodeLayout, target: BlueprintNodeLayout) {
   const bend = Math.max(64, Math.abs(target.x - source.x) / 2)
   return `M ${source.x} ${source.y} C ${source.x + bend} ${source.y}, ${target.x - bend} ${target.y}, ${target.x} ${target.y}`
 }
 
+function edgeGroupGeometry(draft: BlueprintDraft, edges: BlueprintEdge[]) {
+  const fallback = {
+    hub: undefined as BlueprintNodeLayout | undefined,
+    segments: edges.map((edge) => ({ d: edgePath(draft, edge), markerEnd: true })).filter((segment) => segment.d),
+  }
+  if (edges.length <= 1) return fallback
+  const first = edges[0]
+  if (!first) return fallback
+
+  const fanOut = !!draft.graph.agent_nodes[first.from] && !!draft.graph.script_nodes?.[first.to]
+  const fanIn = !!draft.graph.script_nodes?.[first.from] && !!draft.graph.agent_nodes[first.to]
+  if (fanOut) {
+    const source = portPoint(draft, first.from, "output", first.output_port ?? DEFAULT_OUTPUT_PORT)
+    const targets = edges
+      .map((edge) => portPoint(draft, edge.to, "input", edge.input_port ?? DEFAULT_INPUT_PORT))
+      .filter((point): point is BlueprintNodeLayout => !!point)
+    if (!source || targets.length < 2) return fallback
+    const minTargetX = Math.min(...targets.map((point) => point.x))
+    const gap = Math.abs(minTargetX - source.x)
+    const hub = {
+      x: minTargetX >= source.x ? Math.max(source.x + 36, minTargetX - Math.min(72, Math.max(42, gap * 0.34))) : (source.x + minTargetX) / 2,
+      y: targets.reduce((sum, point) => sum + point.y, 0) / targets.length,
+    }
+    return {
+      hub,
+      segments: [
+        { d: edgePathBetween(source, hub), markerEnd: false },
+        ...targets.map((target) => ({ d: edgePathBetween(hub, target), markerEnd: true })),
+      ],
+    }
+  }
+
+  if (fanIn) {
+    const sources = edges
+      .map((edge) => portPoint(draft, edge.from, "output", edge.output_port ?? DEFAULT_OUTPUT_PORT))
+      .filter((point): point is BlueprintNodeLayout => !!point)
+    const target = portPoint(draft, first.to, "input", first.input_port ?? DEFAULT_INPUT_PORT)
+    if (!target || sources.length < 2) return fallback
+    const maxSourceX = Math.max(...sources.map((point) => point.x))
+    const gap = Math.abs(target.x - maxSourceX)
+    const hub = {
+      x: target.x >= maxSourceX ? Math.min(target.x - 36, maxSourceX + Math.min(72, Math.max(42, gap * 0.34))) : (target.x + maxSourceX) / 2,
+      y: sources.reduce((sum, point) => sum + point.y, 0) / sources.length,
+    }
+    return {
+      hub,
+      segments: [
+        ...sources.map((source) => ({ d: edgePathBetween(source, hub), markerEnd: false })),
+        { d: edgePathBetween(hub, target), markerEnd: true },
+      ],
+    }
+  }
+
+  return fallback
+}
+
 function connectionPath(draft: BlueprintDraft, connection: ConnectionState) {
-  const source = portPoint(draft, connection.source, "output")
+  const source = portPoint(draft, connection.source, "output", connection.output_port)
   const target = connection.pointer
   if (!source || !target) return ""
   const bend = Math.max(64, Math.abs(target.x - source.x) / 2)
   return `M ${source.x} ${source.y} C ${source.x + bend} ${source.y}, ${target.x - bend} ${target.y}, ${target.x} ${target.y}`
 }
 
-function portPoint(draft: BlueprintDraft, id: string, side: "input" | "output") {
+function portPoint(draft: BlueprintDraft, id: string, side: "input" | "output", portName?: string) {
   const layout = draft.layout.nodes[id]
   if (!layout) return
   const size = nodeSize(draft, id)
+  const script = draft.graph.script_nodes?.[id]
+  const common = draft.graph.common_nodes?.[id]
+  const commonPort = common ? commonNodePorts(common, side).find((port) => port.name === portName) : undefined
+  const portTop = script ? scriptPortY(script, side, portName) : (commonPort?.top ?? size.height / 2)
   return {
     x: side === "output" ? layout.x + size.width : layout.x,
-    y: layout.y + size.height / 2,
+    y: layout.y + portTop,
   }
 }
 
 function nodeSize(draft: BlueprintDraft, id: string) {
+  const script = draft.graph.script_nodes?.[id]
+  if (script) return scriptNodeSize(script)
+  const common = draft.graph.common_nodes?.[id]
+  if (common) return commonNodeSize(common)
   return nodeKind(draft, id) === "terminal"
     ? { width: TERMINAL_WIDTH, height: TERMINAL_HEIGHT }
     : { width: NODE_WIDTH, height: NODE_HEIGHT }
 }
 
 function sizeForAddKind(kind: BlueprintAddNodeKind) {
+  if (kind === "branch") return { width: COMMON_BRANCH_WIDTH, height: COMMON_BRANCH_HEIGHT }
   return kind === "start" || kind === "end"
     ? { width: TERMINAL_WIDTH, height: TERMINAL_HEIGHT }
     : { width: NODE_WIDTH, height: NODE_HEIGHT }

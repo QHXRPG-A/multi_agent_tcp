@@ -10,6 +10,7 @@ ProjectRole = Literal["owner", "operator", "viewer"]
 SystemRole = Literal["admin", "user"]
 RunStatus = Literal["running", "completed", "cancelled", "failed", "paused", "unknown"]
 NodeState = Literal["idle", "queued", "running", "completed", "failed", "unknown"]
+BlueprintNodeKind = Literal["agent", "worker_agent", "script", "branch", "tick"]
 PlanningRequestStatus = Literal[
     "pending_desktop",
     "planning",
@@ -99,16 +100,25 @@ class ProjectSummary(BaseModel):
 class BlueprintStructureNode(BaseModel):
     id: str
     label: str
+    kind: BlueprintNodeKind = "worker_agent"
     role: Optional[str] = None
     state: NodeState
+    summary: Optional[str] = None
+    x: Optional[float] = None
+    y: Optional[float] = None
     upstreamNodeIds: list[str] = Field(default_factory=list)
     downstreamNodeIds: list[str] = Field(default_factory=list)
+    inputPorts: list[str] = Field(default_factory=list)
+    outputPorts: list[str] = Field(default_factory=list)
+    everyNTicks: Optional[int] = None
 
 
 class BlueprintStructureEdge(BaseModel):
     source: str
     target: str
     kind: Literal["exec", "data", "unknown"] = "unknown"
+    outputPort: Optional[str] = None
+    inputPort: Optional[str] = None
 
 
 class BlueprintStructureProjection(BaseModel):
@@ -119,12 +129,17 @@ class BlueprintStructureProjection(BaseModel):
 class DesktopBlueprintSnapshotNode(BaseModel):
     id: str = Field(min_length=1, max_length=256)
     label: str = Field(min_length=1, max_length=512)
+    kind: BlueprintNodeKind = "worker_agent"
     role: Optional[str] = None
     state: NodeState = "idle"
+    summary: Optional[str] = Field(default=None, max_length=2048)
     x: Optional[float] = None
     y: Optional[float] = None
     upstreamNodeIds: list[str] = Field(default_factory=list)
     downstreamNodeIds: list[str] = Field(default_factory=list)
+    inputPorts: list[str] = Field(default_factory=list, max_length=80)
+    outputPorts: list[str] = Field(default_factory=list, max_length=80)
+    everyNTicks: Optional[int] = Field(default=None, ge=1)
     agentId: Optional[str] = None
     cliKind: Optional[str] = None
     taskStatus: Optional[str] = None
@@ -138,6 +153,8 @@ class DesktopBlueprintSnapshotEdge(BaseModel):
     source: str = Field(min_length=1, max_length=256)
     target: str = Field(min_length=1, max_length=256)
     kind: Literal["exec", "data", "unknown"] = "unknown"
+    outputPort: Optional[str] = Field(default=None, max_length=128)
+    inputPort: Optional[str] = Field(default=None, max_length=128)
 
 
 class DesktopBlueprintSnapshotRequest(BaseModel):

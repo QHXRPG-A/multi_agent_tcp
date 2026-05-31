@@ -1,6 +1,15 @@
 import { execFileSync } from "node:child_process"
 import { existsSync, readFileSync, readdirSync } from "node:fs"
-import { dirname, extname, join } from "node:path"
+import { basename, dirname, extname, join } from "node:path"
+
+export type BlueprintEditorCandidate = {
+  id: string
+  label: string
+  command?: string
+  args?: string[]
+  source: string
+  systemDefault?: boolean
+}
 
 export function checkAppExists(appName: string): boolean {
   if (process.platform === "win32") return true
@@ -11,6 +20,37 @@ export function checkAppExists(appName: string): boolean {
 export function resolveAppPath(appName: string): string | null {
   if (process.platform !== "win32") return appName
   return resolveWindowsAppPath(appName)
+}
+
+export function listBlueprintEditors(): BlueprintEditorCandidate[] {
+  const candidates: BlueprintEditorCandidate[] = []
+  const seen = new Set<string>()
+  const add = (candidate: BlueprintEditorCandidate | null) => {
+    if (!candidate) return
+    const key = candidate.systemDefault
+      ? candidate.id
+      : `${candidate.command ?? ""}\u0000${(candidate.args ?? []).join("\u0000")}`.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    candidates.push(candidate)
+  }
+
+  add(editorFromEnv("VISUAL"))
+  add(editorFromEnv("EDITOR"))
+  add(editorFromKnownCommand("vscode", "VS Code", ["code"], "Visual Studio Code"))
+  add(editorFromKnownCommand("cursor", "Cursor", ["cursor"], "Cursor"))
+  add(editorFromKnownCommand("windsurf", "Windsurf", ["windsurf"], "Windsurf"))
+  add(editorFromKnownCommand("zed", "Zed", ["zed"], "Zed"))
+  add(editorFromKnownCommand("pycharm", "PyCharm", ["pycharm64", "pycharm"], "PyCharm"))
+  add(systemDefaultEditor())
+
+  return candidates
+}
+
+export function resolveBlueprintEditor(editorId?: string): BlueprintEditorCandidate {
+  const id = editorId?.trim()
+  const candidates = listBlueprintEditors()
+  return candidates.find((candidate) => candidate.id === id) ?? systemDefaultEditor()
 }
 
 export function wslPath(path: string, mode: "windows" | "linux" | null): string {
@@ -29,6 +69,83 @@ export function wslPath(path: string, mode: "windows" | "linux" | null): string 
     return output.toString().trim()
   } catch (error) {
     throw new Error(`Failed to run wslpath: ${String(error)}`, { cause: error })
+  }
+}
+
+function systemDefaultEditor(): BlueprintEditorCandidate {
+  return {
+    id: "system",
+    label: "System default",
+    source: "system",
+    systemDefault: true,
+  }
+}
+
+function editorFromEnv(envName: "VISUAL" | "EDITOR"): BlueprintEditorCandidate | null {
+  const raw = process.env[envName]?.trim()
+  if (!raw) return null
+  const parts = splitEditorCommand(raw)
+  const command = parts[0]
+  if (!command) return null
+  const resolved = resolveProgram(command)
+  if (!resolved) return null
+  return {
+    id: `env:${envName.toLowerCase()}`,
+    label: `${envName}: ${basename(command)}`,
+    command: resolved,
+    args: parts.slice(1),
+    source: envName,
+  }
+}
+
+function editorFromKnownCommand(
+  id: string,
+  label: string,
+  commands: string[],
+  macosAppName: string,
+): BlueprintEditorCandidate | null {
+  if (process.platform === "darwin" && checkMacosApp(macosAppName)) {
+    return {
+      id,
+      label,
+      command: "open",
+      args: ["-a", macosAppName],
+      source: `macOS app ${macosAppName}`,
+    }
+  }
+
+  for (const command of commands) {
+    const resolved = resolveProgram(command)
+    if (resolved) {
+      return {
+        id,
+        label,
+        command: resolved,
+        args: [],
+        source: `PATH ${command}`,
+      }
+    }
+  }
+  return null
+}
+
+function splitEditorCommand(raw: string): string[] {
+  const parts: string[] = []
+  const pattern = /"([^"]*)"|'([^']*)'|(\S+)/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(raw))) {
+    parts.push(match[1] ?? match[2] ?? match[3] ?? "")
+  }
+  return parts.filter(Boolean)
+}
+
+function resolveProgram(program: string): string | null {
+  if (/[\\/]/.test(program)) return existsSync(program) ? program : null
+  if (process.platform === "win32") return resolveWindowsAppPath(program)
+  try {
+    return execFileSync("which", [program]).toString().trim().split(/\r?\n/)[0] || null
+  } catch {
+    return null
   }
 }
 

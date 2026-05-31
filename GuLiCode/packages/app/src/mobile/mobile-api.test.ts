@@ -139,6 +139,101 @@ describe("mobile collaboration API projection", () => {
     expect(data.blueprint.edges).toEqual([])
   })
 
+  test("projects full desktop blueprint nodes and edge ports", () => {
+    const data = serverStateToMobile(
+      project,
+      {
+        ...status,
+        blueprint: {
+          nodes: [
+            {
+              id: "agent-1",
+              label: "Agent 1",
+              kind: "worker_agent",
+              state: "running",
+              x: 96,
+              y: 120,
+              upstreamNodeIds: [],
+              downstreamNodeIds: ["script-1"],
+            },
+            {
+              id: "script-1",
+              label: "Format Result",
+              kind: "script",
+              role: "Script Function",
+              state: "idle",
+              summary: "format_result(payload: dict) -> {summary: str}",
+              x: 280,
+              y: 120,
+              upstreamNodeIds: ["agent-1"],
+              downstreamNodeIds: ["branch-1"],
+              inputPorts: ["payload: dict"],
+              outputPorts: ["summary: str"],
+            },
+            {
+              id: "branch-1",
+              label: "Branch",
+              kind: "branch",
+              state: "idle",
+              x: 464,
+              y: 120,
+              upstreamNodeIds: ["script-1"],
+              downstreamNodeIds: ["agent-2"],
+              inputPorts: ["condition: bool"],
+              outputPorts: ["true: message", "false: message"],
+            },
+            {
+              id: "tick-1",
+              label: "Tick",
+              kind: "tick",
+              state: "idle",
+              x: 96,
+              y: 264,
+              upstreamNodeIds: [],
+              downstreamNodeIds: ["agent-1"],
+              outputPorts: ["tick: tick"],
+              everyNTicks: 3,
+            },
+          ],
+          edges: [
+            { source: "agent-1", target: "script-1", kind: "data", outputPort: "out", inputPort: "payload" },
+            { source: "script-1", target: "branch-1", kind: "data", outputPort: "summary", inputPort: "condition" },
+            { source: "tick-1", target: "agent-1", kind: "data", outputPort: "tick", inputPort: "in" },
+          ],
+        },
+        agents: [
+          {
+            nodeId: "agent-1",
+            agentId: "Agent 1",
+            cliKind: "codex",
+            state: "running",
+            taskStatus: "running",
+            queueSize: 1,
+            messagesSent: 2,
+            busyCount: 1,
+            updatedAt: "2026-05-28T09:48:00Z",
+            recentEvents: [],
+          },
+        ],
+      },
+      undefined,
+      [],
+      { csrfToken: "csrf-1", capabilities: [], planningRequests: [] },
+    )
+
+    expect(data.blueprint.nodes.map((node) => node.kind)).toEqual(["worker_agent", "script", "branch", "tick"])
+    expect(data.blueprint.nodes.find((node) => node.id === "script-1")?.summary).toContain("format_result")
+    expect(data.blueprint.nodes.find((node) => node.id === "branch-1")?.outputPorts).toContain("true: message")
+    expect(data.blueprint.nodes.find((node) => node.id === "tick-1")?.everyNTicks).toBe(3)
+    expect(data.blueprint.edges[0]).toEqual({
+      source: "agent-1",
+      target: "script-1",
+      kind: "data",
+      outputPort: "out",
+      inputPort: "payload",
+    })
+  })
+
   test("loads /mobile data through the read-only API sequence", async () => {
     const calls: string[] = []
     const fetcher = async (input: RequestInfo | URL) => {

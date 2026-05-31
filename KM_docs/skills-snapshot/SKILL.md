@@ -87,6 +87,93 @@ Read these first based on the task:
 
 ## Recent Handoff
 
+For the latest Agent and Script Function Node interaction work from
+2026-05-31:
+
+- Agent -> Script multi-input fan-out, Script multi-output -> Agent fan-in,
+  true sibling edges, hub rendering, and group hover/select/delete:
+  `archive/frontend/blueprint_agent_script_fan_edges_2026-05-31.md`
+- Ordinary-Agent `blueprint_script_call` MCP tool, batch `script_calls` state,
+  idle reminders, script execution events, and automatic downstream Agent
+  delivery:
+  `archive/runtime-backend/blueprint_script_call_mcp_runtime_2026-05-31.md`
+- GuLiCode desktop debug loopback issue where stale `127.0.0.1:5173` blocked
+  renderer health while `[::1]:5173` worked:
+  `archive/runtime-backend/gulicode_desktop_debug_loopback_renderer_2026-05-31.md`
+
+Use those files when the user reports:
+
+- Agent -> Script or Script -> Agent connections should fan across all script
+  ports, delete as a group, or render with a hub.
+- Agents are not calling Script Function Nodes, `required_script_calls` is
+  missing, `blueprint_script_call` is unavailable, or downstream Script output
+  is not automatically delivered to Agents.
+- `agent.dispatch` incorrectly bypasses a Script Function Node path.
+- GuLiCode desktop appears to have an Electron process and bridge but the
+  window is blank or the debug launcher reports desktop failure while
+  `[::1]:5173` is healthy.
+
+For the latest built-in Blueprint Branch/Tick common node work from 2026-05-31:
+
+- Branch/Tick node search, common node graph model, port type validation,
+  Inspector edge validation, Tick-only direct-run allowance, and Branch pin
+  labels/triangle input:
+  `archive/frontend/blueprint_common_nodes_branch_tick_ui_type_ports_2026-05-31.md`
+- Python `CommonNode`, `common_nodes` graph parsing, backend port type
+  validation, `agent.dispatch` to Branch, Branch strict-bool routing, Tick
+  scheduling/backpressure, and common-node status:
+  `archive/runtime-backend/blueprint_common_nodes_branch_tick_runtime_2026-05-31.md`
+
+Use those files when the user reports:
+
+- Branch/Tick nodes are missing from node search or serialize incorrectly
+- Branch pins should show `condition: bool`, `true: message`, or
+  `false: message`
+- invalid `tick -> bool` or other typed-port connections are accepted
+- canvas drag connection and Inspector edge edits disagree
+- Tick-only direct runs require a selected start Agent
+- `common_nodes` JSON fails to load, Branch dispatch does not route, or Tick
+  cadence/backpressure/status looks wrong
+
+For the latest Blueprint Script Function Node work from 2026-05-31:
+
+- Right-click node search, Script Function Node creation dialog, IDE selector,
+  compile button, dynamic script ports, and Python-style node visual:
+  `archive/frontend/blueprint_script_function_node_ui_ide_compile_2026-05-31.md`
+- Python `@blueprint_node` discovery/execution, `.multi_agent_workspace/scripts`
+  management, desktop bridge commands, editor discovery/opening, and runtime
+  Agent -> Script -> Agent flow:
+  `archive/runtime-backend/blueprint_script_function_node_runtime_bridge_2026-05-31.md`
+
+Use those files when the user reports:
+
+- right-click node search or the Script Function Node `+` flow is wrong
+- the toolbar Script editor selector, "system default" fallback, or script
+  double-click open behavior is wrong
+- the Blueprint Compile button does not refresh script signatures/ports
+- Script Function Node visual shape, collapse/expand, or port rendering is
+  wrong
+- `blueprint.scriptNodes` / `blueprint.createScriptNode` fails, script catalog
+  scanning imports user code, or Agent -> Script -> Agent dispatch fails
+
+For the latest full CLI Agent / Worker Agent split from 2026-05-30:
+
+- Full CLI `Agent` node UI, access-policy inspector, i18n, and opaque
+  light-green visual treatment:
+  `archive/frontend/blueprint_full_agent_node_ui_2026-05-30.md`
+- Full `Agent` runtime launch semantics, message-only MCP scope, and real
+  Codex end-to-end smoke:
+  `archive/runtime-backend/blueprint_full_agent_runtime_real_codex_smoke_2026-05-30.md`
+
+Use those files when the user reports:
+
+- the add-node menu, inspector, or visible name for `Agent` / `Worker Agent` is
+  wrong
+- full `Agent` nodes are not opaque light green
+- a full `Agent` unexpectedly gets private workspace or workspace MCP tools
+- `worker_agent` can bypass sandbox or dangerous access policy
+- real Codex full-Agent dispatch through `agent_dispatch` needs to be checked
+
 For the latest Blueprint Agent model/runtime cleanup from 2026-05-29:
 
 - Test Agent merge into normal Agent UI, global Agent panel JSON test-log
@@ -119,7 +206,21 @@ Use that file when the user reports:
 - reasoning/tool disclosures close, resize, or jump scroll during tick refresh
 - desktop session mirror or `desktop.session.submit` behavior is unclear
 
-For the latest blueprint panel work from 2026-05-25:
+For the latest blueprint multi-document and direct-run work from 2026-05-30:
+
+- Project blueprint dropdown, new blueprint dialog, current blueprint id
+  binding, and direct live run button:
+  `archive/frontend/blueprint_multi_document_direct_run_2026-05-30.md`
+
+Use that file when the user reports:
+
+- the Blueprint toolbar dropdown, project blueprint switching, or new blueprint
+  creation is wrong
+- runtime direct `Run` should start live without Top Agent planning
+- direct run does not require or respect selected start Agents
+- Top Agent planning starts the wrong blueprint document
+
+For earlier blueprint panel work from 2026-05-25:
 
 - Progress overlay and staged-plan sync:
   `archive/frontend/blueprint_flow_progress_overlay_plan_sync_2026-05-25.md`

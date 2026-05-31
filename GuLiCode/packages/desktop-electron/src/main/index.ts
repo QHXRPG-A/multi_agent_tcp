@@ -35,7 +35,7 @@ app.setPath("userData", join(app.getPath("appData"), appId))
 const { autoUpdater } = pkg
 
 import type { InitStep, ServerReadyData, SqliteMigrationProgress, WslConfig } from "../preload/types"
-import { checkAppExists, resolveAppPath, wslPath } from "./apps"
+import { checkAppExists, listBlueprintEditors, resolveAppPath, resolveBlueprintEditor, wslPath } from "./apps"
 import { CHANNEL, UPDATER_ENABLED } from "./constants"
 import { DesktopControlBridge } from "./desktop-control-bridge"
 import { registerIpcHandlers, sendDeepLinks, sendMenuCommand, sendSqliteMigrationProgress } from "./ipc"
@@ -288,6 +288,8 @@ registerIpcHandlers({
   checkAppExists: async (appName) => checkAppExists(appName),
   wslPath: async (path, mode) => wslPath(path, mode),
   resolveAppPath: async (appName) => resolveAppPath(appName),
+  listBlueprintEditors: async () => listBlueprintEditors(),
+  resolveBlueprintEditor: async (editorId) => resolveBlueprintEditor(editorId),
   loadingWindowComplete: () => loadingComplete.resolve(),
   runUpdater: async (alertOnFail) => checkForUpdates(alertOnFail),
   checkUpdate: async () => checkUpdate(),

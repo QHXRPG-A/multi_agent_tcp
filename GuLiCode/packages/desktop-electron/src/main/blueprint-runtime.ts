@@ -55,6 +55,14 @@ export class BlueprintRuntime {
     return this.request("blueprint.save", { projectDir, document }).then((result) => result.document)
   }
 
+  scriptNodes(projectDir: string) {
+    return this.request("blueprint.scriptNodes", { projectDir })
+  }
+
+  createScriptNode(projectDir: string, name: string, description?: string) {
+    return this.request("blueprint.createScriptNode", { projectDir, name, description })
+  }
+
   relocateProjectWorkdir(
     projectDir: string,
     blueprintId: string,

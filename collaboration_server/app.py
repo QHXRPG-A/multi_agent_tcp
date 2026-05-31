@@ -309,7 +309,13 @@ def _register_routes(app: FastAPI) -> None:
         )
         projection = status_projection(run_summary(updated), status_payload, [], None)
         payload["run"] = run_summary(updated)
-        payload["status"] = _mobile_tick_status_projection(projection)
+        runtime_status = _mobile_tick_status_projection(projection)
+        snapshot = store.get_desktop_blueprint_snapshot(str(project["id"]), str(updated["blueprint_id"]))
+        if snapshot:
+            snapshot_status = _desktop_snapshot_tick_status(project, snapshot, run=payload["run"])
+            payload["status"] = _merge_desktop_snapshot_runtime_status(snapshot_status, runtime_status)
+        else:
+            payload["status"] = runtime_status
         return payload
 
     @app.get("/api/mobile/desktop-sessions")
@@ -1472,7 +1478,7 @@ def _client_sync_payload(store: CollaborationStore, user_id: str) -> dict[str, A
 
 
 def _mobile_tick_status_projection(projection: Any) -> dict[str, Any]:
-    data = projection.model_dump() if hasattr(projection, "model_dump") else dict(projection)
+    data = projection.model_dump(exclude_none=True) if hasattr(projection, "model_dump") else dict(projection)
     return {
         "run": data.get("run"),
         "blueprint": data.get("blueprint"),
@@ -1513,7 +1519,11 @@ def _desktop_snapshot_tick_status(
     return {
         "run": run_payload,
         "blueprint": {"nodes": nodes, "edges": edges},
-        "agents": [_desktop_snapshot_agent_projection(item) for item in raw_nodes],
+        "agents": [
+            _desktop_snapshot_agent_projection(item)
+            for item in raw_nodes
+            if _snapshot_node_kind(item.get("kind")) in {"agent", "worker_agent"}
+        ],
         "pending": {
             "queuedMessages": 0,
             "waitingOutgoingBatches": 0,
@@ -1527,16 +1537,27 @@ def _desktop_snapshot_node_projection(item: dict[str, Any]) -> dict[str, Any]:
     node = {
         "id": str(item.get("id") or ""),
         "label": str(item.get("label") or item.get("agentId") or item.get("id") or ""),
+        "kind": _snapshot_node_kind(item.get("kind")),
         "role": str(item.get("role") or item.get("cliKind") or "") or None,
         "state": _snapshot_node_state(item.get("state")),
         "upstreamNodeIds": [str(value) for value in list(item.get("upstreamNodeIds") or [])],
         "downstreamNodeIds": [str(value) for value in list(item.get("downstreamNodeIds") or [])],
+        "inputPorts": _snapshot_port_names(item.get("inputPorts")),
+        "outputPorts": _snapshot_port_names(item.get("outputPorts")),
     }
+    if not node["role"]:
+        node["role"] = _snapshot_node_role(str(node["kind"]))
+    summary = _snapshot_optional_string(item.get("summary"))
+    if summary:
+        node["summary"] = summary
     x = _snapshot_optional_number(item.get("x"))
     y = _snapshot_optional_number(item.get("y"))
     if x is not None and y is not None:
         node["x"] = x
         node["y"] = y
+    every_n_ticks = _snapshot_optional_int(item.get("everyNTicks"))
+    if every_n_ticks is not None and every_n_ticks >= 1:
+        node["everyNTicks"] = every_n_ticks
     return node
 
 
@@ -1549,11 +1570,18 @@ def _snapshot_optional_number(value: Any) -> float | None:
 
 
 def _desktop_snapshot_edge_projection(item: dict[str, Any]) -> dict[str, Any]:
-    return {
+    edge = {
         "source": str(item.get("source") or ""),
         "target": str(item.get("target") or ""),
         "kind": _snapshot_edge_kind(item.get("kind")),
     }
+    output_port = _snapshot_optional_string(item.get("outputPort"))
+    input_port = _snapshot_optional_string(item.get("inputPort"))
+    if output_port:
+        edge["outputPort"] = output_port
+    if input_port:
+        edge["inputPort"] = input_port
+    return edge
 
 
 def _desktop_snapshot_agent_projection(item: dict[str, Any]) -> dict[str, Any]:
@@ -1563,9 +1591,9 @@ def _desktop_snapshot_agent_projection(item: dict[str, Any]) -> dict[str, Any]:
         "cliKind": item.get("cliKind") if item.get("cliKind") else item.get("role"),
         "state": str(item.get("state") or "idle"),
         "taskStatus": item.get("taskStatus"),
-        "queueSize": int(item.get("queueSize") or 0),
-        "messagesSent": int(item.get("messagesSent") or 0),
-        "busyCount": int(item.get("busyCount") or 0),
+        "queueSize": _snapshot_optional_int(item.get("queueSize")) or 0,
+        "messagesSent": _snapshot_optional_int(item.get("messagesSent")) or 0,
+        "busyCount": _snapshot_optional_int(item.get("busyCount")) or 0,
         "updatedAt": item.get("updatedAt"),
     }
 
@@ -1577,11 +1605,121 @@ def _snapshot_node_state(value: Any) -> str:
     return "idle"
 
 
+def _snapshot_node_kind(value: Any) -> str:
+    kind = str(value or "worker_agent").lower()
+    if kind in {"agent", "worker_agent", "script", "branch", "tick"}:
+        return kind
+    return "worker_agent"
+
+
+def _snapshot_node_role(kind: str) -> str:
+    if kind == "agent":
+        return "Agent"
+    if kind == "worker_agent":
+        return "Worker Agent"
+    if kind == "script":
+        return "Script Function"
+    if kind == "branch":
+        return "Branch"
+    if kind == "tick":
+        return "Tick"
+    return "Node"
+
+
 def _snapshot_edge_kind(value: Any) -> str:
     kind = str(value or "unknown").lower()
     if kind in {"exec", "data", "unknown"}:
         return kind
     return "unknown"
+
+
+def _snapshot_optional_string(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _snapshot_port_names(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    for item in value:
+        name = str(item or "").strip()
+        if name:
+            names.append(name[:128])
+    return names
+
+
+def _snapshot_optional_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _merge_desktop_snapshot_runtime_status(snapshot_status: dict[str, Any], runtime_status: dict[str, Any]) -> dict[str, Any]:
+    runtime_blueprint = runtime_status.get("blueprint") if isinstance(runtime_status.get("blueprint"), dict) else {}
+    runtime_nodes = {
+        str(item.get("id")): item
+        for item in list(runtime_blueprint.get("nodes") or [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    runtime_agents = {
+        str(item.get("nodeId")): item
+        for item in list(runtime_status.get("agents") or [])
+        if isinstance(item, dict) and item.get("nodeId")
+    }
+
+    seen_nodes: set[str] = set()
+    merged_nodes: list[dict[str, Any]] = []
+    snapshot_blueprint = snapshot_status.get("blueprint") if isinstance(snapshot_status.get("blueprint"), dict) else {}
+    for item in list(snapshot_blueprint.get("nodes") or []):
+        if not isinstance(item, dict):
+            continue
+        node = dict(item)
+        node_id = str(node.get("id") or "")
+        if not node_id:
+            continue
+        seen_nodes.add(node_id)
+        runtime_node = runtime_nodes.get(node_id)
+        runtime_agent = runtime_agents.get(node_id)
+        state = None
+        if isinstance(runtime_node, dict):
+            state = runtime_node.get("state")
+        if state is None and isinstance(runtime_agent, dict):
+            state = runtime_agent.get("state")
+        if state is not None:
+            node["state"] = _snapshot_node_state(state)
+        merged_nodes.append(node)
+
+    for node_id, item in runtime_nodes.items():
+        if node_id in seen_nodes:
+            continue
+        node = dict(item)
+        node.setdefault("kind", "worker_agent")
+        merged_nodes.append(node)
+
+    snapshot_agents = [
+        dict(item)
+        for item in list(snapshot_status.get("agents") or [])
+        if isinstance(item, dict) and item.get("nodeId")
+    ]
+    merged_agents_by_id = {str(item["nodeId"]): item for item in snapshot_agents}
+    for node_id, item in runtime_agents.items():
+        if node_id in merged_agents_by_id:
+            merged_agents_by_id[node_id].update(item)
+        else:
+            merged_agents_by_id[node_id] = dict(item)
+
+    return {
+        "run": runtime_status.get("run") or snapshot_status.get("run"),
+        "blueprint": {
+            "nodes": merged_nodes,
+            "edges": list(snapshot_blueprint.get("edges") or []),
+        },
+        "agents": list(merged_agents_by_id.values()),
+        "pending": runtime_status.get("pending") or snapshot_status.get("pending") or {},
+    }
 
 
 def _mobile_tick_agent_projection(agent: Any) -> dict[str, Any]:

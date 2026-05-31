@@ -20,15 +20,19 @@ from urllib.parse import urlparse
 from .graph_runtime import (
     AgentNode,
     BlueprintTerminalNode,
+    CommonNode,
     GraphDefinition,
     GraphEdge,
     GraphExecutor,
+    GraphEvent,
     GraphRuntime,
     GuLiCodeTopAgentProfile,
     RouteNode,
+    ScriptNode,
     TopAgentStartPlan,
     is_dispatch_no_op_body,
 )
+from .blueprint_script_nodes import execute_script_node
 
 
 @dataclass
@@ -113,6 +117,38 @@ def graph_definition_from_dict(data: Dict[str, Any]) -> GraphDefinition:
             raise ValueError("terminal_nodes entries must be strings or objects")
         terminal_nodes[node_id] = BlueprintTerminalNode(node_id, kind)
 
+    scripts_raw = data.get("script_nodes", {})
+    script_nodes: Dict[str, ScriptNode] = {}
+    if isinstance(scripts_raw, list):
+        script_items = enumerate(scripts_raw)
+    elif isinstance(scripts_raw, dict):
+        script_items = scripts_raw.items()
+    else:
+        raise ValueError("graph script_nodes must be an object or array")
+    for key, value in script_items:
+        if not isinstance(value, dict):
+            raise ValueError("script_nodes entries must be objects")
+        node_data = dict(value)
+        node_data.setdefault("node_id", str(key))
+        node = ScriptNode.from_dict(node_data)
+        script_nodes[node.node_id] = node
+
+    common_raw = data.get("common_nodes", {})
+    common_nodes: Dict[str, CommonNode] = {}
+    if isinstance(common_raw, list):
+        common_items = enumerate(common_raw)
+    elif isinstance(common_raw, dict):
+        common_items = common_raw.items()
+    else:
+        raise ValueError("graph common_nodes must be an object or array")
+    for key, value in common_items:
+        if not isinstance(value, dict):
+            raise ValueError("common_nodes entries must be objects")
+        node_data = dict(value)
+        node_data.setdefault("node_id", str(key))
+        node = CommonNode.from_dict(node_data)
+        common_nodes[node.node_id] = node
+
     edges_raw = data.get("edges", [])
     if not isinstance(edges_raw, list):
         raise ValueError("graph edges must be an array")
@@ -152,16 +188,20 @@ def graph_definition_from_dict(data: Dict[str, Any]) -> GraphDefinition:
     if not isinstance(ring_limits_raw, dict):
         raise ValueError("agent_ring_max_circulations must be an object")
 
-    return GraphDefinition(
+    graph = GraphDefinition(
         agent_nodes=agent_nodes,
         route_nodes=route_nodes,
         terminal_nodes=terminal_nodes,
+        script_nodes=script_nodes,
+        common_nodes=common_nodes,
         edges=edges,
         agent_ring_max_circulations={
             str(key): int(value)
             for key, value in ring_limits_raw.items()
         },
     )
+    graph.validate_port_types()
+    return graph
 
 
 def load_graph_definition(path: Path) -> GraphDefinition:
@@ -182,11 +222,21 @@ def scoped_organization_view(graph: GraphDefinition, *, agent_id: Optional[str] 
     if node_id not in view["agents"]:
         raise KeyError(f"unknown AgentNode: {node_id}")
     agent = dict(view["agents"][node_id])
-    related = set(agent.get("upstream_agents", [])) | set(agent.get("downstream_agents", [])) | {node_id}
+    related = (
+        set(agent.get("upstream_agents", []))
+        | set(agent.get("downstream_agents", []))
+        | set(view.get("framework_connections", {}).get(node_id, []))
+        | {node_id}
+    )
     return {
         "graph": {
             "nodes": sorted(related),
             "agent_nodes": [node_id],
+            "common_nodes": {
+                common_id: node
+                for common_id, node in view["graph"].get("common_nodes", {}).items()
+                if common_id in related
+            },
             "edges": [
                 edge
                 for edge in view["graph"]["edges"]
@@ -196,6 +246,9 @@ def scoped_organization_view(graph: GraphDefinition, *, agent_id: Optional[str] 
         "agent": agent,
         "agent_connections": {
             node_id: list(view["agent_connections"].get(node_id, [])),
+        },
+        "framework_connections": {
+            node_id: list(view.get("framework_connections", {}).get(node_id, [])),
         },
         "scope": "agent",
     }
@@ -215,13 +268,20 @@ def ordinary_agent_framework_context(
         raise KeyError(f"unknown AgentNode: {node_id}")
     organization = graph.agent_organization_summary(agent_id=node_id)
     agent_view = organization["agent"]
-    downstream = (
-        runtime.active_agent_connections(graph, node_id)
+    downstream_nodes = (
+        runtime.active_framework_connections(graph, node_id)
         if runtime is not None
-        else list(graph.agent_connections().get(node_id, []))
+        else list(graph.framework_targets_for_agent(node_id))
     )
-    organization["agent_connections"] = {node_id: list(downstream)}
-    organization["agent"]["downstream_agents"] = list(downstream)
+    downstream_agents = [
+        target_id
+        for target_id in downstream_nodes
+        if target_id in graph.agent_nodes
+    ]
+    organization["framework_connections"] = {node_id: list(downstream_nodes)}
+    organization["agent_connections"] = {node_id: list(downstream_agents)}
+    organization["agent"]["downstream_nodes"] = list(downstream_nodes)
+    organization["agent"]["downstream_agents"] = list(downstream_agents)
     if runtime is not None:
         ring_counts = runtime.agent_ring_circulation_counts_for(node_id)
         if ring_counts:
@@ -231,6 +291,7 @@ def ordinary_agent_framework_context(
     message_envelope: Dict[str, Any] = {
         "outgoing_batch_id": batch.batch_id if batch is not None else None,
         "required_outgoing_targets": required_targets,
+        "required_script_calls": _required_script_calls_for_envelope(batch),
     }
     if batch is not None:
         message_envelope["remaining_targets"] = remaining_targets
@@ -238,7 +299,12 @@ def ordinary_agent_framework_context(
         "agent_node_id": node_id,
         "agent_id": agent_view["agent_id"],
         "upstream_agents": list(agent_view.get("upstream_agents", [])),
-        "downstream_agents": downstream,
+        "downstream_agents": downstream_agents,
+        "downstream_nodes": downstream_nodes,
+        "common_nodes": {
+            common_id: node.to_dict()
+            for common_id, node in graph.common_nodes.items()
+        },
         "organization": organization,
         "message_envelope": message_envelope,
     }
@@ -288,10 +354,12 @@ class GraphRuntimeControlPlane:
         graph: GraphDefinition,
         *,
         top_agent: Optional[GuLiCodeTopAgentProfile] = None,
+        script_root: Optional[Path] = None,
     ) -> None:
         self.runtime = runtime
         self.graph = graph
         self.top_agent = top_agent or GuLiCodeTopAgentProfile()
+        self.script_root = script_root
 
     def handle_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         command = str(payload.get("command", "")).strip()
@@ -437,6 +505,25 @@ class GraphRuntimeControlPlane:
             )
             return GraphControlResponse(True, data).to_dict()
 
+        if command == "script.call":
+            return asyncio.run(
+                self.call_script_node(
+                    str(args["source_node_id"]),
+                    str(args.get("function_name") or ""),
+                    dict(args.get("arguments") or {}),
+                    script_node_id=(
+                        str(args["script_node_id"])
+                        if args.get("script_node_id") is not None
+                        else None
+                    ),
+                    batch_id=(
+                        str(args["batch_id"])
+                        if args.get("batch_id") is not None
+                        else None
+                    ),
+                )
+            )
+
         if command == "run.end":
             result = self.runtime.end_run(
                 str(args["action"]),
@@ -535,6 +622,7 @@ class GraphRuntimeControlPlane:
         manifest_path: Optional[Path] = None,
         prestart_all_agents: bool = False,
     ) -> Dict[str, Any]:
+        self.graph.validate_port_types()
         validation = self.top_agent.validate_start_plan(self.graph, plan)
         if not validation.ok:
             return validation.to_dict()
@@ -546,7 +634,7 @@ class GraphRuntimeControlPlane:
         for node_id in plan.start_nodes:
             node = self.graph.agent_nodes[node_id]
             await self.runtime.ensure_agent(node)
-            downstream = self.graph.agent_connections().get(node_id, [])
+            downstream = self.runtime.active_framework_connections(self.graph, node_id)
             batch = None
             if downstream:
                 batch = await self.runtime.create_outgoing_batch_from_graph(
@@ -569,6 +657,7 @@ class GraphRuntimeControlPlane:
                         self.graph,
                         node_id,
                         batch=batch,
+                        runtime=self.runtime,
                     ),
                 ),
                 source_agent_id=self.top_agent.agent_id,
@@ -633,6 +722,271 @@ class GraphRuntimeControlPlane:
         )
         return GraphControlResponse(True, {"batch": batch.to_dict()}).to_dict()
 
+    async def call_script_node(
+        self,
+        source_node_id: str,
+        function_name: str,
+        arguments: Dict[str, Any],
+        *,
+        script_node_id: Optional[str] = None,
+        batch_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if source_node_id not in self.graph.agent_nodes:
+            raise KeyError(f"unknown source AgentNode: {source_node_id}")
+        if self.script_root is None:
+            raise RuntimeError("script node execution requires a configured script_root")
+        if not batch_id:
+            raise ValueError("blueprint_script_call requires the current outgoing batch_id")
+        batch = self.runtime.outgoing_batches.get(str(batch_id))
+        if batch is None:
+            raise KeyError(f"unknown outgoing batch: {batch_id}")
+        if batch.source_node_id != source_node_id:
+            raise ValueError(
+                f"batch {batch_id!r} belongs to source {batch.source_node_id!r}, not {source_node_id!r}"
+            )
+        if not isinstance(arguments, dict):
+            raise ValueError("blueprint_script_call arguments must be a JSON object")
+
+        record = self._select_required_script_call(
+            batch,
+            function_name=function_name,
+            script_node_id=script_node_id,
+        )
+        node = self.graph.script_nodes[record["script_node_id"]]
+        if str(record.get("status") or "") in {"completed", "delivered"}:
+            return GraphControlResponse(
+                True,
+                {
+                    "script_call": dict(record),
+                    "result": dict(record.get("result") or {}),
+                    "delivery": [],
+                    "already_called": True,
+                    "batch": batch.to_dict(),
+                },
+            ).to_dict()
+
+        self.runtime._emit(
+            GraphEvent(
+                "ScriptNodeRunning",
+                node_id=node.node_id,
+                status="running",
+                payload={
+                    "node": node.to_dict(),
+                    "batch_id": batch.batch_id,
+                    "source_node_id": source_node_id,
+                    "arguments": dict(arguments),
+                },
+            )
+        )
+        try:
+            result = await execute_script_node(
+                self.script_root,
+                node,
+                arguments,
+            )
+        except Exception as exc:
+            record.update(
+                {
+                    "status": "failed",
+                    "error": str(exc),
+                    "arguments": dict(arguments),
+                    "called_by_node_id": source_node_id,
+                    "called_by_agent_id": batch.source_agent_id,
+                }
+            )
+            batch.last_script_call_reminder_keys = []
+            self.runtime._emit(
+                GraphEvent(
+                    "ScriptNodeFailed",
+                    node_id=node.node_id,
+                    status="failed",
+                    payload={
+                        "error": str(exc),
+                        "node": node.to_dict(),
+                        "batch_id": batch.batch_id,
+                        "source_node_id": source_node_id,
+                    },
+                )
+            )
+            raise
+
+        record.update(
+            {
+                "status": "completed",
+                "arguments": dict(arguments),
+                "called_by_node_id": source_node_id,
+                "called_by_agent_id": batch.source_agent_id,
+                "result": dict(result),
+                "outputs": dict(result.get("outputs") or {}),
+                "error": None,
+            }
+        )
+        batch.last_script_call_reminder_keys = []
+        self.runtime._emit(
+            GraphEvent(
+                "ScriptNodeCompleted",
+                node_id=node.node_id,
+                status="completed",
+                payload={
+                    **dict(result),
+                    "batch_id": batch.batch_id,
+                    "source_node_id": source_node_id,
+                    "arguments": dict(arguments),
+                },
+            )
+        )
+        delivery = await self._deliver_completed_script_targets(batch)
+        return GraphControlResponse(
+            True,
+            {
+                "script_call": dict(record),
+                "result": dict(result),
+                "delivery": delivery,
+                "batch": batch.to_dict(),
+            },
+        ).to_dict()
+
+    def _select_required_script_call(
+        self,
+        batch: Any,
+        *,
+        function_name: str,
+        script_node_id: Optional[str],
+    ) -> Dict[str, Any]:
+        calls = [
+            record
+            for record in batch.script_calls.values()
+            if isinstance(record, dict)
+        ]
+        if script_node_id is not None:
+            for record in calls:
+                if str(record.get("script_node_id") or "") == str(script_node_id):
+                    if function_name and str(record.get("function_name") or "") != function_name:
+                        raise ValueError(
+                            f"script_node_id {script_node_id!r} does not match function {function_name!r}"
+                        )
+                    return record
+            raise ValueError(f"script node {script_node_id!r} is not required for this batch")
+        matches = [
+            record
+            for record in calls
+            if str(record.get("function_name") or "") == str(function_name).strip()
+        ]
+        if not matches:
+            raise ValueError(f"script function {function_name!r} is not required for this batch")
+        if len(matches) > 1:
+            raise ValueError(
+                f"script function {function_name!r} is ambiguous; pass script_node_id"
+            )
+        return matches[0]
+
+    async def _deliver_completed_script_targets(self, batch: Any) -> list[Dict[str, Any]]:
+        deliveries: list[Dict[str, Any]] = []
+        for target_node_id, script_path in list(batch.script_paths_by_target.items()):
+            if target_node_id not in self.graph.agent_nodes:
+                continue
+            if target_node_id in batch.staged_messages or target_node_id in batch.no_op_target_node_ids:
+                continue
+            path = [str(item) for item in script_path]
+            if not path:
+                continue
+            records = [batch.script_calls.get(script_node_id) for script_node_id in path]
+            if any(not isinstance(record, dict) or str(record.get("status") or "") not in {"completed", "delivered"} for record in records):
+                continue
+
+            downstream_batch = None
+            downstream = self.runtime.active_framework_connections(self.graph, target_node_id)
+            if downstream:
+                downstream_batch = await self.runtime.create_outgoing_batch_from_graph(
+                    self.graph,
+                    target_node_id,
+                    required_target_node_ids=downstream,
+                )
+            body = inject_framework_context(
+                self._script_delivery_body(batch, target_node_id, path),
+                ordinary_agent_framework_context(
+                    self.graph,
+                    target_node_id,
+                    batch=downstream_batch,
+                    runtime=self.runtime,
+                ),
+            )
+            staged = self.runtime.stage_outgoing_message(
+                batch.batch_id,
+                self.graph.agent_nodes[target_node_id],
+                body,
+            )
+            for script_node_id in path:
+                record = batch.script_calls.get(script_node_id)
+                if not isinstance(record, dict):
+                    continue
+                delivered = record.setdefault("delivered_target_node_ids", [])
+                if target_node_id not in delivered:
+                    delivered.append(target_node_id)
+                required = [str(item) for item in record.get("required_target_node_ids", [])]
+                if required and all(target in delivered for target in required):
+                    record["status"] = "delivered"
+            deliveries.append(
+                {
+                    "target_node_id": target_node_id,
+                    "script_path": path,
+                    "dispatch": staged,
+                }
+            )
+        return deliveries
+
+    def _script_delivery_body(
+        self,
+        batch: Any,
+        target_node_id: str,
+        script_path: Sequence[str],
+    ) -> Dict[str, Any]:
+        path_results = []
+        for script_node_id in script_path:
+            record = batch.script_calls.get(str(script_node_id), {})
+            result = dict(record.get("result") or {}) if isinstance(record, dict) else {}
+            path_results.append(
+                {
+                    "script_node_id": str(script_node_id),
+                    "function_name": str(record.get("function_name") or "") if isinstance(record, dict) else "",
+                    "title": str(record.get("title") or "") if isinstance(record, dict) else "",
+                    "description": str(record.get("description") or "") if isinstance(record, dict) else "",
+                    "arguments": dict(record.get("arguments") or {}) if isinstance(record, dict) else {},
+                    "arguments_summary": _script_arguments_summary(
+                        dict(record.get("arguments") or {}) if isinstance(record, dict) else {}
+                    ),
+                    "result": result,
+                    "outputs": dict(result.get("outputs") or {}),
+                }
+            )
+        final_record = batch.script_calls.get(str(script_path[-1]), {})
+        final_result = dict(final_record.get("result") or {}) if isinstance(final_record, dict) else {}
+        final_outputs = dict(final_result.get("outputs") or {})
+        function_name = str(final_record.get("function_name") or "") if isinstance(final_record, dict) else ""
+        description = str(final_record.get("description") or "") if isinstance(final_record, dict) else ""
+        title = str(final_record.get("title") or function_name) if isinstance(final_record, dict) else function_name
+        return {
+            "type": "blueprint_script_result",
+            "prompt": f"Use the output from Blueprint script function `{function_name}`.",
+            "target_node_id": target_node_id,
+            "script_node_id": str(script_path[-1]),
+            "script_title": title,
+            "function_name": function_name,
+            "function_description": description,
+            "arguments": dict(final_record.get("arguments") or {}) if isinstance(final_record, dict) else {},
+            "arguments_summary": _script_arguments_summary(
+                dict(final_record.get("arguments") or {}) if isinstance(final_record, dict) else {}
+            ),
+            "outputs": final_outputs,
+            "result": final_outputs.get("result", final_result.get("result")),
+            "script_path_results": path_results,
+            "source": {
+                "node_id": batch.source_node_id,
+                "agent_id": batch.source_agent_id,
+                "batch_id": batch.batch_id,
+            },
+        }
+
     def top_agent_utterances(
         self,
         *,
@@ -677,8 +1031,10 @@ class GraphRuntimeControlPlane:
     ) -> Dict[str, Any]:
         if source_node_id not in self.graph.agent_nodes:
             raise KeyError(f"unknown source AgentNode: {source_node_id}")
-        if target_node_id not in self.graph.agent_nodes:
-            raise KeyError(f"unknown target AgentNode: {target_node_id}")
+        target_is_agent = target_node_id in self.graph.agent_nodes
+        target_is_common = target_node_id in self.graph.common_nodes
+        if not target_is_agent and not target_is_common:
+            raise KeyError(f"unknown target node: {target_node_id}")
 
         if batch_id is None:
             raise ValueError("agent.dispatch requires the current outgoing batch_id")
@@ -694,17 +1050,24 @@ class GraphRuntimeControlPlane:
                 f"target {target_node_id!r} is not in current required_outgoing_targets"
             )
         is_no_op = is_dispatch_no_op_body(body)
+        if (
+            target_is_agent
+            and batch.script_paths_by_target.get(target_node_id)
+        ):
+            raise ValueError(
+                f"target {target_node_id!r} requires blueprint_script_call before downstream delivery"
+            )
         downstream_batch = None
         ring_record: Dict[str, Any] = {"recorded": False, "consumed_ring_ids": []}
-        if not is_no_op:
+        if not is_no_op and target_is_agent:
             ring_record = self.runtime.record_outgoing_edge_from_batch(
                 batch.batch_id,
                 target_node_id,
             )
         downstream = (
             []
-            if is_no_op
-            else self.runtime.active_agent_connections(self.graph, target_node_id)
+            if is_no_op or not target_is_agent
+            else self.runtime.active_framework_connections(self.graph, target_node_id)
         )
         if downstream:
             downstream_batch = await self.runtime.create_outgoing_batch_from_graph(
@@ -713,20 +1076,27 @@ class GraphRuntimeControlPlane:
                 required_target_node_ids=downstream,
             )
 
-        staged_body = body if is_no_op else inject_framework_context(
-            body,
-            ordinary_agent_framework_context(
-                self.graph,
-                target_node_id,
-                batch=downstream_batch,
-                runtime=self.runtime,
-            ),
-        )
-        staged = self.runtime.stage_outgoing_message(
-            batch.batch_id,
-            self.graph.agent_nodes[target_node_id],
-            staged_body,
-        )
+        if target_is_agent:
+            staged_body = body if is_no_op else inject_framework_context(
+                body,
+                ordinary_agent_framework_context(
+                    self.graph,
+                    target_node_id,
+                    batch=downstream_batch,
+                    runtime=self.runtime,
+                ),
+            )
+            staged = self.runtime.stage_outgoing_message(
+                batch.batch_id,
+                self.graph.agent_nodes[target_node_id],
+                staged_body,
+            )
+        else:
+            staged = self.runtime.stage_outgoing_common_node_message(
+                batch.batch_id,
+                self.graph.common_nodes[target_node_id],
+                body,
+            )
         staged["ring_record"] = dict(ring_record)
         return GraphControlResponse(
             True,
@@ -736,6 +1106,89 @@ class GraphRuntimeControlPlane:
             },
         ).to_dict()
 
+    async def _apply_script_path(
+        self,
+        source_node_id: str,
+        target_node_id: str,
+        body: Any,
+    ) -> tuple[Any, Optional[Dict[str, Any]]]:
+        script_path = self.graph.script_path_between_agents(source_node_id, target_node_id)
+        if not script_path:
+            return body, None
+        if self.script_root is None:
+            raise RuntimeError("script node execution requires a configured script_root")
+
+        payload = self._script_payload_from_body(body)
+        results: List[Dict[str, Any]] = []
+        for script_node_id in script_path:
+            node = self.graph.script_nodes[script_node_id]
+            self.runtime._emit(
+                GraphEvent(
+                    "ScriptNodeRunning",
+                    node_id=node.node_id,
+                    status="running",
+                    payload=node.to_dict(),
+                )
+            )
+            try:
+                result = await execute_script_node(
+                    self.script_root,
+                    node,
+                    payload,
+                )
+            except Exception as exc:
+                self.runtime._emit(
+                    GraphEvent(
+                        "ScriptNodeFailed",
+                        node_id=node.node_id,
+                        status="failed",
+                        payload={"error": str(exc), "node": node.to_dict()},
+                    )
+                )
+                raise
+            payload = dict(result.get("outputs") or {})
+            results.append({"node_id": node.node_id, **result})
+            self.runtime._emit(
+                GraphEvent(
+                    "ScriptNodeCompleted",
+                    node_id=node.node_id,
+                    status="completed",
+                    payload=result,
+                )
+            )
+        return self._body_with_script_result(body, payload, results), {
+            "path": list(script_path),
+            "results": results,
+        }
+
+    @staticmethod
+    def _script_payload_from_body(body: Any) -> Any:
+        if isinstance(body, dict):
+            if "payload" in body and len(body) == 1:
+                return body["payload"]
+            return body
+        return body
+
+    @staticmethod
+    def _body_with_script_result(body: Any, payload: Dict[str, Any], results: List[Dict[str, Any]]) -> Any:
+        if isinstance(body, dict):
+            updated = dict(body)
+            updated["script_result"] = dict(payload)
+            updated["script_path_results"] = list(results)
+            if "prompt" in updated and "result" in payload:
+                updated["context"] = {
+                    "script_result": dict(payload),
+                    "previous_context": updated.get("context"),
+                }
+            elif "result" in payload:
+                updated["prompt"] = str(payload["result"])
+            return updated
+        return {
+            "payload": body,
+            "script_result": dict(payload),
+            "script_path_results": list(results),
+        }
+
 
 def _list_of_dicts(value: Any) -> list[Dict[str, Any]]:
     if value is None:
@@ -743,6 +1196,62 @@ def _list_of_dicts(value: Any) -> list[Dict[str, Any]]:
     if not isinstance(value, list):
         raise ValueError("expected a list")
     return [dict(item) for item in value]
+
+
+def _required_script_calls_for_envelope(batch: Any) -> list[Dict[str, Any]]:
+    if batch is None:
+        return []
+    calls = getattr(batch, "script_calls", None)
+    if not isinstance(calls, dict):
+        return []
+    result: list[Dict[str, Any]] = []
+    for record in calls.values():
+        if not isinstance(record, dict):
+            continue
+        result.append(
+            {
+                "script_node_id": str(record.get("script_node_id") or ""),
+                "function_name": str(record.get("function_name") or ""),
+                "title": str(record.get("title") or record.get("function_name") or ""),
+                "description": str(record.get("description") or ""),
+                "inputs": [dict(item) for item in record.get("inputs", []) if isinstance(item, dict)],
+                "outputs": [dict(item) for item in record.get("outputs", []) if isinstance(item, dict)],
+                "batch_id": getattr(batch, "batch_id", None),
+                "downstream_target_node_ids": [
+                    str(item) for item in record.get("required_target_node_ids", [])
+                ],
+                "delivered_target_node_ids": [
+                    str(item) for item in record.get("delivered_target_node_ids", [])
+                ],
+                "status": str(record.get("status") or "pending"),
+            }
+        )
+    return result
+
+
+def _script_arguments_summary(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    def summarize(value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value if len(value) <= 120 else {"type": "str", "chars": len(value)}
+        if isinstance(value, dict):
+            return {
+                str(key): summarize(item)
+                for key, item in list(value.items())[:12]
+            }
+        if isinstance(value, (list, tuple)):
+            return {
+                "type": "list",
+                "length": len(value),
+                "preview": [summarize(item) for item in list(value)[:5]],
+            }
+        return {"type": type(value).__name__}
+
+    return {
+        str(key): summarize(value)
+        for key, value in list(arguments.items())[:20]
+    }
 
 
 class GraphRuntimeRPCServer:

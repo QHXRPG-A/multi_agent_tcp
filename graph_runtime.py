@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from .blueprint_script_nodes import ScriptNodePort
 from .client import AgentTCPClient
 from .cluster import WorkerConfig
 
@@ -28,16 +29,22 @@ TopAgentRunPermission = str
 JoinPolicy = str
 RunLifecycleStatus = str
 RunFinalStatus = str
+AgentNodeType = str
+CommonNodeKind = str
+BlueprintPortDataType = str
 
 _VALID_ENVELOPE_KINDS = {"text", "image", "audio", "file", "blob"}
 _VALID_ENVELOPE_ENCODINGS = {"inline", "fileref", "blobref"}
 _VALID_EXECUTION_MODES = {"blocking", "nonblocking"}
 _VALID_ROUTE_KINDS = {"sequence", "parallel", "parallel_reduce"}
+_VALID_COMMON_NODE_KINDS = {"branch", "tick"}
+_VALID_BLUEPRINT_PORT_DATA_TYPES = {"message", "bool", "tick"}
 _VALID_SKILL_SELECTION_MODES = {"none", "all", "selected", "upstream"}
 _VALID_BLUEPRINT_TERMINAL_KINDS = {"start", "end"}
 _VALID_TOP_AGENT_RUN_PERMISSIONS = {"ask", "start", "status", "end", "utterances", "fixture"}
 _VALID_JOIN_POLICIES = {"wait-all", "wait-any", "quorum"}
 _VALID_RUN_END_ACTIONS = {"complete", "cancel", "fail", "pause", "archive_only"}
+_VALID_AGENT_NODE_TYPES = {"agent", "worker_agent"}
 _AGENT_CAN_ACCEPT_STATES = {"idle", "queued", "timed_out"}
 _VALID_AGENT_TASK_STATUSES = {"not_started", "working", "completed", "blocked", "needs_input", "failed"}
 _TERMINAL_AGENT_TASK_STATUSES = {"completed", "blocked", "needs_input", "failed"}
@@ -45,6 +52,20 @@ DEFAULT_AGENT_WRITE_SCOPE = ["**"]
 LEGACY_REPORT_ONLY_WRITE_SCOPE = ["shared/reports/**"]
 COMPLETION_IDLE_THRESHOLD_SEC = 30.0
 AGENT_RUN_PROMPT_HEADER = "# Agent Run Prompt"
+DEFAULT_AGENT_ACCESS_POLICY = {
+    "direct_project_io": True,
+    "outside_project_io": True,
+    "unrestricted_commands": True,
+    "disable_sandbox": True,
+    "framework_message_tools": True,
+}
+DEFAULT_WORKER_AGENT_ACCESS_POLICY = {
+    "direct_project_io": False,
+    "outside_project_io": False,
+    "unrestricted_commands": False,
+    "disable_sandbox": False,
+    "framework_message_tools": True,
+}
 _VALID_AGENT_RUNTIME_STATES = {
     "created",
     "starting",
@@ -74,6 +95,24 @@ def _normalize_agent_write_scope(value: Any, *, default: Optional[Sequence[str]]
     if scope == LEGACY_REPORT_ONLY_WRITE_SCOPE:
         return _default_agent_write_scope()
     return scope
+
+
+def _normalize_agent_node_type(value: Any) -> AgentNodeType:
+    return "agent" if str(value or "").strip() == "agent" else "worker_agent"
+
+
+def _normalize_agent_access_policy(value: Any, node_type: AgentNodeType) -> Dict[str, bool]:
+    defaults = (
+        DEFAULT_AGENT_ACCESS_POLICY
+        if node_type == "agent"
+        else DEFAULT_WORKER_AGENT_ACCESS_POLICY
+    )
+    if not isinstance(value, dict):
+        return dict(defaults)
+    return {
+        key: bool(value.get(key, default))
+        for key, default in defaults.items()
+    }
 
 
 def is_dispatch_no_op_body(body: Any) -> bool:
@@ -545,6 +584,7 @@ class AgentNode:
     """Serializable configuration for one blueprint Agent node."""
 
     node_id: str = field(default_factory=generate_agent_node_id)
+    node_type: AgentNodeType = "worker_agent"
     agent_id: Optional[str] = None
     prompt: str = ""
     run_prompt: str = ""
@@ -564,18 +604,21 @@ class AgentNode:
     workspace_id: Optional[str] = None
     workspace_root: Optional[Path] = None
     read_scope: List[str] = field(default_factory=list)
-    write_scope: List[str] = field(default_factory=_default_agent_write_scope)
+    write_scope: List[str] = field(default_factory=list)
     artifact_scope: List[str] = field(default_factory=list)
+    access_policy: Dict[str, bool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not str(self.node_id).strip():
             self.node_id = generate_agent_node_id()
         else:
             self.node_id = str(self.node_id).strip()
+        self.node_type = _normalize_agent_node_type(self.node_type)
         if self.execution_mode not in _VALID_EXECUTION_MODES:
             raise ValueError(
                 "AgentNode.execution_mode must be 'blocking' or 'nonblocking'"
             )
+        self.access_policy = _normalize_agent_access_policy(self.access_policy, self.node_type)
         if not isinstance(self.skill_selection, AgentSkillSelection):
             self.skill_selection = AgentSkillSelection.from_value(
                 self.skill_selection,
@@ -593,6 +636,9 @@ class AgentNode:
         return self.agent_id or self.node_id
 
     def to_worker_config(self) -> WorkerConfig:
+        adapter_options = dict(self.adapter_options)
+        adapter_options["node_type"] = self.node_type
+        adapter_options["access_policy"] = dict(self.access_policy)
         return WorkerConfig(
             agent_id=self.runtime_agent_id,
             cwd=self.cwd,
@@ -601,7 +647,7 @@ class AgentNode:
             prompt_via_file=self.prompt_via_file,
             command=self.command,
             cli_kind=self.cli_kind,
-            adapter_options=dict(self.adapter_options),
+            adapter_options=adapter_options,
             extra_env=dict(self.extra_env),
         )
 
@@ -621,6 +667,7 @@ class AgentNode:
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "node_id": self.node_id,
+            "node_type": self.node_type,
             "prompt": self.prompt,
             "run_prompt": self.run_prompt,
             "execution_mode": self.execution_mode,
@@ -639,6 +686,7 @@ class AgentNode:
             "read_scope": list(self.read_scope),
             "write_scope": list(self.write_scope),
             "artifact_scope": list(self.artifact_scope),
+            "access_policy": dict(self.access_policy),
         }
         if self.agent_id is not None:
             data["agent_id"] = self.agent_id
@@ -654,6 +702,7 @@ class AgentNode:
         if node_id is not None and (not isinstance(node_id, str) or not node_id.strip()):
             raise ValueError("AgentNode.node_id must be a non-empty string when set")
         raw_cwd = data.get("cwd", ".")
+        node_type = _normalize_agent_node_type(data.get("node_type"))
         skills = data.get("skills", [])
         if not isinstance(skills, list):
             raise ValueError("AgentNode.skills must be a list")
@@ -670,21 +719,37 @@ class AgentNode:
         for scope_key in ("read_scope", "write_scope", "artifact_scope"):
             if not isinstance(data.get(scope_key, []), list):
                 raise ValueError(f"AgentNode.{scope_key} must be a list")
+        raw_cli_kind = data.get("cli_kind")
+        if raw_cli_kind is None:
+            cli_kind = "codex" if node_type == "agent" else "codemaker"
+        else:
+            cli_kind = str(raw_cli_kind)
+        raw_model = data.get("model")
+        if raw_model is None:
+            model = "gpt-5.4" if cli_kind == "codex" else "netease-codemaker/kimi-k2.5"
+        else:
+            model = str(raw_model)
+        raw_command = data.get("command")
+        if raw_command is None:
+            command = "codex" if cli_kind == "codex" else "codemaker"
+        else:
+            command = str(raw_command)
         return cls(
             node_id=node_id.strip() if isinstance(node_id, str) else generate_agent_node_id(),
+            node_type=node_type,
             agent_id=str(data["agent_id"]).strip() if data.get("agent_id") else None,
             prompt=str(data.get("prompt", "")),
             run_prompt=str(data.get("run_prompt", "")),
             execution_mode=str(data.get("execution_mode", "blocking")),
-            cli_kind=str(data.get("cli_kind", "codemaker")),
-            model=str(data.get("model", "netease-codemaker/kimi-k2.5")),
+            cli_kind=cli_kind,
+            model=model,
             cwd=Path(str(raw_cwd)).expanduser(),
             skills=[str(s) for s in skills],
             skill_selection=skill_selection,
             rule_paths=[str(s) for s in data.get("rule_paths", [])],
             timeout_sec=float(data.get("timeout_sec", 1800.0)),
             prompt_via_file=str(data.get("prompt_via_file", "auto")),
-            command=str(data.get("command", "codemaker")),
+            command=command,
             adapter_options=dict(adapter_options),
             extra_env={str(k): str(v) for k, v in extra_env.items()},
             external=bool(data.get("external", False)),
@@ -702,6 +767,7 @@ class AgentNode:
                 default=DEFAULT_AGENT_WRITE_SCOPE,
             ),
             artifact_scope=[str(s) for s in data.get("artifact_scope", [])],
+            access_policy=_normalize_agent_access_policy(data.get("access_policy"), node_type),
         )
 
 
@@ -1091,8 +1157,10 @@ class GuLiCodeTopAgentProfile:
             )
 
         start_ids = set(plan.start_nodes)
+        tick_source_allowed = not plan.start_nodes and graph.has_tick_source()
         if not plan.start_nodes:
-            errors.append("start_nodes must not be empty")
+            if not tick_source_allowed:
+                errors.append("start_nodes must not be empty")
         unknown_starts = sorted(start_ids - node_ids)
         if unknown_starts:
             errors.append("start_nodes contains unknown AgentNode ids: " + ", ".join(unknown_starts))
@@ -1111,6 +1179,8 @@ class GuLiCodeTopAgentProfile:
                 + ", ".join(invalid_source_starts)
             )
         for group in required_start_groups:
+            if tick_source_allowed:
+                break
             group_nodes = [str(node_id) for node_id in group.get("node_ids", [])]
             selected = [node_id for node_id in plan.start_nodes if node_id in set(group_nodes)]
             if not selected:
@@ -1281,6 +1351,7 @@ class StagedOutgoingMessage:
     target_node_id: str
     target_agent_id: str
     body: Any
+    target_node_kind: str = "agent"
     staged_at: float = field(default_factory=time.monotonic)
     overwrite_count: int = 0
 
@@ -1288,6 +1359,7 @@ class StagedOutgoingMessage:
         return {
             "target_node_id": self.target_node_id,
             "target_agent_id": self.target_agent_id,
+            "target_node_kind": self.target_node_kind,
             "body": self.body,
             "staged_at": self.staged_at,
             "overwrite_count": self.overwrite_count,
@@ -1313,6 +1385,10 @@ class OutgoingMessageBatch:
     ring_ids_by_target: Dict[str, List[str]] = field(default_factory=dict)
     closing_ring_ids_by_target: Dict[str, List[str]] = field(default_factory=dict)
     ring_recorded_target_node_ids: List[str] = field(default_factory=list)
+    script_paths_by_target: Dict[str, List[str]] = field(default_factory=dict)
+    script_calls: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    last_script_call_reminder_keys: List[str] = field(default_factory=list)
+    target_node_kinds_by_target: Dict[str, str] = field(default_factory=dict)
 
     @property
     def remaining_targets(self) -> List[str]:
@@ -1352,7 +1428,68 @@ class OutgoingMessageBatch:
                 for target, ring_ids in self.closing_ring_ids_by_target.items()
             },
             "ring_recorded_target_node_ids": list(self.ring_recorded_target_node_ids),
+            "script_paths_by_target": {
+                target: list(script_ids)
+                for target, script_ids in self.script_paths_by_target.items()
+            },
+            "script_calls": {
+                script_node_id: _safe_script_call_record(record)
+                for script_node_id, record in self.script_calls.items()
+            },
+            "last_script_call_reminder_keys": list(self.last_script_call_reminder_keys),
+            "target_node_kinds_by_target": {
+                target: str(kind)
+                for target, kind in self.target_node_kinds_by_target.items()
+            },
         }
+
+
+def _safe_script_call_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(record)
+    if isinstance(result.get("arguments"), dict):
+        result["arguments"] = {
+            str(key): value
+            for key, value in list(result["arguments"].items())[:20]
+        }
+    if isinstance(result.get("result"), dict):
+        result["result"] = dict(result["result"])
+    return result
+
+
+@dataclass
+class PendingCommonNodeMessage:
+    """Message queued for a framework-owned common node."""
+
+    message_id: str
+    node_id: str
+    body: Any
+    source_node_id: Optional[str] = None
+    source_agent_id: Optional[str] = None
+    status: str = "queued"
+    queued_at: float = field(default_factory=time.monotonic)
+    dispatched_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "message_id": self.message_id,
+            "node_id": self.node_id,
+            "body": self.body,
+            "status": self.status,
+            "queued_at": self.queued_at,
+        }
+        if self.source_node_id is not None:
+            data["source_node_id"] = self.source_node_id
+        if self.source_agent_id is not None:
+            data["source_agent_id"] = self.source_agent_id
+        if self.dispatched_at is not None:
+            data["dispatched_at"] = self.dispatched_at
+        if self.completed_at is not None:
+            data["completed_at"] = self.completed_at
+        if self.error is not None:
+            data["error"] = self.error
+        return data
 
 
 @dataclass
@@ -1706,6 +1843,11 @@ class GraphRuntime:
         self._launch_nodes: Dict[str, AgentNode] = {}
         self._agent_message_queues: Dict[str, List[PendingAgentMessage]] = {}
         self._pending_messages: Dict[str, PendingAgentMessage] = {}
+        self._common_nodes: Dict[str, CommonNode] = {}
+        self._common_graph: Optional["GraphDefinition"] = None
+        self._common_node_message_queues: Dict[str, List[PendingCommonNodeMessage]] = {}
+        self._pending_common_messages: Dict[str, PendingCommonNodeMessage] = {}
+        self._common_tick_counters: Dict[str, int] = {}
         self._agent_utterances: Dict[str, AgentUtterance] = {}
         self._utterances_by_task: Dict[str, List[str]] = {}
         self._message_journal: List[RuntimeMessageRecord] = []
@@ -1774,6 +1916,22 @@ class GraphRuntime:
         cached = self._launch_nodes.get(node.node_id)
         if cached is not None:
             return cached
+        if node.node_type == "agent":
+            from .agent_launch_context import materialize_full_agent_context
+
+            launch_node = materialize_full_agent_context(
+                node,
+                project_root=(
+                    Path(getattr(self.private_context_manager, "project_root"))
+                    if self.private_context_manager is not None
+                    and getattr(self.private_context_manager, "project_root", None) is not None
+                    else None
+                ),
+                run=self.private_context_run,
+                mcp_context_provider=self.private_context_mcp_provider,
+            )
+            self._launch_nodes[node.node_id] = launch_node
+            return launch_node
         self._ensure_private_context_runtime(node)
         from .agent_launch_context import materialize_private_agent_context
 
@@ -1803,6 +1961,14 @@ class GraphRuntime:
     @property
     def pending_messages(self) -> Dict[str, PendingAgentMessage]:
         return dict(self._pending_messages)
+
+    @property
+    def common_node_message_queues(self) -> Dict[str, List[PendingCommonNodeMessage]]:
+        return {node_id: list(queue) for node_id, queue in self._common_node_message_queues.items()}
+
+    @property
+    def pending_common_messages(self) -> Dict[str, PendingCommonNodeMessage]:
+        return dict(self._pending_common_messages)
 
     @property
     def agent_utterances(self) -> Dict[str, AgentUtterance]:
@@ -2115,6 +2281,21 @@ class GraphRuntime:
         self.reset_run_prompt_injections()
         self._completion_agent_node_ids = list(graph.agent_nodes)
         self.configure_agent_rings(graph)
+        self.configure_common_nodes(graph)
+
+    def configure_common_nodes(self, graph: "GraphDefinition") -> None:
+        self._common_graph = graph
+        self._common_nodes = dict(graph.common_nodes)
+        for node_id, node in self._common_nodes.items():
+            self._common_node_message_queues.setdefault(node_id, [])
+            if node.kind == "tick":
+                self._common_tick_counters.setdefault(node_id, 0)
+        for node_id in list(self._common_node_message_queues):
+            if node_id not in self._common_nodes:
+                self._common_node_message_queues.pop(node_id, None)
+        for node_id in list(self._common_tick_counters):
+            if node_id not in self._common_nodes or self._common_nodes[node_id].kind != "tick":
+                self._common_tick_counters.pop(node_id, None)
 
     def reset_run_prompt_injections(self) -> None:
         for inst in self._instances.values():
@@ -2367,6 +2548,249 @@ class GraphRuntime:
             pass
         self._tick_task = None
 
+    async def _process_common_nodes(self) -> None:
+        graph = self._common_graph
+        if graph is None or not self._common_nodes:
+            return
+
+        for node_id, node in list(self._common_nodes.items()):
+            if node.kind != "tick":
+                continue
+            count = self._common_tick_counters.get(node_id, 0) + 1
+            self._common_tick_counters[node_id] = count
+            if count % node.every_n_ticks != 0:
+                continue
+            await self._emit_common_node_output(
+                graph,
+                node_id,
+                "tick",
+                {
+                    "type": "tick",
+                    "tick_node_id": node_id,
+                    "tick_count": count,
+                    "every_n_ticks": node.every_n_ticks,
+                    "created_at": time.time(),
+                },
+                tick_source_node_id=node_id,
+            )
+
+        for node_id, queue in list(self._common_node_message_queues.items()):
+            node = self._common_nodes.get(node_id)
+            if node is None or node.kind != "branch" or not queue:
+                continue
+            pending = queue.pop(0)
+            pending.status = "dispatching"
+            pending.dispatched_at = time.monotonic()
+            self.record_agent_stream_event(
+                {
+                    "kind": "common.queue.updated",
+                    "node_id": node_id,
+                    "message_id": pending.message_id,
+                    "status": pending.status,
+                    "queue_size": len(queue),
+                }
+            )
+            self._emit(
+                GraphEvent(
+                    "BranchNodeRunning",
+                    node_id=node_id,
+                    status="running",
+                    payload=pending.to_dict(),
+                )
+            )
+            try:
+                branch_value = self._branch_condition_from_body(pending.body)
+                output_port = "true" if branch_value else "false"
+                await self._emit_common_node_output(
+                    graph,
+                    node_id,
+                    output_port,
+                    pending.body,
+                    source_agent_id=pending.source_agent_id,
+                )
+                pending.status = "completed"
+                self._emit(
+                    GraphEvent(
+                        "BranchNodeCompleted",
+                        node_id=node_id,
+                        status="completed",
+                        payload={
+                            **pending.to_dict(),
+                            "condition": branch_value,
+                            "output_port": output_port,
+                        },
+                    )
+                )
+            except Exception as exc:
+                pending.status = "failed"
+                pending.error = str(exc)
+                self._emit(
+                    GraphEvent(
+                        "BranchNodeFailed",
+                        node_id=node_id,
+                        status="failed",
+                        payload={**pending.to_dict(), "error": str(exc)},
+                    )
+                )
+            finally:
+                pending.completed_at = time.monotonic()
+                self.record_agent_stream_event(
+                    {
+                        "kind": "common.queue.updated",
+                        "node_id": node_id,
+                        "message_id": pending.message_id,
+                        "status": pending.status,
+                        "queue_size": len(queue),
+                        "last_error": pending.error,
+                    }
+                )
+
+    @staticmethod
+    def _branch_condition_from_body(body: Any) -> bool:
+        if type(body) is bool:
+            return body
+        if isinstance(body, dict) and type(body.get("condition")) is bool:
+            return bool(body["condition"])
+        raise ValueError("Branch node requires a strict boolean condition")
+
+    async def _emit_common_node_output(
+        self,
+        graph: "GraphDefinition",
+        common_node_id: str,
+        output_port: str,
+        body: Any,
+        *,
+        source_agent_id: Optional[str] = None,
+        tick_source_node_id: Optional[str] = None,
+    ) -> List[str]:
+        # ``common_node_id`` is the framework node that emits the output.
+        emit_source = str(common_node_id)
+        targets = graph._exec_successors_by_port(emit_source, output_port)
+        if not targets:
+            self._emit(
+                GraphEvent(
+                    "CommonNodeOutputNoOp",
+                    node_id=emit_source,
+                    status="skipped",
+                    payload={"output_port": output_port, "body": body},
+                )
+            )
+            return []
+
+        queued_ids: List[str] = []
+        for target_id in targets:
+            if target_id in graph.agent_nodes:
+                if tick_source_node_id is not None and self._has_pending_tick_message(
+                    tick_source_node_id,
+                    target_id,
+                ):
+                    self._emit(
+                        GraphEvent(
+                            "TickNodeSkipped",
+                            node_id=tick_source_node_id,
+                            status="skipped",
+                            payload={
+                                "target_node_id": target_id,
+                                "reason": "target_has_pending_tick",
+                            },
+                        )
+                    )
+                    continue
+                downstream = self.active_framework_connections(graph, target_id)
+                downstream_batch = None
+                if downstream:
+                    downstream_batch = await self.create_outgoing_batch_from_graph(
+                        graph,
+                        target_id,
+                        required_target_node_ids=downstream,
+                    )
+                queued_body = await self._body_with_agent_framework_context(
+                    graph,
+                    target_id,
+                    body,
+                    downstream_batch,
+                )
+                pending = self.queue_agent_message(
+                    graph.agent_nodes[target_id],
+                    queued_body,
+                    source_node_id=emit_source,
+                    source_agent_id=source_agent_id,
+                )
+                queued_ids.append(pending.message_id)
+            elif target_id in graph.common_nodes:
+                pending = self.queue_common_node_message(
+                    target_id,
+                    body,
+                    source_node_id=emit_source,
+                    source_agent_id=source_agent_id,
+                )
+                queued_ids.append(pending.message_id)
+            else:
+                self._emit(
+                    GraphEvent(
+                        "CommonNodeTargetUnsupported",
+                        node_id=emit_source,
+                        status="skipped",
+                        payload={
+                            "target_node_id": target_id,
+                            "output_port": output_port,
+                        },
+                    )
+                )
+        event_type = "TickNodeEmitted" if tick_source_node_id is not None else "CommonNodeOutputEmitted"
+        self._emit(
+            GraphEvent(
+                event_type,
+                node_id=emit_source,
+                status="queued",
+                payload={
+                    "output_port": output_port,
+                    "target_node_ids": list(targets),
+                    "queued_message_ids": list(queued_ids),
+                },
+            )
+        )
+        return queued_ids
+
+    async def _body_with_agent_framework_context(
+        self,
+        graph: "GraphDefinition",
+        target_node_id: str,
+        body: Any,
+        downstream_batch: Optional[OutgoingMessageBatch],
+    ) -> Any:
+        try:
+            from .graph_control import inject_framework_context, ordinary_agent_framework_context
+
+            return inject_framework_context(
+                body,
+                ordinary_agent_framework_context(
+                    graph,
+                    target_node_id,
+                    batch=downstream_batch,
+                    runtime=self,
+                ),
+            )
+        except Exception:
+            log.exception("failed to inject framework context for common node output")
+            return body
+
+    def _has_pending_tick_message(self, source_node_id: str, target_node_id: str) -> bool:
+        for message in self._pending_messages.values():
+            if message.source_node_id != source_node_id or message.node_id != target_node_id:
+                continue
+            if message.status not in {"queued", "dispatching"}:
+                continue
+            if isinstance(message.body, dict) and message.body.get("type") == "tick":
+                return True
+            if (
+                isinstance(message.body, dict)
+                and isinstance(message.body.get("payload"), dict)
+                and message.body["payload"].get("type") == "tick"
+            ):
+                return True
+        return False
+
     async def _tick_loop(self) -> None:
         while not self._closed:
             await self.tick()
@@ -2383,6 +2807,7 @@ class GraphRuntime:
             return
         self._last_tick_at = time.monotonic()
         self._check_join_timeouts(now=self._last_tick_at)
+        await self._process_common_nodes()
 
         finished: List[str] = []
         for message_id, task in self._dispatch_tasks.items():
@@ -2395,6 +2820,7 @@ class GraphRuntime:
         for node_id, inst in list(self._instances.items()):
             if inst.busy_count < 0:
                 inst.busy_count = 0
+            self._maybe_remind_script_calls(inst)
             self._maybe_remind_outgoing_targets(inst)
             queue = self._agent_message_queues.get(node_id, [])
             if not queue or not inst.can_accept_message:
@@ -2427,6 +2853,111 @@ class GraphRuntime:
                 self._dispatch_pending_message(inst.node, pending)
             )
         self._maybe_emit_top_agent_summary_ready()
+
+    def _pending_script_call_records(self, batch: OutgoingMessageBatch) -> List[Dict[str, Any]]:
+        return [
+            record
+            for record in batch.script_calls.values()
+            if isinstance(record, dict)
+            and str(record.get("status") or "pending") == "pending"
+        ]
+
+    def _script_call_reminder_body(
+        self,
+        inst: AgentInstance,
+        batch: OutgoingMessageBatch,
+        records: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        required_script_calls = [
+            {
+                "script_node_id": str(record.get("script_node_id") or ""),
+                "function_name": str(record.get("function_name") or ""),
+                "title": str(record.get("title") or record.get("function_name") or ""),
+                "description": str(record.get("description") or ""),
+                "inputs": [dict(item) for item in record.get("inputs", []) if isinstance(item, dict)],
+                "outputs": [dict(item) for item in record.get("outputs", []) if isinstance(item, dict)],
+                "batch_id": batch.batch_id,
+                "downstream_target_node_ids": [
+                    str(item) for item in record.get("required_target_node_ids", [])
+                ],
+                "status": str(record.get("status") or "pending"),
+            }
+            for record in records
+        ]
+        names = ", ".join(
+            call["function_name"] or call["script_node_id"]
+            for call in required_script_calls
+        )
+        return {
+            "type": "blueprint_script_call_reminder",
+            "prompt": (
+                "Call the required Blueprint script function(s) before dispatching downstream work: "
+                f"{names}. Use the `blueprint_script_call` MCP tool. The framework will deliver "
+                "script output to connected downstream AgentNodes automatically."
+            ),
+            "script_calls": required_script_calls,
+            "context": {
+                "framework_context": {
+                    "agent_node_id": inst.node.node_id,
+                    "agent_id": inst.agent_id,
+                    "message_envelope": {
+                        "outgoing_batch_id": batch.batch_id,
+                        "required_outgoing_targets": list(batch.required_target_node_ids),
+                        "remaining_targets": list(batch.remaining_targets),
+                        "required_script_calls": required_script_calls,
+                    },
+                }
+            },
+        }
+
+    def _maybe_remind_script_calls(self, inst: AgentInstance) -> None:
+        if not inst.can_accept_message:
+            return
+        for batch in self._outgoing_batches.values():
+            if batch.status != "staging":
+                continue
+            if batch.source_node_id != inst.node.node_id:
+                continue
+            records = self._pending_script_call_records(batch)
+            if not records:
+                continue
+            reminder_keys = sorted(str(record.get("script_node_id") or "") for record in records)
+            if batch.last_script_call_reminder_keys == reminder_keys:
+                continue
+            batch.last_script_call_reminder_keys = list(reminder_keys)
+            pending = self.queue_agent_message(
+                inst.node,
+                self._script_call_reminder_body(inst, batch, records),
+                source_node_id=None,
+                source_agent_id="graph-runtime",
+                message_id=f"script-call-reminder-{inst.node.node_id}-{uuid.uuid4().hex[:8]}",
+                queue_mode="top",
+            )
+            self._emit(
+                GraphEvent(
+                    "AgentScriptCallReminder",
+                    node_id=inst.node.node_id,
+                    agent_id=inst.agent_id,
+                    status="queued",
+                    payload={
+                        "message_id": pending.message_id,
+                        "batch_id": batch.batch_id,
+                        "required_script_calls": [
+                            {
+                                "script_node_id": str(record.get("script_node_id") or ""),
+                                "function_name": str(record.get("function_name") or ""),
+                                "description": str(record.get("description") or ""),
+                                "inputs": [dict(item) for item in record.get("inputs", []) if isinstance(item, dict)],
+                                "downstream_target_node_ids": [
+                                    str(item) for item in record.get("required_target_node_ids", [])
+                                ],
+                            }
+                            for record in records
+                        ],
+                    },
+                )
+            )
+            return
 
     def _maybe_remind_outgoing_targets(self, inst: AgentInstance) -> None:
         if not inst.can_accept_message:
@@ -2910,6 +3441,8 @@ class GraphRuntime:
         """Return a top-agent/UI-friendly runtime status snapshot."""
 
         self._check_join_timeouts()
+        if graph is not None:
+            self.configure_common_nodes(graph)
         agents: Dict[str, Dict[str, Any]] = {}
         for node_id, inst in self._instances.items():
             agents[node_id] = {
@@ -2948,6 +3481,22 @@ class GraphRuntime:
             message_id: message.to_dict()
             for message_id, message in self._pending_messages.items()
         }
+        common_queue_state = {
+            node_id: [message.to_dict() for message in queue]
+            for node_id, queue in self._common_node_message_queues.items()
+        }
+        pending_common_state = {
+            message_id: message.to_dict()
+            for message_id, message in self._pending_common_messages.items()
+        }
+        common_state = {
+            node_id: {
+                **node.to_dict(),
+                "queue_size": len(self._common_node_message_queues.get(node_id, [])),
+                "tick_count": self._common_tick_counters.get(node_id, 0),
+            }
+            for node_id, node in self._common_nodes.items()
+        }
         outgoing_state = {
             batch_id: batch.to_dict()
             for batch_id, batch in self._outgoing_batches.items()
@@ -2977,9 +3526,12 @@ class GraphRuntime:
                 "ready_for_top_agent_summary_generation": self._ready_for_top_agent_summary_generation,
             },
             "agents": agents,
+            "common_nodes": common_state,
             "queues": {
                 "by_agent": queue_state,
+                "by_common_node": common_queue_state,
                 "pending_messages": pending_state,
+                "pending_common_messages": pending_common_state,
                 "dispatching_message_ids": list(self._dispatch_tasks),
             },
             "outgoing_batches": outgoing_state,
@@ -3018,6 +3570,7 @@ class GraphRuntime:
             agent_states.setdefault(str(info.get("state", "unknown")), []).append(node_id)
 
         pending_message_count = sum(len(items) for items in queues["by_agent"].values())
+        pending_common_message_count = sum(len(items) for items in queues.get("by_common_node", {}).values())
         dispatching_message_count = len(queues.get("dispatching_message_ids", []))
         waiting_batches = {
             batch_id: batch
@@ -3050,6 +3603,8 @@ class GraphRuntime:
             observations.append(f"final status is {run['final_status']}")
         if pending_message_count:
             observations.append(f"{pending_message_count} queued agent message(s)")
+        if pending_common_message_count:
+            observations.append(f"{pending_common_message_count} queued common node message(s)")
         if dispatching_message_count:
             observations.append(f"{dispatching_message_count} dispatch task(s) in flight")
         if waiting_batches:
@@ -3065,6 +3620,7 @@ class GraphRuntime:
         if not any(
             [
                 pending_message_count,
+                pending_common_message_count,
                 dispatching_message_count,
                 waiting_batches,
                 waiting_joins,
@@ -3111,6 +3667,7 @@ class GraphRuntime:
             },
             "pending": {
                 "queued_messages": pending_message_count,
+                "queued_common_messages": pending_common_message_count,
                 "dispatching_messages": dispatching_message_count,
                 "waiting_outgoing_batches": {
                     batch_id: {
@@ -3149,6 +3706,11 @@ class GraphRuntime:
         pending_messages = [
             message.to_dict()
             for message in self._pending_messages.values()
+            if message.status in {"queued", "dispatching"}
+        ]
+        pending_common_messages = [
+            message.to_dict()
+            for message in self._pending_common_messages.values()
             if message.status in {"queued", "dispatching"}
         ]
         failed_messages = [
@@ -3197,6 +3759,7 @@ class GraphRuntime:
         return {
             "agent_states": agent_states,
             "pending_messages": pending_messages,
+            "pending_common_messages": pending_common_messages,
             "failed_messages": failed_messages,
             "failed_jobs": failed_jobs,
             "running_jobs": running_jobs,
@@ -3224,7 +3787,7 @@ class GraphRuntime:
             state in {"failed", "disconnected"} for state in summary["agent_states"].values()
         ):
             return "failed"
-        if summary["pending_messages"] or summary["running_jobs"] or summary["waiting_joins"]:
+        if summary["pending_messages"] or summary["pending_common_messages"] or summary["running_jobs"] or summary["waiting_joins"]:
             if summary["completed_jobs"] or summary["accepted_changesets"]:
                 return "partial_success"
             return "failed"
@@ -3248,6 +3811,25 @@ class GraphRuntime:
                     "AgentQueuedMessageCompleted",
                     node_id=message.node_id,
                     agent_id=message.agent_id,
+                    status=message.status,
+                    payload=message.to_dict(),
+                )
+            )
+
+        cancelled_common_messages: List[str] = []
+        for queue in self._common_node_message_queues.values():
+            queue.clear()
+        for message in self._pending_common_messages.values():
+            if message.status not in {"queued", "dispatching"}:
+                continue
+            message.status = "cancelled"
+            message.error = reason or "run ended"
+            message.completed_at = time.monotonic()
+            cancelled_common_messages.append(message.message_id)
+            self._emit(
+                GraphEvent(
+                    "CommonNodeMessageCompleted",
+                    node_id=message.node_id,
                     status=message.status,
                     payload=message.to_dict(),
                 )
@@ -3293,12 +3875,13 @@ class GraphRuntime:
 
         summary = {
             "messages": cancelled_messages,
+            "common_messages": cancelled_common_messages,
             "jobs": cancelled_jobs,
             "joins": cancelled_joins,
             "dispatch_tasks": list(self._dispatch_tasks),
             "job_tasks": list(self._job_tasks),
         }
-        if any(summary[key] for key in ("messages", "jobs", "joins", "dispatch_tasks", "job_tasks")):
+        if any(summary[key] for key in ("messages", "common_messages", "jobs", "joins", "dispatch_tasks", "job_tasks")):
             self._emit(
                 GraphEvent(
                     "RunPendingWorkCancelled",
@@ -3628,6 +4211,26 @@ class GraphRuntime:
             if self.can_forward_agent_edge(graph, source_node_id, target_node_id)
         ]
 
+    def active_framework_connections(
+        self,
+        graph: "GraphDefinition",
+        source_node_id: str,
+    ) -> List[str]:
+        self.configure_agent_rings(graph)
+        self.configure_common_nodes(graph)
+        if source_node_id not in graph.agent_nodes:
+            return list(graph.framework_connections().get(source_node_id, []))
+        targets: List[str] = []
+        for target_node_id in graph.framework_targets_for_agent(source_node_id):
+            if target_node_id in graph.agent_nodes and not self.can_forward_agent_edge(
+                graph,
+                source_node_id,
+                target_node_id,
+            ):
+                continue
+            targets.append(target_node_id)
+        return targets
+
     def record_outgoing_edge_from_batch(
         self,
         batch_id: str,
@@ -3721,6 +4324,7 @@ class GraphRuntime:
         allowed_targets: Optional[Sequence[AgentNode]] = None,
         ring_ids_by_target: Optional[Dict[str, Sequence[str]]] = None,
         closing_ring_ids_by_target: Optional[Dict[str, Sequence[str]]] = None,
+        script_paths_by_target: Optional[Dict[str, Sequence[str]]] = None,
     ) -> OutgoingMessageBatch:
         """Start a framework-owned one-to-many handoff.
 
@@ -3768,6 +4372,14 @@ class GraphRuntime:
                 target: [str(ring_id) for ring_id in ring_ids]
                 for target, ring_ids in (closing_ring_ids_by_target or {}).items()
             },
+            script_paths_by_target={
+                target: [str(script_id) for script_id in script_ids]
+                for target, script_ids in (script_paths_by_target or {}).items()
+            },
+            target_node_kinds_by_target={
+                target_id: "agent"
+                for target_id in target_node_ids
+            },
         )
         self._outgoing_batches[batch.batch_id] = batch
         self._emit(
@@ -3793,30 +4405,118 @@ class GraphRuntime:
         if source_node_id not in graph.agent_nodes:
             raise KeyError(f"unknown source AgentNode: {source_node_id}")
         self.configure_agent_rings(graph)
-        allowed_target_ids = self.active_agent_connections(graph, source_node_id)
+        self.configure_common_nodes(graph)
+        allowed_target_ids = self.active_framework_connections(graph, source_node_id)
         if required_target_node_ids is None:
             required_ids = list(allowed_target_ids)
         else:
             required_ids = [str(node_id) for node_id in required_target_node_ids]
-        missing = [node_id for node_id in required_ids if node_id not in graph.agent_nodes]
+        graph_node_ids = graph._node_ids()
+        missing = [node_id for node_id in required_ids if node_id not in graph_node_ids]
         if missing:
-            raise KeyError(f"unknown target AgentNode(s): {', '.join(missing)}")
-        required_targets = [graph.agent_nodes[node_id] for node_id in required_ids]
-        allowed_targets = [graph.agent_nodes[node_id] for node_id in allowed_target_ids]
-        return await self.create_outgoing_batch(
-            graph.agent_nodes[source_node_id],
-            required_targets,
-            batch_id=batch_id,
-            allowed_targets=allowed_targets,
+            raise KeyError(f"unknown target node(s): {', '.join(missing)}")
+        disallowed = [node_id for node_id in required_ids if node_id not in allowed_target_ids]
+        if disallowed:
+            raise ValueError(
+                f"target node(s) not reachable from {source_node_id!r}: "
+                + ", ".join(disallowed)
+            )
+        if not required_ids:
+            raise ValueError("required_targets must not be empty")
+
+        source_inst = await self.ensure_agent(graph.agent_nodes[source_node_id])
+        seen_targets: set[str] = set()
+        target_agent_ids: List[str] = []
+        target_node_kinds: Dict[str, str] = {}
+        for target_id in required_ids:
+            if target_id in seen_targets:
+                raise ValueError(f"duplicate required target: {target_id}")
+            seen_targets.add(target_id)
+            if target_id in graph.agent_nodes:
+                target_inst = await self.ensure_agent(graph.agent_nodes[target_id])
+                target_agent_ids.append(target_inst.agent_id)
+                target_node_kinds[target_id] = "agent"
+            elif target_id in graph.common_nodes:
+                target_agent_ids.append(target_id)
+                target_node_kinds[target_id] = f"common:{graph.common_nodes[target_id].kind}"
+            else:
+                target_agent_ids.append(target_id)
+                target_node_kinds[target_id] = "node"
+
+        script_paths_by_target = {
+            target_id: self.graph_script_path(graph, source_node_id, target_id)
+            for target_id in required_ids
+            if target_id in graph.agent_nodes
+        }
+        batch = OutgoingMessageBatch(
+            batch_id=batch_id or f"out-{uuid.uuid4().hex[:12]}",
+            source_node_id=source_node_id,
+            source_agent_id=source_inst.agent_id,
+            required_target_node_ids=list(required_ids),
+            required_target_agent_ids=target_agent_ids,
             ring_ids_by_target={
                 target_id: self._ring_ids_for_edge(source_node_id, target_id)
                 for target_id in required_ids
+                if target_id in graph.agent_nodes
             },
             closing_ring_ids_by_target={
                 target_id: self._closing_ring_ids_for_edge(source_node_id, target_id)
                 for target_id in required_ids
+                if target_id in graph.agent_nodes
             },
+            script_paths_by_target=script_paths_by_target,
+            script_calls=self.script_calls_from_paths(graph, script_paths_by_target),
+            target_node_kinds_by_target=target_node_kinds,
         )
+        self._outgoing_batches[batch.batch_id] = batch
+        self._emit(
+            GraphEvent(
+                "AgentOutgoingBatchCreated",
+                node_id=source_node_id,
+                agent_id=source_inst.agent_id,
+                status=batch.status,
+                payload=batch.to_dict(),
+            )
+        )
+        return batch
+
+    @staticmethod
+    def graph_script_path(graph: "GraphDefinition", source_node_id: str, target_node_id: str) -> List[str]:
+        if hasattr(graph, "script_path_between_agents"):
+            return graph.script_path_between_agents(source_node_id, target_node_id)
+        return []
+
+    @staticmethod
+    def script_calls_from_paths(
+        graph: "GraphDefinition",
+        script_paths_by_target: Dict[str, Sequence[str]],
+    ) -> Dict[str, Dict[str, Any]]:
+        calls: Dict[str, Dict[str, Any]] = {}
+        for target_id, script_path in script_paths_by_target.items():
+            for script_node_id in script_path:
+                node = graph.script_nodes.get(str(script_node_id))
+                if node is None:
+                    continue
+                record = calls.setdefault(
+                    node.node_id,
+                    {
+                        "script_node_id": node.node_id,
+                        "script_id": node.script_id,
+                        "module_path": node.module_path,
+                        "function_name": node.function_name,
+                        "title": node.title,
+                        "description": node.description,
+                        "inputs": [port.to_dict() for port in node.inputs],
+                        "outputs": [port.to_dict() for port in node.outputs],
+                        "required_target_node_ids": [],
+                        "delivered_target_node_ids": [],
+                        "status": "pending",
+                    },
+                )
+                targets = record["required_target_node_ids"]
+                if target_id not in targets:
+                    targets.append(str(target_id))
+        return calls
 
     def stage_outgoing_message(
         self,
@@ -3825,35 +4525,68 @@ class GraphRuntime:
         body: Any,
     ) -> Dict[str, Any]:
         """Stage or overwrite a source agent's message for one required target."""
+        inst = self._instances.get(target_node.node_id)
+        target_agent_id = inst.agent_id if inst is not None else target_node.runtime_agent_id
+        return self._stage_outgoing_message_to_target(
+            batch_id,
+            target_node.node_id,
+            target_agent_id,
+            body,
+            target_node_kind="agent",
+        )
+
+    def stage_outgoing_common_node_message(
+        self,
+        batch_id: str,
+        target_node: CommonNode,
+        body: Any,
+    ) -> Dict[str, Any]:
+        return self._stage_outgoing_message_to_target(
+            batch_id,
+            target_node.node_id,
+            target_node.node_id,
+            body,
+            target_node_kind=f"common:{target_node.kind}",
+        )
+
+    def _stage_outgoing_message_to_target(
+        self,
+        batch_id: str,
+        target_node_id: str,
+        target_agent_id: str,
+        body: Any,
+        *,
+        target_node_kind: str,
+    ) -> Dict[str, Any]:
         batch = self._outgoing_batches.get(batch_id)
         if batch is None:
             raise KeyError(f"unknown outgoing batch: {batch_id}")
         if batch.status != "staging":
             raise RuntimeError(f"outgoing batch {batch_id} is already {batch.status}")
-        if target_node.node_id not in batch.required_target_node_ids:
+        if target_node_id not in batch.required_target_node_ids:
             raise ValueError(
-                f"target {target_node.node_id!r} is not required for batch {batch_id}"
+                f"target {target_node_id!r} is not required for batch {batch_id}"
             )
 
-        inst = self._instances.get(target_node.node_id)
-        target_agent_id = inst.agent_id if inst is not None else target_node.runtime_agent_id
-        previous = batch.staged_messages.get(target_node.node_id)
+        previous = batch.staged_messages.get(target_node_id)
         overwritten = previous is not None
         overwrite_count = (previous.overwrite_count + 1) if previous is not None else 0
         is_no_op = is_dispatch_no_op_body(body)
         ring_record: Dict[str, Any] = {"recorded": False, "consumed_ring_ids": []}
         if is_no_op:
-            batch.staged_messages.pop(target_node.node_id, None)
-            if target_node.node_id not in batch.no_op_target_node_ids:
-                batch.no_op_target_node_ids.append(target_node.node_id)
+            batch.staged_messages.pop(target_node_id, None)
+            if target_node_id not in batch.no_op_target_node_ids:
+                batch.no_op_target_node_ids.append(target_node_id)
         else:
-            ring_record = self.record_outgoing_edge_from_batch(batch.batch_id, target_node.node_id)
-            if target_node.node_id in batch.no_op_target_node_ids:
-                batch.no_op_target_node_ids.remove(target_node.node_id)
-            batch.staged_messages[target_node.node_id] = StagedOutgoingMessage(
-                target_node_id=target_node.node_id,
+            if str(target_node_kind) == "agent":
+                ring_record = self.record_outgoing_edge_from_batch(batch.batch_id, target_node_id)
+            if target_node_id in batch.no_op_target_node_ids:
+                batch.no_op_target_node_ids.remove(target_node_id)
+            batch.staged_messages[target_node_id] = StagedOutgoingMessage(
+                target_node_id=target_node_id,
                 target_agent_id=target_agent_id,
                 body=body,
+                target_node_kind=target_node_kind,
                 overwrite_count=overwrite_count,
             )
         batch.last_reminder_targets = []
@@ -3867,8 +4600,9 @@ class GraphRuntime:
                 status="staged",
                 payload={
                     "batch_id": batch.batch_id,
-                    "target_node_id": target_node.node_id,
+                    "target_node_id": target_node_id,
                     "target_agent_id": target_agent_id,
+                    "target_node_kind": target_node_kind,
                     "overwritten": overwritten,
                     "no_op": is_no_op,
                     "ready_to_dispatch": ready,
@@ -3886,8 +4620,9 @@ class GraphRuntime:
                     status="staged",
                     payload={
                         "batch_id": batch.batch_id,
-                        "target_node_id": target_node.node_id,
+                        "target_node_id": target_node_id,
                         "target_agent_id": target_agent_id,
+                        "target_node_kind": target_node_kind,
                         "remaining_targets": list(remaining),
                     },
                 )
@@ -3904,8 +4639,9 @@ class GraphRuntime:
             batch_id=batch.batch_id,
             status="staged",
             metadata={
-                "target_node_id": target_node.node_id,
+                "target_node_id": target_node_id,
                 "target_agent_id": target_agent_id,
+                "target_node_kind": target_node_kind,
                 "overwritten": overwritten,
                 "no_op": is_no_op,
                 "ready_to_dispatch": ready,
@@ -3944,6 +4680,16 @@ class GraphRuntime:
             if target_node_id in batch.no_op_target_node_ids:
                 continue
             staged = batch.staged_messages[target_node_id]
+            target_kind = batch.target_node_kinds_by_target.get(target_node_id, staged.target_node_kind)
+            if target_kind.startswith("common:"):
+                pending = self.queue_common_node_message(
+                    target_node_id,
+                    staged.body,
+                    source_node_id=batch.source_node_id,
+                    source_agent_id=batch.source_agent_id,
+                )
+                message_ids.append(pending.message_id)
+                continue
             target_inst = self._instances.get(target_node_id)
             if target_inst is None:
                 raise KeyError(f"target agent is not started: {target_node_id}")
@@ -4088,6 +4834,62 @@ class GraphRuntime:
                 "AgentMessageQueued",
                 node_id=node.node_id,
                 agent_id=agent_id,
+                status=pending.status,
+                payload=pending.to_dict(),
+            )
+        )
+        return pending
+
+    def queue_common_node_message(
+        self,
+        node_id: str,
+        body: Any,
+        *,
+        source_node_id: Optional[str] = None,
+        source_agent_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> PendingCommonNodeMessage:
+        if self._closed:
+            raise RuntimeError("GraphRuntime is closed")
+        node_id = str(node_id).strip()
+        if node_id not in self._common_nodes:
+            raise KeyError(f"unknown CommonNode: {node_id}")
+        self._mark_run_running()
+        pending = PendingCommonNodeMessage(
+            message_id=message_id or f"cmsg-{uuid.uuid4().hex[:12]}",
+            node_id=node_id,
+            body=body,
+            source_node_id=source_node_id,
+            source_agent_id=source_agent_id,
+        )
+        queue = self._common_node_message_queues.setdefault(node_id, [])
+        queue.append(pending)
+        self._pending_common_messages[pending.message_id] = pending
+        self.record_agent_stream_event(
+            {
+                "kind": "common.queue.updated",
+                "node_id": node_id,
+                "message_id": pending.message_id,
+                "status": pending.status,
+                "queue_size": len(queue),
+            }
+        )
+        self._record_message_io(
+            record_type="framework.common_message.queued",
+            sender={
+                "type": "agent" if source_agent_id else "framework",
+                "agent_id": source_agent_id,
+                "node_id": source_node_id,
+            },
+            receiver={"type": "common_node", "node_id": node_id},
+            payload=body,
+            message_id=pending.message_id,
+            status=pending.status,
+        )
+        self._emit(
+            GraphEvent(
+                "CommonNodeMessageQueued",
+                node_id=node_id,
                 status=pending.status,
                 payload=pending.to_dict(),
             )
@@ -4595,6 +5397,49 @@ class RouteNode:
 
 
 @dataclass
+class CommonNode:
+    """Framework-owned built-in blueprint node."""
+
+    node_id: str
+    kind: CommonNodeKind
+    every_n_ticks: int = 1
+
+    def __post_init__(self) -> None:
+        self.node_id = str(self.node_id).strip()
+        self.kind = str(self.kind or "").strip().lower()
+        if not self.node_id:
+            raise ValueError("CommonNode.node_id must be non-empty")
+        if self.kind not in _VALID_COMMON_NODE_KINDS:
+            raise ValueError(
+                "CommonNode.kind must be one of "
+                + ", ".join(sorted(_VALID_COMMON_NODE_KINDS))
+            )
+        try:
+            self.every_n_ticks = max(1, int(self.every_n_ticks))
+        except (TypeError, ValueError):
+            raise ValueError("Tick CommonNode.every_n_ticks must be an integer") from None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "node_id": self.node_id,
+            "kind": self.kind,
+        }
+        if self.kind == "tick":
+            data["every_n_ticks"] = self.every_n_ticks
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CommonNode":
+        if not isinstance(data, dict):
+            raise ValueError("CommonNode data must be an object")
+        return cls(
+            node_id=str(data.get("node_id", "")).strip(),
+            kind=str(data.get("kind", "")),
+            every_n_ticks=int(data.get("every_n_ticks", 1) or 1),
+        )
+
+
+@dataclass
 class BlueprintTerminalNode:
     """Start/end marker node for runnable visual blueprints."""
 
@@ -4610,6 +5455,76 @@ class BlueprintTerminalNode:
             raise ValueError(
                 "BlueprintTerminalNode.terminal_kind must be 'start' or 'end'"
             )
+
+
+@dataclass
+class ScriptNode:
+    """User-authored Python function node compiled into a blueprint graph."""
+
+    node_id: str
+    script_id: str
+    module_path: str
+    function_name: str
+    title: str = ""
+    description: str = ""
+    inputs: List[ScriptNodePort] = field(default_factory=list)
+    outputs: List[ScriptNodePort] = field(default_factory=list)
+    collapsed: bool = True
+
+    def __post_init__(self) -> None:
+        self.node_id = str(self.node_id).strip()
+        if not self.node_id:
+            raise ValueError("ScriptNode.node_id must be non-empty")
+        self.script_id = str(self.script_id or f"{self.module_path}:{self.function_name}").strip()
+        self.module_path = str(self.module_path).replace("\\", "/").strip()
+        self.function_name = str(self.function_name).strip()
+        self.title = str(self.title or self.function_name or self.node_id).strip()
+        self.description = str(self.description or "")
+        self.inputs = [ScriptNodePort.from_value(port) for port in self.inputs]
+        self.outputs = [
+            ScriptNodePort.from_value(port, default_name="result" if index == 0 else f"out{index + 1}")
+            for index, port in enumerate(self.outputs or [ScriptNodePort("result", "Any")])
+        ]
+        self.collapsed = bool(self.collapsed)
+        if not self.module_path:
+            raise ValueError("ScriptNode.module_path must be non-empty")
+        if not self.function_name:
+            raise ValueError("ScriptNode.function_name must be non-empty")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "script_id": self.script_id,
+            "module_path": self.module_path,
+            "function_name": self.function_name,
+            "title": self.title,
+            "description": self.description,
+            "inputs": [port.to_dict() for port in self.inputs],
+            "outputs": [port.to_dict() for port in self.outputs],
+            "collapsed": self.collapsed,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ScriptNode":
+        if not isinstance(data, dict):
+            raise ValueError("ScriptNode data must be an object")
+        return cls(
+            node_id=str(data.get("node_id", "")).strip(),
+            script_id=str(data.get("script_id") or ""),
+            module_path=str(data.get("module_path") or ""),
+            function_name=str(data.get("function_name") or ""),
+            title=str(data.get("title") or ""),
+            description=str(data.get("description") or ""),
+            inputs=[
+                ScriptNodePort.from_value(item)
+                for item in data.get("inputs", [])
+            ],
+            outputs=[
+                ScriptNodePort.from_value(item, default_name="result" if index == 0 else f"out{index + 1}")
+                for index, item in enumerate(data.get("outputs", []))
+            ],
+            collapsed=bool(data.get("collapsed", True)),
+        )
 
 
 @dataclass
@@ -4650,6 +5565,8 @@ class GraphDefinition:
     agent_nodes: Dict[str, AgentNode] = field(default_factory=dict)
     route_nodes: Dict[str, RouteNode] = field(default_factory=dict)
     terminal_nodes: Dict[str, BlueprintTerminalNode] = field(default_factory=dict)
+    script_nodes: Dict[str, ScriptNode] = field(default_factory=dict)
+    common_nodes: Dict[str, CommonNode] = field(default_factory=dict)
     edges: List[GraphEdge] = field(default_factory=list)
     agent_ring_max_circulations: Dict[str, int] = field(default_factory=dict)
 
@@ -4677,30 +5594,149 @@ class GraphDefinition:
                     f"terminal node key {key!r} does not match node_id {node.node_id!r}"
                 )
             terminal_ids.add(node.node_id)
-        return agent_ids | route_ids | terminal_ids
+
+        script_ids = set()
+        for key, node in self.script_nodes.items():
+            if key != node.node_id:
+                raise ValueError(
+                    f"script node key {key!r} does not match node_id {node.node_id!r}"
+                )
+            script_ids.add(node.node_id)
+
+        common_ids = set()
+        for key, node in self.common_nodes.items():
+            if key != node.node_id:
+                raise ValueError(
+                    f"common node key {key!r} does not match node_id {node.node_id!r}"
+                )
+            common_ids.add(node.node_id)
+        return agent_ids | route_ids | terminal_ids | script_ids | common_ids
 
     def _adjacency(self, node_ids: set[str], *, exec_only: bool = False) -> Dict[str, List[str]]:
         adjacency: Dict[str, List[str]] = {node_id: [] for node_id in node_ids}
         for edge in self.edges:
             if exec_only and not edge.is_exec_edge:
                 continue
+            if edge.source not in adjacency or edge.target not in node_ids:
+                continue
             adjacency[edge.source].append(edge.target)
         return adjacency
 
+    def _exec_successors_by_port(self, source_id: str, output_port: Optional[str] = None) -> List[str]:
+        targets: List[str] = []
+        requested = str(output_port).strip() if output_port is not None else None
+        for edge in self.edges:
+            if edge.source != source_id or not edge.is_exec_edge:
+                continue
+            actual = edge.output_port or "out"
+            if requested is not None and actual != requested:
+                continue
+            targets.append(edge.target)
+        return targets
+
+    def framework_targets_for_agent(self, source_node_id: str) -> List[str]:
+        """Return immediate framework dispatch targets for an AgentNode.
+
+        ScriptNodes remain transparent transformation steps. CommonNodes are
+        not transparent because the framework must execute their built-in
+        control-flow semantics before choosing downstream targets.
+        """
+
+        source = str(source_node_id)
+        if source not in self.agent_nodes:
+            return []
+        successors = self._adjacency(self._node_ids(), exec_only=True)
+        targets: List[str] = []
+        queue = list(successors.get(source, []))
+        seen: set[str] = {source}
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            if current in self.agent_nodes or current in self.common_nodes:
+                if current not in targets:
+                    targets.append(current)
+                continue
+            if current not in self.script_nodes and current not in self.common_nodes:
+                continue
+            queue.extend(successors.get(current, []))
+        return targets
+
+    def framework_connections(self) -> Dict[str, List[str]]:
+        """Return dispatchable node-to-node framework flow connections."""
+
+        connections: Dict[str, List[str]] = {
+            node_id: self.framework_targets_for_agent(node_id)
+            for node_id in self.agent_nodes
+        }
+        for node_id in self.common_nodes:
+            connections[node_id] = list(self._exec_successors_by_port(node_id))
+        return connections
+
+    def has_tick_source(self) -> bool:
+        return any(node.kind == "tick" for node in self.common_nodes.values())
+
+    def node_port_data_type(
+        self,
+        node_id: str,
+        *,
+        side: str,
+        port_name: Optional[str] = None,
+    ) -> Optional[BlueprintPortDataType]:
+        """Return a port data type or ``None`` for unchecked Agent/Script ports."""
+
+        node = str(node_id)
+        if node in self.agent_nodes or node in self.script_nodes:
+            return None
+        port = str(port_name or ("out" if side == "output" else "in")).strip()
+        if node in self.common_nodes:
+            common = self.common_nodes[node]
+            if common.kind == "branch":
+                if side == "input" and port == "condition":
+                    return "bool"
+                if side == "output" and port in {"true", "false"}:
+                    return "message"
+                raise ValueError(f"unknown Branch port: {node}.{port}")
+            if common.kind == "tick":
+                if side == "output" and port == "tick":
+                    return "tick"
+                raise ValueError(f"unknown Tick port: {node}.{port}")
+        if node in self.route_nodes or node in self.terminal_nodes:
+            return "message"
+        raise KeyError(f"unknown graph node: {node}")
+
+    def validate_port_types(self) -> None:
+        for edge in self.edges:
+            source_type = self.node_port_data_type(
+                edge.source,
+                side="output",
+                port_name=edge.output_port,
+            )
+            target_type = self.node_port_data_type(
+                edge.target,
+                side="input",
+                port_name=edge.input_port,
+            )
+            if source_type is None or target_type is None:
+                continue
+            if source_type != target_type:
+                raise ValueError(
+                    "edge port type mismatch: "
+                    f"{edge.source}:{edge.output_port or 'out'} is {source_type}, "
+                    f"{edge.target}:{edge.input_port or 'in'} is {target_type}"
+                )
+
     def agent_connections(self) -> Dict[str, List[str]]:
-        """Return directly reachable downstream AgentNodes over exec edges."""
+        """Return downstream AgentNodes over exec edges, crossing ScriptNodes."""
         connections: Dict[str, List[str]] = {
             node_id: [] for node_id in self.agent_nodes
         }
-        for edge in self.edges:
-            if not edge.is_exec_edge:
-                continue
-            if edge.source not in self.agent_nodes:
-                continue
-            if edge.target not in self.agent_nodes:
-                continue
-            if edge.target not in connections[edge.source]:
-                connections[edge.source].append(edge.target)
+        successors = self._adjacency(self._node_ids(), exec_only=True)
+        for source_id in self.agent_nodes:
+            for target_id in self._agent_targets_through_scripts(source_id, successors):
+                if target_id not in connections[source_id]:
+                    connections[source_id].append(target_id)
         return connections
 
     def agent_flow_connections(self) -> Dict[str, List[str]]:
@@ -4709,16 +5745,62 @@ class GraphDefinition:
         connections: Dict[str, List[str]] = {
             node_id: [] for node_id in self.agent_nodes
         }
+        successors: Dict[str, List[str]] = {node_id: [] for node_id in self._node_ids()}
         for edge in self.edges:
             if edge.edge_type == "data":
                 continue
-            if edge.source not in self.agent_nodes:
-                continue
-            if edge.target not in self.agent_nodes:
-                continue
-            if edge.target not in connections[edge.source]:
-                connections[edge.source].append(edge.target)
+            successors.setdefault(edge.source, []).append(edge.target)
+        for source_id in self.agent_nodes:
+            for target_id in self._agent_targets_through_scripts(source_id, successors):
+                if target_id not in connections[source_id]:
+                    connections[source_id].append(target_id)
         return connections
+
+    def script_path_between_agents(self, source_node_id: str, target_node_id: str) -> List[str]:
+        """Return ScriptNode ids on the first exec path between two agents."""
+
+        source = str(source_node_id)
+        target = str(target_node_id)
+        if source not in self.agent_nodes or target not in self.agent_nodes:
+            return []
+        successors = self._adjacency(self._node_ids(), exec_only=True)
+        queue: List[tuple[str, List[str]]] = [
+            (node_id, [])
+            for node_id in successors.get(source, [])
+        ]
+        seen: set[str] = {source}
+        while queue:
+            current, path = queue.pop(0)
+            if current == target:
+                return path
+            if current in seen:
+                continue
+            seen.add(current)
+            if current in self.script_nodes:
+                for next_id in successors.get(current, []):
+                    queue.append((next_id, [*path, current]))
+        return []
+
+    def _agent_targets_through_scripts(
+        self,
+        source_node_id: str,
+        successors: Dict[str, List[str]],
+    ) -> List[str]:
+        targets: List[str] = []
+        queue = list(successors.get(source_node_id, []))
+        seen: set[str] = {source_node_id}
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            if current in self.agent_nodes:
+                targets.append(current)
+                continue
+            if current not in self.script_nodes:
+                continue
+            queue.extend(successors.get(current, []))
+        return targets
 
     def required_start_groups(self) -> List[Dict[str, Any]]:
         """Return source SCCs that must be covered by a start node."""
@@ -4875,6 +5957,7 @@ class GraphDefinition:
         for node_id, node in self.agent_nodes.items():
             agents[node_id] = {
                 "node_id": node_id,
+                "node_type": node.node_type,
                 "agent_id": node.runtime_agent_id,
                 "cli_kind": node.cli_kind,
                 "execution_mode": node.execution_mode,
@@ -4884,6 +5967,7 @@ class GraphDefinition:
                 "read_scope": list(node.read_scope),
                 "write_scope": list(node.write_scope),
                 "artifact_scope": list(node.artifact_scope),
+                "access_policy": dict(node.access_policy),
                 "upstream_agents": list(upstreams.get(node_id, [])),
                 "downstream_agents": list(connections.get(node_id, [])),
             }
@@ -4893,6 +5977,14 @@ class GraphDefinition:
                 "nodes": sorted(self._node_ids()),
                 "agent_nodes": list(self.agent_nodes),
                 "route_nodes": list(self.route_nodes),
+                "common_nodes": {
+                    node_id: node.to_dict()
+                    for node_id, node in self.common_nodes.items()
+                },
+                "script_nodes": {
+                    node_id: node.to_dict()
+                    for node_id, node in self.script_nodes.items()
+                },
                 "terminal_nodes": {
                     node_id: node.terminal_kind
                     for node_id, node in self.terminal_nodes.items()
@@ -4909,6 +6001,7 @@ class GraphDefinition:
                 ],
             },
             "agent_connections": connections,
+            "framework_connections": self.framework_connections(),
             "cycle_groups": self.agent_cycle_groups(),
             "agent_rings": [ring.to_dict() for ring in self.agent_rings()],
             "agents": agents,
@@ -4928,15 +6021,18 @@ class GraphDefinition:
                 "scope": "top_agent",
                 "graph": full["graph"],
                 "agent_connections": full["agent_connections"],
+                "framework_connections": full["framework_connections"],
                 "agents": {
                     node_id: {
                         "node_id": agent["node_id"],
+                        "node_type": agent["node_type"],
                         "agent_id": agent["agent_id"],
                         "upstream_agents": list(agent["upstream_agents"]),
                         "downstream_agents": list(agent["downstream_agents"]),
                         "read_scope": list(agent["read_scope"]),
                         "write_scope": list(agent["write_scope"]),
                         "artifact_scope": list(agent["artifact_scope"]),
+                        "access_policy": dict(agent["access_policy"]),
                         "skill_selection_mode": agent["skill_selection"].get("mode"),
                     }
                     for node_id, agent in full["agents"].items()
@@ -4949,12 +6045,22 @@ class GraphDefinition:
         if agent_id not in full["agents"]:
             raise KeyError(f"unknown AgentNode: {agent_id}")
         agent = full["agents"][agent_id]
-        related = set(agent.get("upstream_agents", [])) | set(agent.get("downstream_agents", [])) | {agent_id}
+        related = (
+            set(agent.get("upstream_agents", []))
+            | set(agent.get("downstream_agents", []))
+            | set(full["framework_connections"].get(agent_id, []))
+            | {agent_id}
+        )
         return {
             "scope": "agent",
             "graph": {
                 "nodes": sorted(related),
                 "agent_nodes": [agent_id],
+                "common_nodes": {
+                    node_id: node
+                    for node_id, node in full["graph"].get("common_nodes", {}).items()
+                    if node_id in related
+                },
                 "edges": [
                     edge
                     for edge in full["graph"]["edges"]
@@ -4963,16 +6069,21 @@ class GraphDefinition:
             },
             "agent": {
                 "node_id": agent["node_id"],
+                "node_type": agent["node_type"],
                 "agent_id": agent["agent_id"],
                 "upstream_agents": list(agent["upstream_agents"]),
                 "downstream_agents": list(agent["downstream_agents"]),
                 "read_scope": list(agent["read_scope"]),
                 "write_scope": list(agent["write_scope"]),
                 "artifact_scope": list(agent["artifact_scope"]),
+                "access_policy": dict(agent["access_policy"]),
                 "skill_selection_mode": agent["skill_selection"].get("mode"),
             },
             "agent_connections": {
                 agent_id: list(full["agent_connections"].get(agent_id, [])),
+            },
+            "framework_connections": {
+                agent_id: list(full["framework_connections"].get(agent_id, [])),
             },
             "cycle_groups": [
                 group for group in full["cycle_groups"] if agent_id in group
@@ -4991,6 +6102,7 @@ class GraphDefinition:
                 raise ValueError(f"unknown edge source: {edge.source}")
             if edge.target not in node_ids:
                 raise ValueError(f"unknown edge target: {edge.target}")
+        self.validate_port_types()
 
         adjacency = self._adjacency(node_ids)
         indegree: Dict[str, int] = {node_id: 0 for node_id in node_ids}

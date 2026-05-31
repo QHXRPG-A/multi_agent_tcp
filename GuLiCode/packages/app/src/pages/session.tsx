@@ -811,6 +811,8 @@ export default function Page() {
     pendingPlan: undefined as BlueprintPlanningPlan | undefined,
     activeRun: undefined as Record<string, unknown> | undefined,
     mcpRegisteredSessionId: undefined as string | undefined,
+    blueprintId: DEFAULT_BLUEPRINT_ID,
+    contextBlueprintId: undefined as string | undefined,
     planningRequested: false,
     preparing: false,
     answering: false,
@@ -858,6 +860,7 @@ export default function Page() {
         "sessionId",
         typeof snapshot.sessionId === "string" ? snapshot.sessionId : blueprintPlanning.sessionId,
       )
+      if (typeof snapshot.sessionId === "string") setBlueprintPlanning("contextBlueprintId", blueprintPlanning.blueprintId)
       setBlueprintPlanning("events", blueprintPlanningEvents(snapshot.events))
       const pendingQuestion = blueprintPlanningQuestion(snapshot.pendingQuestion)
       const pendingPlan = blueprintPlanningPlan(snapshot.pendingPlan)
@@ -904,7 +907,12 @@ export default function Page() {
   const ensureBlueprintPlanning = async (input: PromptSubmitOverrideInput) => {
     if (!platform.ensureBlueprintPlanningContext) throw new Error("Blueprint planning API is not available")
     const desktopSessionId = input.draft.sessionID
-    if (blueprintPlanning.sessionId && blueprintPlanning.desktopSessionId === desktopSessionId) {
+    const blueprintId = blueprintPlanning.blueprintId || DEFAULT_BLUEPRINT_ID
+    if (
+      blueprintPlanning.sessionId &&
+      blueprintPlanning.desktopSessionId === desktopSessionId &&
+      blueprintPlanning.contextBlueprintId === blueprintId
+    ) {
       const snapshot = await platform.blueprintPlanningStatus?.(blueprintPlanning.sessionId)
       if (snapshot) {
         applyBlueprintPlanningSnapshot(snapshot, desktopSessionId)
@@ -914,7 +922,7 @@ export default function Page() {
     }
     const snapshot = await platform.ensureBlueprintPlanningContext(
       input.projectDirectory,
-      DEFAULT_BLUEPRINT_ID,
+      blueprintId,
       desktopSessionId,
     )
     applyBlueprintPlanningSnapshot(snapshot, desktopSessionId)
@@ -957,7 +965,12 @@ export default function Page() {
     })
   }
 
-  const requestBlueprintPlanningSubmit = (input: { message: string; silentBlocked?: boolean; onBlocked?: () => void }) => {
+  const requestBlueprintPlanningSubmit = (input: {
+    message: string
+    blueprintId?: string
+    silentBlocked?: boolean
+    onBlocked?: () => void
+  }) => {
     const block = () => {
       if (!input.silentBlocked) showBlueprintPlanningSubmitBlocked()
       input.onBlocked?.()
@@ -974,7 +987,9 @@ export default function Page() {
     if (currentText || prompt.context.items().length > 0) {
       return block()
     }
-    if (!input.silentBlocked) setBlueprintPlanning({ desktopSessionId: params.id, planningRequested: true })
+    const blueprintId = input.blueprintId?.trim() || DEFAULT_BLUEPRINT_ID
+    setBlueprintPlanning("blueprintId", blueprintId)
+    if (!input.silentBlocked) setBlueprintPlanning({ desktopSessionId: params.id, planningRequested: true, blueprintId })
     setBlueprintPlanningSubmitRequest({
       id: Date.now(),
       text: input.message,
@@ -1267,7 +1282,12 @@ export default function Page() {
     try {
       const startPlan = cloneBlueprintPlanningPayload(plan)
       const started = cloneBlueprintPlanningPayload(
-        await platform.startBlueprintRun(sdk.directory, DEFAULT_BLUEPRINT_ID, startPlan, "live"),
+        await platform.startBlueprintRun(
+          sdk.directory,
+          blueprintPlanning.contextBlueprintId || blueprintPlanning.blueprintId || DEFAULT_BLUEPRINT_ID,
+          startPlan,
+          "live",
+        ),
       )
       const runId = typeof started.runId === "string" ? started.runId : ""
       if (!runId) throw new Error("Blueprint start did not return a runId")
@@ -2942,10 +2962,11 @@ export default function Page() {
     if (!blueprintWindowEventMatchesSession(detail)) return
     const input = isRecord(detail?.input) ? detail.input : undefined
     const message = typeof input?.message === "string" ? input.message : ""
+    const blueprintId = typeof input?.blueprintId === "string" ? input.blueprintId : undefined
     const silentBlocked = input?.silentBlocked === true
     const respond = typeof detail?.respond === "function" ? detail.respond : undefined
     if (!message || !respond) return
-    respond(requestBlueprintPlanningSubmit({ message, silentBlocked }))
+    respond(requestBlueprintPlanningSubmit({ message, blueprintId, silentBlocked }))
   }
 
   const deleteCurrentSessionFromBridge = async (sessionId?: string) => {

@@ -1,4 +1,41 @@
-import { expect, test } from "@playwright/test"
+import { expect, test, type Page } from "@playwright/test"
+
+async function useMobileMockApi(page: Page) {
+  await page.route("**/api/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        csrfToken: "csrf-e2e",
+        user: { id: "e2e-user", username: "e2e" },
+        clients: { mobile: true, desktop: true },
+        syncReady: true,
+      }),
+    })
+  })
+  await page.route("**/api/projects", async (route) => {
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: false, code: "E2E_MOCK_ONLY", message: "Use mobile mock data" }),
+    })
+  })
+  await page.route("**/api/mobile/tick", async (route) => {
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: false, code: "E2E_MOCK_ONLY", message: "No live tick in mock e2e" }),
+    })
+  })
+  await page.route("**/api/client-logs", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true }),
+    })
+  })
+}
 
 test.use({
   viewport: { width: 390, height: 844 },
@@ -6,23 +43,27 @@ test.use({
 })
 
 test("mobile mock renders three top tabs and read-only panels", async ({ page }) => {
+  await useMobileMockApi(page)
   await page.goto("/mobile")
 
   await expect(page.getByTestId("mobile-app")).toBeVisible()
   await expect(page.getByText("移动协作台")).toBeVisible()
-  await expect(page.getByRole("button", { name: "Top Agent", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "聊天", exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "蓝图", exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "待定", exact: true })).toBeVisible()
   const topAgentTabBackground = await page
-    .getByRole("button", { name: "Top Agent", exact: true })
+    .getByRole("button", { name: "聊天", exact: true })
     .evaluate((element) => getComputedStyle(element).backgroundColor)
   expect(topAgentTabBackground).not.toBe("rgb(22, 19, 18)")
   expect(topAgentTabBackground).not.toBe("rgb(0, 0, 0)")
 
-  await expect(page.getByTestId("top-agent-panel")).toContainText("只读对话")
-  await expect(page.getByTestId("top-agent-panel")).toContainText("消息传递暂未接入")
-  await expect(page.getByRole("textbox")).toHaveCount(0)
-  await expect(page.getByRole("button", { name: "发送" })).toHaveCount(0)
+  await expect(page.getByTestId("top-agent-panel")).toContainText("顶层代理")
+  await expect(page.getByTestId("top-agent-panel")).toContainText("移动端镜像同步")
+  await expect(page.getByTestId("top-agent-panel")).toContainText("思考过程")
+  await expect(page.getByTestId("top-agent-panel")).toContainText("blueprint.snapshot")
+  await expect(page.getByTestId("mobile-desktop-message-mode")).toHaveValue("mode-blueprint")
+  await expect(page.getByTestId("mobile-desktop-message")).toBeDisabled()
+  await expect(page.getByTestId("mobile-desktop-message-submit")).toBeDisabled()
 
   await page.getByRole("button", { name: "蓝图", exact: true }).click()
   const blueprintTabBackground = await page
@@ -36,6 +77,9 @@ test("mobile mock renders three top tabs and read-only panels", async ({ page })
   await expect(previewMap).toBeVisible()
   await expect(previewMap.getByTestId("blueprint-structure-node").filter({ hasText: "Start" })).toBeVisible()
   await expect(previewMap.getByTestId("blueprint-structure-node").filter({ hasText: "Top Agent" })).toBeVisible()
+  await expect(previewMap.getByTestId("blueprint-structure-node").filter({ hasText: "Format Result" })).toBeVisible()
+  await expect(previewMap.getByTestId("blueprint-structure-node").filter({ hasText: "Branch" })).toBeVisible()
+  await expect(previewMap.getByTestId("blueprint-structure-node").filter({ hasText: "Tick" })).toBeVisible()
   await expect(structurePreview).toContainText("Top Agent")
   await expect(page.getByTestId("blueprint-node-detail")).toHaveCount(0)
   await previewMap.getByTestId("blueprint-structure-node").filter({ hasText: "Top Agent" }).click()
@@ -45,6 +89,7 @@ test("mobile mock renders three top tabs and read-only panels", async ({ page })
     .evaluate((element) => getComputedStyle(element).backgroundColor)
   expect(agentSheetBackground).toBe("rgb(255, 253, 250)")
   await expect(page.getByTestId("agent-info-sheet")).toContainText("Top Agent")
+  await expect(page.getByTestId("agent-info-sheet")).toHaveAttribute("data-node-kind", "worker_agent")
   await expect(page.getByTestId("agent-info-sheet")).toContainText("任务状态")
   await expect(page.getByTestId("agent-info-status-toggle")).toHaveAttribute("aria-expanded", "false")
   await expect(page.getByTestId("agent-info-status-details")).toHaveCount(0)
@@ -72,6 +117,17 @@ test("mobile mock renders three top tabs and read-only panels", async ({ page })
   await expect(page.getByTestId("agent-info-send")).toBeDisabled()
   await page.getByRole("button", { name: "关闭 Agent 信息面板" }).click()
   await expect(page.getByTestId("agent-info-sheet")).toHaveCount(0)
+  await previewMap.getByTestId("blueprint-structure-node").filter({ hasText: "Format Result" }).click()
+  await expect(page.getByTestId("agent-info-sheet")).toHaveAttribute("data-node-kind", "script")
+  await expect(page.getByTestId("node-type-details")).toContainText("payload: dict")
+  await expect(page.getByTestId("node-type-details")).toContainText("summary: str")
+  await expect(page.getByTestId("agent-info-input")).toHaveCount(0)
+  await page.getByRole("button", { name: "关闭 Agent 信息面板" }).click()
+  await previewMap.getByTestId("blueprint-structure-node").filter({ hasText: "Branch" }).click()
+  await expect(page.getByTestId("agent-info-sheet")).toHaveAttribute("data-node-kind", "branch")
+  await expect(page.getByTestId("node-type-details")).toContainText("condition: bool")
+  await expect(page.getByTestId("node-type-details")).toContainText("true: message")
+  await page.getByRole("button", { name: "关闭 Agent 信息面板" }).click()
   const firstNodeText = await previewMap.getByTestId("blueprint-structure-node").first().innerText()
   expect(firstNodeText.trim().startsWith("1")).toBe(false)
   const firstNodeBackground = await previewMap
@@ -102,6 +158,7 @@ test("mobile mock renders three top tabs and read-only panels", async ({ page })
   await expect(overlay).toBeVisible()
   await expect(overlay.getByTestId("blueprint-structure-map-fullscreen")).toBeVisible()
   await expect(overlay.getByTestId("blueprint-structure-node").filter({ hasText: "Summary" })).toBeVisible()
+  await expect(overlay.getByTestId("blueprint-structure-node").filter({ hasText: "Tick" })).toBeVisible()
   await expect(overlay.getByTestId("blueprint-structure-zoom-in")).toBeVisible()
   await expect(overlay).toContainText("Summary")
   await overlay.getByTestId("blueprint-structure-node").filter({ hasText: "Summary" }).click()
@@ -129,6 +186,10 @@ test("mobile mock renders three top tabs and read-only panels", async ({ page })
   await expect(page.getByTestId("agent-info-sheet")).toContainText("规划")
   await page.getByTestId("agent-info-sheet-backdrop").click({ position: { x: 8, y: 8 } })
   await expect(page.getByTestId("agent-info-sheet")).toHaveCount(0)
+  await page.getByTestId("blueprint-node-row").filter({ hasText: "Tick" }).click()
+  await expect(page.getByTestId("agent-info-sheet")).toHaveAttribute("data-node-kind", "tick")
+  await expect(page.getByTestId("node-type-details")).toContainText("每 3 tick")
+  await page.getByRole("button", { name: "关闭 Agent 信息面板" }).click()
   await expect(page.getByTestId("blueprint-node-detail")).toHaveCount(0)
   await expect(page.getByTestId("blueprint-panel")).toContainText("运行情况")
   await expect(page.getByTestId("blueprint-panel")).toContainText("Diff")
@@ -143,8 +204,13 @@ test("mobile mock renders three top tabs and read-only panels", async ({ page })
   await expect(mobileAppDiff.getByTestId("blueprint-diff-preview")).toContainText("active tab")
 
   await page.getByRole("button", { name: "待定", exact: true }).click()
-  await expect(page.getByTestId("pending-panel")).toContainText("待定")
-  await expect(page.getByTestId("pending-panel")).toContainText("后续扩展预留")
+  await expect(page.getByTestId("pending-panel")).toContainText("Pending")
+  await expect(page.getByTestId("planning-request-card")).toHaveCount(2)
+  await expect(page.getByTestId("pending-panel")).toContainText("补全移动端桌面镜像同步")
+  await expect(page.getByTestId("pending-panel")).toContainText("同步桌面 Blueprint 全图节点")
+  await expect(page.getByTestId("planning-answer-input")).toBeDisabled()
+  await expect(page.getByTestId("planning-approve")).toBeDisabled()
+  await expect(page.getByTestId("planning-reject")).toBeDisabled()
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)
   expect(overflow).toBe(false)

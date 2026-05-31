@@ -19,6 +19,7 @@ export type MobileDesktopMessageSegment = {
 }
 
 export type BlueprintNodeState = "done" | "running" | "queued" | "idle" | "failed"
+export type BlueprintNodeKind = "agent" | "worker_agent" | "script" | "branch" | "tick"
 
 export type BlueprintAgentPanelEventTone = "user" | "reply" | "reasoning" | "tool" | "error" | "event"
 
@@ -53,10 +54,15 @@ export type BlueprintAgentPanel = {
 export type BlueprintNode = {
   id: string
   label: string
+  kind: BlueprintNodeKind
   state: BlueprintNodeState
   role: string
   detail: string
   note: string
+  summary?: string
+  inputPorts?: string[]
+  outputPorts?: string[]
+  everyNTicks?: number
   layout?: {
     x: number
     y: number
@@ -68,6 +74,8 @@ export type BlueprintEdge = {
   source: string
   target: string
   kind?: string
+  outputPort?: string
+  inputPort?: string
 }
 
 export type BlueprintRunStatus = {
@@ -222,5 +230,20 @@ export function nodeStateTone(state: BlueprintNodeState) {
       return "border-stone-200 bg-white text-stone-500"
     case "failed":
       return "border-red-200 bg-red-50 text-red-700"
+  }
+}
+
+export function nodeKindLabel(kind: BlueprintNodeKind) {
+  switch (kind) {
+    case "agent":
+      return "Agent"
+    case "worker_agent":
+      return "Worker Agent"
+    case "script":
+      return "Script"
+    case "branch":
+      return "Branch"
+    case "tick":
+      return "Tick"
   }
 }

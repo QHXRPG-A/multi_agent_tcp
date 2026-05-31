@@ -208,12 +208,12 @@ if ($desktopRendererReady -and $desktopBridgeReady) {
 $healthOk = Wait-Http "http://127.0.0.1:8787/api/health" 30
 $mobileOk = Wait-Http "http://127.0.0.1:3040/mobile" 45
 $consoleOk = Wait-Http "http://127.0.0.1:3040/console" 45
-$rendererOk = Wait-Http "http://localhost:5173/" 60
+$rendererOk = Wait-Http "http://[::1]:5173/" 60
 
 Write-Host ("[start-gulicode-debug] health  = {0}" -f $healthOk)
 Write-Host ("[start-gulicode-debug] mobile  = {0} http://127.0.0.1:3040/mobile" -f $mobileOk)
 Write-Host ("[start-gulicode-debug] console = {0} http://127.0.0.1:3040/console" -f $consoleOk)
-Write-Host ("[start-gulicode-debug] desktop = {0} http://localhost:5173/" -f $rendererOk)
+Write-Host ("[start-gulicode-debug] desktop = {0} http://[::1]:5173/" -f $rendererOk)
 
 if (-not $NoOpen) {
     Start-Process "http://127.0.0.1:3040/mobile"

@@ -1,17 +1,22 @@
 import { describe, expect, test } from "bun:test"
 import {
   addAgentNode,
+  addFullAgentNode,
   addEdge,
   addNode,
   addRouteNode,
+  addScriptNode,
   addTestAgentNode,
+  canConnectPorts,
   CLI_KIND_OPTIONS,
+  compileScriptNodesFromCatalog,
   createBlueprintStartPlan,
   createDefaultBlueprintDraft,
   fromBlueprintDocument,
   DEFAULT_PYTHON_PATH,
   DEFAULT_SKILL_DIR,
   TEST_AGENT_NODE_FLAG,
+  deleteEdge,
   deleteNode,
   parseScopeText,
   setInspector,
@@ -19,6 +24,8 @@ import {
   toBlueprintDocument,
   toRuntimeGraphDraft,
   updateAgentNode,
+  updateEdge,
+  hasTickSourceNode,
   validateBlueprintConfigForStart,
 } from "./blueprint-model"
 
@@ -34,9 +41,11 @@ describe("blueprint draft model", () => {
     })
     expect(draft.graph.terminal_nodes).toEqual({})
     expect(draft.graph.route_nodes).toEqual({})
+    expect(draft.graph.common_nodes).toEqual({})
     expect(Object.keys(draft.graph.agent_nodes)).toEqual(["planner", "coder", "review", "summary"])
     expect(draft.graph.agent_nodes.planner).toMatchObject({
       node_id: "planner",
+      node_type: "worker_agent",
       cli_kind: "codemaker",
       model: "netease-codemaker/kimi-k2.5",
       cwd: ".",
@@ -46,6 +55,13 @@ describe("blueprint draft model", () => {
       command: "codemaker",
       external: false,
       skill_selection: { mode: "none" },
+      access_policy: {
+        direct_project_io: false,
+        outside_project_io: false,
+        unrestricted_commands: false,
+        disable_sandbox: false,
+        framework_message_tools: true,
+      },
     })
     expect(draft.graph.edges.map((edge) => [edge.from, edge.output_port, edge.to, edge.input_port, edge.edge_type])).toEqual([
       ["planner", "out", "coder", "in", "exec"],
@@ -70,10 +86,42 @@ describe("blueprint draft model", () => {
     })
 
     expect(draft.graph.agent_nodes["coder-1"]?.agent_id).toBe("agent-coder-1")
+    expect(draft.graph.agent_nodes["coder-1"]?.node_type).toBe("worker_agent")
     expect(draft.graph.agent_nodes["coder-1"]?.write_scope).toEqual(["**"])
     expect(draft.layout.nodes["coder-1"]).toEqual({ x: 0, y: 24 })
     expect(draft.selection).toEqual({ type: "node", id: "coder-1" })
     expect(draft.inspector).toEqual({ type: "node", id: "coder-1" })
+  })
+
+  test("adds full CLI agent nodes with unrestricted defaults", () => {
+    const draft = addFullAgentNode(createDefaultBlueprintDraft(), {
+      node_id: "shell",
+      position: { x: 10, y: 20 },
+    })
+
+    expect(draft.graph.agent_nodes.shell).toMatchObject({
+      node_id: "shell",
+      node_type: "agent",
+      agent_id: "agent-shell",
+      cli_kind: "codex",
+      model: "gpt-5.4",
+      command: "codex",
+      adapter_options: {
+        sandbox: "danger-full-access",
+        dangerous_access: true,
+        extra_args: ["--dangerously-bypass-approvals-and-sandbox"],
+      },
+      access_policy: {
+        direct_project_io: true,
+        outside_project_io: true,
+        unrestricted_commands: true,
+        disable_sandbox: true,
+        framework_message_tools: true,
+      },
+    })
+    expect(draft.layout.nodes.shell).toEqual({ x: 0, y: 24 })
+    expect(draft.selection).toEqual({ type: "node", id: "shell" })
+    expect(draft.inspector).toEqual({ type: "node", id: "shell" })
   })
 
   test("adds test-agent compatibility nodes as ordinary agent nodes", () => {
@@ -83,6 +131,7 @@ describe("blueprint draft model", () => {
 
     expect(draft.graph.agent_nodes.agent).toMatchObject({
       node_id: "agent",
+      node_type: "worker_agent",
       agent_id: "agent-agent",
       cli_kind: "codemaker",
       model: "netease-codemaker/kimi-k2.5",
@@ -99,11 +148,22 @@ describe("blueprint draft model", () => {
     const viaGenericAdd = addNode(draft, { kind: "test-agent" })
     expect(viaGenericAdd.graph.agent_nodes["agent-1"]).toMatchObject({
       node_id: "agent-1",
+      node_type: "worker_agent",
       agent_id: "agent-agent-1",
       cli_kind: "codemaker",
       adapter_options: {},
     })
     expect(viaGenericAdd.graph.agent_nodes["agent-1"]?.adapter_options[TEST_AGENT_NODE_FLAG]).toBeUndefined()
+  })
+
+  test("generic add node creates full Agent and Worker Agent explicitly", () => {
+    const withFullAgent = addNode(createDefaultBlueprintDraft(), { kind: "agent", node_id: "agent" })
+    const withWorkerAgent = addNode(withFullAgent, { kind: "worker-agent", node_id: "agent" })
+
+    expect(withFullAgent.graph.agent_nodes.agent?.node_type).toBe("agent")
+    expect(withFullAgent.graph.agent_nodes.agent?.cli_kind).toBe("codex")
+    expect(withWorkerAgent.graph.agent_nodes["agent-1"]?.node_type).toBe("worker_agent")
+    expect(withWorkerAgent.graph.agent_nodes["agent-1"]?.cli_kind).toBe("codemaker")
   })
 
   test("migrates legacy report-only write scope to project-wide default", () => {
@@ -131,6 +191,75 @@ describe("blueprint draft model", () => {
     expect(withTerminal.layout.nodes.start).toEqual({ x: 408, y: 120 })
   })
 
+  test("adds built-in common Branch and Tick nodes and preserves them in documents", () => {
+    let draft = addNode(createDefaultBlueprintDraft(), {
+      kind: "branch",
+      node_id: "gate",
+      position: { x: 190, y: 55 },
+    })
+    draft = addNode(draft, {
+      kind: "tick",
+      node_id: "clock",
+      position: { x: 290, y: 87 },
+    })
+
+    expect(draft.graph.common_nodes.gate).toEqual({ node_id: "gate", kind: "branch" })
+    expect(draft.graph.common_nodes.clock).toEqual({ node_id: "clock", kind: "tick", every_n_ticks: 1 })
+    expect(draft.layout.nodes.gate).toEqual({ x: 192, y: 48 })
+    expect(draft.layout.nodes.clock).toEqual({ x: 288, y: 96 })
+    expect(hasTickSourceNode(draft)).toBe(true)
+
+    const document = toBlueprintDocument(draft)
+    const restored = fromBlueprintDocument(document)
+    expect(document.graph.common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_ticks: 1 })
+    expect(restored.graph.common_nodes.gate).toEqual({ node_id: "gate", kind: "branch" })
+    expect(toRuntimeGraphDraft(restored).common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_ticks: 1 })
+  })
+
+  test("enforces port types for non-Agent and non-Script connections only", () => {
+    let draft = addNode(createDefaultBlueprintDraft(), { kind: "branch", node_id: "gate" })
+    draft = addNode(draft, { kind: "tick", node_id: "clock" })
+    draft = addRouteNode(draft, "sequence", { node_id: "route" })
+    draft = addScriptNode(draft, {
+      node_id: "script",
+      script: {
+        script_id: "demo.py:demo",
+        module_path: "demo.py",
+        function_name: "demo",
+      },
+    })
+
+    const branchInput = addEdge(draft, "planner", "gate", "exec", "out", "condition")
+    expect(branchInput.graph.edges.some((edge) => edge.to === "gate" && edge.input_port === "condition")).toBe(true)
+
+    const branchOutput = addEdge(branchInput, "gate", "summary", "exec", "true", "in")
+    expect(branchOutput.graph.edges.some((edge) => edge.from === "gate" && edge.output_port === "true")).toBe(true)
+
+    const rejected = addEdge(branchOutput, "clock", "gate", "exec", "tick", "condition")
+    expect(rejected.graph.edges).toEqual(branchOutput.graph.edges)
+    expect(canConnectPorts(branchOutput, "clock", "tick", "gate", "condition")).toMatchObject({
+      ok: false,
+      reason: "type_mismatch",
+      sourceType: "tick",
+      targetType: "bool",
+    })
+
+    const routeRejected = addEdge(branchOutput, "clock", "route", "exec", "tick", "in")
+    expect(routeRejected.graph.edges).toEqual(branchOutput.graph.edges)
+    const withScriptTarget = addEdge(branchOutput, "clock", "script", "exec", "tick", "payload")
+    expect(withScriptTarget.graph.edges.at(-1)).toMatchObject({ from: "clock", to: "script", output_port: "tick", input_port: "payload" })
+    const withScriptSource = addEdge(withScriptTarget, "script", "gate", "exec", "result", "condition")
+    expect(withScriptSource.graph.edges.at(-1)).toMatchObject({ from: "script", to: "gate", output_port: "result", input_port: "condition" })
+
+    const unchanged = updateEdge(branchOutput, branchOutput.graph.edges.at(-1)?.id ?? "", {
+      from: "clock",
+      to: "gate",
+      output_port: "tick",
+      input_port: "condition",
+    })
+    expect(unchanged.graph.edges).toEqual(branchOutput.graph.edges)
+  })
+
   test("adds port-aware edges once and selects the edge", () => {
     const initial = createDefaultBlueprintDraft()
     const draft = addEdge(addEdge(initial, "planner", "summary"), "planner", "summary")
@@ -144,6 +273,168 @@ describe("blueprint draft model", () => {
       input_port: "in",
       edge_type: "exec",
     })
+  })
+
+  test("fans agent to every script input and deletes the input fan group", () => {
+    const initial = addScriptNode(createDefaultBlueprintDraft(), {
+      node_id: "test_1",
+      script: {
+        script_id: "test_1.py:test_1",
+        module_path: "test_1.py",
+        function_name: "test_1",
+        title: "test_1",
+        inputs: [
+          { name: "title", type: "str", required: true },
+          { name: "priority", type: "int", required: true },
+          { name: "context", type: "dict", required: true },
+        ],
+        outputs: [{ name: "summary", type: "str", required: true }],
+      },
+    })
+
+    const draft = addEdge(initial, "planner", "test_1", "exec", "out", "priority")
+    const fanEdges = draft.graph.edges.filter((edge) => edge.from === "planner" && edge.to === "test_1")
+    expect(fanEdges.map((edge) => edge.input_port).sort()).toEqual(["context", "priority", "title"])
+    expect(draft.selection).toEqual({ type: "edge", id: "planner:out->test_1:priority:exec" })
+
+    const deleted = deleteEdge(draft, "planner:out->test_1:priority:exec")
+    expect(deleted.graph.edges.some((edge) => edge.from === "planner" && edge.to === "test_1")).toBe(false)
+  })
+
+  test("fans every script output into an agent and keeps single-port scripts one-to-one", () => {
+    let draft = addScriptNode(createDefaultBlueprintDraft(), {
+      node_id: "test_1",
+      script: {
+        script_id: "test_1.py:test_1",
+        module_path: "test_1.py",
+        function_name: "test_1",
+        title: "test_1",
+        inputs: [{ name: "payload", type: "dict", required: true }],
+        outputs: [
+          { name: "summary", type: "str", required: true },
+          { name: "details", type: "dict", required: true },
+        ],
+      },
+    })
+    draft = addScriptNode(draft, {
+      node_id: "single",
+      script: {
+        script_id: "single.py:single",
+        module_path: "single.py",
+        function_name: "single",
+        title: "single",
+        inputs: [{ name: "payload", type: "dict", required: true }],
+        outputs: [{ name: "result", type: "dict", required: true }],
+      },
+    })
+
+    draft = addEdge(draft, "test_1", "review", "exec", "details", "in")
+    const fanInEdges = draft.graph.edges.filter((edge) => edge.from === "test_1" && edge.to === "review")
+    expect(fanInEdges.map((edge) => edge.output_port).sort()).toEqual(["details", "summary"])
+
+    draft = addEdge(draft, "single", "summary", "exec", "result", "in")
+    expect(draft.graph.edges.filter((edge) => edge.from === "single" && edge.to === "summary")).toHaveLength(1)
+
+    const deleted = deleteEdge(draft, "test_1:details->review:in:exec")
+    expect(deleted.graph.edges.some((edge) => edge.from === "test_1" && edge.to === "review")).toBe(false)
+  })
+
+  test("compiles placed script nodes from catalog and cleans stale port edges", () => {
+    let draft = addScriptNode(createDefaultBlueprintDraft(), {
+      node_id: "test_1",
+      position: { x: 49, y: 74 },
+      script: {
+        script_id: "test_1.py:test_1",
+        module_path: "test_1.py",
+        function_name: "test_1",
+        title: "test_1",
+        description: "Old script",
+        inputs: [
+          { name: "title", type: "str", required: true },
+          { name: "payload", type: "dict", required: true },
+        ],
+        outputs: [
+          { name: "summary", type: "str", required: true },
+          { name: "result", type: "dict", required: true },
+        ],
+        collapsed: false,
+      },
+    })
+    draft = addEdge(draft, "planner", "test_1", "exec", "out", "title")
+    draft = addEdge(draft, "coder", "test_1", "exec", "out", "payload")
+    draft = addEdge(draft, "test_1", "review", "exec", "summary", "in")
+    draft = addEdge(draft, "test_1", "summary", "exec", "result", "in")
+    draft.inspector = { type: "edge", id: "test_1:result->summary:in:exec" }
+
+    const result = compileScriptNodesFromCatalog(draft, [
+      {
+        node_id: "test_1",
+        script_id: "test_1.py:test_1",
+        module_path: "test_1.py",
+        function_name: "test_1",
+        title: "Format score",
+        description: "New script",
+        inputs: [
+          { name: "title", type: "str", required: true },
+          { name: "priority", type: "int", required: true },
+          { name: "context", type: "dict", required: true },
+        ],
+        outputs: [
+          { name: "summary", type: "str", required: true },
+          { name: "details", type: "dict", required: true },
+        ],
+        collapsed: true,
+      },
+    ])
+
+    expect(result.updated).toBe(1)
+    expect(result.missing).toBe(0)
+    expect(result.removedEdges).toBe(4)
+    expect(result.draft.graph.script_nodes.test_1).toMatchObject({
+      node_id: "test_1",
+      title: "Format score",
+      description: "New script",
+      collapsed: false,
+      inputs: [
+        { name: "title", type: "str", required: true },
+        { name: "priority", type: "int", required: true },
+        { name: "context", type: "dict", required: true },
+      ],
+      outputs: [
+        { name: "summary", type: "str", required: true },
+        { name: "details", type: "dict", required: true },
+      ],
+    })
+    expect(result.draft.layout.nodes.test_1).toEqual({ x: 48, y: 72 })
+    expect(result.draft.graph.edges.map((edge) => edge.id)).toEqual([
+      "planner:out->coder:in:exec",
+      "coder:out->review:in:exec",
+      "review:out->summary:in:exec",
+      "planner:out->test_1:title:exec",
+      "coder:out->test_1:title:exec",
+      "test_1:summary->review:in:exec",
+      "test_1:summary->summary:in:exec",
+    ])
+    expect(result.draft.inspector).toBeUndefined()
+  })
+
+  test("reports missing script catalog entries without changing placed nodes", () => {
+    const draft = addScriptNode(createDefaultBlueprintDraft(), {
+      node_id: "missing_script",
+      script: {
+        script_id: "missing.py:missing_script",
+        module_path: "missing.py",
+        function_name: "missing_script",
+        title: "Missing script",
+      },
+    })
+
+    const result = compileScriptNodesFromCatalog(draft, [])
+
+    expect(result.updated).toBe(0)
+    expect(result.missing).toBe(1)
+    expect(result.removedEdges).toBe(0)
+    expect(result.draft.graph.script_nodes.missing_script).toEqual(draft.graph.script_nodes.missing_script)
   })
 
   test("deletes every node kind and cascades connected edges", () => {
@@ -217,6 +508,45 @@ describe("blueprint draft model", () => {
       input_port: "in",
     })
     expect("id" in graph.edges[0]).toBe(false)
+  })
+
+  test("normalizes legacy agent nodes as worker agents", () => {
+    const draft = fromBlueprintDocument({
+      schema_version: 1,
+      id: "legacy",
+      name: "Legacy",
+      graph: {
+        terminal_nodes: {},
+        route_nodes: {},
+        agent_nodes: {
+          legacy: {
+            node_id: "legacy",
+            agent_id: "agent-legacy",
+            prompt: "Legacy node.",
+          } as never,
+        },
+        edges: [],
+      },
+      ui: {
+        config: {
+          python_path: "",
+          project_workdir: ".",
+          skill_dir: "",
+          rule_dir: "",
+        },
+        nodes: {},
+        viewport: { x: 0, y: 0, zoom: 1 },
+      },
+    })
+
+    expect(draft.graph.agent_nodes.legacy.node_type).toBe("worker_agent")
+    expect(draft.graph.agent_nodes.legacy.access_policy).toEqual({
+      direct_project_io: false,
+      outside_project_io: false,
+      unrestricted_commands: false,
+      disable_sandbox: false,
+      framework_message_tools: true,
+    })
   })
 
   test("validates required absolute blueprint common config before start", () => {

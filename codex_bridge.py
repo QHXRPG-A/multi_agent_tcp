@@ -187,17 +187,18 @@ def validate_codex_launch_safety(
     sandbox: Any,
     extra_args: List[str],
     protected_readonly_roots: Optional[List[Path]] = None,
+    allow_dangerous_access: bool = False,
 ) -> None:
     """Reject Codex launch options that would make read-only project roots writable."""
     normalized_sandbox = _normalize_sandbox(sandbox)
-    if normalized_sandbox == DANGEROUS_CODEX_SANDBOX:
+    if normalized_sandbox == DANGEROUS_CODEX_SANDBOX and not allow_dangerous_access:
         raise ValueError("codex sandbox=danger-full-access is not allowed in strict blueprint runs")
 
     for value in _extra_arg_values(extra_args, ["--sandbox", "-s"]):
-        if _normalize_sandbox(value) == DANGEROUS_CODEX_SANDBOX:
+        if _normalize_sandbox(value) == DANGEROUS_CODEX_SANDBOX and not allow_dangerous_access:
             raise ValueError("codex extra_args must not request sandbox=danger-full-access")
 
-    if "--dangerously-bypass-approvals-and-sandbox" in extra_args:
+    if "--dangerously-bypass-approvals-and-sandbox" in extra_args and not allow_dangerous_access:
         raise ValueError("codex extra_args must not bypass approvals and sandboxing")
 
     roots = [root.resolve() for root in (protected_readonly_roots or [])]
@@ -256,6 +257,13 @@ def _parse_codex_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     prompt_execution_context = raw.get("prompt_execution_context")
     if prompt_execution_context is not None and not isinstance(prompt_execution_context, dict):
         raise ValueError("codex.prompt_execution_context must be an object when set")
+    access_policy = raw.get("access_policy", cfg.get("access_policy", {}))
+    if access_policy is None:
+        access_policy_dict: Dict[str, Any] = {}
+    elif isinstance(access_policy, dict):
+        access_policy_dict = dict(access_policy)
+    else:
+        raise ValueError("codex.access_policy must be an object when set")
 
     parsed = {
         "command": command,
@@ -279,6 +287,9 @@ def _parse_codex_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "codex_home": raw.get("codex_home"),
         "diagnostics_dir": raw.get("diagnostics_dir"),
         "prompt_preamble": raw.get("prompt_preamble"),
+        "node_type": str(raw.get("node_type", cfg.get("node_type", "worker_agent"))),
+        "access_policy": access_policy_dict,
+        "dangerous_access": _as_bool(raw.get("dangerous_access"), default=False),
         "execution_context": dict(execution_context or {}),
         "prompt_execution_context": dict(prompt_execution_context or {}),
         "extra_env": extra_env_dict,
@@ -297,6 +308,11 @@ def _parse_codex_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         sandbox=parsed.get("sandbox"),
         extra_args=parsed.get("extra_args", []),
         protected_readonly_roots=protected_roots,
+        allow_dangerous_access=(
+            parsed.get("node_type") == "agent"
+            and bool(parsed.get("dangerous_access"))
+            and bool(parsed.get("access_policy", {}).get("disable_sandbox", False))
+        ),
     )
     return parsed
 

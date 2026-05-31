@@ -70,7 +70,26 @@ const createPlatform = (): Platform => {
       rollbackId?: string,
       reason?: string,
     ) => Promise<Record<string, unknown>>
+    blueprintCreateScriptNode?: (projectDir: string, name: string, description?: string) => Promise<Record<string, unknown>>
+    blueprintListEditors?: () => Promise<
+      Array<{
+        id: string
+        label: string
+        command?: string
+        args?: string[]
+        source: string
+        systemDefault?: boolean
+      }>
+    >
+    blueprintOpenScriptInEditor?: (
+      projectDir: string,
+      modulePath: string,
+      editorId?: string,
+    ) => Promise<Record<string, unknown>>
   }
+  const blueprintCreateScriptNode = api.blueprintCreateScriptNode
+  const blueprintListEditors = api.blueprintListEditors
+  const blueprintOpenScriptInEditor = api.blueprintOpenScriptInEditor
   const os = (() => {
     const ua = navigator.userAgent
     if (ua.includes("Mac")) return "macos"
@@ -178,6 +197,33 @@ const createPlatform = (): Platform => {
     openBlueprint: (projectDir: string, blueprintId: string) => window.api.blueprintOpen(projectDir, blueprintId),
 
     saveBlueprint: (projectDir: string, document) => window.api.blueprintSave(projectDir, document),
+
+    listBlueprintScriptNodes: (projectDir: string) => window.api.blueprintScriptNodes(projectDir),
+
+    ...(typeof blueprintCreateScriptNode === "function"
+      ? {
+          createBlueprintScriptNode: (projectDir: string, name: string, description?: string) =>
+            blueprintCreateScriptNode(projectDir, name, description),
+        }
+      : {}),
+
+    ...(typeof blueprintListEditors === "function"
+      ? {
+          listBlueprintEditors: () => blueprintListEditors(),
+        }
+      : {}),
+
+    ...(typeof blueprintOpenScriptInEditor === "function"
+      ? {
+          openBlueprintScriptInEditor: async (projectDir: string, modulePath: string, editorId?: string) => {
+            const resolvedProjectDir =
+              os === "windows" && (await isWslEnabled())
+                ? await window.api.wslPath(projectDir, "windows").catch(() => projectDir)
+                : projectDir
+            return blueprintOpenScriptInEditor(resolvedProjectDir, modulePath, editorId)
+          },
+        }
+      : {}),
 
     relocateBlueprintProjectWorkdir: (projectDir: string, blueprintId: string, document, targetProjectWorkdir, conflictPolicy) =>
       window.api.blueprintRelocateProjectWorkdir(projectDir, blueprintId, document, targetProjectWorkdir, conflictPolicy),

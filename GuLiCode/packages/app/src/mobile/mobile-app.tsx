@@ -25,6 +25,7 @@ import { requireCollaborationAuth } from "@/components/collaboration-auth"
 import { mobileMockData } from "./mock-data"
 import {
   mobileTabs,
+  nodeKindLabel,
   nodeStateLabel,
   nodeStateTone,
   type BlueprintAgentPanelEvent,
@@ -1187,6 +1188,9 @@ function BlueprintPanel(props: {
                 <span class="min-w-0 flex-1 truncate text-13-medium text-[#2c2521]">
                   {node.label}
                 </span>
+                <span class="shrink-0 rounded-full border border-[#eaded7] bg-white px-2 py-1 text-10-medium text-[#81756e]">
+                  {nodeKindLabel(node.kind)}
+                </span>
                 <span class="shrink-0 rounded-full bg-white px-2 py-1 text-11-medium text-[#9a8f88]">信息</span>
               </button>
             )}
@@ -1335,11 +1339,12 @@ function AgentInfoSheet(props: {
   onClose: () => void
 }) {
   const panel = () => props.node.agentPanel
+  const isAgentLike = () => props.node.kind === "agent" || props.node.kind === "worker_agent"
   const [statusDetailsOpen, setStatusDetailsOpen] = createSignal(false)
   const [text, setText] = createSignal("")
   const [mode, setMode] = createSignal<"default" | "top">("default")
   const [sending, setSending] = createSignal(false)
-  const canSend = () => props.canMessage && text().trim().length > 0 && !sending()
+  const canSend = () => isAgentLike() && props.canMessage && text().trim().length > 0 && !sending()
   const send = async () => {
     if (!canSend()) return
     setSending(true)
@@ -1360,17 +1365,18 @@ function AgentInfoSheet(props: {
       <section
         role="dialog"
         aria-modal="true"
-        aria-label={`${props.node.label} Agent 信息`}
+        aria-label={`${props.node.label} 节点信息`}
         data-testid="agent-info-sheet"
         data-node-id={props.node.id}
+        data-node-kind={props.node.kind}
         class="flex max-h-[82dvh] w-full max-w-[460px] flex-col overflow-hidden rounded-t-lg border border-[#eaded7] bg-[#fffdfa] text-[#161312] shadow-[0_24px_70px_rgba(90,70,62,0.20),0_0_0_1px_rgba(255,255,255,0.70)]"
         onClick={(event) => event.stopPropagation()}
       >
         <div class="flex h-11 shrink-0 items-center justify-between border-b border-[#f0e7e1] bg-white/80 px-3">
           <div class="min-w-0 flex-1">
-            <div class="truncate text-12-medium text-[#161312]">{panel().agentId}</div>
+            <div class="truncate text-12-medium text-[#161312]">{props.node.label}</div>
             <div class="mt-0.5 truncate text-10-regular text-[#9a8f88]">
-              {panel().cliKind} · {nodeStateLabel(props.node.state)}
+              {nodeKindLabel(props.node.kind)} · {nodeStateLabel(props.node.state)}
             </div>
           </div>
           <button
@@ -1389,14 +1395,29 @@ function AgentInfoSheet(props: {
           class="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-color:#d8c6bd_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#d8c6bd] [&::-webkit-scrollbar-thumb:hover]:bg-[#c8aa99] [&::-webkit-scrollbar-track]:bg-transparent"
         >
           <div data-testid="agent-info-status-summary" class="border-b border-[#f0e7e1] p-3">
-            <div class="grid grid-cols-3 gap-2">
-              <AgentPanelMetric label="状态" value={nodeStateLabel(props.node.state)} />
-              <AgentPanelMetric label="任务状态" value={panel().taskStatus} />
-              <AgentPanelMetric label="队列" value={`${panel().queueSize}`} />
-              <AgentPanelMetric label="消息" value={`${panel().messagesSent}`} />
-              <AgentPanelMetric label="忙碌" value={`${panel().busyCount}`} />
-              <AgentPanelMetric label="更新" value={panel().updatedAt} />
-            </div>
+            <Show
+              when={isAgentLike()}
+              fallback={
+                <div class="grid grid-cols-3 gap-2">
+                  <AgentPanelMetric label="类型" value={nodeKindLabel(props.node.kind)} />
+                  <AgentPanelMetric label="状态" value={nodeStateLabel(props.node.state)} />
+                  <AgentPanelMetric label="输入" value={`${props.node.inputPorts?.length ?? 0}`} />
+                  <AgentPanelMetric label="输出" value={`${props.node.outputPorts?.length ?? 0}`} />
+                  <AgentPanelMetric label="节拍" value={props.node.everyNTicks ? `${props.node.everyNTicks}` : "-"} />
+                  <AgentPanelMetric label="更新" value={panel().updatedAt} />
+                </div>
+              }
+            >
+              <div class="grid grid-cols-3 gap-2">
+                <AgentPanelMetric label="状态" value={nodeStateLabel(props.node.state)} />
+                <AgentPanelMetric label="任务状态" value={panel().taskStatus} />
+                <AgentPanelMetric label="队列" value={`${panel().queueSize}`} />
+                <AgentPanelMetric label="消息" value={`${panel().messagesSent}`} />
+                <AgentPanelMetric label="忙碌" value={`${panel().busyCount}`} />
+                <AgentPanelMetric label="更新" value={panel().updatedAt} />
+              </div>
+            </Show>
+            <NodeTypeDetails node={props.node} />
             <div data-testid="agent-info-status-card" class="mt-3 overflow-hidden rounded-md border border-[#f0d4cf] bg-[#fff7f5]">
               <button
                 type="button"
@@ -1440,44 +1461,98 @@ function AgentInfoSheet(props: {
             </Show>
           </div>
 
-          <div class="border-t border-[#f0e7e1] bg-white/70 p-3">
-            <div class="mb-2 rounded-md border border-[#f2dfb8] bg-[#fff8e7] px-2 py-1.5 text-11-regular text-[#8a6421]">
-              {props.canMessage ? "API 已就绪：消息将通过 Collaboration Server 发送。" : panel().disabledNotice}
-            </div>
-            <textarea
-              data-testid="agent-info-input"
-              aria-label={`发送给 ${props.node.label}`}
-              class="h-16 w-full resize-none rounded-md border border-[#eaded7] bg-[#fbf7f4] px-2 py-1.5 text-12-regular text-[#3c3430] outline-none placeholder:text-[#a69b95] disabled:cursor-not-allowed disabled:opacity-80"
-              disabled={!props.canMessage || sending()}
-              placeholder={panel().inputPlaceholder}
-              value={text()}
-              onInput={(event) => setText(event.currentTarget.value)}
-            />
-            <div class="mt-2 flex items-center gap-2">
-              <select
-                data-testid="agent-info-mode"
-                aria-label="Agent 消息模式"
-                class="h-8 rounded-md border border-[#eaded7] bg-white px-2 text-11-regular text-[#6f6560] disabled:cursor-not-allowed disabled:opacity-75"
+          <Show
+            when={isAgentLike()}
+            fallback={
+              <div class="border-t border-[#f0e7e1] bg-white/70 p-3">
+                <div class="rounded-md border border-[#f2dfb8] bg-[#fff8e7] px-2 py-1.5 text-11-regular text-[#8a6421]">
+                  {nodeKindLabel(props.node.kind)} 是桌面端蓝图结构节点，移动端只展示同步信息，不提供编辑或执行入口。
+                </div>
+              </div>
+            }
+          >
+            <div class="border-t border-[#f0e7e1] bg-white/70 p-3">
+              <div class="mb-2 rounded-md border border-[#f2dfb8] bg-[#fff8e7] px-2 py-1.5 text-11-regular text-[#8a6421]">
+                {props.canMessage ? "API 已就绪：消息将通过 Collaboration Server 发送。" : panel().disabledNotice}
+              </div>
+              <textarea
+                data-testid="agent-info-input"
+                aria-label={`发送给 ${props.node.label}`}
+                class="h-16 w-full resize-none rounded-md border border-[#eaded7] bg-[#fbf7f4] px-2 py-1.5 text-12-regular text-[#3c3430] outline-none placeholder:text-[#a69b95] disabled:cursor-not-allowed disabled:opacity-80"
                 disabled={!props.canMessage || sending()}
-                value={mode()}
-                onChange={(event) => setMode(event.currentTarget.value === "top" ? "top" : "default")}
-              >
-                <option value="default">默认</option>
-                <option value="top">置顶</option>
-              </select>
-              <button
-                type="button"
-                data-testid="agent-info-send"
-                class="ml-auto h-8 rounded-md border border-[#eaded7] bg-[#fbf7f4] px-3 text-11-medium text-[#81756e] disabled:cursor-not-allowed disabled:opacity-70"
-                disabled={!canSend()}
-                onClick={() => void send()}
-              >
-                发送
-              </button>
+                placeholder={panel().inputPlaceholder}
+                value={text()}
+                onInput={(event) => setText(event.currentTarget.value)}
+              />
+              <div class="mt-2 flex items-center gap-2">
+                <select
+                  data-testid="agent-info-mode"
+                  aria-label="Agent 消息模式"
+                  class="h-8 rounded-md border border-[#eaded7] bg-white px-2 text-11-regular text-[#6f6560] disabled:cursor-not-allowed disabled:opacity-75"
+                  disabled={!props.canMessage || sending()}
+                  value={mode()}
+                  onChange={(event) => setMode(event.currentTarget.value === "top" ? "top" : "default")}
+                >
+                  <option value="default">默认</option>
+                  <option value="top">置顶</option>
+                </select>
+                <button
+                  type="button"
+                  data-testid="agent-info-send"
+                  class="ml-auto h-8 rounded-md border border-[#eaded7] bg-[#fbf7f4] px-3 text-11-medium text-[#81756e] disabled:cursor-not-allowed disabled:opacity-70"
+                  disabled={!canSend()}
+                  onClick={() => void send()}
+                >
+                  发送
+                </button>
+              </div>
             </div>
-          </div>
+          </Show>
         </div>
       </section>
+    </div>
+  )
+}
+
+function NodeTypeDetails(props: { node: BlueprintNode }) {
+  const inputs = () => props.node.inputPorts ?? []
+  const outputs = () => props.node.outputPorts ?? []
+  return (
+    <div data-testid="node-type-details" class="mt-3 rounded-md border border-[#f0e7e1] bg-[#fffdfa] px-2.5 py-2">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-10-medium uppercase text-[#b5837d]">{nodeKindLabel(props.node.kind)}</div>
+          <div class="mt-1 text-12-regular leading-5 text-[#6f6560]">{props.node.summary || props.node.detail}</div>
+        </div>
+        <Show when={props.node.everyNTicks}>
+          {(every) => <span class="shrink-0 rounded-full border border-[#eaded7] bg-white px-2 py-1 text-10-medium text-[#81756e]">每 {every()} tick</span>}
+        </Show>
+      </div>
+      <Show when={inputs().length || outputs().length}>
+        <div class="mt-2 grid gap-1.5">
+          <PortList label="输入" ports={inputs()} />
+          <PortList label="输出" ports={outputs()} />
+        </div>
+      </Show>
+    </div>
+  )
+}
+
+function PortList(props: { label: string; ports: string[] }) {
+  return (
+    <div class="flex min-w-0 items-start gap-2">
+      <span class="shrink-0 text-10-medium text-[#9a8f88]">{props.label}</span>
+      <div class="flex min-w-0 flex-1 flex-wrap gap-1">
+        <Show when={props.ports.length} fallback={<span class="text-10-regular text-[#a69b95]">无</span>}>
+          <For each={props.ports}>
+            {(port) => (
+              <span class="max-w-full truncate rounded-full border border-[#eaded7] bg-white px-2 py-0.5 text-10-regular text-[#6f6560]">
+                {port}
+              </span>
+            )}
+          </For>
+        </Show>
+      </div>
     </div>
   )
 }
@@ -1713,6 +1788,9 @@ const blueprintNodeLayout: Record<string, BlueprintMapPoint> = {
   start: { x: 116, y: 122 },
   "top-agent": { x: 390, y: 122 },
   planner: { x: 664, y: 122 },
+  "tick-refresh": { x: 116, y: 260 },
+  "branch-review": { x: 390, y: 260 },
+  "script-format": { x: 664, y: 260 },
   coder: { x: 664, y: 398 },
   review: { x: 390, y: 398 },
   summary: { x: 116, y: 398 },
@@ -2177,6 +2255,7 @@ function BlueprintStructureMap(props: {
                     {nodeStateLabel(node.state)}
                   </span>
                 </div>
+                <div class="mt-1 truncate text-10-medium uppercase text-[#81756e]">{nodeKindLabel(node.kind)}</div>
                 <div class="mt-2 truncate text-14-semibold leading-5">{node.label}</div>
               </button>
             )

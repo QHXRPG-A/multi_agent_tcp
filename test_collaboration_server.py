@@ -597,18 +597,24 @@ def test_mobile_tick_returns_light_runtime_projection_when_both_clients_online(t
         {
             "id": "planner",
             "label": "Planner",
+            "kind": "worker_agent",
             "role": "codex",
             "state": "completed",
             "upstreamNodeIds": [],
             "downstreamNodeIds": ["coder"],
+            "inputPorts": [],
+            "outputPorts": [],
         },
         {
             "id": "coder",
             "label": "Coder",
+            "kind": "worker_agent",
             "role": "codex",
             "state": "running",
             "upstreamNodeIds": ["planner"],
             "downstreamNodeIds": [],
+            "inputPorts": [],
+            "outputPorts": [],
         },
     ]
     assert status["blueprint"]["edges"] == [{"source": "planner", "target": "coder", "kind": "exec"}]
@@ -706,6 +712,109 @@ def test_mobile_tick_projects_runtime_blueprint_structure_changes(tmp_path: Path
     }
 
 
+def test_mobile_tick_preserves_desktop_snapshot_graph_with_live_runtime_state(tmp_path: Path) -> None:
+    mobile = make_client(tmp_path)
+    desktop = TestClient(mobile.app)
+    login(mobile, client_kind="mobile")
+    desktop_csrf = login(desktop, client_kind="desktop")
+    headers = {"x-csrf-token": desktop_csrf}
+
+    posted = desktop.post(
+        "/api/desktop/blueprint-snapshot",
+        json={
+            "projectDir": "C:\\secret\\project",
+            "blueprintId": "default",
+            "title": "当前蓝图",
+            "nodes": [
+                {
+                    "id": "planner",
+                    "label": "Planner Snapshot",
+                    "kind": "worker_agent",
+                    "state": "idle",
+                    "x": 96,
+                    "y": 144,
+                    "downstreamNodeIds": ["script-format"],
+                    "agentId": "Planner Snapshot",
+                    "cliKind": "codex",
+                },
+                {
+                    "id": "script-format",
+                    "label": "Format Result",
+                    "kind": "script",
+                    "state": "idle",
+                    "x": 280,
+                    "y": 144,
+                    "upstreamNodeIds": ["planner"],
+                    "downstreamNodeIds": ["branch-route"],
+                    "inputPorts": ["payload: dict"],
+                    "outputPorts": ["summary: str"],
+                },
+                {
+                    "id": "branch-route",
+                    "label": "Branch",
+                    "kind": "branch",
+                    "state": "idle",
+                    "x": 464,
+                    "y": 144,
+                    "upstreamNodeIds": ["script-format"],
+                    "downstreamNodeIds": ["coder"],
+                    "inputPorts": ["condition: bool"],
+                    "outputPorts": ["true: message", "false: message"],
+                },
+                {
+                    "id": "coder",
+                    "label": "Coder Snapshot",
+                    "kind": "agent",
+                    "state": "idle",
+                    "x": 648,
+                    "y": 144,
+                    "upstreamNodeIds": ["branch-route"],
+                    "agentId": "Coder Snapshot",
+                    "cliKind": "codex",
+                },
+            ],
+            "edges": [
+                {"source": "planner", "target": "script-format", "kind": "data", "outputPort": "out", "inputPort": "payload"},
+                {
+                    "source": "script-format",
+                    "target": "branch-route",
+                    "kind": "data",
+                    "outputPort": "summary",
+                    "inputPort": "condition",
+                },
+                {"source": "branch-route", "target": "coder", "kind": "exec", "outputPort": "true", "inputPort": "in"},
+            ],
+        },
+        headers=headers,
+    )
+    assert posted.status_code == 200, posted.text
+
+    response = mobile.get("/api/mobile/tick")
+
+    assert response.status_code == 200, response.text
+    status = response.json()["status"]
+    assert [node["id"] for node in status["blueprint"]["nodes"]] == ["planner", "script-format", "branch-route", "coder"]
+    assert [node["kind"] for node in status["blueprint"]["nodes"]] == ["worker_agent", "script", "branch", "agent"]
+    states = {node["id"]: node["state"] for node in status["blueprint"]["nodes"]}
+    assert states["planner"] == "completed"
+    assert states["coder"] == "running"
+    assert states["script-format"] == "idle"
+    assert status["blueprint"]["edges"] == [
+        {"source": "planner", "target": "script-format", "kind": "data", "outputPort": "out", "inputPort": "payload"},
+        {
+            "source": "script-format",
+            "target": "branch-route",
+            "kind": "data",
+            "outputPort": "summary",
+            "inputPort": "condition",
+        },
+        {"source": "branch-route", "target": "coder", "kind": "exec", "outputPort": "true", "inputPort": "in"},
+    ]
+    agents = {agent["nodeId"]: agent for agent in status["agents"]}
+    assert agents["planner"]["messagesSent"] == 2
+    assert agents["coder"]["busyCount"] == 1
+
+
 def test_mobile_tick_uses_desktop_blueprint_snapshot_without_runtime_run(tmp_path: Path) -> None:
     mobile = make_client(tmp_path)
     desktop = TestClient(mobile.app)
@@ -733,9 +842,47 @@ def test_mobile_tick_uses_desktop_blueprint_snapshot_without_runtime_run(tmp_pat
                     "state": "idle",
                     "x": 120,
                     "y": 240,
-                    "downstreamNodeIds": ["agent-b"],
+                    "downstreamNodeIds": ["script-format"],
                     "agentId": "agent-a",
                     "cliKind": "codex",
+                },
+                {
+                    "id": "script-format",
+                    "label": "Format Result",
+                    "kind": "script",
+                    "role": "Script Function",
+                    "summary": "format_result(payload: dict) -> {summary: str}",
+                    "state": "idle",
+                    "x": 320,
+                    "y": 240,
+                    "upstreamNodeIds": ["agent-a"],
+                    "downstreamNodeIds": ["branch-route"],
+                    "inputPorts": ["payload: dict"],
+                    "outputPorts": ["summary: str"],
+                },
+                {
+                    "id": "branch-route",
+                    "label": "Branch",
+                    "kind": "branch",
+                    "summary": "condition: bool",
+                    "state": "idle",
+                    "x": 520,
+                    "y": 240,
+                    "upstreamNodeIds": ["script-format"],
+                    "downstreamNodeIds": ["agent-b"],
+                    "inputPorts": ["condition: bool"],
+                    "outputPorts": ["true: message", "false: message"],
+                },
+                {
+                    "id": "tick-refresh",
+                    "label": "Tick",
+                    "kind": "tick",
+                    "state": "idle",
+                    "x": 120,
+                    "y": 96,
+                    "downstreamNodeIds": ["agent-a"],
+                    "outputPorts": ["tick: tick"],
+                    "everyNTicks": 3,
                 },
                 {
                     "id": "agent-b",
@@ -744,12 +891,23 @@ def test_mobile_tick_uses_desktop_blueprint_snapshot_without_runtime_run(tmp_pat
                     "state": "idle",
                     "x": 120,
                     "y": 384,
-                    "upstreamNodeIds": ["agent-a"],
+                    "upstreamNodeIds": ["branch-route"],
                     "agentId": "agent-b",
                     "cliKind": "codex",
                 },
             ],
-            "edges": [{"source": "agent-a", "target": "agent-b", "kind": "exec"}],
+            "edges": [
+                {"source": "agent-a", "target": "script-format", "kind": "data", "outputPort": "out", "inputPort": "payload"},
+                {
+                    "source": "script-format",
+                    "target": "branch-route",
+                    "kind": "data",
+                    "outputPort": "summary",
+                    "inputPort": "condition",
+                },
+                {"source": "branch-route", "target": "agent-b", "kind": "exec", "outputPort": "true", "inputPort": "in"},
+                {"source": "tick-refresh", "target": "agent-a", "kind": "data", "outputPort": "tick", "inputPort": "in"},
+            ],
         },
         headers=headers,
     )
@@ -765,25 +923,84 @@ def test_mobile_tick_uses_desktop_blueprint_snapshot_without_runtime_run(tmp_pat
         {
             "id": "agent-a",
             "label": "测试节点 A",
+            "kind": "worker_agent",
             "role": "codex",
             "state": "idle",
             "x": 120.0,
             "y": 240.0,
             "upstreamNodeIds": [],
+            "downstreamNodeIds": ["script-format"],
+            "inputPorts": [],
+            "outputPorts": [],
+        },
+        {
+            "id": "script-format",
+            "label": "Format Result",
+            "kind": "script",
+            "role": "Script Function",
+            "state": "idle",
+            "upstreamNodeIds": ["agent-a"],
+            "downstreamNodeIds": ["branch-route"],
+            "inputPorts": ["payload: dict"],
+            "outputPorts": ["summary: str"],
+            "summary": "format_result(payload: dict) -> {summary: str}",
+            "x": 320.0,
+            "y": 240.0,
+        },
+        {
+            "id": "branch-route",
+            "label": "Branch",
+            "kind": "branch",
+            "role": "Branch",
+            "state": "idle",
+            "upstreamNodeIds": ["script-format"],
             "downstreamNodeIds": ["agent-b"],
+            "inputPorts": ["condition: bool"],
+            "outputPorts": ["true: message", "false: message"],
+            "summary": "condition: bool",
+            "x": 520.0,
+            "y": 240.0,
+        },
+        {
+            "id": "tick-refresh",
+            "label": "Tick",
+            "kind": "tick",
+            "role": "Tick",
+            "state": "idle",
+            "upstreamNodeIds": [],
+            "downstreamNodeIds": ["agent-a"],
+            "inputPorts": [],
+            "outputPorts": ["tick: tick"],
+            "x": 120.0,
+            "y": 96.0,
+            "everyNTicks": 3,
         },
         {
             "id": "agent-b",
             "label": "测试节点 B",
+            "kind": "worker_agent",
             "role": "codex",
             "state": "idle",
             "x": 120.0,
             "y": 384.0,
-            "upstreamNodeIds": ["agent-a"],
+            "upstreamNodeIds": ["branch-route"],
             "downstreamNodeIds": [],
+            "inputPorts": [],
+            "outputPorts": [],
         },
     ]
-    assert body["status"]["blueprint"]["edges"] == [{"source": "agent-a", "target": "agent-b", "kind": "exec"}]
+    assert body["status"]["blueprint"]["edges"] == [
+        {"source": "agent-a", "target": "script-format", "kind": "data", "outputPort": "out", "inputPort": "payload"},
+        {
+            "source": "script-format",
+            "target": "branch-route",
+            "kind": "data",
+            "outputPort": "summary",
+            "inputPort": "condition",
+        },
+        {"source": "branch-route", "target": "agent-b", "kind": "exec", "outputPort": "true", "inputPort": "in"},
+        {"source": "tick-refresh", "target": "agent-a", "kind": "data", "outputPort": "tick", "inputPort": "in"},
+    ]
     forbidden_keys = {"planningRequests", "diff", "events", "reports", "artifacts", "outputs", "lastCursor", "recentEvents"}
     assert not forbidden_keys.intersection(_json_keys(body))
 

@@ -25,6 +25,15 @@ export type BlueprintCatalogItem = {
   description?: string
 }
 
+export type BlueprintEditorCandidate = {
+  id: string
+  label: string
+  command?: string
+  args?: string[]
+  source: string
+  systemDefault?: boolean
+}
+
 export type BlueprintDocument = {
   schema_version: 1
   id: string
@@ -74,6 +83,8 @@ export type BlueprintWindowContext = {
 
 export type BlueprintWindowPlanningSubmitInput = {
   task: string
+  blueprintId?: string
+  blueprintName?: string
   startNodeIds: string[]
   message: string
   silentBlocked?: boolean
@@ -134,6 +145,14 @@ export type ElectronAPI = {
   blueprintList: (projectDir: string) => Promise<BlueprintSummary[]>
   blueprintOpen: (projectDir: string, blueprintId: string) => Promise<BlueprintDocument>
   blueprintSave: (projectDir: string, document: BlueprintDocument) => Promise<BlueprintDocument>
+  blueprintScriptNodes: (projectDir: string) => Promise<Record<string, unknown>>
+  blueprintCreateScriptNode: (projectDir: string, name: string, description?: string) => Promise<Record<string, unknown>>
+  blueprintListEditors: () => Promise<BlueprintEditorCandidate[]>
+  blueprintOpenScriptInEditor: (
+    projectDir: string,
+    modulePath: string,
+    editorId?: string,
+  ) => Promise<Record<string, unknown>>
   blueprintRelocateProjectWorkdir: (
     projectDir: string,
     blueprintId: string,

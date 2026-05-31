@@ -23,12 +23,17 @@ export type DesktopBlueprintSnapshotPayload = {
   nodes: Array<{
     id: string
     label: string
+    kind?: "agent" | "worker_agent" | "script" | "branch" | "tick"
     role?: string
     state?: "idle" | "queued" | "running" | "completed" | "failed" | "unknown"
+    summary?: string
     x?: number
     y?: number
     upstreamNodeIds?: string[]
     downstreamNodeIds?: string[]
+    inputPorts?: string[]
+    outputPorts?: string[]
+    everyNTicks?: number
     agentId?: string
     cliKind?: string
     taskStatus?: string
@@ -41,6 +46,8 @@ export type DesktopBlueprintSnapshotPayload = {
     source: string
     target: string
     kind?: "exec" | "data" | "unknown"
+    outputPort?: string
+    inputPort?: string
   }>
 }
 

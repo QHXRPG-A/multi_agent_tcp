@@ -288,6 +288,7 @@ def _blueprint_projection(status: dict[str, Any]) -> BlueprintStructureProjectio
             BlueprintStructureNode(
                 id=str(node_id),
                 label=str(info.get("agent_id") or node_id),
+                kind=_node_kind(info.get("node_type") or info.get("kind")),
                 role=str(info.get("cli_kind")) if info.get("cli_kind") else None,
                 state=_node_state(runtime.get("state")),
                 upstreamNodeIds=[str(item) for item in list(info.get("upstream_agents") or [])],
@@ -303,6 +304,8 @@ def _blueprint_projection(status: dict[str, Any]) -> BlueprintStructureProjectio
                 source=str(edge.get("from") or edge.get("source") or ""),
                 target=str(edge.get("to") or edge.get("target") or ""),
                 kind=_edge_kind(edge.get("edge_type") or edge.get("kind")),
+                outputPort=_optional_string(edge.get("output_port") or edge.get("outputPort")),
+                inputPort=_optional_string(edge.get("input_port") or edge.get("inputPort")),
             )
         )
     return BlueprintStructureProjection(nodes=nodes, edges=edges)
@@ -334,11 +337,23 @@ def _node_state(value: Any) -> str:
     return "unknown"
 
 
+def _node_kind(value: Any) -> str:
+    kind = str(value or "worker_agent").lower()
+    if kind in {"agent", "worker_agent", "script", "branch", "tick"}:
+        return kind
+    return "worker_agent"
+
+
 def _edge_kind(value: Any) -> str:
     kind = str(value or "unknown").lower()
     if kind in {"exec", "data"}:
         return kind
     return "unknown"
+
+
+def _optional_string(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _report_item(item: Any, index: int) -> ReportIndexItem:

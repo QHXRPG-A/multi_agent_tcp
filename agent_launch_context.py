@@ -8,6 +8,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence
 
@@ -20,6 +22,14 @@ from .workspace_rpc import WorkspaceRPCServer
 
 WORKSPACE_API_CONTEXT_ENV = "MULTI_AGENT_WORKSPACE_CONTEXT"
 CODEX_RUNTIME_STATE_FILES = ("config.toml", "auth.json", "models_cache.json")
+LOCAL_MCP_NO_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
+CODEX_DANGEROUS_BYPASS_ARG = "--dangerously-bypass-approvals-and-sandbox"
+PROXY_ENV_NAMES_BY_SCHEME = {
+    "http": ("HTTP_PROXY", "http_proxy"),
+    "https": ("HTTPS_PROXY", "https_proxy"),
+    "ftp": ("FTP_PROXY", "ftp_proxy"),
+    "all": ("ALL_PROXY", "all_proxy"),
+}
 
 
 def is_framework_top_agent_node(node: AgentNode) -> bool:
@@ -38,6 +48,56 @@ def workspace_api_base_command() -> str:
 def _write_text_no_bom(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _split_no_proxy_hosts(raw: str) -> list[str]:
+    return str(raw).replace(";", ",").split(",")
+
+
+def _merge_no_proxy_hosts(existing: Sequence[str] | str, hosts: Sequence[str]) -> str:
+    seen: set[str] = set()
+    merged: list[str] = []
+    values = [existing] if isinstance(existing, str) else list(existing)
+    parts: list[str] = []
+    for value in values:
+        parts.extend(_split_no_proxy_hosts(str(value)))
+    for item in [*parts, *hosts]:
+        value = str(item).strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(value)
+    return ",".join(merged)
+
+
+def _apply_local_mcp_proxy_env(extra_env: Dict[str, str]) -> None:
+    system_proxies = urllib.request.getproxies()
+    no_proxy = _merge_no_proxy_hosts(
+        [
+            extra_env.get("NO_PROXY", ""),
+            extra_env.get("no_proxy", ""),
+            os.environ.get("NO_PROXY", ""),
+            os.environ.get("no_proxy", ""),
+            system_proxies.get("no", ""),
+        ],
+        LOCAL_MCP_NO_PROXY_HOSTS,
+    )
+    extra_env["NO_PROXY"] = no_proxy
+    extra_env["no_proxy"] = no_proxy
+
+    for scheme, names in PROXY_ENV_NAMES_BY_SCHEME.items():
+        value = next((extra_env[name] for name in names if extra_env.get(name)), None)
+        if value is None:
+            value = next((os.environ[name] for name in names if os.environ.get(name)), None)
+        if value is None:
+            value = system_proxies.get(scheme)
+        if not value:
+            continue
+        for name in names:
+            extra_env.setdefault(name, str(value))
 
 
 def _default_user_codex_home() -> Path:
@@ -147,6 +207,7 @@ def framework_agent_rules() -> str:
             "- The only current batch you may read or dispatch for this message is `framework_context.message_envelope.outgoing_batch_id`.",
             "- Upstream/source batch ids mentioned in message text are provenance/audit labels; do not pass them to `agent_context(batch_id=...)`.",
             "- To inspect the current readable batch, call `agent_context({})` with no explicit batch_id.",
+            "- When `framework_context.message_envelope.required_script_calls` is non-empty, call `blueprint_script_call` for the listed function(s); the framework executes the ScriptNode and delivers outputs to connected downstream AgentNodes.",
             "- To provide information to another AgentNode, use `agent_dispatch` for the current batch.",
             "- Sending an empty string `\"\"` or numeric `0` through `agent_dispatch` means this target has no task and should not receive a downstream message.",
             "- When `framework_context.message_envelope.required_outgoing_targets` is empty, this is leaf work: do not call `agent_dispatch` or `join_contribute`; process the message and publish durable results through `workspace_publish` / `workspace_publish_file`.",
@@ -223,6 +284,8 @@ def framework_agent_skill() -> str:
             "",
             "For downstream messages, use the `agent_dispatch` MCP tool. The target must be listed in the current message's "
             "`framework_context.message_envelope.required_outgoing_targets`.",
+            "If `framework_context.message_envelope.required_script_calls` is non-empty, call `blueprint_script_call` for each listed Script Function Node instead of dispatching directly to its downstream AgentNode. "
+            "The framework executes the Python function and automatically delivers function name, description, arguments, and outputs to connected downstream AgentNodes.",
             "If a target has no work, dispatch `\"\"` or `0` for that target; the framework records it as no-op and does not queue a downstream task.",
             "If `required_outgoing_targets` is empty, there is no downstream dispatch to perform.",
             "",
@@ -744,6 +807,7 @@ def materialize_private_agent_context(
     extra_env[WORKSPACE_API_CONTEXT_ENV] = str(api_context_path)
     if mcp_context is not None:
         extra_env[str(mcp_context["bearer_token_env_var"])] = str(mcp_context["bearer_token"])
+        _apply_local_mcp_proxy_env(extra_env)
     package_parent = str(Path(__file__).resolve().parent.parent)
     existing_pythonpath = extra_env.get("PYTHONPATH") or os.environ.get("PYTHONPATH")
     extra_env["PYTHONPATH"] = (
@@ -751,5 +815,119 @@ def materialize_private_agent_context(
         if existing_pythonpath
         else package_parent
     )
+    data["extra_env"] = extra_env
+    return AgentNode.from_dict(data)
+
+
+def materialize_full_agent_context(
+    node: AgentNode,
+    *,
+    project_root: Optional[Path] = None,
+    run: Optional[RunWorkspace] = None,
+    mcp_context_provider: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+) -> AgentNode:
+    """Return a full CLI AgentNode with optional message-only MCP wiring.
+
+    Unlike private worker materialization, this does not create a checkout or
+    rewrite the agent into the framework workspace. The only files created are
+    runtime support files for Codex MCP configuration and diagnostics.
+    """
+
+    root = Path(project_root).expanduser() if project_root is not None else Path(node.cwd).expanduser()
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    root = root.resolve()
+    cwd = _resolve_agent_workdir(node.cwd, root)
+    support_root = (
+        Path(getattr(run, "path")) / "runtime_agent_context"
+        if run is not None and getattr(run, "path", None) is not None
+        else Path(tempfile.gettempdir()) / "multi_agent_tcp_full_agent_context"
+    )
+    support_dir = support_root / _safe_skill_dir_name(node.runtime_agent_id)
+    support_dir.mkdir(parents=True, exist_ok=True)
+
+    data = node.to_dict()
+    data["cwd"] = str(cwd)
+    data.pop("workspace_id", None)
+    data.pop("workspace_root", None)
+    data["read_scope"] = []
+    data["write_scope"] = []
+    data["artifact_scope"] = []
+
+    adapter_options = dict(data.get("adapter_options", {}))
+    access_policy = dict(getattr(node, "access_policy", {}) or {})
+    mcp_context: Optional[Dict[str, Any]] = None
+    codex_home = support_dir / "codex_home"
+    if node.cli_kind == "codex":
+        initialize_private_codex_home(codex_home)
+        adapter_options.setdefault("codex_home", str(codex_home))
+        adapter_options.setdefault("diagnostics_dir", str(support_dir / "logs" / "codex"))
+        adapter_options.setdefault("skip_git_repo_check", True)
+        if bool(access_policy.get("disable_sandbox", True)):
+            adapter_options["sandbox"] = "danger-full-access"
+            adapter_options["dangerous_access"] = True
+            extra_args = adapter_options.get("extra_args", [])
+            if not isinstance(extra_args, list) or not all(isinstance(x, str) for x in extra_args):
+                raise ValueError("Codex AgentNode adapter_options.extra_args must be a list of strings")
+            if CODEX_DANGEROUS_BYPASS_ARG not in extra_args:
+                extra_args = [*extra_args, CODEX_DANGEROUS_BYPASS_ARG]
+            adapter_options["extra_args"] = [str(item) for item in extra_args]
+        else:
+            adapter_options["dangerous_access"] = False
+            adapter_options["sandbox"] = (
+                "workspace-write"
+                if bool(access_policy.get("direct_project_io", True))
+                else "read-only"
+            )
+            extra_args = adapter_options.get("extra_args", [])
+            if isinstance(extra_args, list):
+                adapter_options["extra_args"] = [
+                    str(item)
+                    for item in extra_args
+                    if str(item) != CODEX_DANGEROUS_BYPASS_ARG
+                ]
+
+        if bool(access_policy.get("framework_message_tools", True)) and mcp_context_provider is not None:
+            candidate = mcp_context_provider(
+                node=node,
+                private_dir=support_dir,
+                checkout_dir=cwd,
+                codex_home=codex_home,
+            )
+            if candidate:
+                mcp_context = dict(candidate)
+                write_private_codex_mcp_config(
+                    codex_home,
+                    server_name=str(mcp_context["server_name"]),
+                    url=str(mcp_context["url"]),
+                    bearer_token_env_var=str(mcp_context["bearer_token_env_var"]),
+                    tools=[str(item) for item in mcp_context.get("tools", [])],
+                )
+
+    execution_context = dict(adapter_options.get("execution_context", {}))
+    execution_context["agent_access"] = {
+        "node_type": "agent",
+        "project_workdir": str(cwd),
+        "direct_project_io": bool(access_policy.get("direct_project_io", True)),
+        "outside_project_io": bool(access_policy.get("outside_project_io", True)),
+        "unrestricted_commands": bool(access_policy.get("unrestricted_commands", True)),
+        "disable_sandbox": bool(access_policy.get("disable_sandbox", True)),
+        "workspace_tools": False,
+    }
+    if mcp_context is not None:
+        execution_context["mcp"] = {
+            "enabled": True,
+            "server_kind": str(mcp_context.get("server_kind", "")),
+            "server_name": str(mcp_context.get("server_name", "")),
+            "tools": [str(item) for item in mcp_context.get("tools", [])],
+        }
+    adapter_options["execution_context"] = execution_context
+    adapter_options["prompt_execution_context"] = _build_prompt_execution_context(execution_context)
+    data["adapter_options"] = adapter_options
+
+    extra_env = {str(k): str(v) for k, v in dict(data.get("extra_env", {})).items()}
+    if mcp_context is not None:
+        extra_env[str(mcp_context["bearer_token_env_var"])] = str(mcp_context["bearer_token"])
+        _apply_local_mcp_proxy_env(extra_env)
     data["extra_env"] = extra_env
     return AgentNode.from_dict(data)
