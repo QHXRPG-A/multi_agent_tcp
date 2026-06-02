@@ -460,6 +460,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
 
   const shellModeKey = "mod+shift+x"
   const normalModeKey = "mod+shift+e"
+  const blueprintPlanningModeEnabled = createMemo(() => !!platform.ensureBlueprintPlanningContext)
 
   command.register("prompt-input", () => [
     {
@@ -493,7 +494,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
       disabled: store.mode === "blueprintPlanning",
       onSelect: () => setMode("blueprintPlanning"),
     },
-  ])
+  ].filter((item) => item.id !== "prompt.mode.blueprintPlanning" || blueprintPlanningModeEnabled()))
 
   const closePopover = () => setStore("popover", null)
 
@@ -582,10 +583,15 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
   )
   const BLUEPRINT_PLANNING_AGENT_OPTION = "__blueprint_planning__"
   const agentNames = createMemo(() => local.agent.list().map((agent) => agent.name))
-  const agentSelectOptions = createMemo(() => [...agentNames(), BLUEPRINT_PLANNING_AGENT_OPTION])
+  const agentSelectOptions = createMemo(() =>
+    blueprintPlanningModeEnabled() ? [...agentNames(), BLUEPRINT_PLANNING_AGENT_OPTION] : agentNames(),
+  )
   const currentAgentOption = createMemo(() =>
     store.mode === "blueprintPlanning" ? BLUEPRINT_PLANNING_AGENT_OPTION : (local.agent.current()?.name ?? ""),
   )
+  createEffect(() => {
+    if (store.mode === "blueprintPlanning" && !blueprintPlanningModeEnabled()) setMode("normal")
+  })
   createEffect(() => {
     const current = currentAgentOption()
     if (!current) return
@@ -659,7 +665,8 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
         type: "builtin" as const,
       }))
 
-    const custom = sync.data.command.map((cmd) => ({
+    const customCommands = Array.isArray(sync.data.command) ? sync.data.command : []
+    const custom = customCommands.map((cmd) => ({
       id: `custom.${cmd.name}`,
       trigger: cmd.name,
       title: cmd.name,
@@ -1138,7 +1145,8 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
       request.onBlocked?.()
       return
     }
-    setMode(request.mode ?? "blueprintPlanning")
+    const requestedMode = request.mode ?? (blueprintPlanningModeEnabled() ? "blueprintPlanning" : "normal")
+    setMode(requestedMode === "blueprintPlanning" && !blueprintPlanningModeEnabled() ? "normal" : requestedMode)
     setEditorText(text)
     prompt.set([{ type: "text", content: text, start: 0, end: text.length }], text.length)
     requestAnimationFrame(() => {

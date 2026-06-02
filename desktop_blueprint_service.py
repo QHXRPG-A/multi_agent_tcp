@@ -12,10 +12,12 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import re
 import secrets
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -33,6 +35,7 @@ from .blueprint_mcp_runtime import RunMCPRuntimeHandle, TOP_AGENT_PLANNING_CONTR
 from .blueprint_script_nodes import (
     create_script_node,
     discover_script_nodes,
+    ensure_script_nodes_dir,
     script_nodes_dir,
     validate_script_node_references,
 )
@@ -82,6 +85,346 @@ class BlueprintServiceError(ValueError):
         self.code = code
         self.status = status
         self.details = dict(details or {})
+
+
+def system_default_blueprint_editor() -> Dict[str, Any]:
+    return {
+        "id": "system",
+        "label": "System default",
+        "source": "system",
+        "systemDefault": True,
+    }
+
+
+def list_blueprint_editors() -> list[Dict[str, Any]]:
+    candidates: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(candidate: Optional[Dict[str, Any]]) -> None:
+        if not candidate:
+            return
+        key = (
+            str(candidate.get("id", ""))
+            if candidate.get("systemDefault")
+            else "\0".join([str(candidate.get("command", "")), *[str(arg) for arg in candidate.get("args", [])]])
+            .casefold()
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(candidate)
+
+    add(_blueprint_editor_from_env("VISUAL"))
+    add(_blueprint_editor_from_env("EDITOR"))
+    add(_blueprint_editor_from_known_command("vscode", "VS Code", _vscode_command_candidates()))
+    add(_blueprint_editor_from_known_command("cursor", "Cursor", ["cursor"]))
+    add(_blueprint_editor_from_known_command("windsurf", "Windsurf", ["windsurf"]))
+    add(_blueprint_editor_from_known_command("zed", "Zed", ["zed"]))
+    add(_blueprint_editor_from_known_command("pycharm", "PyCharm", ["pycharm64", "pycharm"]))
+    add(system_default_blueprint_editor())
+
+    return candidates
+
+
+def resolve_blueprint_editor(editor_id: Optional[str]) -> Dict[str, Any]:
+    selected = str(editor_id or "").strip()
+    for editor in list_blueprint_editors():
+        if editor.get("id") == selected:
+            return editor
+    return system_default_blueprint_editor()
+
+
+def open_blueprint_script_in_editor(
+    project_dir: Path,
+    module_path: str,
+    editor_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    script_root = _blueprint_script_root_for_module(project_dir, module_path)
+    editor = resolve_blueprint_editor(editor_id)
+    if editor.get("systemDefault") or not editor.get("command"):
+        _open_path_with_system_default(script_root)
+        return {"ok": True, "path": str(script_root), "editorId": "system"}
+    _launch_blueprint_editor(editor, script_root)
+    return {"ok": True, "path": str(script_root), "editorId": str(editor.get("id") or "")}
+
+
+def _blueprint_editor_from_env(env_name: str) -> Optional[Dict[str, Any]]:
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return None
+    parts = _split_editor_command(raw)
+    command = parts[0] if parts else ""
+    if not command:
+        return None
+    resolved = _resolve_editor_program(command)
+    if not resolved:
+        return None
+    return {
+        "id": f"env:{env_name.lower()}",
+        "label": f"{env_name}: {Path(command).name}",
+        "command": resolved,
+        "args": parts[1:],
+        "source": env_name,
+    }
+
+
+def _blueprint_editor_from_known_command(
+    editor_id: str,
+    label: str,
+    commands: Sequence[str],
+) -> Optional[Dict[str, Any]]:
+    for command in commands:
+        resolved = _resolve_editor_program(command)
+        if resolved and _resolved_editor_matches(editor_id, resolved):
+            return {
+                "id": editor_id,
+                "label": label,
+                "command": resolved,
+                "args": [],
+                "source": f"PATH {command}",
+            }
+    return None
+
+
+def _vscode_command_candidates() -> list[str]:
+    candidates = ["code"]
+    if sys.platform == "win32":
+        for root_name in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+            root = os.environ.get(root_name)
+            if root:
+                candidates.append(str(Path(root) / "Microsoft VS Code" / "bin" / "code.cmd"))
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            candidates.append(str(Path(local_app_data) / "Programs" / "Microsoft VS Code" / "bin" / "code.cmd"))
+            candidates.append(str(Path(local_app_data) / "Programs" / "Microsoft VS Code Insiders" / "bin" / "code-insiders.cmd"))
+    return candidates
+
+
+def _resolved_editor_matches(editor_id: str, command: str) -> bool:
+    resolved = str(command or "").replace("\\", "/").lower()
+    if editor_id == "vscode":
+        parts = [part for part in resolved.split("/") if part]
+        for index, part in enumerate(parts):
+            if part == "cursor" and parts[index + 1 : index + 4] == ["resources", "app", "codebin"]:
+                return False
+            if part == "cursor" and parts[index + 1 : index + 4] == ["resources", "app", "bin"]:
+                return False
+        return True
+    return True
+
+
+def _split_editor_command(raw: str) -> list[str]:
+    matches = re.finditer(r'"([^"]*)"|\'([^\']*)\'|(\S+)', raw)
+    return [part for match in matches for part in [match.group(1) or match.group(2) or match.group(3) or ""] if part]
+
+
+def _resolve_editor_program(program: str) -> Optional[str]:
+    if "\\" in program or "/" in program:
+        path = Path(program).expanduser()
+        return str(path) if path.exists() else None
+    return shutil.which(program)
+
+
+def _blueprint_script_root_for_module(project_dir: Path, module_path: str) -> Path:
+    script_root = ensure_script_nodes_dir(project_dir).resolve()
+    normalized = str(module_path or "").replace("\\", "/").strip()
+    parts = [part for part in normalized.split("/") if part]
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or WINDOWS_ABSOLUTE_PATH_RE.match(normalized)
+        or any(part == ".." for part in parts)
+    ):
+        raise BlueprintServiceError("BAD_REQUEST", "modulePath must stay inside the script directory")
+    if not normalized.endswith(".py"):
+        raise BlueprintServiceError("BAD_REQUEST", "modulePath must point to a .py file")
+
+    target = script_root.joinpath(*parts).resolve()
+    try:
+        target.relative_to(script_root)
+    except ValueError as exc:
+        raise BlueprintServiceError("BAD_REQUEST", "modulePath escapes the script directory") from exc
+    return script_root
+
+
+def _open_path_with_system_default(path: Path) -> None:
+    if sys.platform == "win32":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+        return
+    command = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen(
+        [command, str(path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+
+def _launch_blueprint_editor(editor: Dict[str, Any], script_root: Path) -> None:
+    command = str(editor.get("command") or "").strip()
+    if not command:
+        raise BlueprintServiceError("BAD_REQUEST", "editor command is missing")
+    args = [
+        *[
+            str(arg)
+            for arg in editor.get("args", [])
+            if str(arg) not in {"--wait", "-w", "--reuse-window", "-r"}
+        ],
+        *_editor_window_args(editor),
+        str(script_root),
+    ]
+    launch = [command, *args]
+    if sys.platform == "win32" and Path(command).suffix.lower() in {".bat", ".cmd"}:
+        launch = [os.environ.get("ComSpec") or "cmd.exe", "/c", command, *args]
+    popen_kwargs: Dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0)
+    subprocess.Popen(launch, **popen_kwargs)
+
+
+def _editor_window_args(editor: Dict[str, Any]) -> list[str]:
+    editor_id = str(editor.get("id") or "").lower()
+    command_name = Path(str(editor.get("command") or "")).name.lower()
+    if (
+        editor_id in {"vscode", "cursor", "windsurf"}
+        or command_name in {"code", "code.exe", "code.cmd", "cursor", "cursor.exe", "cursor.cmd", "windsurf", "windsurf.exe", "windsurf.cmd"}
+    ):
+        return ["--new-window"]
+    return []
+
+
+@dataclass(frozen=True)
+class BlueprintPythonCandidate:
+    command: str
+    args: Sequence[str]
+    source: str
+
+
+def detect_blueprint_python(
+    *,
+    project_dir: Optional[Path] = None,
+    python_command: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    package_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    try:
+        python = _resolve_blueprint_python(
+            project_dir=project_dir,
+            python_command=python_command,
+            env=env or os.environ,
+            package_root=package_root or Path(__file__).resolve().parent,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "pythonCommand": python["executable"], "source": python["source"]}
+
+
+def _resolve_blueprint_python(
+    *,
+    project_dir: Optional[Path],
+    python_command: Optional[str],
+    env: Dict[str, str],
+    package_root: Path,
+) -> Dict[str, str]:
+    configured = (python_command or "").strip()
+    if configured:
+        candidate = _blueprint_python_candidate_from_command(configured, "blueprint common config python_path")
+        executable = _blueprint_python_executable(candidate)
+        if executable:
+            return {"executable": executable, "source": candidate.source}
+
+    env_python = (env.get("GULICODE_PYTHON") or "").strip()
+    if env_python:
+        candidate = _blueprint_python_candidate_from_command(env_python, "GULICODE_PYTHON")
+        executable = _blueprint_python_executable(candidate)
+        if executable:
+            return {"executable": executable, "source": candidate.source}
+
+    candidates = [
+        BlueprintPythonCandidate("python", (), "PATH python"),
+        BlueprintPythonCandidate("python3", (), "PATH python3"),
+    ]
+    if sys.platform == "win32":
+        candidates.append(BlueprintPythonCandidate("py", ("-3",), "Windows py -3"))
+    candidates.extend(_blueprint_venv_python_candidates(project_dir))
+    candidates.extend(_blueprint_venv_python_candidates(package_root))
+
+    for candidate in candidates:
+        executable = _blueprint_python_executable(candidate)
+        if executable:
+            return {"executable": executable, "source": candidate.source}
+
+    raise RuntimeError(
+        "Python interpreter is required for blueprint runtime. Set the Blueprint config Python path or GULICODE_PYTHON."
+    )
+
+
+def _blueprint_python_candidate_from_command(value: str, source: str) -> BlueprintPythonCandidate:
+    command, args = _parse_blueprint_python_command(value)
+    return BlueprintPythonCandidate(command, tuple(args), source)
+
+
+def _parse_blueprint_python_command(value: str) -> tuple[str, list[str]]:
+    trimmed = value.strip()
+    if trimmed.startswith('"'):
+        end = trimmed.find('"', 1)
+        if end > 1:
+            command = trimmed[1:end]
+            rest = trimmed[end + 1 :].strip()
+            return command, _split_editor_command(rest) if rest else []
+    if trimmed.startswith("'"):
+        end = trimmed.find("'", 1)
+        if end > 1:
+            command = trimmed[1:end]
+            rest = trimmed[end + 1 :].strip()
+            return command, _split_editor_command(rest) if rest else []
+    if Path(trimmed).expanduser().exists() or "\\" in trimmed or "/" in trimmed:
+        return trimmed, []
+    parts = _split_editor_command(trimmed)
+    return (parts[0], parts[1:]) if parts else (trimmed, [])
+
+
+def _blueprint_venv_python_candidates(root: Optional[Path]) -> list[BlueprintPythonCandidate]:
+    if root is None:
+        return []
+    command = root / ".venv" / "Scripts" / "python.exe" if sys.platform == "win32" else root / ".venv" / "bin" / "python"
+    return [BlueprintPythonCandidate(str(command), (), f".venv Python at {command}")]
+
+
+def _blueprint_python_executable(candidate: BlueprintPythonCandidate) -> Optional[str]:
+    command = candidate.command.strip()
+    if not command:
+        return None
+    if ("\\" in command or "/" in command) and not Path(command).expanduser().exists():
+        return None
+    try:
+        result = subprocess.run(
+            [command, *candidate.args, "-c", "import sys; print(sys.executable)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=3,
+            check=False,
+            shell=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    executable = (result.stdout or "").strip().splitlines()[0].strip() if (result.stdout or "").strip() else ""
+    if not executable:
+        return None
+    if not (Path(executable).is_absolute() or WINDOWS_ABSOLUTE_PATH_RE.match(executable)):
+        return None
+    return executable
 
 
 class DesktopAsyncLoop:
@@ -354,6 +697,21 @@ class DesktopBlueprintService:
                     str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
                 ),
             }
+        if command == "blueprint.create":
+            project_dir = request_project_dir(args)
+            blueprint_id = args.get("blueprintId")
+            name = args.get("name")
+            return self.create_blueprint(
+                project_dir,
+                blueprint_id=str(blueprint_id).strip() if blueprint_id is not None else None,
+                name=str(name).strip() if name is not None else None,
+            )
+        if command == "blueprint.delete":
+            project_dir = request_project_dir(args)
+            return self.delete_blueprint(
+                project_dir,
+                str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
+            )
         if command == "blueprint.save":
             project_dir = request_project_dir(args)
             document = args.get("document")
@@ -361,6 +719,13 @@ class DesktopBlueprintService:
                 raise BlueprintServiceError("BAD_REQUEST", "document must be a JSON object")
             saved = self.save_blueprint(project_dir, document)
             return {"ok": True, "document": saved}
+        if command == "blueprint.detectPython":
+            raw_project_dir = args.get("projectDir")
+            project_dir = request_project_dir(args) if isinstance(raw_project_dir, str) and raw_project_dir.strip() else None
+            python_command = args.get("pythonCommand")
+            if python_command is not None and not isinstance(python_command, str):
+                raise BlueprintServiceError("BAD_REQUEST", "pythonCommand must be a string")
+            return detect_blueprint_python(project_dir=project_dir, python_command=python_command)
         if command == "blueprint.scriptNodes":
             project_dir = request_project_dir(args)
             return {"ok": True, **discover_script_nodes(project_dir)}
@@ -373,6 +738,17 @@ class DesktopBlueprintService:
             if description is not None and not isinstance(description, str):
                 raise BlueprintServiceError("BAD_REQUEST", "description must be a string")
             return {"ok": True, **create_script_node(project_dir, name, description or "")}
+        if command == "blueprint.listEditors":
+            return {"ok": True, "editors": list_blueprint_editors()}
+        if command == "blueprint.openScriptInEditor":
+            project_dir = request_project_dir(args)
+            module_path = args.get("modulePath")
+            if not isinstance(module_path, str) or not module_path.strip():
+                raise BlueprintServiceError("BAD_REQUEST", "modulePath must be a non-empty string")
+            editor_id = args.get("editorId")
+            if editor_id is not None and not isinstance(editor_id, str):
+                raise BlueprintServiceError("BAD_REQUEST", "editorId must be a string")
+            return open_blueprint_script_in_editor(project_dir, module_path, editor_id)
         if command == "blueprint.relocateProjectWorkdir":
             project_dir = request_project_dir(args)
             document = args.get("document")
@@ -400,6 +776,22 @@ class DesktopBlueprintService:
                     str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
                 )
             return self.validate_blueprint(document, project_dir=project_dir)
+        if command == "blueprint.plan.create":
+            project_dir = request_project_dir(args)
+            return self.create_blueprint_start_plan(
+                project_dir,
+                str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
+                task=args.get("task"),
+                start_node_ids=args.get("startNodeIds"),
+                plan_overrides=args.get("planOverrides"),
+            )
+        if command == "blueprint.plan.validate":
+            project_dir = request_project_dir(args)
+            return self.validate_blueprint_start_plan(
+                project_dir,
+                str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
+                args.get("plan"),
+            )
         if command == "blueprint.listRuns":
             project_dir = args.get("projectDir")
             blueprint_id = args.get("blueprintId")
@@ -554,6 +946,157 @@ class DesktopBlueprintService:
         tmp_path.replace(path)
         return normalized
 
+    def create_blueprint(
+        self,
+        project_dir: Path,
+        *,
+        blueprint_id: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        document_name = str(name or "").strip() or DEFAULT_BLUEPRINT_NAME
+        normalized_id = (
+            validate_blueprint_id(blueprint_id)
+            if blueprint_id
+            else self._unique_blueprint_id(project_dir, _slug_blueprint_id(document_name))
+        )
+        path = blueprint_path(project_dir, normalized_id)
+        if path.exists():
+            raise BlueprintServiceError(
+                "BLUEPRINT_EXISTS",
+                f"blueprint {normalized_id!r} already exists",
+                status=409,
+            )
+        document = default_blueprint_document(validate_project_dir(project_dir), normalized_id, document_name)
+        saved = self.save_blueprint(project_dir, document)
+        return {"ok": True, "document": saved, "created": True}
+
+    def delete_blueprint(self, project_dir: Path, blueprint_id: str) -> Dict[str, Any]:
+        resolved_project = validate_project_dir(project_dir)
+        normalized_id = validate_blueprint_id(blueprint_id)
+        path = blueprint_path(resolved_project, normalized_id)
+        if not path.is_file():
+            raise BlueprintServiceError(
+                "NOT_FOUND",
+                f"blueprint {normalized_id!r} was not found",
+                status=404,
+            )
+        if self._blueprint_has_active_run(resolved_project, normalized_id):
+            raise BlueprintServiceError(
+                "BLUEPRINT_IN_USE",
+                f"blueprint {normalized_id!r} has a live run and cannot be deleted",
+                status=409,
+            )
+        trash_dir = blueprint_dir(resolved_project) / ".trash"
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        target = trash_dir / f"{normalized_id}.{timestamp}.json"
+        if target.exists():
+            target = trash_dir / f"{normalized_id}.{timestamp}.{uuid.uuid4().hex[:8]}.json"
+        path.replace(target)
+        return {
+            "ok": True,
+            "deleted": True,
+            "blueprintId": normalized_id,
+            "trashPath": str(target),
+        }
+
+    def create_blueprint_start_plan(
+        self,
+        project_dir: Path,
+        blueprint_id: str,
+        *,
+        task: Any,
+        start_node_ids: Any = None,
+        plan_overrides: Any = None,
+    ) -> Dict[str, Any]:
+        task_text = str(task or "").strip()
+        if not task_text:
+            raise BlueprintServiceError("BAD_REQUEST", "task must be a non-empty string")
+        graph = self._blueprint_graph_for_plan(project_dir, blueprint_id)
+        start_nodes = coerce_string_list(start_node_ids, "startNodeIds")
+        if not start_nodes and not graph.has_tick_source():
+            raise BlueprintServiceError(
+                "START_NODES_REQUIRED",
+                "startNodeIds must include at least one valid AgentNode unless the blueprint has a Tick source",
+                details=start_plan_validation_context(graph),
+            )
+        plan_data = default_start_plan_for_graph(graph, task_text, start_nodes)
+        if plan_overrides is not None:
+            plan_data = apply_start_plan_overrides(plan_data, plan_overrides)
+        result = self._validate_blueprint_start_plan_data(graph, plan_data)
+        return {
+            "ok": True,
+            "plan": result["plan"],
+            "validation": result["validation"],
+        }
+
+    def validate_blueprint_start_plan(
+        self,
+        project_dir: Path,
+        blueprint_id: str,
+        plan_data: Any,
+    ) -> Dict[str, Any]:
+        graph = self._blueprint_graph_for_plan(project_dir, blueprint_id)
+        result = self._validate_blueprint_start_plan_data(graph, plan_data)
+        return {
+            "ok": True,
+            "plan": result["plan"],
+            "validation": result["validation"],
+        }
+
+    def _blueprint_graph_for_plan(self, project_dir: Path, blueprint_id: str) -> Any:
+        document = self.open_blueprint(project_dir, blueprint_id)
+        document = document_with_common_config_paths(document)
+        try:
+            graph = graph_definition_from_dict(dict(document["graph"]))
+            validate_desktop_blueprint_graph(graph, project_dir=validate_project_dir(project_dir))
+        except Exception as exc:
+            raise BlueprintServiceError(
+                "INVALID_BLUEPRINT_GRAPH",
+                str(exc),
+                details={"blueprintId": str(document["id"])},
+            ) from exc
+        return graph
+
+    def _validate_blueprint_start_plan_data(self, graph: Any, plan_data: Any) -> Dict[str, Any]:
+        if not isinstance(plan_data, dict):
+            raise BlueprintServiceError("BAD_START_PLAN", "plan must be a complete start plan JSON object")
+        try:
+            plan = TopAgentStartPlan.from_dict(plan_data)
+        except Exception as exc:
+            raise BlueprintServiceError("BAD_START_PLAN", str(exc)) from exc
+        validation = GuLiCodeTopAgentProfile().validate_start_plan(graph, plan).to_dict()
+        validation.update(start_plan_validation_context(graph))
+        return {"plan": plan.to_dict(), "validation": validation}
+
+    def _unique_blueprint_id(self, project_dir: Path, seed: str) -> str:
+        base = validate_blueprint_id(seed or DEFAULT_BLUEPRINT_ID)
+        candidate = base
+        index = 2
+        while blueprint_path(project_dir, candidate).exists():
+            candidate = f"{base}-{index}"
+            index += 1
+        return candidate
+
+    def _blueprint_has_active_run(self, project_dir: Path, blueprint_id: str) -> bool:
+        return self._active_run_for_blueprint(project_dir, blueprint_id) is not None
+
+    def _active_run_for_blueprint(self, project_dir: Path, blueprint_id: str) -> Optional[DesktopBlueprintRun]:
+        with self._lock:
+            runs = [
+                run
+                for run in self._runs.values()
+                if run.project_dir == project_dir and run.blueprint_id == blueprint_id
+            ]
+        for run in runs:
+            try:
+                status = self._runtime_call(run, lambda: run.runtime.status_snapshot()["run"])
+            except Exception:
+                return run
+            if str(status.get("status") or "").strip() not in TERMINAL_RUN_STATUSES:
+                return run
+        return None
+
     def relocate_project_workdir(
         self,
         project_dir: Path,
@@ -683,7 +1226,7 @@ class DesktopBlueprintService:
         if not isinstance(plan_data, dict):
             raise BlueprintServiceError(
                 "BAD_START_PLAN",
-                "plan must be a complete TopAgentStartPlan JSON object",
+                "plan must be a complete start plan JSON object",
             )
         try:
             plan = TopAgentStartPlan.from_dict(plan_data)
@@ -693,6 +1236,39 @@ class DesktopBlueprintService:
                 str(exc),
                 details={"blueprintId": str(document["id"])},
             ) from exc
+        preflight_validation = GuLiCodeTopAgentProfile().validate_start_plan(graph, plan).to_dict()
+        preflight_validation.update(start_plan_validation_context(graph))
+        if not preflight_validation.get("ok"):
+            raise BlueprintServiceError(
+                "START_PLAN_INVALID",
+                "start plan failed validation",
+                details={
+                    "validation": preflight_validation,
+                    "blueprintId": str(document["id"]),
+                },
+            )
+
+        active_run = self._active_run_for_blueprint(validate_project_dir(project_dir), str(document["id"]))
+        if active_run is not None:
+            with self._lock:
+                active_run.updated_at = float(self.now())
+            status = self._runtime_call(active_run, lambda: active_run.runtime.status_snapshot(graph=active_run.graph))
+            run_summary = active_run.summary()
+            run_status = status.get("run") if isinstance(status, dict) else None
+            if isinstance(run_status, dict):
+                run_summary["status"] = run_status.get("status")
+                run_summary["finalStatus"] = run_status.get("final_status")
+                run_summary["endedAt"] = run_status.get("ended_at")
+            return {
+                "ok": True,
+                "alreadyActive": True,
+                "runId": active_run.run_id,
+                "run": run_summary,
+                "validation": preflight_validation,
+                "queuedMessages": [],
+                "startManifest": {},
+                "status": status,
+            }
 
         with self._lock:
             run_id = self._generate_run_id_locked()
@@ -2833,6 +3409,150 @@ def normalize_document(data: Dict[str, Any], *, fallback_id: Optional[str] = Non
         "graph": graph,
         "ui": ui,
     }
+
+
+def default_blueprint_document(project_dir: Path, blueprint_id: str, name: str) -> Dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "id": validate_blueprint_id(blueprint_id),
+        "name": str(name or DEFAULT_BLUEPRINT_NAME),
+        "graph": {
+            "terminal_nodes": {},
+            "route_nodes": {},
+            "script_nodes": {},
+            "common_nodes": {},
+            "agent_nodes": {
+                "planner": {
+                    "node_id": "planner",
+                    "node_type": "worker_agent",
+                    "agent_id": "agent-planner",
+                    "prompt": "Break down the user goal and dispatch implementation work.",
+                    "write_scope": ["shared/reports/planning/**"],
+                },
+                "coder": {
+                    "node_id": "coder",
+                    "node_type": "worker_agent",
+                    "agent_id": "agent-coder",
+                    "prompt": "Implement the requested changes.",
+                    "write_scope": ["src/**"],
+                    "artifact_scope": ["shared/artifacts/code/**"],
+                },
+                "review": {
+                    "node_id": "review",
+                    "node_type": "worker_agent",
+                    "agent_id": "agent-review",
+                    "prompt": "Review implementation output and identify required fixes.",
+                    "write_scope": ["shared/reports/review/**"],
+                },
+                "summary": {
+                    "node_id": "summary",
+                    "node_type": "worker_agent",
+                    "agent_id": "agent-summary",
+                    "prompt": "Summarize the run and prepare final records.",
+                    "write_scope": ["shared/reports/**"],
+                },
+            },
+            "edges": [
+                {"from": "planner", "to": "coder", "edge_type": "exec"},
+                {"from": "coder", "to": "review", "edge_type": "exec"},
+                {"from": "review", "to": "summary", "edge_type": "exec"},
+            ],
+        },
+        "ui": {
+            "config": {
+                "python_path": sys.executable,
+                "project_workdir": str(project_dir),
+                "skill_dir": "",
+                "rule_dir": "",
+            },
+            "nodes": {
+                "planner": {"x": 0, "y": 96},
+                "coder": {"x": 240, "y": 96},
+                "review": {"x": 480, "y": 96},
+                "summary": {"x": 720, "y": 96},
+            },
+            "viewport": {"x": 0, "y": 0, "zoom": 1},
+        },
+    }
+
+
+def _slug_blueprint_id(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip().lower()).strip("-._")
+    return slug or DEFAULT_BLUEPRINT_ID
+
+
+def coerce_string_list(value: Any, field_name: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise BlueprintServiceError("BAD_REQUEST", f"{field_name} must be a list")
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def start_plan_validation_context(graph: Any) -> Dict[str, Any]:
+    return {
+        "required_start_groups": graph.required_start_groups(),
+        "valid_start_nodes": sorted(graph.agent_nodes),
+        "tick_source_allowed": graph.has_tick_source(),
+    }
+
+
+def default_start_plan_for_graph(graph: Any, task: str, start_nodes: list[str]) -> Dict[str, Any]:
+    descriptions: Dict[str, str] = {}
+    for node_id, node in sorted(graph.agent_nodes.items()):
+        prompt = str(getattr(node, "prompt", "") or "").strip()
+        agent_id = str(getattr(node, "agent_id", "") or "").strip()
+        if prompt and agent_id:
+            descriptions[node_id] = f"{agent_id}: {prompt}"
+        else:
+            descriptions[node_id] = prompt or agent_id or node_id
+
+    task_text = str(task).strip()
+    return {
+        "user_goal": task_text,
+        "agent_descriptions": descriptions,
+        "start_nodes": list(start_nodes),
+        "tasks": {
+            node_id: {
+                "goal": task_text,
+                "context_refs": [],
+                "expected_output": "Complete the assigned blueprint work and report the result.",
+                "acceptance": "The requested work is complete, or blockers are reported clearly.",
+                "metadata": {"source": "gulicode-bp-plugin"},
+            }
+            for node_id in dict.fromkeys(start_nodes)
+        },
+        "run_policy": {
+            "allow_parallel": True,
+            "requires_confirmation": True,
+            "source": "gulicode-bp-plugin",
+        },
+    }
+
+
+def apply_start_plan_overrides(plan: Dict[str, Any], overrides: Any) -> Dict[str, Any]:
+    if not isinstance(overrides, dict):
+        raise BlueprintServiceError("BAD_REQUEST", "planOverrides must be a JSON object")
+    allowed = {"user_goal", "agent_descriptions", "tasks", "run_policy"}
+    rejected = sorted(str(key) for key in overrides if str(key) not in allowed)
+    if rejected:
+        raise BlueprintServiceError(
+            "START_PLAN_OVERRIDE_REJECTED",
+            "planOverrides may only set user_goal, agent_descriptions, tasks, and run_policy",
+            details={"rejected": rejected},
+        )
+    next_plan = dict(plan)
+    for key, value in overrides.items():
+        normalized_key = str(key)
+        if normalized_key == "run_policy":
+            if not isinstance(value, dict):
+                raise BlueprintServiceError("BAD_REQUEST", "planOverrides.run_policy must be an object")
+            merged = dict(next_plan.get("run_policy", {}))
+            merged.update(value)
+            next_plan["run_policy"] = merged
+            continue
+        next_plan[normalized_key] = value
+    return next_plan
 
 
 def document_with_project_workdir(

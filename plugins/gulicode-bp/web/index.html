@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GuLiCode Blueprint</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/config.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>GuLiCode Blueprint</h1>
+          <p id="connection-status">Local workbench</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="refresh-runs" type="button">Refresh</button>
+          <button id="validate-blueprint" type="button">Validate</button>
+          <button id="save-blueprint" type="button">Save</button>
+        </div>
+      </header>
+
+      <section class="toolbar">
+        <label>
+          <span>Project</span>
+          <input id="project-dir" placeholder="Absolute project directory" spellcheck="false" />
+        </label>
+        <label>
+          <span>Blueprint</span>
+          <select id="blueprint-id"></select>
+        </label>
+        <button id="load-blueprints" type="button">Load</button>
+        <button id="open-blueprint" type="button">Open</button>
+      </section>
+
+      <section class="workspace">
+        <aside class="panel list-panel">
+          <div class="panel-header">
+            <h2>Runs</h2>
+            <button id="list-runs" type="button">List</button>
+          </div>
+          <div id="runs" class="list"></div>
+        </aside>
+
+        <section class="panel editor-panel">
+          <div class="tabs">
+            <button class="tab active" data-tab="document" type="button">Document</button>
+            <button class="tab" data-tab="plan" type="button">Plan</button>
+            <button class="tab" data-tab="status" type="button">Status</button>
+            <button class="tab" data-tab="events" type="button">Events</button>
+            <button class="tab" data-tab="diff" type="button">Diff</button>
+          </div>
+          <textarea id="document-editor" data-tab-panel="document" spellcheck="false"></textarea>
+          <textarea id="plan-editor" data-tab-panel="plan" class="hidden" spellcheck="false"></textarea>
+          <pre id="status-view" data-tab-panel="status" class="hidden"></pre>
+          <pre id="events-view" data-tab-panel="events" class="hidden"></pre>
+          <pre id="diff-view" data-tab-panel="diff" class="hidden"></pre>
+        </section>
+
+        <aside class="panel control-panel">
+          <div class="panel-header">
+            <h2>Runtime</h2>
+          </div>
+          <label>
+            <span>Run</span>
+            <input id="run-id" placeholder="run id" spellcheck="false" />
+          </label>
+          <label>
+            <span>Node</span>
+            <input id="node-id" placeholder="node id" spellcheck="false" />
+          </label>
+          <div class="button-grid">
+            <button id="start-live" type="button">Start Live</button>
+            <button id="start-status" type="button">Start Status</button>
+            <button id="run-status" type="button">Status</button>
+            <button id="run-events" type="button">Events</button>
+            <button id="run-diff" type="button">Diff</button>
+            <button id="run-complete" type="button">Complete</button>
+            <button id="run-cancel" type="button">Cancel</button>
+            <button id="agent-info" type="button">Agent Info</button>
+          </div>
+          <label class="message-box">
+            <span>Message</span>
+            <textarea id="agent-message" spellcheck="false"></textarea>
+          </label>
+          <button id="queue-message" type="button">Queue Message</button>
+          <pre id="last-result"></pre>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

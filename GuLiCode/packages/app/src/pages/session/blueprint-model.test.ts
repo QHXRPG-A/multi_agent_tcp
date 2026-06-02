@@ -204,16 +204,16 @@ describe("blueprint draft model", () => {
     })
 
     expect(draft.graph.common_nodes.gate).toEqual({ node_id: "gate", kind: "branch" })
-    expect(draft.graph.common_nodes.clock).toEqual({ node_id: "clock", kind: "tick", every_n_ticks: 1 })
+    expect(draft.graph.common_nodes.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 1 })
     expect(draft.layout.nodes.gate).toEqual({ x: 192, y: 48 })
     expect(draft.layout.nodes.clock).toEqual({ x: 288, y: 96 })
     expect(hasTickSourceNode(draft)).toBe(true)
 
     const document = toBlueprintDocument(draft)
     const restored = fromBlueprintDocument(document)
-    expect(document.graph.common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_ticks: 1 })
+    expect(document.graph.common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 1 })
     expect(restored.graph.common_nodes.gate).toEqual({ node_id: "gate", kind: "branch" })
-    expect(toRuntimeGraphDraft(restored).common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_ticks: 1 })
+    expect(toRuntimeGraphDraft(restored).common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 1 })
   })
 
   test("enforces port types for non-Agent and non-Script connections only", () => {
@@ -611,6 +611,90 @@ describe("blueprint draft model", () => {
     expect(restored.graph.agent_nodes.extra.node_id).toBe("extra")
     expect(restored.layout.nodes.extra).toEqual({ x: 240, y: 120 })
     expect(toRuntimeGraphDraft(restored).agent_nodes.planner.cwd).toBe("F:\\repo\\game")
+  })
+
+  test("round-trips persisted common config, agent settings, tick settings, and UI state", () => {
+    let draft = createDefaultBlueprintDraft("F:\\repo\\persist")
+    draft.config = {
+      python_path: "C:\\Python313\\python.exe",
+      project_workdir: "F:\\repo\\persist",
+      skill_dir: "F:\\repo\\persist\\skills",
+      rule_dir: "F:\\repo\\persist\\rules",
+    }
+    draft = updateAgentNode(draft, "planner", {
+      prompt: "Plan with saved settings.",
+      run_prompt: "Use the saved per-run prompt once.",
+      execution_mode: "nonblocking",
+      model: "netease-codemaker/kimi-k2.5",
+      skills: ["business-skill"],
+      skill_selection: { mode: "selected", skill_hashes: ["business-skill"] },
+      rule_paths: ["policy.md"],
+      timeout_sec: 321,
+      prompt_via_file: "always",
+      adapter_options: { temperature: 0.2, retry: true },
+      extra_env: { GULI_SETTING: "1" },
+      external: true,
+      read_scope: ["docs/**"],
+      write_scope: ["src/**"],
+      artifact_scope: ["shared/artifacts/**"],
+      access_policy: {
+        direct_project_io: true,
+        outside_project_io: false,
+        unrestricted_commands: false,
+        disable_sandbox: false,
+        framework_message_tools: true,
+      },
+    })
+    draft = addNode(draft, {
+      kind: "tick",
+      node_id: "clock",
+      position: { x: 301, y: 119 },
+    })
+    const clock = draft.graph.common_nodes.clock
+    if (clock?.kind === "tick") clock.every_n_seconds = 9
+    draft.layout.viewport = { x: 33, y: -12, zoom: 1.25 }
+    draft.selection = { type: "node", id: "clock" }
+    draft.inspector = { type: "node", id: "planner" }
+
+    const document = toBlueprintDocument(draft, "settings", "Settings")
+    const restored = fromBlueprintDocument(document, "F:\\repo\\persist")
+
+    expect(document.ui.config).toEqual(draft.config)
+    expect(document.graph.common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 9 })
+    expect(document.graph.agent_nodes.planner).toMatchObject({
+      prompt: "Plan with saved settings.",
+      run_prompt: "Use the saved per-run prompt once.",
+      execution_mode: "nonblocking",
+      skills: ["business-skill"],
+      skill_selection: { mode: "selected", skill_hashes: ["business-skill"] },
+      rule_paths: ["policy.md"],
+      timeout_sec: 321,
+      prompt_via_file: "always",
+      adapter_options: { temperature: 0.2, retry: true },
+      extra_env: { GULI_SETTING: "1" },
+      external: true,
+      read_scope: ["docs/**"],
+      write_scope: ["src/**"],
+      artifact_scope: ["shared/artifacts/**"],
+      access_policy: {
+        direct_project_io: true,
+        outside_project_io: false,
+        unrestricted_commands: false,
+        disable_sandbox: false,
+        framework_message_tools: true,
+      },
+    })
+    expect(document.ui.nodes.clock).toEqual({ x: 312, y: 120 })
+    expect(document.ui.viewport).toEqual({ x: 33, y: -12, zoom: 1.25 })
+    expect(document.ui.selection).toEqual({ type: "node", id: "clock" })
+    expect(document.ui.inspector).toEqual({ type: "node", id: "planner" })
+    expect(restored.config).toEqual(draft.config)
+    expect(restored.graph.common_nodes.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 9 })
+    expect(restored.graph.agent_nodes.planner.run_prompt).toBe("Use the saved per-run prompt once.")
+    expect(restored.graph.agent_nodes.planner.adapter_options).toEqual({ temperature: 0.2, retry: true })
+    expect(restored.layout.viewport).toEqual({ x: 33, y: -12, zoom: 1.25 })
+    expect(restored.selection).toEqual({ type: "node", id: "clock" })
+    expect(restored.inspector).toEqual({ type: "node", id: "planner" })
   })
 
   test("reads legacy terminal documents but filters terminals from export and runtime graphs", () => {

@@ -8,11 +8,14 @@ sessions/
 skill_list/
 .multi_agent_workspace/
 .codemaker/
+build/
+plugins/*/.runtime/
 .venv_vendor_ryven/
 GuLiCode/node_modules/
 GuLiCode/**/node_modules/
 GuLiCode/dist/
 GuLiCode/**/dist/
+dist/
 GuLiCode/.turbo/
 GuLiCode/.next/
 GuLiCode/.sst/

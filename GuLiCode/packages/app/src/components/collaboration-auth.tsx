@@ -33,6 +33,7 @@ export type DesktopBlueprintSnapshotPayload = {
     downstreamNodeIds?: string[]
     inputPorts?: string[]
     outputPorts?: string[]
+    everyNSeconds?: number
     everyNTicks?: number
     agentId?: string
     cliKind?: string

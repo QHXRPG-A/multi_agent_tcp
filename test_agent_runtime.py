@@ -649,13 +649,15 @@ async def test_graph_runtime_branch_routes_true_false_and_rejects_non_bool() -> 
 
 
 @pytest.mark.asyncio
-async def test_graph_runtime_tick_emits_on_interval_and_applies_backpressure() -> None:
+async def test_graph_runtime_tick_emits_on_interval_and_applies_backpressure(monkeypatch) -> None:
+    now = {"value": 100.0}
+    monkeypatch.setattr("multi_agent_tcp.graph_runtime.time.monotonic", lambda: now["value"])
     graph = GraphDefinition(
         agent_nodes={
             "worker": AgentNode.from_dict({"node_id": "worker", "agent_id": "worker"}),
         },
         common_nodes={
-            "clock": CommonNode(node_id="clock", kind="tick", every_n_ticks=2),
+            "clock": CommonNode(node_id="clock", kind="tick", every_n_seconds=2),
         },
         edges=[
             GraphEdge("clock", "worker", output_port="tick", edge_type="exec"),
@@ -667,13 +669,20 @@ async def test_graph_runtime_tick_emits_on_interval_and_applies_backpressure() -
     await runtime.tick()
     assert runtime.agent_message_queues.get("worker", []) == []
 
+    now["value"] += 1.9
+    await runtime.tick()
+    assert runtime.agent_message_queues.get("worker", []) == []
+
+    now["value"] += 0.1
     await runtime.tick()
     queued = runtime.agent_message_queues["worker"]
     assert len(queued) == 1
     assert queued[0].body["type"] == "tick"
-    assert queued[0].body["tick_count"] == 2
+    assert queued[0].body["every_n_seconds"] == 2
 
+    now["value"] += 2
     await runtime.tick()
+    now["value"] += 2
     await runtime.tick()
     assert len(runtime.agent_message_queues["worker"]) == 1
     event_types = [event["event_type"] for event in runtime.status_snapshot(graph=graph)["recent_events"]]
@@ -1934,6 +1943,8 @@ async def test_graph_runtime_reminds_idle_source_about_remaining_outgoing_target
     target_c = AgentNode(node_id="agent-c", cwd=Path("."))
     runtime = GraphRuntime(cluster)
 
+    await runtime.ensure_agent(source)
+    runtime.record_agent_task_status(source.node_id, status="completed")
     await runtime.create_outgoing_batch(source, [target_b, target_c], batch_id="batch-1")
     runtime.stage_outgoing_message("batch-1", target_b, {"prompt": "for b"})
 
@@ -1948,6 +1959,77 @@ async def test_graph_runtime_reminds_idle_source_about_remaining_outgoing_target
     assert len(reminders) == 1
     assert reminders[0].payload["remaining_targets"] == ["agent-c"]
     assert reminders[0].payload["required_outgoing_targets"] == ["agent-b", "agent-c"]
+    pending = runtime.pending_messages[reminders[0].payload["message_id"]]
+    assert pending.queue_mode == "top"
+    assert pending.body["type"] == "framework_outgoing_targets_reminder"
+    assert pending.body["outgoing_targets"]["batch_id"] == "batch-1"
+    envelope = pending.body["context"]["framework_context"]["message_envelope"]
+    assert envelope["outgoing_batch_id"] == "batch-1"
+    assert envelope["required_outgoing_targets"] == ["agent-b", "agent-c"]
+    assert envelope["remaining_targets"] == ["agent-c"]
+
+    await runtime.tick()
+    reminders = [
+        event
+        for event in runtime.events
+        if event.event_type == "AgentOutgoingTargetsReminder"
+    ]
+    assert len(reminders) == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_waits_for_existing_agent_message_before_outgoing_reminder() -> None:
+    cluster = _FakeCluster()
+    source = AgentNode(node_id="agent-a", agent_id="worker-a", cwd=Path("."))
+    target = AgentNode(node_id="agent-b", agent_id="worker-b", cwd=Path("."))
+    runtime = GraphRuntime(cluster)
+
+    await runtime.ensure_agent(source)
+    await runtime.create_outgoing_batch(source, [target], batch_id="batch-1")
+    original = runtime.queue_agent_message(
+        source,
+        {"prompt": "original task"},
+        source_agent_id="test",
+    )
+
+    await runtime.tick()
+    for _ in range(5):
+        await asyncio.sleep(0)
+        if cluster.sent:
+            break
+    assert cluster.sent == [("worker-a", {"prompt": "original task"}, 1800.0)]
+    assert [
+        event for event in runtime.events
+        if event.event_type == "AgentOutgoingTargetsReminder"
+    ] == []
+    assert runtime.pending_messages[original.message_id].status == "completed"
+
+    await runtime.tick()
+    reminders = [
+        event for event in runtime.events
+        if event.event_type == "AgentOutgoingTargetsReminder"
+    ]
+    assert len(reminders) == 1
+    assert reminders[0].payload["remaining_targets"] == ["agent-b"]
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_does_not_remind_agent_before_first_flow_message() -> None:
+    cluster = _FakeCluster()
+    source = AgentNode(node_id="agent-a", agent_id="worker-a", cwd=Path("."))
+    target = AgentNode(node_id="agent-b", agent_id="worker-b", cwd=Path("."))
+    runtime = GraphRuntime(cluster)
+
+    await runtime.ensure_agent(source)
+    await runtime.create_outgoing_batch(source, [target], batch_id="batch-1")
+
+    await runtime.tick()
+    await runtime.tick()
+
+    assert [
+        event for event in runtime.events
+        if event.event_type == "AgentOutgoingTargetsReminder"
+    ] == []
 
 
 @pytest.mark.asyncio
@@ -1980,6 +2062,8 @@ async def test_graph_runtime_reminds_idle_source_about_required_script_calls() -
     )
     runtime = GraphRuntime(_FakeCluster())
 
+    await runtime.ensure_agent(graph.agent_nodes["planner"])
+    runtime.record_agent_task_status("planner", status="completed")
     batch = await runtime.create_outgoing_batch_from_graph(graph, "planner", batch_id="batch-script")
     assert batch.script_calls["format"]["status"] == "pending"
 

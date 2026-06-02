@@ -2,12 +2,16 @@
 
 ## Position
 
-`multi_agent_tcp` is now best understood as the runtime substrate for the **GuLiCode desktop app + multi-agent blueprint system**.
+`multi_agent_tcp` is now best understood as the runtime substrate for the
+**gulicode-bp Codex plugin + multi-agent blueprint system**. GuLiCode
+desktop/Electron is a secondary explicit compatibility track.
 
 The current main line is:
 
 ```text
-GuLiCode desktop / UI / top Agent
+gulicode-bp plugin / Blueprint web workbench
+  -> GuLiCode app dev surfaces: /mobile and /console
+  -> DesktopBlueprintService
   -> GraphRuntimeControlPlane
   -> GraphRuntime
   -> AgentNode queues
@@ -24,7 +28,8 @@ The old low-level TCP worker path remains valid as an execution backend. It is n
 
 | Layer | Main Files | Responsibility |
 |---|---|---|
-| GuLiCode desktop | `GuLiCode/packages/desktop-electron`, `GuLiCode/packages/app` | User-facing desktop shell, top-agent UI, session/project surface, future blueprint workbench |
+| Plugin workbench and app surfaces | `plugins/gulicode-bp`, `GuLiCode/packages/app` | Default Blueprint workbench, `/mobile`, `/console`, top-agent/session surfaces |
+| GuLiCode desktop compatibility | `GuLiCode/packages/desktop-electron`, `GuLiCode/packages/app` | Explicit desktop shell, IPC, packaging, taskbar, and windowing work |
 | Runtime control plane | `graph_control.py`, `__main__.py` runtime commands | Stable non-UI interface for organization reads, top-agent context, run start/status/end, message batches, agent dispatch, joins |
 | Runtime scheduler | `graph_runtime.py` | Trusted scheduler for AgentNode queues, dispatch state, outgoing batches, join barriers, events, jobs, final status |
 | Graph model | `graph_runtime.py`, `ryven_blueprint.py` | AgentNode definitions, graph edges, organization view, runnable graph validation, graph scheduling, exec-edge SCC cycle grouping for agents |
@@ -69,7 +74,8 @@ GraphRuntime
 ## Important Current Documents
 
 - Top-agent and communication design: [`../多agents通信设计.md`](../多agents通信设计.md)
-- GuLiCode desktop: [`gulicode_desktop.md`](gulicode_desktop.md)
+- Plugin-first debug startup: [`debug_start.md`](debug_start.md)
+- Explicit GuLiCode desktop work: [`gulicode_desktop.md`](gulicode_desktop.md)
 - Runtime control commands: [`dispatch_workflows.md`](dispatch_workflows.md)
 - Backend compatibility: [`cluster_api.md`](cluster_api.md)
 - Registry and skills: [`registry_and_skills.md`](registry_and_skills.md)
@@ -96,4 +102,5 @@ Avoid presenting the project as primarily:
 - "CodeMakerCluster is the core architecture"
 - "Ryven Start -> AgentNode -> End is the main current loop"
 
-Those are historical or secondary views. The current center is GuLiCode-led blueprint orchestration through framework-owned runtime APIs.
+Those are historical or secondary views. The current center is the
+`gulicode-bp` plugin workbench backed by framework-owned runtime APIs.

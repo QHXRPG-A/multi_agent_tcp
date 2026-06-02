@@ -25,9 +25,10 @@ import { requireCollaborationAuth } from "@/components/collaboration-auth"
 import { mobileMockData } from "./mock-data"
 import {
   mobileTabs,
-  nodeKindLabel,
+  nodeDisplayKindLabel,
   nodeStateLabel,
   nodeStateTone,
+  normalizedBlueprintNodeKind,
   type BlueprintAgentPanelEvent,
   type BlueprintEdge,
   type BlueprintDiffFile,
@@ -1167,33 +1168,44 @@ function BlueprintPanel(props: {
               </div>
             }
           >
-            {(node) => (
-              <button
-                type="button"
-                data-mobile-touch
-                data-testid="blueprint-node-row"
-                aria-pressed={selectedNodeId() === node.id}
-                class="flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left transition-[background-color,border-color,box-shadow]"
-                classList={{
-                  "border-[#efc8c1] bg-[#fff7f5] shadow-[0_8px_18px_rgba(185,79,69,0.08)]":
-                    selectedNodeId() === node.id,
-                  "border-[#f0e7e1] bg-[#fbf7f4] hover:border-[#eaded7] hover:bg-[#fffdfa]":
-                    selectedNodeId() !== node.id,
-                }}
-                onClick={() => openAgentInfo(node)}
-              >
-                <span class={`shrink-0 rounded-full border px-2.5 py-1 text-12-medium ${nodeStateTone(node.state)}`}>
-                  {nodeStateLabel(node.state)}
-                </span>
-                <span class="min-w-0 flex-1 truncate text-13-medium text-[#2c2521]">
-                  {node.label}
-                </span>
-                <span class="shrink-0 rounded-full border border-[#eaded7] bg-white px-2 py-1 text-10-medium text-[#81756e]">
-                  {nodeKindLabel(node.kind)}
-                </span>
-                <span class="shrink-0 rounded-full bg-white px-2 py-1 text-11-medium text-[#9a8f88]">信息</span>
-              </button>
-            )}
+            {(node) => {
+              const tone = () => blueprintNodeTone(node)
+              return (
+                <button
+                  type="button"
+                  data-mobile-touch
+                  data-testid="blueprint-node-row"
+                  aria-pressed={selectedNodeId() === node.id}
+                  class="flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left transition-[background-color,border-color,box-shadow]"
+                  classList={{
+                    "border-[#efc8c1] bg-[#fff7f5] shadow-[0_8px_18px_rgba(185,79,69,0.08)]":
+                      selectedNodeId() === node.id,
+                    "border-[#f0e7e1] bg-[#fbf7f4] hover:border-[#eaded7] hover:bg-[#fffdfa]":
+                      selectedNodeId() !== node.id,
+                  }}
+                  onClick={() => openAgentInfo(node)}
+                >
+                  <span class={`shrink-0 rounded-full border px-2.5 py-1 text-12-medium ${nodeStateTone(node.state)}`}>
+                    {nodeStateLabel(node.state)}
+                  </span>
+                  <span class="size-1.5 shrink-0 rounded-full" style={{ "background-color": tone().accent }} />
+                  <span class="min-w-0 flex-1 truncate text-13-medium text-[#2c2521]">
+                    {node.label}
+                  </span>
+                  <span
+                    class="shrink-0 rounded-full border px-2 py-1 text-10-medium"
+                    style={{
+                      "background-color": tone().badgeBackground,
+                      "border-color": tone().badgeBorder,
+                      color: tone().badgeText,
+                    }}
+                  >
+                    {nodeDisplayKindLabel(node)}
+                  </span>
+                  <span class="shrink-0 rounded-full bg-white px-2 py-1 text-11-medium text-[#9a8f88]">信息</span>
+                </button>
+              )
+            }}
           </For>
         </div>
       </section>
@@ -1339,7 +1351,8 @@ function AgentInfoSheet(props: {
   onClose: () => void
 }) {
   const panel = () => props.node.agentPanel
-  const isAgentLike = () => props.node.kind === "agent" || props.node.kind === "worker_agent"
+  const displayKind = createMemo(() => normalizedBlueprintNodeKind(props.node))
+  const isAgentLike = () => displayKind() === "agent" || displayKind() === "worker_agent"
   const [statusDetailsOpen, setStatusDetailsOpen] = createSignal(false)
   const [text, setText] = createSignal("")
   const [mode, setMode] = createSignal<"default" | "top">("default")
@@ -1376,7 +1389,7 @@ function AgentInfoSheet(props: {
           <div class="min-w-0 flex-1">
             <div class="truncate text-12-medium text-[#161312]">{props.node.label}</div>
             <div class="mt-0.5 truncate text-10-regular text-[#9a8f88]">
-              {nodeKindLabel(props.node.kind)} · {nodeStateLabel(props.node.state)}
+              {nodeDisplayKindLabel(props.node)} · {nodeStateLabel(props.node.state)}
             </div>
           </div>
           <button
@@ -1399,11 +1412,11 @@ function AgentInfoSheet(props: {
               when={isAgentLike()}
               fallback={
                 <div class="grid grid-cols-3 gap-2">
-                  <AgentPanelMetric label="类型" value={nodeKindLabel(props.node.kind)} />
+                  <AgentPanelMetric label="类型" value={nodeDisplayKindLabel(props.node)} />
                   <AgentPanelMetric label="状态" value={nodeStateLabel(props.node.state)} />
                   <AgentPanelMetric label="输入" value={`${props.node.inputPorts?.length ?? 0}`} />
                   <AgentPanelMetric label="输出" value={`${props.node.outputPorts?.length ?? 0}`} />
-                  <AgentPanelMetric label="节拍" value={props.node.everyNTicks ? `${props.node.everyNTicks}` : "-"} />
+                  <AgentPanelMetric label="秒数" value={props.node.everyNSeconds ? `${props.node.everyNSeconds}` : "-"} />
                   <AgentPanelMetric label="更新" value={panel().updatedAt} />
                 </div>
               }
@@ -1466,7 +1479,7 @@ function AgentInfoSheet(props: {
             fallback={
               <div class="border-t border-[#f0e7e1] bg-white/70 p-3">
                 <div class="rounded-md border border-[#f2dfb8] bg-[#fff8e7] px-2 py-1.5 text-11-regular text-[#8a6421]">
-                  {nodeKindLabel(props.node.kind)} 是桌面端蓝图结构节点，移动端只展示同步信息，不提供编辑或执行入口。
+                  {nodeDisplayKindLabel(props.node)} 是桌面端蓝图结构节点，移动端只展示同步信息，不提供编辑或执行入口。
                 </div>
               </div>
             }
@@ -1521,11 +1534,11 @@ function NodeTypeDetails(props: { node: BlueprintNode }) {
     <div data-testid="node-type-details" class="mt-3 rounded-md border border-[#f0e7e1] bg-[#fffdfa] px-2.5 py-2">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <div class="text-10-medium uppercase text-[#b5837d]">{nodeKindLabel(props.node.kind)}</div>
+          <div class="text-10-medium uppercase text-[#b5837d]">{nodeDisplayKindLabel(props.node)}</div>
           <div class="mt-1 text-12-regular leading-5 text-[#6f6560]">{props.node.summary || props.node.detail}</div>
         </div>
-        <Show when={props.node.everyNTicks}>
-          {(every) => <span class="shrink-0 rounded-full border border-[#eaded7] bg-white px-2 py-1 text-10-medium text-[#81756e]">每 {every()} tick</span>}
+        <Show when={props.node.everyNSeconds}>
+          {(every) => <span class="shrink-0 rounded-full border border-[#eaded7] bg-white px-2 py-1 text-10-medium text-[#81756e]">每 {every()} 秒</span>}
         </Show>
       </div>
       <Show when={inputs().length || outputs().length}>
@@ -1904,52 +1917,57 @@ function zoomViewportAroundPoint(viewport: BlueprintViewport, zoom: number, poin
   }
 }
 
-function blueprintNodeTone(state: BlueprintNode["state"]) {
-  switch (state) {
-    case "done":
+function blueprintNodeTone(node: BlueprintNode) {
+  switch (normalizedBlueprintNodeKind(node)) {
+    case "agent":
       return {
         cardBackground: "#ecfdf5",
-        cardBorder: "#6ee7b7",
-        cardText: "#064e3b",
-        chipBackground: "#d1fae5",
-        chipBorder: "#6ee7b7",
-        chipText: "#047857",
+        cardBorder: "#86efac",
+        cardText: "#052e16",
+        badgeBackground: "#dcfce7",
+        badgeBorder: "#86efac",
+        badgeText: "#166534",
+        accent: "#22c55e",
       }
-    case "running":
+    case "worker_agent":
       return {
-        cardBackground: "#fff1f2",
-        cardBorder: "#fda4af",
-        cardText: "#881337",
-        chipBackground: "#ffe4e6",
-        chipBorder: "#fda4af",
-        chipText: "#be123c",
+        cardBackground: "#f8fbff",
+        cardBorder: "#9ec6e8",
+        cardText: "#12344d",
+        badgeBackground: "#eff6ff",
+        badgeBorder: "#bfdbfe",
+        badgeText: "#1d4ed8",
+        accent: "#38bdf8",
       }
-    case "queued":
+    case "script":
       return {
-        cardBackground: "#fffbeb",
-        cardBorder: "#fcd34d",
-        cardText: "#78350f",
-        chipBackground: "#fef3c7",
-        chipBorder: "#fcd34d",
-        chipText: "#92400e",
+        cardBackground: "#fff9db",
+        cardBorder: "#f6d365",
+        cardText: "#3f3713",
+        badgeBackground: "#fff3bf",
+        badgeBorder: "#f6d365",
+        badgeText: "#854d0e",
+        accent: "#facc15",
       }
-    case "idle":
+    case "branch":
       return {
-        cardBackground: "#ffffff",
-        cardBorder: "#d6d3d1",
-        cardText: "#57534e",
-        chipBackground: "#fafaf9",
-        chipBorder: "#d6d3d1",
-        chipText: "#78716c",
+        cardBackground: "#fff7ed",
+        cardBorder: "#fdba74",
+        cardText: "#431407",
+        badgeBackground: "#ffedd5",
+        badgeBorder: "#fdba74",
+        badgeText: "#c2410c",
+        accent: "#f59e0b",
       }
-    case "failed":
+    case "tick":
       return {
-        cardBackground: "#fef2f2",
-        cardBorder: "#fca5a5",
-        cardText: "#7f1d1d",
-        chipBackground: "#fee2e2",
-        chipBorder: "#fca5a5",
-        chipText: "#b91c1c",
+        cardBackground: "#ecfeff",
+        cardBorder: "#67e8f9",
+        cardText: "#083344",
+        badgeBackground: "#cffafe",
+        badgeBorder: "#67e8f9",
+        badgeText: "#0e7490",
+        accent: "#06b6d4",
       }
   }
 }
@@ -2212,7 +2230,7 @@ function BlueprintStructureMap(props: {
         <For each={props.nodes}>
           {(node, index) => {
             const point = () => mapPoints().get(node.id) ?? blueprintMapPoint(node, index())
-            const tone = () => blueprintNodeTone(node.state)
+            const tone = () => blueprintNodeTone(node)
 
             return (
               <button
@@ -2245,17 +2263,24 @@ function BlueprintStructureMap(props: {
               >
                 <div class="flex justify-end">
                   <span
-                    class="max-w-full truncate rounded-full border px-2 py-0.5 text-11-medium"
-                    style={{
-                      "background-color": tone().chipBackground,
-                      "border-color": tone().chipBorder,
-                      color: tone().chipText,
-                    }}
+                    class={`max-w-full truncate rounded-full border px-2 py-0.5 text-11-medium ${nodeStateTone(node.state)}`}
                   >
                     {nodeStateLabel(node.state)}
                   </span>
                 </div>
-                <div class="mt-1 truncate text-10-medium uppercase text-[#81756e]">{nodeKindLabel(node.kind)}</div>
+                <div class="mt-1 flex min-w-0 items-center gap-1.5">
+                  <span class="size-1.5 shrink-0 rounded-full" style={{ "background-color": tone().accent }} />
+                  <span
+                    class="min-w-0 truncate rounded-full border px-2 py-0.5 text-10-medium uppercase"
+                    style={{
+                      "background-color": tone().badgeBackground,
+                      "border-color": tone().badgeBorder,
+                      color: tone().badgeText,
+                    }}
+                  >
+                    {nodeDisplayKindLabel(node)}
+                  </span>
+                </div>
                 <div class="mt-2 truncate text-14-semibold leading-5">{node.label}</div>
               </button>
             )

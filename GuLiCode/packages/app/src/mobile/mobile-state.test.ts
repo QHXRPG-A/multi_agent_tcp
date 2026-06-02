@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { mobileMockData } from "./mock-data"
-import { mobileTabs, nodeKindLabel, nodeStateLabel, nodeStateTone } from "./mobile-state"
+import { mobileTabs, nodeKindLabel, nodeStateLabel, nodeStateTone, normalizedBlueprintNodeKind } from "./mobile-state"
 
 describe("mobile display mock state", () => {
   test("defines the three top-level mobile tabs", () => {
@@ -57,7 +57,7 @@ describe("mobile display mock state", () => {
     ])
     expect(mobileMockData.blueprint.nodes.find((node) => node.kind === "script")?.inputPorts).toContain("payload: dict")
     expect(mobileMockData.blueprint.nodes.find((node) => node.kind === "branch")?.outputPorts).toContain("true: message")
-    expect(mobileMockData.blueprint.nodes.find((node) => node.kind === "tick")?.everyNTicks).toBe(3)
+    expect(mobileMockData.blueprint.nodes.find((node) => node.kind === "tick")?.everyNSeconds).toBe(3)
     expect(
       mobileMockData.blueprint.nodes.every(
         (node) =>
@@ -85,5 +85,10 @@ describe("mobile display mock state", () => {
     expect(nodeStateTone("running")).toContain("rose")
     expect(nodeKindLabel("script")).toBe("Script")
     expect(nodeKindLabel("worker_agent")).toBe("Worker Agent")
+    expect(normalizedBlueprintNodeKind({ kind: "worker_agent", label: "Branch", outputPorts: ["true: message", "false: message"] })).toBe(
+      "branch",
+    )
+    expect(normalizedBlueprintNodeKind({ kind: "worker_agent", label: "Tick", everyNSeconds: 3 })).toBe("tick")
+    expect(normalizedBlueprintNodeKind({ kind: "worker_agent", label: "agent-agent-3", role: "Agent" })).toBe("agent")
   })
 })

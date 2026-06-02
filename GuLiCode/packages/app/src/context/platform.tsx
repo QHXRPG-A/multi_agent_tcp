@@ -74,6 +74,13 @@ export type BlueprintWindowPlanningSubmitInput = {
   silentBlocked?: boolean
 }
 
+export type BlueprintWindowPlanningSubmitResult = {
+  accepted: boolean
+  requestId?: string
+  status?: string
+  message?: string
+}
+
 export type Platform = {
   /** Platform discriminator */
   platform: "web" | "desktop"
@@ -138,6 +145,12 @@ export type Platform = {
   /** Open one project blueprint document (desktop only) */
   openBlueprint?(projectDir: string, blueprintId: string): Promise<BlueprintDocument>
 
+  /** Create one project blueprint document (desktop only) */
+  createBlueprint?(projectDir: string, blueprintId?: string, name?: string): Promise<BlueprintDocument>
+
+  /** Soft-delete one project blueprint document (desktop only) */
+  deleteBlueprint?(projectDir: string, blueprintId: string): Promise<Record<string, unknown>>
+
   /** Save one project blueprint document (desktop only) */
   saveBlueprint?(projectDir: string, document: BlueprintDocument): Promise<BlueprintDocument>
 
@@ -168,6 +181,20 @@ export type Platform = {
 
   /** Validate one project blueprint document against runtime graph rules (desktop only) */
   validateBlueprint?(projectDir: string, blueprintId: string, document?: BlueprintDocument): Promise<BlueprintValidationResult>
+
+  /** Generate and validate a start plan without starting a run (desktop only) */
+  createBlueprintStartPlan?(
+    projectDir: string,
+    blueprintId: string,
+    input: { task: string; startNodeIds?: string[]; planOverrides?: Record<string, unknown> },
+  ): Promise<Record<string, unknown>>
+
+  /** Validate a generated or edited start plan without starting a run (desktop only) */
+  validateBlueprintStartPlan?(
+    projectDir: string,
+    blueprintId: string,
+    plan: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>
 
   /** List live blueprint runs owned by the desktop runtime service (desktop only) */
   listBlueprintRuns?(projectDir?: string, blueprintId?: string): Promise<Record<string, unknown>[]>
@@ -263,7 +290,13 @@ export type Platform = {
     projectDir: string,
     sessionId: string | undefined,
     input: BlueprintWindowPlanningSubmitInput,
-  ): Promise<{ accepted: boolean }>
+  ): Promise<BlueprintWindowPlanningSubmitResult>
+
+  /** Poll a Workbench planning request submitted to the current thread. */
+  blueprintWindowPlanningStatus?(requestId: string): Promise<Record<string, unknown>>
+
+  /** Cancel a Workbench planning request submitted to the current thread. */
+  cancelBlueprintWindowPlanning?(requestId: string, reason?: string): Promise<Record<string, unknown>>
 
   /** Storage mechanism, defaults to localStorage */
   storage?: (name?: string) => SyncStorage | AsyncStorage

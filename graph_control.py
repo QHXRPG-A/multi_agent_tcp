@@ -44,6 +44,30 @@ class GraphControlResponse:
         return {"ok": self.ok, **self.data}
 
 
+def _run_control_coro(coro: Any) -> Any:
+    """Run a control-plane coroutine from sync callers, including MCP event loops."""
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: Dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # pragma: no cover - re-raised in caller
+            result["error"] = exc
+
+    thread = threading.Thread(target=runner, name="graph-control-coro", daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
 def graph_definition_from_dict(data: Dict[str, Any]) -> GraphDefinition:
     """Build a GraphDefinition from a JSON-friendly dict."""
 
@@ -424,7 +448,7 @@ class GraphRuntimeControlPlane:
                 if args.get("manifest_path") is not None
                 else None
             )
-            return asyncio.run(
+            return _run_control_coro(
                 self.start_run(
                     TopAgentStartPlan.from_dict(dict(args["plan"])),
                     manifest_path=manifest_path,
@@ -438,7 +462,7 @@ class GraphRuntimeControlPlane:
                 if args.get("manifest_path") is not None
                 else None
             )
-            return asyncio.run(
+            return _run_control_coro(
                 self.execute_fixture_to_archive(
                     TopAgentStartPlan.from_dict(dict(args["plan"])),
                     runtime_scenarios=dict(args.get("runtime_scenarios", {})),
@@ -506,7 +530,7 @@ class GraphRuntimeControlPlane:
             return GraphControlResponse(True, data).to_dict()
 
         if command == "script.call":
-            return asyncio.run(
+            return _run_control_coro(
                 self.call_script_node(
                     str(args["source_node_id"]),
                     str(args.get("function_name") or ""),
@@ -533,7 +557,7 @@ class GraphRuntimeControlPlane:
             return result.to_dict()
 
         if command == "message.create_batch":
-            return asyncio.run(
+            return _run_control_coro(
                 self._create_message_batch(
                     str(args["source_node_id"]),
                     [str(item) for item in args.get("required_target_node_ids", [])],
@@ -551,7 +575,7 @@ class GraphRuntimeControlPlane:
             return GraphControlResponse(True, data).to_dict()
 
         if command == "agent.dispatch":
-            return asyncio.run(
+            return _run_control_coro(
                 self.dispatch_agent_message(
                     str(args["source_node_id"]),
                     str(args["target_node_id"]),

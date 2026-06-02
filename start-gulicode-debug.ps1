@@ -1,13 +1,24 @@
 param(
-    [switch]$NoOpen
+    [switch]$NoOpen,
+    [string]$BlueprintId = "default",
+    [switch]$SkipPluginInstall,
+    [switch]$SkipWebBuild
 )
 
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AppDir = Join-Path $Root "GuLiCode\packages\app"
-$DesktopLauncher = Join-Path $Root "start-gulicode-desktop.cmd"
+$PluginRoot = Join-Path $Root "plugins\gulicode-bp"
+$PersonalPluginRoot = Join-Path $HOME "plugins\gulicode-bp"
+$PluginInstaller = Join-Path $PluginRoot "scripts\install_personal_plugin.py"
+$WorkbenchScript = Join-Path $PluginRoot "scripts\start_workbench.py"
+$PersonalWorkbenchScript = Join-Path $PersonalPluginRoot "scripts\start_workbench.py"
 $SeedConfig = Join-Path $Root "examples\collaboration_server_debug_seed.json"
+$LogDir = Join-Path $Root "logs"
+$ReadyFile = Join-Path $LogDir "gulicode-bp-workbench-ready.json"
+$WorkbenchOut = Join-Path $LogDir "gulicode-bp-workbench.out.log"
+$WorkbenchErr = Join-Path $LogDir "gulicode-bp-workbench.err.log"
 
 $env:NO_PROXY = "127.0.0.1,localhost,::1"
 $env:no_proxy = $env:NO_PROXY
@@ -48,83 +59,6 @@ function Stop-StaleCollaborationServer {
     Start-Sleep -Seconds 1
 }
 
-function Get-ProcessCommandLine {
-    param([int]$ProcessId)
-    $process = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f $ProcessId) -ErrorAction SilentlyContinue
-    if ($null -eq $process) {
-        return ""
-    }
-    return [string]$process.CommandLine
-}
-
-function Get-GuLiCodeElectronMainProcess {
-    $rootNeedle = (Join-Path $Root "GuLiCode").ToLowerInvariant()
-    return Get-Process -Name electron -ErrorAction SilentlyContinue |
-        Where-Object {
-            $path = [string]$_.Path
-            $title = [string]$_.MainWindowTitle
-            $path.ToLowerInvariant().Contains($rootNeedle) -and $title -like "GuLiCode*"
-        } |
-        Select-Object -First 1
-}
-
-function Test-GuLiCodeDesktopBridge {
-    $main = Get-GuLiCodeElectronMainProcess
-    if ($null -eq $main) {
-        return $false
-    }
-    $listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.OwningProcess -eq $main.Id -and
-            ($_.LocalAddress -eq "127.0.0.1" -or $_.LocalAddress -eq "::1")
-        }
-    # Current desktop dev exposes both the sidecar and desktop-control bridge from the main process.
-    return (($listeners | Measure-Object).Count -ge 2)
-}
-
-function Stop-StaleGuLiCodeDesktop {
-    $rootNeedle = (Join-Path $Root "GuLiCode").ToLowerInvariant()
-    $targets = New-Object System.Collections.Generic.HashSet[int]
-
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object {
-            $name = ([string]$_.Name).ToLowerInvariant()
-            $exe = ([string]$_.ExecutablePath).ToLowerInvariant()
-            $cmd = ([string]$_.CommandLine).ToLowerInvariant()
-            (
-                $name -like "electron*" -and $exe.Contains($rootNeedle)
-            ) -or (
-                ($name -eq "bun.exe" -or $name -eq "bun") -and
-                ($cmd.Contains("packages\desktop-electron") -or $cmd.Contains("packages/desktop-electron") -or $cmd.Contains("scripts/dev-desktop.ts"))
-            ) -or (
-                $name -eq "cmd.exe" -and $cmd.Contains("start-gulicode-desktop.cmd")
-            )
-        } |
-        ForEach-Object { [void]$targets.Add([int]$_.ProcessId) }
-
-    foreach ($connection in (Get-NetTCPConnection -State Listen -LocalPort 5173 -ErrorAction SilentlyContinue)) {
-        $ownerPid = [int]$connection.OwningProcess
-        if ($ownerPid -le 0) {
-            continue
-        }
-        $cmd = (Get-ProcessCommandLine $ownerPid).ToLowerInvariant()
-        if ($cmd.Contains("packages\desktop-electron") -or $cmd.Contains("packages/desktop-electron") -or $cmd.Contains("electron-vite")) {
-            [void]$targets.Add($ownerPid)
-        }
-    }
-
-    foreach ($targetPid in $targets) {
-        if ($targetPid -le 0) {
-            continue
-        }
-        Write-Host ("[start-gulicode-debug] stopping stale GuLiCode desktop pid={0}" -f $targetPid)
-        Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
-    }
-    if ($targets.Count -gt 0) {
-        Start-Sleep -Seconds 2
-    }
-}
-
 function Start-BackgroundProcess {
     param(
         [string]$Name,
@@ -134,6 +68,26 @@ function Start-BackgroundProcess {
     )
     $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru
     Write-Host ("[start-gulicode-debug] started {0} pid={1}" -f $Name, $process.Id)
+}
+
+function Start-WorkbenchProcess {
+    param(
+        [string[]]$ArgumentList
+    )
+    foreach ($path in @($WorkbenchOut, $WorkbenchErr)) {
+        if (Test-Path $path) {
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
+    $process = Start-Process `
+        -FilePath "python" `
+        -ArgumentList $ArgumentList `
+        -WorkingDirectory $Root `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $WorkbenchOut `
+        -RedirectStandardError $WorkbenchErr `
+        -PassThru
+    Write-Host ("[start-gulicode-debug] started blueprint workbench pid={0}" -f $process.Id)
 }
 
 function Wait-Http {
@@ -155,7 +109,60 @@ function Wait-Http {
     return $false
 }
 
+function Wait-WorkbenchReady {
+    param(
+        [string]$Path,
+        [int]$TimeoutSeconds = 30
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path $Path) {
+            try {
+                $raw = Get-Content -Raw -LiteralPath $Path
+                if ($raw.Trim().Length -gt 0) {
+                    $payload = $raw | ConvertFrom-Json
+                    if ($payload.ok -eq $false) {
+                        throw ("blueprint workbench failed: {0}" -f $payload.error)
+                    }
+                    return $payload
+                }
+            } catch {
+                if ((Get-Date) -ge $deadline) {
+                    throw
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    throw ("Timed out waiting for blueprint workbench. See {0} and {1}" -f $WorkbenchOut, $WorkbenchErr)
+}
+
+function Invoke-Checked {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$WorkingDirectory
+    )
+    & $FilePath @ArgumentList
+    if ($LASTEXITCODE -ne 0) {
+        throw ("Command failed with exit code {0}: {1}" -f $LASTEXITCODE, $FilePath)
+    }
+}
+
 Write-Host ("[start-gulicode-debug] root = {0}" -f $Root)
+Write-Host "[start-gulicode-debug] mode = plugin workbench + mobile + console; Electron desktop is not started"
+
+if (-not (Test-Path $PluginInstaller)) {
+    throw ("Missing plugin installer: {0}" -f $PluginInstaller)
+}
+if (-not (Test-Path $WorkbenchScript)) {
+    throw ("Missing workbench launcher: {0}" -f $WorkbenchScript)
+}
+
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+if (Test-Path $ReadyFile) {
+    Remove-Item -LiteralPath $ReadyFile -Force
+}
 
 if ((Test-ListeningPort 8787) -and (Test-MonitorRoute)) {
     Write-Host "[start-gulicode-debug] collaboration server already listening on 8787"
@@ -167,24 +174,23 @@ if ((Test-ListeningPort 8787) -and (Test-MonitorRoute)) {
     if (Test-ListeningPort 8787) {
         throw "Port 8787 is still occupied by a non-debug process."
     }
-    $args = @(
-        "-m",
-        "multi_agent_tcp",
-        "collaboration-server",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8787",
-        "--db",
-        "logs/collaboration_server.sqlite3",
-        "--seed-config",
-        $SeedConfig,
-        "--log-dir",
-        "logs",
-        "--log-level",
-        "INFO"
-    )
-    Start-BackgroundProcess -Name "collaboration server" -FilePath "python" -ArgumentList $args -WorkingDirectory $Root
+    Write-Host "[start-gulicode-debug] singleton plugin service will start the collaboration server on demand"
+}
+
+if (-not $SkipPluginInstall) {
+    $installArgs = @($PluginInstaller, "--force")
+    if ($SkipWebBuild) {
+        $installArgs += "--skip-web-build"
+    }
+    Write-Host "[start-gulicode-debug] refreshing gulicode-bp personal plugin"
+    Invoke-Checked -FilePath "python" -ArgumentList $installArgs -WorkingDirectory $Root
+} else {
+    Write-Host "[start-gulicode-debug] skipping personal plugin refresh"
+}
+
+if (Test-Path $PersonalWorkbenchScript) {
+    $WorkbenchScript = $PersonalWorkbenchScript
+    Write-Host ("[start-gulicode-debug] using personal plugin workbench wrapper = {0}" -f $WorkbenchScript)
 }
 
 if (Test-ListeningPort 3040) {
@@ -193,29 +199,33 @@ if (Test-ListeningPort 3040) {
     Start-BackgroundProcess -Name "app dev server" -FilePath "bun" -ArgumentList @("run", "dev", "--", "--host", "127.0.0.1") -WorkingDirectory $AppDir
 }
 
-$desktopRendererReady = Test-ListeningPort 5173
-$desktopBridgeReady = Test-GuLiCodeDesktopBridge
-if ($desktopRendererReady -and $desktopBridgeReady) {
-    Write-Host "[start-gulicode-debug] GuLiCode desktop already listening on 5173 with desktop bridge"
-} else {
-    if ($desktopRendererReady) {
-        Write-Host "[start-gulicode-debug] desktop renderer is stale or missing desktop bridge"
-        Stop-StaleGuLiCodeDesktop
-    }
-    Start-BackgroundProcess -Name "GuLiCode desktop" -FilePath $DesktopLauncher -ArgumentList @("--no-clean") -WorkingDirectory $Root
-}
+$workbenchArgs = @(
+    "-u",
+    $WorkbenchScript,
+    "--project-dir",
+    $Root,
+    "--blueprint-id",
+    $BlueprintId,
+    "--ready-file",
+    $ReadyFile
+)
+Start-WorkbenchProcess -ArgumentList $workbenchArgs
+
+$workbench = Wait-WorkbenchReady -Path $ReadyFile -TimeoutSeconds 45
 
 $healthOk = Wait-Http "http://127.0.0.1:8787/api/health" 30
 $mobileOk = Wait-Http "http://127.0.0.1:3040/mobile" 45
 $consoleOk = Wait-Http "http://127.0.0.1:3040/console" 45
-$rendererOk = Wait-Http "http://[::1]:5173/" 60
+$workbenchOk = Wait-Http $workbench.url 45
 
-Write-Host ("[start-gulicode-debug] health  = {0}" -f $healthOk)
-Write-Host ("[start-gulicode-debug] mobile  = {0} http://127.0.0.1:3040/mobile" -f $mobileOk)
-Write-Host ("[start-gulicode-debug] console = {0} http://127.0.0.1:3040/console" -f $consoleOk)
-Write-Host ("[start-gulicode-debug] desktop = {0} http://[::1]:5173/" -f $rendererOk)
+Write-Host ("[start-gulicode-debug] health    = {0}" -f $healthOk)
+Write-Host ("[start-gulicode-debug] workbench = {0} {1}" -f $workbenchOk, $workbench.url)
+Write-Host ("[start-gulicode-debug] mobile    = {0} http://127.0.0.1:3040/mobile" -f $mobileOk)
+Write-Host ("[start-gulicode-debug] console   = {0} http://127.0.0.1:3040/console" -f $consoleOk)
+Write-Host "[start-gulicode-debug] desktop   = skipped"
 
 if (-not $NoOpen) {
+    Start-Process $workbench.url
     Start-Process "http://127.0.0.1:3040/mobile"
     Start-Process "http://127.0.0.1:3040/console"
 }

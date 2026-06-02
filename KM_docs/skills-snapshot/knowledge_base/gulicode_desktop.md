@@ -1,13 +1,17 @@
 # GuLiCode desktop knowledge
 
 This document records the current effective knowledge for the local
-`multi_agent_tcp/GuLiCode` desktop app.
+`multi_agent_tcp/GuLiCode` desktop app. Desktop work is now secondary to the
+`gulicode-bp` Codex plugin path; use this file when the user explicitly asks
+for Electron, desktop shell, IPC, packaging, taskbar, or windowing behavior.
 
 ## Position
 
 - `GuLiCode` is the local vendor baseline derived from OpenCode.
+- The default Blueprint debug entrypoint is the `gulicode-bp` plugin workbench,
+  not the Electron desktop shell.
 - The preferred desktop entry on this machine is
-  `GuLiCode/packages/desktop-electron/`.
+  `GuLiCode/packages/desktop-electron/` only for explicit desktop work.
 - `GuLiCode/packages/desktop/` (Tauri) still exists, but it is currently a
   secondary path and requires Rust/Cargo.
 - For productization, branding, blueprint entry embedding, and icon/taskbar
@@ -22,9 +26,9 @@ Historical paths such as `D:\agents\multi_agent_tcp` may still appear in
 archives or old notes. Treat them as historical unless the current machine
 actually uses them.
 
-## One-click startup (preferred)
+## Explicit Desktop Startup
 
-Preferred entrypoints on this machine:
+Use these entrypoints only when desktop-shell behavior is part of the task:
 
 - Windows double-click:
   `F:\src\Package\Script\Python\multi_agent_tcp\start-gulicode-desktop.cmd`
@@ -282,7 +286,11 @@ bun run --cwd packages/desktop tauri dev
 
 ## Blueprint integration guidance
 
-Longer-term blueprint integration should follow this shape:
+Desktop blueprint integration remains a compatibility track. The default
+plugin-first path serves the Blueprint workbench through `gulicode-bp` and
+reuses `DesktopBlueprintService` / `GraphRuntimeControlPlane` directly.
+
+When working on explicit desktop integration, follow this shape:
 
 ```text
 Electron main
@@ -298,8 +306,7 @@ packages/app
      changesets, conflicts, artifacts, and reports
 ```
 
-The current UI/product direction is to land this work inside GuLiCode-owned
-desktop surfaces, not by reviving a separate legacy visual-editor product line.
+Do not revive a separate legacy visual-editor product line.
 
 Do not place real blueprint product logic in
 `packages/desktop-electron/src/renderer/index.tsx`; that file is only the
@@ -309,7 +316,10 @@ desktop shell bootstrap.
 
 When the user asks to start or verify GuLiCode on this machine:
 
-- default to `start-gulicode-desktop.cmd` or `bun run desktop`
+- default to the plugin-first workflow in `debug_start.md` when the request is
+  ordinary `调试启动` or Blueprint workbench debugging
+- use `start-gulicode-desktop.cmd` or `bun run desktop` only when the request is
+  explicitly about Electron desktop behavior
 - use `start-gulicode-desktop.cmd --packaged` for packaged-smoke and taskbar/icon verification
 - do not default to Tauri
 - verify success from the launcher log markers above

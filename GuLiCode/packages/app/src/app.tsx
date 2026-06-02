@@ -70,6 +70,8 @@ const BlueprintWindowRoute = () => (
   </SessionProviders>
 )
 
+const StandaloneBlueprintWindowRoute = () => <BlueprintWindow />
+
 function UiI18nBridge(props: ParentProps) {
   const language = useLanguage()
   return <I18nProvider value={{ locale: language.intl, t: language.t }}>{props.children}</I18nProvider>
@@ -291,8 +293,33 @@ export function AppInterface(props: {
   servers?: Array<ServerConnection.Any>
   router?: Component<BaseRouterProps>
   disableHealthCheck?: boolean
+  disableServerSync?: boolean
   visualShell?: boolean
 }) {
+  const Routed = () => (
+    <Dynamic
+      component={props.router ?? Router}
+      root={(routerProps) => (
+        <RouterRoot appChildren={props.children} visualShell={props.visualShell}>
+          {routerProps.children}
+        </RouterRoot>
+      )}
+    >
+      <Route path="/" component={HomeRoute} />
+      <Route path="/:dir" component={DirectoryLayout}>
+        <Route path="/" component={SessionIndexRoute} />
+        <Route path="/session/:id?" component={SessionRoute} />
+        <Route path="/blueprint-window/:id?" component={BlueprintWindowRoute} />
+      </Route>
+    </Dynamic>
+  )
+
+  const StandaloneRouted = () => (
+    <Dynamic component={props.router ?? Router} root={(routerProps) => <>{routerProps.children}</>}>
+      <Route path="/:dir/blueprint-window/:id?" component={StandaloneBlueprintWindowRoute} />
+    </Dynamic>
+  )
+
   return (
     <ServerProvider
       defaultServer={props.defaultServer}
@@ -302,25 +329,13 @@ export function AppInterface(props: {
       <ConnectionGate disableHealthCheck={props.disableHealthCheck}>
         <ServerKey>
           <QueryProvider>
-            <GlobalSDKProvider>
-              <GlobalSyncProvider>
-                <Dynamic
-                  component={props.router ?? Router}
-                  root={(routerProps) => (
-                    <RouterRoot appChildren={props.children} visualShell={props.visualShell}>
-                      {routerProps.children}
-                    </RouterRoot>
-                  )}
-                >
-                  <Route path="/" component={HomeRoute} />
-                  <Route path="/:dir" component={DirectoryLayout}>
-                    <Route path="/" component={SessionIndexRoute} />
-                    <Route path="/session/:id?" component={SessionRoute} />
-                    <Route path="/blueprint-window/:id?" component={BlueprintWindowRoute} />
-                  </Route>
-                </Dynamic>
-              </GlobalSyncProvider>
-            </GlobalSDKProvider>
+            <Show when={!props.disableServerSync} fallback={<StandaloneRouted />}>
+              <GlobalSDKProvider>
+                <GlobalSyncProvider>
+                  <Routed />
+                </GlobalSyncProvider>
+              </GlobalSDKProvider>
+            </Show>
           </QueryProvider>
         </ServerKey>
       </ConnectionGate>

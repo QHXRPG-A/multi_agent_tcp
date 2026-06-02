@@ -1,18 +1,20 @@
 ---
 name: multi-agent-tcp
 description: >-
- Work on the current multi_agent_tcp direction: GuLiCode desktop productization,
- blueprint runtime embedding, GraphRuntimeControlPlane, GraphRuntime scheduling,
- top-agent orchestration, AgentNode queues, workspace state, events, and
- CLIWorkerBackend adapters. Use for GuLiCode desktop, blueprint entry embedding,
- runtime start/status/end, agent dispatch, workspace/archive flow, per-agent
- private workspaces, MCP workspace tools, and legacy TCP/CodeMaker compatibility.
+ Work on the current multi_agent_tcp direction: gulicode-bp Codex plugin
+ productization, Blueprint web workbench, GraphRuntimeControlPlane, GraphRuntime
+ scheduling, plugin-controlled start plans, AgentNode queues, workspace state, events,
+ and CLIWorkerBackend adapters. Use for the gulicode-bp plugin, blueprint
+ workbench/debug startup, runtime start/status/end, agent dispatch,
+ workspace/archive flow, per-agent private workspaces, MCP workspace tools, and
+ GuLiCode desktop compatibility work.
 ---
 # multi_agent_tcp Project Skill
 
 Use this skill when working on the `multi_agent_tcp` repository, especially the
-GuLiCode desktop app, blueprint runtime, top-agent orchestration, multi-agent
-communication, workspace isolation, MCP workspace tools, and CLI worker
+`gulicode-bp` Codex plugin, Blueprint web workbench, blueprint runtime,
+plugin-controlled start plans, multi-agent communication, workspace isolation, MCP
+workspace tools, GuLiCode mobile/console debug surfaces, and CLI worker
 adapters.
 
 This file is intentionally short so Codex can discover the skill reliably.
@@ -24,8 +26,9 @@ for the current task.
 The active product direction is:
 
 ```text
-GuLiCode desktop / UI / top Agent
-  -> blueprint entry and workbench surfaces
+gulicode-bp Codex plugin
+  -> local Blueprint web workbench
+  -> GuLiCode app dev surfaces: /mobile and /console
   -> GraphRuntimeControlPlane
   -> GraphRuntime
   -> AgentNode queues, outgoing batches, joins, workspace state, events
@@ -35,11 +38,19 @@ GuLiCode desktop / UI / top Agent
 
 Interpretation rules:
 
-- Treat GuLiCode desktop as the user-facing product center.
-- Treat blueprint capability as embedded inside GuLiCode desktop, not as a
-  separate Ryven-led product surface.
+- Treat `gulicode-bp` as the default user-facing development/debug entrypoint.
+- Treat the Blueprint web workbench as a plugin-served surface backed by the
+  existing GuLiCode app build and Python runtime service.
+- Keep `/mobile` and `/console` in the default debug stack through the app dev
+  server.
+- Treat GuLiCode desktop/Electron as a secondary compatibility target. Start it
+  only when the user asks for desktop shell, IPC, packaging, taskbar, or
+  desktop-window behavior.
 - Treat `GraphRuntimeControlPlane` and `GraphRuntime` as the framework-owned
   execution center.
+- Treat start plan generation and validation as a `gulicode-bp` plugin
+  responsibility: create/validate a plan first, show it for confirmation, then
+  call `blueprint_start` with the confirmed plan.
 - Treat low-level TCP workers as a backend adapter path, not the product
   architecture center.
 - Prefer `CLIWorkerBackend` in new writing. Mention `CodeMakerCluster` only as a
@@ -64,14 +75,15 @@ Read these first based on the task:
 
 - Project architecture and ownership:
   `knowledge_base/core_architecture.md`
-- GuLiCode desktop startup, packaging, and shell/runtime layering:
+- GuLiCode desktop startup, packaging, and shell/runtime layering for explicit
+  desktop work:
   `knowledge_base/gulicode_desktop.md`
-- GuLiCode UI, blueprint side panel, workbench entry, branding, and renderer
-  conventions:
+- GuLiCode app UI, plugin-served blueprint workbench, mobile/console debug
+  surfaces, and renderer conventions:
   `knowledge_base/guli_desktop_ui.md`
 - Runtime control-plane CLI/RPC flows:
   `knowledge_base/dispatch_workflows.md`
-- Top-agent governance and multi-agent communication design:
+- Plugin start-plan governance and multi-agent communication design:
   `多agents通信设计.md`
 - Registry, skill selection, and skill injection:
   `knowledge_base/registry_and_skills.md`
@@ -81,11 +93,67 @@ Read these first based on the task:
   `environment_setup.md`
 - Current active priorities:
   `tasks/current_goals.md`
-- Debug start workflow for desktop + Collaboration Server + mock mobile +
-  server console:
+- Plugin-first debug start workflow for Blueprint workbench + Collaboration
+  Server + mock mobile + server console:
   `knowledge_base/debug_start.md`
 
 ## Recent Handoff
+
+For the latest `gulicode-bp` MCP transport, bootstrap lock, and status logging
+work from 2026-06-02:
+
+- Transport/bootstrap/Workbench lifecycle boundaries, dead-PID bootstrap lock
+  cleanup, bootstrap/MCP logs, `mcp_status.json` heartbeat diagnostics, Codex
+  stdio reconnect boundary after `Transport closed`, and plugin manifest
+  default prompt limit:
+  `archive/runtime-backend/gulicode_bp_mcp_transport_bootstrap_logging_2026-06-02.md`
+
+Use that file when the user reports:
+
+- `gulicode-bp` MCP tools are visible but calls return `Transport closed`
+- Workbench is open but MCP tools cannot be called
+- MCP startup appears stuck behind `bootstrap.lock`
+- `mcp_status.json` says `running` while the MCP process is gone or stale
+- the user asks what transport, bootstrap, or Workbench means
+- Codex warns that `interface.defaultPrompt` has too many prompts
+
+For the latest `gulicode-bp` standalone runtime and Codex fan-out smoke work
+from 2026-06-01:
+
+- Plugin-owned runtime venv install/cache sync, installer repair behavior,
+  MCP event-loop `asyncio.run()` fix, queued outgoing-target reminders,
+  reminder race guards, `fanout-worker-smoke`, and Codex live fan-out smoke:
+  `archive/runtime-backend/gulicode_bp_standalone_codex_fanout_runtime_2026-06-01.md`
+
+Use that file when the user reports:
+
+- installed `gulicode-bp` still depends on local repo source or stale Codex
+  cache `.mcp.json`
+- `blueprint_start` fails inside MCP with `asyncio.run() cannot be called from
+  a running event loop`
+- fan-out runs leave `remaining_targets` stuck or reminders create duplicate
+  batches
+- a side-browser workbench URL shows `ERR_CONNECTION_REFUSED` after runtime
+  restart
+- live worker smoke should use Codex rather than CodeMaker
+
+For the latest `gulicode-bp` plugin direct-control and start-plan work from
+2026-06-01:
+
+- Plugin CRUD MCP/API, deterministic `blueprint.plan.create`,
+  `blueprint.plan.validate`, confirmed `blueprint_start`, Top Agent wording
+  removal, two-step workbench run UI, and the current P0 standalone-distribution
+  boundary:
+  `archive/runtime-backend/gulicode_bp_plugin_direct_control_start_plan_2026-06-01.md`
+
+Use that file when the user reports:
+
+- installing `gulicode-bp` without a local `multi_agent_tcp` checkout does not
+  work
+- Blueprint CRUD, plan creation/validation, or confirmed start should be driven
+  directly by plugin MCP tools
+- the UI still exposes Top Agent planning language or skips the generate-plan
+  confirmation step
 
 For the latest Agent and Script Function Node interaction work from
 2026-05-31:
@@ -131,7 +199,7 @@ Use those files when the user reports:
   `false: message`
 - invalid `tick -> bool` or other typed-port connections are accepted
 - canvas drag connection and Inspector edge edits disagree
-- Tick-only direct runs require a selected start Agent
+- Tick-only start-plan generation incorrectly requires a selected start node
 - `common_nodes` JSON fails to load, Branch dispatch does not route, or Tick
   cadence/backpressure/status looks wrong
 
@@ -216,9 +284,9 @@ Use that file when the user reports:
 
 - the Blueprint toolbar dropdown, project blueprint switching, or new blueprint
   creation is wrong
-- runtime direct `Run` should start live without Top Agent planning
-- direct run does not require or respect selected start Agents
-- Top Agent planning starts the wrong blueprint document
+- runtime `Confirm run` should start live only after a generated start plan
+- start-plan generation does not require or respect selected start nodes
+- plugin start-plan generation starts the wrong blueprint document
 
 For earlier blueprint panel work from 2026-05-25:
 
@@ -230,7 +298,7 @@ For earlier blueprint panel work from 2026-05-25:
 Use those files when the user reports:
 
 - blueprint submit progress is missing or stuck
-- the Top Agent plan card does not appear
+- the start-plan preview card does not appear
 - the blueprint panel overlay/mask behavior is wrong
 - runtime node glow, edge flow, or pending task filtering looks wrong
 
@@ -253,22 +321,24 @@ files for implementation decisions unless an archive is explicitly called out.
 - Local environment setup, Python/Bun/Codex paths, PowerShell script policy,
   localhost MCP `502` / `503`, proxy, `NO_PROXY`, and repo `skill_list`:
   read `environment_setup.md`.
-- GuLiCode startup, one-click launcher, packaged bring-up, taskbar icon, and
-  direct Electron fallback: read `knowledge_base/gulicode_desktop.md`.
+- GuLiCode desktop startup, packaged bring-up, taskbar icon, and direct
+  Electron fallback: read `knowledge_base/gulicode_desktop.md`; use it only
+  for explicit desktop-shell work.
 - When the user says `调试启动`: read `knowledge_base/debug_start.md`, then
-  start GuLiCode desktop, the Collaboration Server, the mock mobile `/mobile`
-  client, and the `/console` server console.
+  start the `gulicode-bp` plugin workbench, the Collaboration Server, the app
+  dev server, the mock mobile `/mobile` client, and the `/console` server
+  console. Do not start the GuLiCode Electron desktop unless explicitly asked.
 - Desktop UI ownership, branding, icon replacement, empty-state wording,
   blueprint entry placement, and blueprint workbench embedding:
   read `knowledge_base/guli_desktop_ui.md`, then
   `tasks/guli_desktop_ui_tasks.md`.
-- Agent information panel interactions, task status display, automatic Top
-  Agent summary, long-press progress, Markdown reply rendering, context menu,
+- Agent information panel interactions, task status display, automatic run
+  summary, long-press progress, Markdown reply rendering, context menu,
   move/resize behavior, Test Agent JSON snapshots, and clean desktop debug:
   read `archive/frontend/blueprint_agent_task_panel_auto_top_summary_2026-05-22.md`
   plus the relevant `archive/frontend/agent_info_panel_*` files.
-- GuLiCode top Agent, organization view, top-agent profile, start plan, and
-  status explanation: read `多agents通信设计.md`, then
+- GuLiCode plugin control, organization view, start plan, and status
+  explanation: read `多agents通信设计.md`, then
   `tasks/multi_agent_communication_tasks.md`.
 - Runtime start/status/end, organization, message batch, agent dispatch,
   join-create, and join-contribute: read `knowledge_base/dispatch_workflows.md`.

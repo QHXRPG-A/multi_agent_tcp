@@ -1,0 +1,28 @@
+{
+  "name": "gulicode-bp",
+  "version": "0.1.3",
+  "description": "GuLiCode Blueprint workbench and runtime bridge for Codex.",
+  "author": {
+    "name": "GuLiCode"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "GuLiCode Blueprint",
+    "shortDescription": "Run GuLiCode blueprints from Codex.",
+    "longDescription": "GuLiCode Blueprint exposes the existing Python GraphRuntime control plane through Codex skills, MCP tools, and a local web workbench.",
+    "developerName": "GuLiCode",
+    "category": "Productivity",
+    "capabilities": [
+      "Blueprint Runtime",
+      "MCP Tools",
+      "Local Web Workbench",
+      "Plugin Debug Stack"
+    ],
+    "defaultPrompt": [
+      "Open the GuLiCode Blueprint workbench.",
+      "Run the current project blueprint.",
+      "Inspect blueprint run status and events."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

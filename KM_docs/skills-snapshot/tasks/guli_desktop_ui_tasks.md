@@ -1,14 +1,18 @@
-# Guli desktop UI tasks
+# Guli app UI tasks
 
 ## Current positioning
 
 The current UI workstream is:
 
 ```text
-Guli productization
-  -> blueprint embedded in GuLiCode desktop
-  -> runtime-backed desktop workbench
+gulicode-bp plugin workbench
+  -> GuLiCode app Blueprint routes/components
+  -> /mobile and /console
+  -> runtime-backed web workbench
 ```
+
+Use Electron desktop tasks only when the user explicitly asks for desktop shell,
+IPC, packaging, taskbar, or windowing work.
 
 Do not treat the old Ryven/editor line as the current UI target.
 

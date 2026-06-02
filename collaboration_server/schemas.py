@@ -110,6 +110,7 @@ class BlueprintStructureNode(BaseModel):
     downstreamNodeIds: list[str] = Field(default_factory=list)
     inputPorts: list[str] = Field(default_factory=list)
     outputPorts: list[str] = Field(default_factory=list)
+    everyNSeconds: Optional[int] = None
     everyNTicks: Optional[int] = None
 
 
@@ -139,6 +140,7 @@ class DesktopBlueprintSnapshotNode(BaseModel):
     downstreamNodeIds: list[str] = Field(default_factory=list)
     inputPorts: list[str] = Field(default_factory=list, max_length=80)
     outputPorts: list[str] = Field(default_factory=list, max_length=80)
+    everyNSeconds: Optional[int] = Field(default=None, ge=1)
     everyNTicks: Optional[int] = Field(default=None, ge=1)
     agentId: Optional[str] = None
     cliKind: Optional[str] = None

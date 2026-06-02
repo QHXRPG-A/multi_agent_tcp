@@ -115,7 +115,7 @@ export type BlueprintCommonNode =
   | {
       node_id: string
       kind: "tick"
-      every_n_ticks: number
+      every_n_seconds: number
     }
 
 export type BlueprintPortConnectResult = {
@@ -644,7 +644,7 @@ export function addCommonNode(
   next.graph.common_nodes[node_id] = normalizeCommonNode(node_id, {
     node_id,
     kind,
-    every_n_ticks: kind === "tick" ? 1 : undefined,
+    every_n_seconds: kind === "tick" ? 1 : undefined,
   })
   next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
   next.selection = { type: "node", id: node_id }
@@ -1383,13 +1383,16 @@ function normalizeRouteNode(id: string, node: Partial<BlueprintRouteNode>): Blue
   }
 }
 
-function normalizeCommonNode(id: string, node: Partial<BlueprintCommonNode> & { every_n_ticks?: number }): BlueprintCommonNode {
+function normalizeCommonNode(
+  id: string,
+  node: Partial<BlueprintCommonNode> & { every_n_ticks?: number; every_n_seconds?: number },
+): BlueprintCommonNode {
   const kind = node.kind === "tick" ? "tick" : "branch"
   if (kind === "tick") {
     return {
       node_id: id,
       kind,
-      every_n_ticks: Math.max(1, Math.floor(Number(node.every_n_ticks ?? 1) || 1)),
+      every_n_seconds: Math.max(1, Math.floor(Number(node.every_n_seconds ?? node.every_n_ticks ?? 1) || 1)),
     }
   }
   return {

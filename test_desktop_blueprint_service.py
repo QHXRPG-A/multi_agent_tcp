@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import importlib.util
 import inspect
 import os
 import shutil
@@ -11,6 +12,7 @@ import threading
 import time
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from urllib import request
 
 import pytest
@@ -23,6 +25,7 @@ from multi_agent_tcp.desktop_blueprint_service import (
     DesktopBlueprintService,
 )
 from multi_agent_tcp import blueprint_script_nodes
+from multi_agent_tcp import desktop_blueprint_service as desktop_blueprint_service_module
 from multi_agent_tcp.blueprint_mcp_runtime import (
     MCP_TOOL_AUDIT_EVENT,
     MCPTokenScope,
@@ -39,8 +42,45 @@ from multi_agent_tcp._asyncio_utils import (
     _should_suppress_asyncio_connection_reset,
 )
 from multi_agent_tcp.client import AgentTCPClient
+from multi_agent_tcp.graph_runtime import ScriptNode
 from multi_agent_tcp.protocol import read_frame, write_frame
 from multi_agent_tcp.workspace_manager import DulwichWorkspaceManager, RunWorkspace
+
+
+def _load_gulicode_bp_installer_module():
+    path = Path(__file__).resolve().parent / "plugins" / "gulicode-bp" / "scripts" / "install_personal_plugin.py"
+    spec = importlib.util.spec_from_file_location("gulicode_bp_install_personal_plugin", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_gulicode_bp_smoke_module():
+    path = Path(__file__).resolve().parent / "plugins" / "gulicode-bp" / "scripts" / "smoke_standalone_plugin.py"
+    spec = importlib.util.spec_from_file_location("gulicode_bp_smoke_standalone_plugin", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_gulicode_bp_bootstrap_runtime_module():
+    path = Path(__file__).resolve().parent / "plugins" / "gulicode-bp" / "scripts" / "bootstrap_runtime.py"
+    spec = importlib.util.spec_from_file_location("gulicode_bp_bootstrap_runtime", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_gulicode_bp_mcp_module():
+    path = Path(__file__).resolve().parent / "plugins" / "gulicode-bp" / "mcp" / "gulicode_bp_mcp.py"
+    spec = importlib.util.spec_from_file_location("gulicode_bp_mcp", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _document(project_dir: Path | None = None) -> dict:
@@ -94,6 +134,537 @@ def _plan() -> dict:
         },
         "run_policy": {},
     }
+
+
+def test_blueprint_service_creates_and_soft_deletes_blueprint(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+
+    created = service.handle_request(
+        {
+            "command": "blueprint.create",
+            "args": {"projectDir": str(tmp_path), "blueprintId": "plugin-test", "name": "Plugin Test"},
+        }
+    )
+    listed = service.handle_request({"command": "blueprint.list", "args": {"projectDir": str(tmp_path)}})
+    deleted = service.handle_request(
+        {"command": "blueprint.delete", "args": {"projectDir": str(tmp_path), "blueprintId": "plugin-test"}}
+    )
+    listed_after_delete = service.handle_request({"command": "blueprint.list", "args": {"projectDir": str(tmp_path)}})
+
+    assert created["ok"] is True
+    assert created["document"]["id"] == "plugin-test"
+    assert [item["id"] for item in listed["blueprints"]] == ["plugin-test"]
+    assert deleted["ok"] is True
+    assert Path(deleted["trashPath"]).is_file()
+    assert listed_after_delete["blueprints"] == []
+
+
+def test_blueprint_service_delete_rejects_active_run(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+    try:
+        service.handle_request(
+            {"command": "blueprint.save", "args": {"projectDir": str(tmp_path), "document": _document(tmp_path)}}
+        )
+        started = service.handle_request(
+            {
+                "command": "blueprint.start",
+                "args": {
+                    "projectDir": str(tmp_path),
+                    "blueprintId": "default",
+                    "plan": _plan(),
+                    "executionMode": "status",
+                },
+            }
+        )
+
+        with pytest.raises(BlueprintServiceError) as exc:
+            service.handle_request(
+                {"command": "blueprint.delete", "args": {"projectDir": str(tmp_path), "blueprintId": "default"}}
+            )
+
+        assert started["ok"] is True
+        assert exc.value.code == "BLUEPRINT_IN_USE"
+    finally:
+        service.close()
+
+
+def test_blueprint_service_creates_and_validates_start_plan(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+    service.handle_request(
+        {"command": "blueprint.save", "args": {"projectDir": str(tmp_path), "document": _document(tmp_path)}}
+    )
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.handle_request(
+            {
+                "command": "blueprint.plan.create",
+                "args": {"projectDir": str(tmp_path), "blueprintId": "default", "task": "Ship it"},
+            }
+        )
+    created = service.handle_request(
+        {
+            "command": "blueprint.plan.create",
+            "args": {
+                "projectDir": str(tmp_path),
+                "blueprintId": "default",
+                "task": "Ship it",
+                "startNodeIds": ["planner"],
+            },
+        }
+    )
+    validated = service.handle_request(
+        {
+            "command": "blueprint.plan.validate",
+            "args": {"projectDir": str(tmp_path), "blueprintId": "default", "plan": created["plan"]},
+        }
+    )
+
+    assert exc.value.code == "START_NODES_REQUIRED"
+    assert created["ok"] is True
+    assert created["plan"]["user_goal"] == "Ship it"
+    assert created["plan"]["start_nodes"] == ["planner"]
+    assert created["validation"]["ok"] is True
+    assert created["validation"]["valid_start_nodes"] == ["planner"]
+    assert validated["validation"]["ok"] is True
+
+
+def test_blueprint_service_plan_overrides_cannot_replace_start_nodes(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+    service.handle_request(
+        {"command": "blueprint.save", "args": {"projectDir": str(tmp_path), "document": _document(tmp_path)}}
+    )
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.handle_request(
+            {
+                "command": "blueprint.plan.create",
+                "args": {
+                    "projectDir": str(tmp_path),
+                    "blueprintId": "default",
+                    "task": "Ship it",
+                    "startNodeIds": ["planner"],
+                    "planOverrides": {"start_nodes": ["ghost"]},
+                },
+            }
+        )
+    overridden = service.handle_request(
+        {
+            "command": "blueprint.plan.create",
+            "args": {
+                "projectDir": str(tmp_path),
+                "blueprintId": "default",
+                "task": "Ship it",
+                "startNodeIds": ["planner"],
+                "planOverrides": {"user_goal": "Override goal"},
+            },
+        }
+    )
+
+    assert exc.value.code == "START_PLAN_OVERRIDE_REJECTED"
+    assert overridden["plan"]["user_goal"] == "Override goal"
+    assert overridden["plan"]["start_nodes"] == ["planner"]
+
+
+def test_gulicode_bp_standalone_mcp_payload_uses_plugin_runtime(tmp_path: Path) -> None:
+    installer = _load_gulicode_bp_installer_module()
+    plugin_root = tmp_path / "gulicode-bp"
+
+    payload = installer.build_mcp_payload(plugin_root)
+    server = payload["mcpServers"]["gulicode-bp"]
+    env = server["env"]
+
+    assert server["command"] == "python"
+    assert server["args"] == ["scripts/bootstrap_mcp.py"]
+    assert server["cwd"] == str(plugin_root)
+    assert env["GULICODE_BP_PLUGIN_ROOT"] == str(plugin_root)
+    assert env["GULICODE_BP_RUNTIME_HOME"] == str(plugin_root / ".runtime")
+    assert env["GULICODE_BP_DATA_DIR"] == str(plugin_root / ".runtime" / "state")
+    assert env["GULICODE_BP_DISABLE_REPO_FALLBACK"] == "1"
+    assert "GULICODE_BP_REPO_ROOT" not in env
+    assert "PYTHONPATH" not in env
+
+
+def test_gulicode_bp_bootstrap_creates_runtime_and_installs_wheel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = _load_gulicode_bp_bootstrap_runtime_module()
+    plugin_root = tmp_path / "gulicode-bp"
+    wheel = plugin_root / "runtime" / "wheels" / "multi_agent_tcp-0.5.0-py3-none-any.whl"
+    wheel.parent.mkdir(parents=True)
+    wheel.write_text("wheel", encoding="utf-8")
+    runtime_root = plugin_root / ".runtime"
+    runtime_python = bootstrap.runtime_venv_python(runtime_root)
+    calls: list[list[str]] = []
+
+    class Completed:
+        stdout = ""
+        stderr = ""
+        returncode = 0
+
+    def fake_run_checked(args, **kwargs):
+        call = [str(item) for item in args]
+        calls.append(call)
+        if call[1:3] == ["-m", "venv"]:
+            runtime_python.parent.mkdir(parents=True)
+            runtime_python.write_text("", encoding="utf-8")
+        return Completed()
+
+    def fake_validate(python: Path, root: Path, runtime: Path) -> dict[str, str]:
+        assert python == runtime_python
+        assert root == plugin_root.resolve()
+        assert runtime == runtime_root.resolve()
+        return {"runtimePackage": str(runtime / "venv" / "Lib" / "site-packages" / "multi_agent_tcp" / "__init__.py")}
+
+    monkeypatch.setattr(bootstrap, "_run_checked", fake_run_checked)
+    monkeypatch.setattr(bootstrap, "pip_available", lambda python: True)
+    monkeypatch.setattr(bootstrap, "validate_runtime_imports", fake_validate)
+
+    result = bootstrap.prepare_runtime(plugin_root)
+
+    install_calls = [call for call in calls if call[1:4] == ["-m", "pip", "install"]]
+    assert result["createdVenv"] is True
+    assert result["installedRuntime"] is True
+    assert len(install_calls) == 1
+    install_call = install_calls[0]
+    assert "--upgrade" in install_call
+    assert "--force-reinstall" in install_call
+    assert "--no-deps" not in install_call
+    assert "--ignore-installed" not in install_call
+    assert install_call[-1] == str(wheel.resolve())
+    assert (runtime_root / "state" / "bootstrap.json").is_file()
+    status = json.loads((runtime_root / "state" / "mcp_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "starting"
+    assert status["phase"] == "runtime-ready"
+    assert status["component"] == "runtime-bootstrap"
+    log_text = (runtime_root / "state" / "logs" / "gulicode-bp-bootstrap.log").read_text(encoding="utf-8")
+    assert "prepare-start" in log_text
+    assert "runtime-install-start" in log_text
+    assert "prepare-complete" in log_text
+
+
+def test_gulicode_bp_bootstrap_removes_dead_pid_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = _load_gulicode_bp_bootstrap_runtime_module()
+    plugin_root = tmp_path / "gulicode-bp"
+    wheel = plugin_root / "runtime" / "wheels" / "multi_agent_tcp-0.5.0-py3-none-any.whl"
+    wheel.parent.mkdir(parents=True)
+    wheel.write_text("wheel", encoding="utf-8")
+    runtime_root = plugin_root / ".runtime"
+    runtime_python = bootstrap.runtime_venv_python(runtime_root)
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_text("", encoding="utf-8")
+    state_dir = runtime_root / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "bootstrap.json").write_text(
+        json.dumps({"runtimeWheel": bootstrap._wheel_identity(wheel.resolve())}),
+        encoding="utf-8",
+    )
+    lock_path = runtime_root / "bootstrap.lock"
+    lock_path.write_text("pid=987654\ncreated=2026-06-02T00:00:00Z\ncommand=test\n", encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "_pid_is_running", lambda pid: False)
+    monkeypatch.setattr(bootstrap, "pip_available", lambda python: True)
+    monkeypatch.setattr(
+        bootstrap,
+        "validate_runtime_imports",
+        lambda python, root, runtime: {"runtimePackage": str(runtime / "venv" / "multi_agent_tcp" / "__init__.py")},
+    )
+
+    result = bootstrap.prepare_runtime(plugin_root)
+
+    assert result["createdVenv"] is False
+    assert result["installedRuntime"] is False
+    assert not lock_path.exists()
+    log_text = (state_dir / "logs" / "gulicode-bp-bootstrap.log").read_text(encoding="utf-8")
+    assert "stale-lock-removed" in log_text
+    assert "dead-pid" in log_text
+
+
+def test_gulicode_bp_bootstrap_keeps_live_pid_lock_until_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = _load_gulicode_bp_bootstrap_runtime_module()
+    runtime_root = tmp_path / ".runtime"
+    runtime_root.mkdir()
+    state_dir = runtime_root / "state"
+    lock_path = runtime_root / "bootstrap.lock"
+    lock_path.write_text(f"pid={os.getpid()}\ncreated=2026-06-02T00:00:00Z\ncommand=test\n", encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "_pid_is_running", lambda pid: True)
+
+    with pytest.raises(RuntimeError, match="timed out waiting"):
+        with bootstrap._bootstrap_lock(runtime_root, data_dir=state_dir, timeout=0.01, poll_interval=0.01):
+            pass
+
+    assert lock_path.exists()
+    status = json.loads((state_dir / "mcp_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "error"
+    assert status["phase"] == "bootstrap-lock"
+    log_text = (state_dir / "logs" / "gulicode-bp-bootstrap.log").read_text(encoding="utf-8")
+    assert "lock-wait" in log_text
+    assert "lock-timeout" in log_text
+
+
+def test_gulicode_bp_bootstrap_failure_writes_status_and_log(tmp_path: Path) -> None:
+    bootstrap = _load_gulicode_bp_bootstrap_runtime_module()
+    plugin_root = tmp_path / "gulicode-bp"
+
+    with pytest.raises(RuntimeError, match="runtime wheel is missing"):
+        bootstrap.prepare_runtime(plugin_root, status_component="test-bootstrap")
+
+    state_dir = plugin_root / ".runtime" / "state"
+    status = json.loads((state_dir / "mcp_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "error"
+    assert status["component"] == "test-bootstrap"
+    assert status["phase"] == "prepare-runtime"
+    assert "runtime wheel is missing" in status["lastError"]
+    log_text = (state_dir / "logs" / "gulicode-bp-bootstrap.log").read_text(encoding="utf-8")
+    assert "prepare-start" in log_text
+    assert "prepare-error" in log_text
+
+
+def test_gulicode_bp_bootstrap_validation_disables_repo_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = _load_gulicode_bp_bootstrap_runtime_module()
+    plugin_root = tmp_path / "gulicode-bp"
+    runtime_root = plugin_root / ".runtime"
+    runtime_python = bootstrap.runtime_venv_python(runtime_root)
+    runtime_package = runtime_root / "venv" / "Lib" / "site-packages" / "multi_agent_tcp" / "__init__.py"
+    captured: dict[str, Any] = {}
+
+    class Completed:
+        stdout = json.dumps({"runtimePackage": str(runtime_package)})
+        stderr = ""
+        returncode = 0
+
+    def fake_run_checked(args, **kwargs):
+        captured["env"] = kwargs["env"]
+        captured["cwd"] = kwargs["cwd"]
+        return Completed()
+
+    monkeypatch.setenv("GULICODE_BP_REPO_ROOT", r"F:\src\Package\Script\Python\multi_agent_tcp")
+    monkeypatch.setenv("PYTHONPATH", r"F:\src\Package\Script\Python")
+    monkeypatch.setattr(bootstrap, "_run_checked", fake_run_checked)
+
+    result = bootstrap.validate_runtime_imports(runtime_python, plugin_root, runtime_root)
+
+    env = captured["env"]
+    assert result["runtimePackage"] == str(runtime_package.resolve())
+    assert captured["cwd"] == plugin_root
+    assert env["GULICODE_BP_PLUGIN_ROOT"] == str(plugin_root)
+    assert env["GULICODE_BP_RUNTIME_HOME"] == str(runtime_root)
+    assert env["GULICODE_BP_DATA_DIR"] == str(runtime_root / "state")
+    assert env["GULICODE_BP_DISABLE_REPO_FALLBACK"] == "1"
+    assert "GULICODE_BP_REPO_ROOT" not in env
+    assert "PYTHONPATH" not in env
+
+
+def test_gulicode_bp_installer_installs_runtime_dependencies_and_validates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer = _load_gulicode_bp_installer_module()
+    plugin_root = tmp_path / "gulicode-bp"
+    wheel = tmp_path / "multi_agent_tcp-0.5.0-py3-none-any.whl"
+    wheel.write_text("wheel", encoding="utf-8")
+    runtime_python = installer.runtime_venv_python(plugin_root / ".runtime")
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_text("", encoding="utf-8")
+    calls: list[list[str]] = []
+    validated: list[tuple[Path, Path]] = []
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(args, **kwargs):
+        calls.append([str(item) for item in args])
+        return Completed()
+
+    def fake_validate(python: Path, root: Path) -> None:
+        validated.append((python, root))
+
+    monkeypatch.setattr(installer.subprocess, "run", fake_run)
+    monkeypatch.setattr(installer, "validate_runtime_imports", fake_validate)
+
+    result = installer.ensure_runtime_venv(plugin_root, wheel)
+
+    install_calls = [call for call in calls if call[1:4] == ["-m", "pip", "install"]]
+    assert result == runtime_python
+    assert len(install_calls) == 1
+    install_call = install_calls[0]
+    assert "--upgrade" in install_call
+    assert "--force-reinstall" in install_call
+    assert "--no-deps" not in install_call
+    assert "--ignore-installed" not in install_call
+    assert install_call[-1] == str(wheel)
+    assert validated == [(runtime_python, plugin_root)]
+
+
+def test_gulicode_bp_installer_syncs_codex_cache_mcp(tmp_path: Path) -> None:
+    installer = _load_gulicode_bp_installer_module()
+    installed = tmp_path / "plugins" / "gulicode-bp"
+    cache_root = tmp_path / ".codex" / "plugins" / "cache" / "personal" / "gulicode-bp"
+    legacy_cache = cache_root / "0.1.2"
+    installed.mkdir(parents=True)
+    legacy_cache.mkdir(parents=True)
+    (installed / ".codex-plugin").mkdir()
+    (installed / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "gulicode-bp", "version": "0.1.3"}),
+        encoding="utf-8",
+    )
+    (installed / ".mcp.json").write_text("{}", encoding="utf-8")
+    (legacy_cache / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "gulicode-bp": {
+                        "env": {
+                            "GULICODE_BP_REPO_ROOT": r"F:\src\Package\Script\Python\multi_agent_tcp",
+                            "PYTHONPATH": r"F:\src\Package\Script\Python",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    updated = installer.sync_codex_cache(
+        installed,
+        version="0.1.3",
+        cache_root=cache_root,
+        force=True,
+    )
+
+    assert str(cache_root / "0.1.2") in updated
+    assert str(cache_root / "0.1.3") in updated
+    for version in ("0.1.2", "0.1.3"):
+        payload = json.loads((cache_root / version / ".mcp.json").read_text(encoding="utf-8"))
+        server = payload["mcpServers"]["gulicode-bp"]
+        assert server["command"] == "python"
+        assert server["args"] == ["scripts/bootstrap_mcp.py"]
+        assert server["cwd"] == str(installed)
+        assert server["env"]["GULICODE_BP_PLUGIN_ROOT"] == str(installed)
+        assert server["env"]["GULICODE_BP_DISABLE_REPO_FALLBACK"] == "1"
+        assert "GULICODE_BP_REPO_ROOT" not in server["env"]
+        assert "PYTHONPATH" not in server["env"]
+
+
+def test_gulicode_bp_release_package_contains_bootstrap_runtime_wheel_and_web_dist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer = _load_gulicode_bp_installer_module()
+    source = tmp_path / "source" / "gulicode-bp"
+    package_dir = tmp_path / "source" / "multi_agent_tcp"
+    release = tmp_path / "dist" / "gulicode-bp-0.1.3"
+    for path in [
+        source / ".codex-plugin",
+        source / "mcp",
+        source / "scripts",
+        source / "skills" / "blueprint",
+        source / "web" / "dist",
+    ]:
+        path.mkdir(parents=True)
+    (source / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "gulicode-bp", "version": "0.1.3"}),
+        encoding="utf-8",
+    )
+    (source / ".mcp.json").write_text("{}", encoding="utf-8")
+    (source / "mcp" / "gulicode_bp_mcp.py").write_text("# mcp\n", encoding="utf-8")
+    (source / "scripts" / "bootstrap_mcp.py").write_text("# bootstrap mcp\n", encoding="utf-8")
+    (source / "scripts" / "bootstrap_runtime.py").write_text("# bootstrap runtime\n", encoding="utf-8")
+    (source / "skills" / "blueprint" / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+    (source / "web" / "dist" / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    (source / ".runtime").mkdir()
+
+    def fake_copy_web_dist(plugin_root: Path, runtime_package: Path, *, skip_build: bool) -> str:
+        assert plugin_root == source
+        assert runtime_package == package_dir
+        assert skip_build is True
+        return str(plugin_root / "web" / "dist")
+
+    def fake_build_runtime_wheel(runtime_package: Path, wheelhouse: Path) -> Path:
+        assert runtime_package == package_dir
+        wheelhouse.mkdir(parents=True)
+        wheel = wheelhouse / "multi_agent_tcp-0.5.0-py3-none-any.whl"
+        wheel.write_text("wheel", encoding="utf-8")
+        return wheel
+
+    monkeypatch.setattr(installer, "copy_web_dist", fake_copy_web_dist)
+    monkeypatch.setattr(installer, "build_runtime_wheel", fake_build_runtime_wheel)
+
+    payload = installer.prepare_release_package(
+        source,
+        package_dir,
+        release,
+        force=True,
+        skip_build=True,
+    )
+
+    mcp_payload = json.loads((release / ".mcp.json").read_text(encoding="utf-8"))
+    server = mcp_payload["mcpServers"]["gulicode-bp"]
+    assert payload["mcpMode"] == "bootstrap"
+    assert Path(payload["runtimeWheel"]).is_file()
+    assert (release / "web" / "dist" / "index.html").is_file()
+    assert (release / "runtime" / "wheels" / "multi_agent_tcp-0.5.0-py3-none-any.whl").is_file()
+    assert not (release / ".runtime").exists()
+    assert server["command"] == "python"
+    assert server["args"] == ["scripts/bootstrap_mcp.py"]
+    assert server["cwd"] == "."
+    assert server["env"]["GULICODE_BP_PLUGIN_ROOT"] == "."
+    assert server["env"]["GULICODE_BP_DISABLE_REPO_FALLBACK"] == "1"
+    assert "GULICODE_BP_REPO_ROOT" not in server["env"]
+    assert "PYTHONPATH" not in server["env"]
+
+
+def test_gulicode_bp_standalone_smoke_env_disables_repo_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    smoke = _load_gulicode_bp_smoke_module()
+    plugin_root = tmp_path / "gulicode-bp"
+    runtime_home = plugin_root / ".runtime"
+    plugin_root.mkdir()
+    (plugin_root / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "gulicode-bp": {
+                        "type": "stdio",
+                        "command": "python",
+                        "args": ["scripts/bootstrap_mcp.py"],
+                        "cwd": ".",
+                        "env": {
+                            "GULICODE_BP_PLUGIN_ROOT": ".",
+                            "GULICODE_BP_DISABLE_REPO_FALLBACK": "1",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GULICODE_BP_REPO_ROOT", r"F:\src\Package\Script\Python\multi_agent_tcp")
+    monkeypatch.setenv("PYTHONPATH", r"F:\src\Package\Script\Python")
+
+    server = smoke.load_mcp_server(plugin_root)
+    env = smoke.build_child_env(plugin_root, server)
+
+    assert server["command"] == "python"
+    assert server["args"] == ["scripts/bootstrap_mcp.py"]
+    assert env["GULICODE_BP_PLUGIN_ROOT"] == str(plugin_root)
+    assert env["GULICODE_BP_RUNTIME_HOME"] == str(runtime_home)
+    assert env["GULICODE_BP_DATA_DIR"] == str(runtime_home / "state")
+    assert env["GULICODE_BP_DISABLE_REPO_FALLBACK"] == "1"
+    assert env["PYTHONPATH"] == ""
+    assert "GULICODE_BP_REPO_ROOT" not in env
 
 
 def test_blueprint_service_lists_script_nodes_without_importing_user_code(tmp_path: Path) -> None:
@@ -154,8 +725,7 @@ def test_blueprint_service_creates_script_node_template_and_catalog_item(tmp_pat
     script_dir = tmp_path / ".multi_agent_workspace" / "scripts"
     script_path = script_dir / "format_score.py"
     second_path = script_dir / "format_score_2.py"
-    framework_source_dir = Path(blueprint_script_nodes.__file__).resolve().parent
-    framework_import_root = framework_source_dir.parent.resolve()
+    script_api_path = script_dir / "gulicode_blueprint.py"
     pyright = json.loads((script_dir / "pyrightconfig.json").read_text(encoding="utf-8"))
     vscode_settings = json.loads((script_dir / ".vscode" / "settings.json").read_text(encoding="utf-8"))
     workspace = json.loads((script_dir / "blueprint-scripts.code-workspace").read_text(encoding="utf-8"))
@@ -168,7 +738,7 @@ def test_blueprint_service_creates_script_node_template_and_catalog_item(tmp_pat
     assert second["function_name"] == "format_score"
     assert script_path.read_text(encoding="utf-8") == "\n".join(
         [
-            "from multi_agent_tcp.blueprint_script_nodes import blueprint_node",
+            "from gulicode_blueprint import blueprint_node",
             "",
             '@blueprint_node(name="Format Score", description="Formats a score for display")',
             "def format_score(payload: dict) -> dict:",
@@ -177,18 +747,16 @@ def test_blueprint_service_creates_script_node_template_and_catalog_item(tmp_pat
         ]
     )
     assert second_path.exists()
+    assert "def blueprint_node(" in script_api_path.read_text(encoding="utf-8")
     assert pyright["include"] == ["."]
-    assert pyright["extraPaths"] == [str(framework_import_root)]
-    assert vscode_settings["python.analysis.extraPaths"] == [str(framework_import_root)]
+    assert pyright["extraPaths"] == ["."]
+    assert vscode_settings["python.analysis.extraPaths"] == ["."]
     assert vscode_settings["python.defaultInterpreterPath"] == sys.executable
-    assert workspace["folders"] == [
-        {"name": "Blueprint Scripts", "path": "."},
-        {"name": "multi_agent_tcp source", "path": str(framework_source_dir)},
-    ]
-    assert workspace["settings"]["python.analysis.extraPaths"] == [str(framework_import_root)]
+    assert workspace["folders"] == [{"name": "Blueprint Scripts", "path": "."}]
+    assert workspace["settings"]["python.analysis.extraPaths"] == ["."]
     assert result["dev_environment"]["workspace_file"] == str((script_dir / "blueprint-scripts.code-workspace").resolve())
-    assert result["dev_environment"]["framework_source_dir"] == str(framework_source_dir)
-    assert result["dev_environment"]["framework_import_root"] == str(framework_import_root)
+    assert result["dev_environment"]["script_api_module"] == "gulicode_blueprint"
+    assert result["dev_environment"]["script_api_path"] == str(script_api_path.resolve())
     assert result["node"] == {
         "script_id": "format_score.py:format_score",
         "module_path": "format_score.py",
@@ -198,6 +766,150 @@ def test_blueprint_service_creates_script_node_template_and_catalog_item(tmp_pat
         "inputs": [{"name": "payload", "type": "dict", "required": True}],
         "outputs": [{"name": "result", "type": "dict", "required": True}],
     }
+
+    output = asyncio.run(
+        blueprint_script_nodes.execute_script_node(
+            script_dir,
+            ScriptNode.from_dict(
+                {
+                    "node_id": "format",
+                    "script_id": "format_score.py:format_score",
+                    "module_path": "format_score.py",
+                    "function_name": "format_score",
+                    "inputs": [{"name": "payload", "type": "dict", "required": True}],
+                    "outputs": [{"name": "result", "type": "dict", "required": True}],
+                }
+            ),
+            {"payload": {"value": 7}},
+        )
+    )
+    assert output["result"] == {"value": 7}
+
+
+def test_blueprint_script_node_legacy_runtime_import_still_executes(tmp_path: Path) -> None:
+    script_dir = tmp_path / ".multi_agent_workspace" / "scripts"
+    script_dir.mkdir(parents=True)
+    (script_dir / "legacy.py").write_text(
+        "\n".join(
+            [
+                "from multi_agent_tcp.blueprint_script_nodes import blueprint_node",
+                "",
+                "@blueprint_node(name='Legacy format')",
+                "def legacy_format(payload: dict) -> dict:",
+                "    return {'legacy': payload['value']}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    discovered = DesktopBlueprintService().handle_request(
+        {"command": "blueprint.scriptNodes", "args": {"projectDir": str(tmp_path)}}
+    )
+    output = asyncio.run(
+        blueprint_script_nodes.execute_script_node(
+            script_dir,
+            ScriptNode.from_dict(
+                {
+                    "node_id": "legacy",
+                    "script_id": "legacy.py:legacy_format",
+                    "module_path": "legacy.py",
+                    "function_name": "legacy_format",
+                    "inputs": [{"name": "payload", "type": "dict", "required": True}],
+                    "outputs": [{"name": "result", "type": "dict", "required": True}],
+                }
+            ),
+            {"payload": {"value": 9}},
+        )
+    )
+
+    assert discovered["nodes"][0]["script_id"] == "legacy.py:legacy_format"
+    assert output["result"] == {"legacy": 9}
+
+
+def test_blueprint_service_opens_script_directory_with_system_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[Path] = []
+    monkeypatch.setattr(desktop_blueprint_service_module, "_open_path_with_system_default", opened.append)
+
+    result = DesktopBlueprintService().handle_request(
+        {
+            "command": "blueprint.openScriptInEditor",
+            "args": {"projectDir": str(tmp_path), "modulePath": "format_score.py", "editorId": "system"},
+        }
+    )
+
+    script_dir = tmp_path / ".multi_agent_workspace" / "scripts"
+    assert result == {"ok": True, "path": str(script_dir.resolve()), "editorId": "system"}
+    assert opened == [script_dir.resolve()]
+
+
+def test_blueprint_editor_detection_uses_real_vscode_when_code_alias_points_to_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "program-files"))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "program-files-x86"))
+    vscode_command = tmp_path / "Programs" / "Microsoft VS Code" / "bin" / "code.cmd"
+    vscode_command.parent.mkdir(parents=True)
+    vscode_command.write_text("", encoding="utf-8")
+
+    def fake_which(command: str) -> str | None:
+        if command == "code":
+            return r"C:\Users\qiuhaoxuan\AppData\Local\Programs\cursor\resources\app\codeBin\code.cmd"
+        if command == "cursor":
+            return r"C:\Users\qiuhaoxuan\AppData\Local\Programs\cursor\resources\app\bin\cursor.cmd"
+        return None
+
+    monkeypatch.setattr(desktop_blueprint_service_module.shutil, "which", fake_which)
+
+    editors = desktop_blueprint_service_module.list_blueprint_editors()
+
+    assert editors[0]["id"] == "vscode"
+    assert editors[0]["command"] == str(vscode_command)
+    assert editors[1]["id"] == "cursor"
+    assert editors[1]["command"].endswith("cursor.cmd")
+
+
+def test_blueprint_known_editors_open_in_new_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[list[str]] = []
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(args, **kwargs):  # noqa: ANN001, ANN202
+        launched.append([str(arg) for arg in args])
+        return FakeProcess()
+
+    monkeypatch.setattr(desktop_blueprint_service_module.subprocess, "Popen", fake_popen)
+
+    desktop_blueprint_service_module._launch_blueprint_editor(
+        {"id": "vscode", "command": "code", "args": ["--reuse-window", "--wait"]},
+        tmp_path,
+    )
+
+    assert launched == [["code", "--new-window", str(tmp_path)]]
+
+
+def test_blueprint_service_rejects_script_editor_module_path_escape(tmp_path: Path) -> None:
+    with pytest.raises(BlueprintServiceError) as exc:
+        DesktopBlueprintService().handle_request(
+            {
+                "command": "blueprint.openScriptInEditor",
+                "args": {"projectDir": str(tmp_path), "modulePath": "../format_score.py"},
+            }
+        )
+
+    assert exc.value.code == "BAD_REQUEST"
+    assert "modulePath must stay inside the script directory" in str(exc.value)
 
 
 def test_blueprint_service_rejects_blank_script_node_name(tmp_path: Path) -> None:
@@ -634,6 +1346,397 @@ def test_blueprint_service_save_open_list_and_validate(tmp_path: Path) -> None:
     assert service.validate_blueprint(saved) == {"ok": True, "errors": [], "warnings": []}
 
 
+def test_blueprint_service_detects_python_for_plugin_workbench(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    detected_python = tmp_path / "Python313" / "python.exe"
+
+    def fake_run(args, **kwargs):  # noqa: ANN001, ANN202
+        command = [str(arg) for arg in args]
+        calls.append(command)
+        if command[0] == "python":
+            return desktop_blueprint_service_module.subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f"{detected_python}\n",
+                stderr="",
+            )
+        return desktop_blueprint_service_module.subprocess.CompletedProcess(command, 1, stdout="", stderr="missing")
+
+    monkeypatch.setattr(desktop_blueprint_service_module.subprocess, "run", fake_run)
+
+    result = DesktopBlueprintService().handle_request(
+        {
+            "command": "blueprint.detectPython",
+            "args": {
+                "projectDir": str(tmp_path),
+                "pythonCommand": r"Z:\missing\python.exe",
+            },
+        }
+    )
+
+    assert result == {"ok": True, "pythonCommand": str(detected_python), "source": "PATH python"}
+    assert calls[0] == ["python", "-c", "import sys; print(sys.executable)"]
+
+
+def test_blueprint_service_detect_python_uses_configured_command_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured_python = tmp_path / "custom python" / "python.exe"
+    configured_python.parent.mkdir()
+    configured_python.write_text("", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):  # noqa: ANN001, ANN202
+        command = [str(arg) for arg in args]
+        calls.append(command)
+        return desktop_blueprint_service_module.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"{configured_python}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(desktop_blueprint_service_module.subprocess, "run", fake_run)
+
+    result = DesktopBlueprintService().handle_request(
+        {
+            "command": "blueprint.detectPython",
+            "args": {
+                "projectDir": str(tmp_path),
+                "pythonCommand": f'"{configured_python}" -E',
+            },
+        }
+    )
+
+    assert result == {
+        "ok": True,
+        "pythonCommand": str(configured_python),
+        "source": "blueprint common config python_path",
+    }
+    assert calls == [[str(configured_python), "-E", "-c", "import sys; print(sys.executable)"]]
+
+
+def test_gulicode_bp_mcp_whitelists_python_detection_command() -> None:
+    source = (Path(__file__).resolve().parent / "plugins" / "gulicode-bp" / "mcp" / "gulicode_bp_mcp.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"blueprint.detectPython"' in source
+    assert '"blueprint.planning.submit"' in source
+    assert "blueprint_take_planning_request" in source
+    assert "blueprint_complete_planning_request" in source
+    assert "blueprint_fail_planning_request" in source
+    assert "MCP_STATUS_PATH" in source
+    assert "gulicode-bp-mcp.log" in source
+    assert "_write_mcp_status(" in source
+    assert "MCP_HEARTBEAT_INTERVAL_SECONDS" in source
+    assert "MCP_HEARTBEAT_STALE_AFTER_SECONDS" in source
+    assert "_start_mcp_status_heartbeat(" in source
+    assert '"mcp-running"' in source
+    assert "SingletonProxyState" in source
+    assert "SingletonServiceServer" in source
+    assert "GULICODE_BP_SINGLETON_ROLE" in source
+    assert "service.startWorkbench" in source
+
+    singleton_source = (
+        Path(__file__).resolve().parent / "plugins" / "gulicode-bp" / "mcp" / "gulicode_bp_singleton.py"
+    ).read_text(encoding="utf-8")
+    assert "service.lock" in singleton_source
+    assert "service.json" in singleton_source
+    assert "service.log.jsonl" in singleton_source
+
+
+def test_gulicode_bp_plugin_manifest_default_prompts_stay_within_codex_limit() -> None:
+    manifest_path = Path(__file__).resolve().parent / "plugins" / "gulicode-bp" / ".codex-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    default_prompts = manifest["interface"]["defaultPrompt"]
+    assert len(default_prompts) <= 3
+
+
+def test_gulicode_bp_mcp_planning_thread_context_and_workbench_injection(tmp_path: Path, monkeypatch) -> None:
+    module = _load_gulicode_bp_mcp_module()
+    ctx = SimpleNamespace(request_context=SimpleNamespace(meta=SimpleNamespace(model_extra={"threadId": "thread-meta"})))
+    assert module._planning_thread_id_from_context(ctx) == "thread-meta"
+
+    class FakeWorkbench:
+        def __init__(
+            self,
+            service,
+            request_fn,
+            *,
+            default_project_dir,
+            default_blueprint_id,
+            collaboration_url,
+            ensure_collaboration_fn,
+            planning_thread_id,
+        ):
+            self.default_project_dir = default_project_dir
+            self.default_blueprint_id = default_blueprint_id
+            self.planning_thread_id = planning_thread_id
+            self.url = f"http://127.0.0.1:1/blueprint-window/{default_blueprint_id}"
+
+        def start(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(module, "WorkbenchServer", FakeWorkbench)
+    state = module.PluginState()
+    state.planning_requests_path = tmp_path / "planning.json"
+    state.ensure_collaboration_server = lambda: None
+    try:
+        opened = state.start_workbench(str(tmp_path), "default", planning_thread_id="thread-meta")
+        assert opened["planningThreadId"] == "thread-meta"
+        assert state.workbench.planning_thread_id == "thread-meta"
+    finally:
+        state.close()
+
+
+def test_gulicode_bp_mcp_persistent_workbench_process_keeps_refreshable_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_gulicode_bp_mcp_module()
+    popen_called = False
+
+    class FakeWorkbench:
+        def __init__(
+            self,
+            service,
+            request_fn,
+            *,
+            default_project_dir="",
+            default_blueprint_id="default",
+            planning_thread_id="",
+            **kwargs,
+        ):  # noqa: ANN001, ANN202
+            self.default_project_dir = default_project_dir
+            self.default_blueprint_id = default_blueprint_id
+            self.planning_thread_id = planning_thread_id
+            self.url = "http://127.0.0.1:54321/project/blueprint-window/new1"
+
+        def start(self):
+            return None
+
+        def close(self):
+            return None
+
+    def fail_popen(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal popen_called
+        popen_called = True
+        raise AssertionError("start_persistent_workbench must not spawn start_workbench.py")
+
+    monkeypatch.setattr(module, "PERSISTENT_WORKBENCH_LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(module, "_workbench_url_alive", lambda url: True)
+    monkeypatch.setattr(module, "WorkbenchServer", FakeWorkbench)
+    monkeypatch.setattr(module.PluginState, "ensure_collaboration_server", lambda self: None)
+    monkeypatch.setattr(module.subprocess, "Popen", fail_popen)
+
+    state = module.PluginState()
+    state.persistent_workbench_ready_path = tmp_path / "ready.json"
+    try:
+        first = state.start_persistent_workbench(str(tmp_path), "new1", planning_thread_id="thread-a")
+        second = state.start_persistent_workbench(str(tmp_path), "new1", planning_thread_id="thread-a")
+
+        assert first["persistent"] is True
+        assert first["reused"] is False
+        assert second["reused"] is True
+        assert first["pid"] == os.getpid()
+        assert first["planningThreadId"] == "thread-a"
+        assert json.loads(state.persistent_workbench_ready_path.read_text(encoding="utf-8"))["url"] == first["url"]
+        assert popen_called is False
+    finally:
+        state.close()
+
+
+def test_gulicode_bp_mcp_planning_request_inbox_flow(tmp_path: Path) -> None:
+    module = _load_gulicode_bp_mcp_module()
+
+    class StubService:
+        def __init__(self):
+            self.requests = []
+
+        def handle_request(self, payload):
+            self.requests.append(payload)
+            assert payload["command"] == "blueprint.plan.validate"
+            return {"ok": True, "validation": {"ok": True, "errors": [], "warnings": []}}
+
+        def close(self):
+            return None
+
+    state = module.PluginState()
+    state.service = StubService()
+    state.planning_requests_path = tmp_path / "planning.json"
+    project = tmp_path / "project"
+    project.mkdir()
+    try:
+        submitted = state.request(
+            "blueprint.planning.submit",
+            {
+                "threadId": "thread-a",
+                "projectDir": str(project),
+                "blueprintId": "default",
+                "task": "test task",
+                "startNodeIds": [],
+                "message": "plan this",
+            },
+        )
+        request_id = submitted["requestId"]
+        assert submitted["accepted"] is True
+        assert (tmp_path / "planning.json").is_file()
+
+        assert state.take_planning_request({"requestId": request_id}, thread_id="thread-b")["request"] is None
+        taken = state.take_planning_request({"requestId": request_id}, thread_id="thread-a")
+        assert taken["request"]["requestId"] == request_id
+        assert taken["request"]["status"] == "claimed"
+
+        plan = {"start_nodes": ["planner"], "tasks": {"planner": {"description": "test task"}}}
+        with pytest.raises(module.BlueprintServiceError) as mismatch:
+            state.complete_planning_request(request_id, plan, "wrong thread", thread_id="thread-b")
+        assert mismatch.value.code == "PLANNING_THREAD_MISMATCH"
+
+        completed = state.complete_planning_request(request_id, plan, "done", thread_id="thread-a")
+        assert completed["validation"] == {"ok": True, "errors": [], "warnings": []}
+        assert state.service.requests[-1]["args"]["plan"] == plan
+
+        status = state.request("blueprint.planning.status", {"requestId": request_id})
+        assert status["request"]["status"] == "completed"
+        assert status["request"]["plan"] == plan
+        assert status["request"]["summary"] == "done"
+
+        second = state.request(
+            "blueprint.planning.submit",
+            {"threadId": "thread-a", "projectDir": str(project), "blueprintId": "default", "task": "fail"},
+        )
+        failed = state.fail_planning_request(second["requestId"], "bad plan", thread_id="thread-a")
+        assert failed["request"]["status"] == "failed"
+        assert failed["request"]["reason"] == "bad plan"
+
+        third = state.request(
+            "blueprint.planning.submit",
+            {"threadId": "thread-a", "projectDir": str(project), "blueprintId": "default", "task": "cancel"},
+        )
+        cancelled = state.request("blueprint.planning.cancel", {"requestId": third["requestId"]})
+        assert cancelled["request"]["status"] == "cancelled"
+    finally:
+        state.close()
+
+
+def test_gulicode_bp_mcp_planning_request_inbox_reloads_external_writes(tmp_path: Path) -> None:
+    module = _load_gulicode_bp_mcp_module()
+    planning_path = tmp_path / "planning.json"
+    project = tmp_path / "project"
+    project.mkdir()
+
+    mcp_state = module.PluginState()
+    workbench_state = module.PluginState()
+    mcp_state.planning_requests_path = planning_path
+    workbench_state.planning_requests_path = planning_path
+    try:
+        assert mcp_state.take_planning_request({}, thread_id="thread-a")["request"] is None
+
+        submitted = workbench_state.request(
+            "blueprint.planning.submit",
+            {
+                "threadId": "thread-a",
+                "projectDir": str(project),
+                "blueprintId": "default",
+                "task": "external write",
+            },
+        )
+        request_id = submitted["requestId"]
+
+        status = mcp_state.request("blueprint.planning.status", {"requestId": request_id})
+        assert status["found"] is True
+        assert status["request"]["status"] == "pending"
+
+        taken = mcp_state.take_planning_request({"requestId": request_id}, thread_id="thread-a")
+        assert taken["request"]["requestId"] == request_id
+        assert taken["request"]["status"] == "claimed"
+    finally:
+        mcp_state.close()
+        workbench_state.close()
+
+
+def test_blueprint_service_preserves_settings_and_applies_common_config_paths(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+    project = tmp_path / "project"
+    rules = project / "rules"
+    project.mkdir()
+    rules.mkdir()
+    (rules / "policy.md").write_text("# Policy\n", encoding="utf-8")
+
+    document = _document(project)
+    document["id"] = "settings"
+    document["name"] = "Settings"
+    document["graph"]["common_nodes"] = {
+        "clock": {"node_id": "clock", "kind": "tick", "every_n_seconds": 11}
+    }
+    document["graph"]["agent_nodes"]["planner"].update(
+        {
+            "prompt": "Plan with saved settings.",
+            "run_prompt": "Use the saved prompt once.",
+            "execution_mode": "nonblocking",
+            "cli_kind": "codemaker",
+            "model": "netease-codemaker/kimi-k2.5",
+            "skills": ["business-skill"],
+            "skill_selection": {"mode": "selected", "skill_hashes": ["business-skill"]},
+            "rule_paths": ["policy.md"],
+            "timeout_sec": 321,
+            "prompt_via_file": "always",
+            "adapter_options": {"temperature": 0.2, "retry": True},
+            "extra_env": {"GULI_SETTING": "1"},
+            "external": True,
+        }
+    )
+    document["graph"]["edges"] = [
+        {
+            "from": "clock",
+            "to": "planner",
+            "edge_type": "exec",
+            "output_port": "tick",
+            "input_port": "in",
+        }
+    ]
+    document["ui"]["config"] = {
+        "python_path": sys.executable,
+        "project_workdir": str(project),
+        "skill_dir": str(project / "skills"),
+        "rule_dir": str(rules),
+    }
+    document["ui"]["nodes"]["clock"] = {"x": 312, "y": 120}
+    document["ui"]["viewport"] = {"x": 33, "y": -12, "zoom": 1.25}
+    document["ui"]["selection"] = {"type": "node", "id": "clock"}
+    document["ui"]["inspector"] = {"type": "node", "id": "planner"}
+
+    saved = service.save_blueprint(project, document)
+    opened = service.open_blueprint(project, "settings")
+
+    assert opened == saved
+    assert opened["ui"]["config"]["project_workdir"] == str(project)
+    assert opened["ui"]["config"]["rule_dir"] == str(rules)
+    assert opened["graph"]["common_nodes"]["clock"]["every_n_seconds"] == 11
+    assert opened["graph"]["agent_nodes"]["planner"]["run_prompt"] == "Use the saved prompt once."
+    assert opened["graph"]["agent_nodes"]["planner"]["rule_paths"] == ["policy.md"]
+    assert opened["graph"]["agent_nodes"]["planner"]["adapter_options"] == {"temperature": 0.2, "retry": True}
+    assert opened["graph"]["agent_nodes"]["planner"]["extra_env"] == {"GULI_SETTING": "1"}
+    assert opened["ui"]["nodes"]["clock"] == {"x": 312, "y": 120}
+    assert opened["ui"]["viewport"] == {"x": 33, "y": -12, "zoom": 1.25}
+    assert opened["ui"]["selection"] == {"type": "node", "id": "clock"}
+    assert opened["ui"]["inspector"] == {"type": "node", "id": "planner"}
+
+    graph = service._blueprint_graph_for_plan(project, "settings")
+    assert Path(graph.agent_nodes["planner"].cwd) == project.resolve()
+    assert [Path(path) for path in graph.agent_nodes["planner"].rule_paths] == [(rules / "policy.md").resolve()]
+    assert graph.common_nodes["clock"].every_n_seconds == 11
+
+
 def test_blueprint_service_relocates_project_workdir_and_handles_target_conflicts(tmp_path: Path) -> None:
     service = DesktopBlueprintService()
     source = tmp_path / "source"
@@ -779,6 +1882,11 @@ def test_blueprint_service_allows_graph_without_terminal_nodes_but_rejects_empty
         assert exc.value.code == "START_PLAN_INVALID"
         validation = exc.value.details["validation"]
         assert "start_nodes must not be empty" in validation["errors"]
+
+        duplicate = service.start_blueprint_run(project, "default", _plan(), execution_mode="status")
+        assert duplicate["ok"] is True
+        assert duplicate["alreadyActive"] is True
+        assert duplicate["runId"] == started["runId"]
     finally:
         service.close()
 
@@ -3280,8 +4388,7 @@ def test_blueprint_service_live_mode_does_not_start_workers_for_invalid_plan(
     else:  # pragma: no cover
         raise AssertionError("invalid live start plan should fail")
 
-    assert FakeLiveBackend.instances[-1].worker_configs == {}
-    assert FakeLiveBackend.instances[-1].stopped is True
+    assert FakeLiveBackend.instances == []
     service.close()
 
 

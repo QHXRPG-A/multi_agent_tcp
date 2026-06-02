@@ -1848,6 +1848,7 @@ class GraphRuntime:
         self._common_node_message_queues: Dict[str, List[PendingCommonNodeMessage]] = {}
         self._pending_common_messages: Dict[str, PendingCommonNodeMessage] = {}
         self._common_tick_counters: Dict[str, int] = {}
+        self._common_tick_last_emit_at: Dict[str, float] = {}
         self._agent_utterances: Dict[str, AgentUtterance] = {}
         self._utterances_by_task: Dict[str, List[str]] = {}
         self._message_journal: List[RuntimeMessageRecord] = []
@@ -2296,6 +2297,9 @@ class GraphRuntime:
         for node_id in list(self._common_tick_counters):
             if node_id not in self._common_nodes or self._common_nodes[node_id].kind != "tick":
                 self._common_tick_counters.pop(node_id, None)
+        for node_id in list(self._common_tick_last_emit_at):
+            if node_id not in self._common_nodes or self._common_nodes[node_id].kind != "tick":
+                self._common_tick_last_emit_at.pop(node_id, None)
 
     def reset_run_prompt_injections(self) -> None:
         for inst in self._instances.values():
@@ -2558,8 +2562,14 @@ class GraphRuntime:
                 continue
             count = self._common_tick_counters.get(node_id, 0) + 1
             self._common_tick_counters[node_id] = count
-            if count % node.every_n_ticks != 0:
+            now = self._last_tick_at if self._last_tick_at is not None else time.monotonic()
+            last_emit_at = self._common_tick_last_emit_at.get(node_id)
+            if last_emit_at is None:
+                self._common_tick_last_emit_at[node_id] = now
                 continue
+            if now - last_emit_at < node.every_n_seconds:
+                continue
+            self._common_tick_last_emit_at[node_id] = now
             await self._emit_common_node_output(
                 graph,
                 node_id,
@@ -2568,7 +2578,7 @@ class GraphRuntime:
                     "type": "tick",
                     "tick_node_id": node_id,
                     "tick_count": count,
-                    "every_n_ticks": node.every_n_ticks,
+                    "every_n_seconds": node.every_n_seconds,
                     "created_at": time.time(),
                 },
                 tick_source_node_id=node_id,
@@ -2913,6 +2923,10 @@ class GraphRuntime:
     def _maybe_remind_script_calls(self, inst: AgentInstance) -> None:
         if not inst.can_accept_message:
             return
+        if not inst.has_received_flow:
+            return
+        if self._agent_message_queues.get(inst.node.node_id):
+            return
         for batch in self._outgoing_batches.values():
             if batch.status != "staging":
                 continue
@@ -2959,8 +2973,46 @@ class GraphRuntime:
             )
             return
 
+    def _outgoing_targets_reminder_body(
+        self,
+        inst: AgentInstance,
+        batch: OutgoingMessageBatch,
+        remaining: Sequence[str],
+    ) -> Dict[str, Any]:
+        return {
+            "type": "framework_outgoing_targets_reminder",
+            "prompt": (
+                "This fan-out step is waiting for downstream target messages. "
+                "Call the `agent_dispatch` MCP tool for every remaining target, "
+                "or send an empty string or numeric 0 for a target that should be no-op. "
+                "Do not report the task complete until every required outgoing target is handled."
+            ),
+            "outgoing_targets": {
+                "batch_id": batch.batch_id,
+                "required_outgoing_targets": list(batch.required_target_node_ids),
+                "remaining_targets": list(remaining),
+                "reminder_count": batch.reminder_count,
+            },
+            "context": {
+                "framework_context": {
+                    "agent_node_id": inst.node.node_id,
+                    "agent_id": inst.agent_id,
+                    "message_envelope": {
+                        "outgoing_batch_id": batch.batch_id,
+                        "required_outgoing_targets": list(batch.required_target_node_ids),
+                        "remaining_targets": list(remaining),
+                        "required_script_calls": [],
+                    },
+                }
+            },
+        }
+
     def _maybe_remind_outgoing_targets(self, inst: AgentInstance) -> None:
         if not inst.can_accept_message:
+            return
+        if not inst.has_received_flow:
+            return
+        if self._agent_message_queues.get(inst.node.node_id):
             return
         for batch in self._outgoing_batches.values():
             if batch.status != "staging":
@@ -2974,13 +3026,22 @@ class GraphRuntime:
                 continue
             batch.reminder_count += 1
             batch.last_reminder_targets = list(remaining)
+            pending = self.queue_agent_message(
+                inst.node,
+                self._outgoing_targets_reminder_body(inst, batch, remaining),
+                source_node_id=None,
+                source_agent_id="graph-runtime",
+                message_id=f"outgoing-targets-reminder-{inst.node.node_id}-{uuid.uuid4().hex[:8]}",
+                queue_mode="top",
+            )
             self._emit(
                 GraphEvent(
                     "AgentOutgoingTargetsReminder",
                     node_id=inst.node.node_id,
                     agent_id=inst.agent_id,
-                    status="waiting_for_outgoing_targets",
+                    status="queued",
                     payload={
+                        "message_id": pending.message_id,
                         "batch_id": batch.batch_id,
                         "required_outgoing_targets": list(batch.required_target_node_ids),
                         "remaining_targets": list(remaining),
@@ -3494,6 +3555,7 @@ class GraphRuntime:
                 **node.to_dict(),
                 "queue_size": len(self._common_node_message_queues.get(node_id, [])),
                 "tick_count": self._common_tick_counters.get(node_id, 0),
+                "last_emit_at": self._common_tick_last_emit_at.get(node_id),
             }
             for node_id, node in self._common_nodes.items()
         }
@@ -5402,7 +5464,8 @@ class CommonNode:
 
     node_id: str
     kind: CommonNodeKind
-    every_n_ticks: int = 1
+    every_n_seconds: float = 1.0
+    every_n_ticks: Optional[int] = None
 
     def __post_init__(self) -> None:
         self.node_id = str(self.node_id).strip()
@@ -5415,9 +5478,11 @@ class CommonNode:
                 + ", ".join(sorted(_VALID_COMMON_NODE_KINDS))
             )
         try:
-            self.every_n_ticks = max(1, int(self.every_n_ticks))
+            legacy_ticks = self.every_n_ticks
+            raw_seconds = legacy_ticks if legacy_ticks is not None and self.every_n_seconds == 1.0 else self.every_n_seconds
+            self.every_n_seconds = max(1.0, float(raw_seconds))
         except (TypeError, ValueError):
-            raise ValueError("Tick CommonNode.every_n_ticks must be an integer") from None
+            raise ValueError("Tick CommonNode.every_n_seconds must be a number") from None
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
@@ -5425,7 +5490,7 @@ class CommonNode:
             "kind": self.kind,
         }
         if self.kind == "tick":
-            data["every_n_ticks"] = self.every_n_ticks
+            data["every_n_seconds"] = int(self.every_n_seconds) if self.every_n_seconds.is_integer() else self.every_n_seconds
         return data
 
     @classmethod
@@ -5435,7 +5500,7 @@ class CommonNode:
         return cls(
             node_id=str(data.get("node_id", "")).strip(),
             kind=str(data.get("kind", "")),
-            every_n_ticks=int(data.get("every_n_ticks", 1) or 1),
+            every_n_seconds=float(data.get("every_n_seconds", data.get("every_n_ticks", 1)) or 1),
         )
 
 

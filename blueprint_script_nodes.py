@@ -17,10 +17,49 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 SCRIPT_NODE_WORKSPACE_DIR = Path(".multi_agent_workspace") / "scripts"
 SUPPORTED_PORT_TYPES = {"int", "float", "str", "bool", "dict", "list", "Any"}
+SCRIPT_API_FILENAME = "gulicode_blueprint.py"
 PYRIGHT_CONFIG_FILENAME = "pyrightconfig.json"
 VSCODE_SETTINGS_DIR = ".vscode"
 VSCODE_SETTINGS_FILENAME = "settings.json"
 SCRIPT_WORKSPACE_FILENAME = "blueprint-scripts.code-workspace"
+SCRIPT_API_SHIM = '''"""Public helpers for GuLiCode Blueprint script nodes.
+
+Scripts import ``blueprint_node`` from this local module so "Go to Definition"
+stays inside the project script workspace instead of jumping into the runtime.
+
+The decorator records node metadata on the function. Blueprint compile reads
+that metadata, or falls back to Python type annotations, to build script ports.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from typing import Any
+
+
+def blueprint_node(
+    func: Callable[..., Any] | None = None,
+    *,
+    name: str | None = None,
+    description: str = "",
+    inputs: Mapping[str, Any] | None = None,
+    outputs: Mapping[str, Any] | None = None,
+) -> Callable[..., Any]:
+    """Mark a function as a Blueprint Script Function Node."""
+
+    def decorate(target: Callable[..., Any]) -> Callable[..., Any]:
+        target.__blueprint_node__ = {
+            "name": name,
+            "description": description,
+            "inputs": dict(inputs or {}),
+            "outputs": dict(outputs or {}),
+        }
+        return target
+
+    if func is None:
+        return decorate
+    return decorate(func)
+'''
 
 
 @dataclass
@@ -128,34 +167,33 @@ def ensure_script_nodes_dir(project_dir: Path) -> Path:
 
 
 def ensure_script_nodes_dev_environment(project_dir: Path) -> Dict[str, str]:
-    """Write editor metadata that lets IDEs resolve the local framework source."""
+    """Write editor metadata for project-local Blueprint script authoring."""
 
     root = ensure_script_nodes_dir(project_dir)
-    source_dir = _framework_source_dir()
-    import_root = _framework_import_root(source_dir)
+    api_path = root / SCRIPT_API_FILENAME
     pyright_path = root / PYRIGHT_CONFIG_FILENAME
     vscode_dir = root / VSCODE_SETTINGS_DIR
     vscode_settings_path = vscode_dir / VSCODE_SETTINGS_FILENAME
     workspace_path = root / SCRIPT_WORKSPACE_FILENAME
 
+    _write_text_if_changed(api_path, SCRIPT_API_SHIM)
     _write_json_if_changed(
         pyright_path,
-        _merged_pyright_config(_read_json_object(pyright_path), import_root),
+        _merged_pyright_config(_read_json_object(pyright_path)),
     )
     vscode_dir.mkdir(parents=True, exist_ok=True)
     _write_json_if_changed(
         vscode_settings_path,
-        _merged_vscode_settings(_read_json_object(vscode_settings_path), import_root),
+        _merged_vscode_settings(_read_json_object(vscode_settings_path)),
     )
     _write_json_if_changed(
         workspace_path,
         {
             "folders": [
                 {"name": "Blueprint Scripts", "path": "."},
-                {"name": "multi_agent_tcp source", "path": str(source_dir)},
             ],
             "settings": {
-                "python.analysis.extraPaths": [str(import_root)],
+                "python.analysis.extraPaths": ["."],
                 "python.defaultInterpreterPath": sys.executable,
             },
         },
@@ -165,8 +203,8 @@ def ensure_script_nodes_dev_environment(project_dir: Path) -> Dict[str, str]:
         "pyright_config": str(pyright_path.resolve()),
         "vscode_settings": str(vscode_settings_path.resolve()),
         "workspace_file": str(workspace_path.resolve()),
-        "framework_source_dir": str(source_dir),
-        "framework_import_root": str(import_root),
+        "script_api_module": "gulicode_blueprint",
+        "script_api_path": str(api_path.resolve()),
         "python": sys.executable,
     }
 
@@ -218,7 +256,7 @@ def create_script_node(project_dir: Path, name: str, description: str = "") -> D
     path = root / module_path
     template = "\n".join(
         [
-            "from multi_agent_tcp.blueprint_script_nodes import blueprint_node",
+            "from gulicode_blueprint import blueprint_node",
             "",
             f"@blueprint_node(name={json.dumps(display_name)}, description={json.dumps(display_description)})",
             f"def {function_name}(payload: dict) -> dict:",
@@ -558,16 +596,6 @@ def _unique_script_module_path(root: Path, function_name: str) -> str:
     return f"{function_name}_{uuid.uuid4().hex}.py"
 
 
-def _framework_source_dir() -> Path:
-    return Path(__file__).resolve().parent
-
-
-def _framework_import_root(source_dir: Path) -> Path:
-    if source_dir.name == "multi_agent_tcp":
-        return source_dir.parent.resolve()
-    return source_dir.resolve()
-
-
 def _read_json_object(path: Path) -> Dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -579,6 +607,11 @@ def _read_json_object(path: Path) -> Dict[str, Any]:
 def _write_json_if_changed(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+    _write_text_if_changed(path, text)
+
+
+def _write_text_if_changed(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         if path.read_text(encoding="utf-8") == text:
             return
@@ -587,30 +620,19 @@ def _write_json_if_changed(path: Path, value: Mapping[str, Any]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _merged_pyright_config(current: Mapping[str, Any], import_root: Path) -> Dict[str, Any]:
+def _merged_pyright_config(current: Mapping[str, Any]) -> Dict[str, Any]:
     config = dict(current)
     config.setdefault("include", ["."])
-    config["extraPaths"] = _json_string_list_with(config.get("extraPaths"), str(import_root))
+    config["extraPaths"] = ["."]
     config["pythonVersion"] = f"{sys.version_info.major}.{sys.version_info.minor}"
     return config
 
 
-def _merged_vscode_settings(current: Mapping[str, Any], import_root: Path) -> Dict[str, Any]:
+def _merged_vscode_settings(current: Mapping[str, Any]) -> Dict[str, Any]:
     settings = dict(current)
-    settings["python.analysis.extraPaths"] = _json_string_list_with(
-        settings.get("python.analysis.extraPaths"),
-        str(import_root),
-    )
+    settings["python.analysis.extraPaths"] = ["."]
     settings.setdefault("python.defaultInterpreterPath", sys.executable)
     return settings
-
-
-def _json_string_list_with(value: Any, item: str) -> List[str]:
-    items = [entry for entry in value if isinstance(entry, str)] if isinstance(value, list) else []
-    normalized = {entry.casefold() for entry in items}
-    if item.casefold() not in normalized:
-        items.append(item)
-    return items
 
 
 def _resolve_script_path(script_root: Path, module_path: str) -> Path:

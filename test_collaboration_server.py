@@ -882,7 +882,7 @@ def test_mobile_tick_uses_desktop_blueprint_snapshot_without_runtime_run(tmp_pat
                     "y": 96,
                     "downstreamNodeIds": ["agent-a"],
                     "outputPorts": ["tick: tick"],
-                    "everyNTicks": 3,
+                    "everyNSeconds": 3,
                 },
                 {
                     "id": "agent-b",
@@ -973,7 +973,7 @@ def test_mobile_tick_uses_desktop_blueprint_snapshot_without_runtime_run(tmp_pat
             "outputPorts": ["tick: tick"],
             "x": 120.0,
             "y": 96.0,
-            "everyNTicks": 3,
+            "everyNSeconds": 3,
         },
         {
             "id": "agent-b",

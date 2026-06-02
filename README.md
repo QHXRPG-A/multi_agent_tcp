@@ -1,9 +1,11 @@
 # multi_agent_tcp
 
-`multi_agent_tcp` 是 GuLiCode 桌面多 Agent 蓝图系统的 Python 运行时底座。当前项目中心不是底层 TCP worker，也不是旧的 Ryven 编辑器，而是：
+`multi_agent_tcp` 是 GuLiCode 多 Agent 蓝图系统的 Python 运行时底座。当前项目中心不是底层 TCP worker，也不是旧的 Ryven 编辑器，而是 `gulicode-bp` Codex 插件：
 
 ```text
-GuLiCode 桌面 / Top Agent / 蓝图工作台
+gulicode-bp Codex 插件 / 蓝图 Web 工作台
+  -> GuLiCode app dev surfaces: /mobile 和 /console
+  -> DesktopBlueprintService
   -> GraphRuntimeControlPlane
   -> GraphRuntime
   -> AgentNode 队列、消息分发、汇聚等待、Workspace、事件
@@ -11,7 +13,7 @@ GuLiCode 桌面 / Top Agent / 蓝图工作台
   -> Codex / CodeMaker 等 CLI worker
 ```
 
-GuLiCode 桌面负责用户入口、蓝图编排体验和 Top Agent 规划；`GraphRuntimeControlPlane` 与 `GraphRuntime` 负责框架事实、调度和生命周期；`CLIWorkerBackend` 是执行适配层，用来在需要模型工作时启动具体 CLI worker。
+`gulicode-bp` 插件负责默认用户入口、蓝图编排体验、蓝图 CRUD、启动计划生成和确认运行；`GraphRuntimeControlPlane` 与 `GraphRuntime` 负责框架事实、调度和生命周期；`CLIWorkerBackend` 是执行适配层，用来在需要模型工作时启动具体 CLI worker。GuLiCode Electron 桌面端保留为显式桌面壳、IPC、打包、任务栏或窗口行为开发路径。
 
 ## 架构图
 
@@ -19,7 +21,7 @@ GuLiCode 桌面负责用户入口、蓝图编排体验和 Top Agent 规划；`Gr
 
 <img src="docs/diagrams/blueprint_framework_layers.png" alt="蓝图框架分层图" width="92">
 
-产品入口在 GuLiCode 桌面和蓝图工作台，调度事实在 Python runtime，底层 CLI worker 不拥有产品调度语义。
+产品入口默认在 `gulicode-bp` 插件蓝图工作台，调试时同时保留 `/mobile` 和 `/console`；调度事实在 Python runtime，底层 CLI worker 不拥有产品调度语义。
 
 ### Agents 三区协同办公
 
@@ -35,14 +37,14 @@ GuLiCode 桌面负责用户入口、蓝图编排体验和 Top Agent 规划；`Gr
 
 ## 当前核心能力
 
-- 蓝图工作台嵌入 GuLiCode 桌面：蓝图是项目级能力，运行在当前 project/workspace 语义下。
-- Top Agent 规划入口：GuLiCode 当前桌面会话承担 Top Agent 产品角色，负责理解目标、拆解任务、提交启动计划和解释状态。
+- 插件蓝图工作台：蓝图是项目级能力，默认通过 `gulicode-bp` 本地 Web 工作台运行在当前 project/workspace 语义下。
+- 插件启动计划入口：插件工作台负责按当前蓝图、用户任务和起始节点生成启动计划；用户确认后才提交运行。
 - 运行时控制面：`GraphRuntimeControlPlane` 提供组织读取、计划校验、启动、状态、结束、消息批次、Agent dispatch、join 等稳定接口。
 - 图调度运行时：`GraphRuntime` 负责 AgentNode 队列、消息投递、fan-out、fan-in、idle 提醒、事件、取消、归档和最终状态。
 - Workspace 三个区：工程目录只读给 Agent，Agent 私有区可写，运行共享区沉淀报告、产物、manifest、changeset 和冲突记录。
-- MCP 工具边界：live blueprint run 可启动 run-scoped MCP 服务，为普通 Agent 和 Top Agent 暴露不同工具集合。
+- MCP 工具边界：live blueprint run 可启动 run-scoped MCP 服务，为 AgentNode 暴露受控运行时与 workspace 工具集合。
 - Codex-first 适配：当前 live Agent 主线优先使用 Codex CLI；CodeMaker 保留为兼容和备选路径。
-- 本地 Collaboration Server：支持 GuLiCode desktop、`/mobile` 和 `/console` 的账号级协作调试；同账号允许多个移动端连接一个唯一桌面端。
+- 本地 Collaboration Server：支持 `gulicode-bp` 调试、`/mobile` 和 `/console` 的账号级协作调试；桌面端 bridge 只在显式桌面调试时使用。
 
 ## 环境要求
 
@@ -88,21 +90,29 @@ python -m multi_agent_tcp show-registry
 python -m multi_agent_tcp organization --graph path\to\graph.json
 ```
 
-### GuLiCode 桌面
+### GuLiCode BP 插件调试
 
-Windows 推荐入口：
-
-```powershell
-.\start-gulicode-desktop.cmd
-```
-
-本地协作调试入口：
+默认本地调试入口：
 
 ```powershell
 .\start-gulicode-debug.cmd
 ```
 
-该脚本会幂等检查并启动 Collaboration Server `127.0.0.1:8787`、GuLiCode app dev server `127.0.0.1:3040`、桌面端/sidecar，并打开 `http://127.0.0.1:3040/mobile` 与 `http://127.0.0.1:3040/console`。
+等价的显式插件入口：
+
+```powershell
+.\start-gulicode-bp-plugin.cmd
+```
+
+该脚本会幂等检查并启动 Collaboration Server `127.0.0.1:8787`、`gulicode-bp` 蓝图工作台、GuLiCode app dev server `127.0.0.1:3040`、`http://127.0.0.1:3040/mobile` 与 `http://127.0.0.1:3040/console`，默认不启动 GuLiCode Electron 桌面壳。
+
+### GuLiCode 桌面
+
+只在需要 Electron 桌面壳、IPC、打包、任务栏或窗口行为时使用：
+
+```powershell
+.\start-gulicode-desktop.cmd
+```
 
 跨平台终端入口：
 
@@ -117,7 +127,7 @@ bun run desktop
 .\start-gulicode-desktop.cmd --packaged
 ```
 
-启动成功通常会看到 renderer dev server、Electron app started、sidecar server ready 等日志标记。详细桌面启动和打包注意事项见 `KM_docs/skills-snapshot/knowledge_base/gulicode_desktop.md`。
+桌面启动成功通常会看到 renderer dev server、Electron app started、sidecar server ready 等日志标记。详细桌面启动和打包注意事项见 `KM_docs/skills-snapshot/knowledge_base/gulicode_desktop.md`。
 
 ## 开发与验证
 
@@ -181,7 +191,8 @@ bun run typecheck
 | `codex_bridge.py` / `codemaker_bridge.py` / `cluster.py` | CLI worker 适配和兼容层。新文档中优先使用 `CLIWorkerBackend` 这个语义名。 |
 | `docs/` | 设计文档、Workspace API 说明、蓝图 fixture、架构图。 |
 | `KM_docs/skills-snapshot/` | 当前 Codex skill 知识快照，记录近期架构方向、验证命令和交接状态。 |
-| `start-gulicode-debug.cmd` / `start-gulicode-debug.ps1` | 本地协作调试启动脚本，默认拉起 desktop、`/mobile` 和 `/console`。 |
+| `start-gulicode-debug.cmd` / `start-gulicode-debug.ps1` | 插件优先调试启动脚本，默认拉起 `gulicode-bp` 蓝图工作台、`/mobile` 和 `/console`，不启动 Electron 桌面壳。 |
+| `start-gulicode-bp-plugin.cmd` | 插件优先调试入口别名。 |
 | `skill_list/` | 本地 Agent skill 目录，通常由 `python -m multi_agent_tcp.init_skill_list` 初始化。 |
 | `test_*.py` | Python runtime、workspace、desktop service、control-plane 和 Collaboration Server 的测试。 |
 
@@ -191,7 +202,7 @@ bun run typecheck
 - 不恢复旧 Ryven/editor UI 作为主线。当前蓝图能力应嵌入 GuLiCode 桌面。
 - 普通 Agents 不直接互发消息。它们通过框架 API 暂存 dispatch 意图，由 `GraphRuntime` 校验并投递。
 - 普通 Agents 不直接写工程目录或运行共享区。代码改动进入私有 checkout，提交 changeset 后由框架校验、合并或返回冲突。
-- Top Agent 不直接改写 runtime 内部状态。它读取组织上下文、提交结构化计划、解释状态，并通过控制面请求生命周期动作。
+- 插件不直接改写 runtime 内部状态。它读取蓝图组织上下文、生成/校验结构化启动计划，并通过控制面请求生命周期动作。
 - UI 不复制调度语义。GuLiCode 前端消费 runtime/control-plane 状态，不重新实现队列、join、workspace 决策。
 
 ## 相关文档

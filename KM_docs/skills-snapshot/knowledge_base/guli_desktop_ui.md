@@ -1,21 +1,29 @@
-# Guli desktop UI productization and blueprint embedding
+# Guli app UI and Blueprint workbench
 
-This document records the current effective knowledge for the Guli desktop UI line inside `multi_agent_tcp/GuLiCode`.
+This document records the current effective knowledge for the GuLiCode app UI
+surfaces used by the `gulicode-bp` plugin workbench, `/mobile`, and `/console`.
+Electron desktop UI is now a secondary compatibility track.
 
 ## Position
 
 The current UI main line is:
 
 ```text
-Guli productization
-  -> blueprint embedded in GuLiCode desktop
-  -> runtime/control-plane state rendered inside GuLiCode
+gulicode-bp plugin workbench
+  -> GuLiCode app Blueprint routes and components
+  -> /mobile and /console debug surfaces
+  -> runtime/control-plane state rendered through app UI
 ```
 
 This means:
 
-- The user-facing product surface is `GuLiCode`, not a separate Ryven-led visual-editor app.
-- Blueprint capability should appear as a GuLiCode route, panel, or workbench entry.
+- The default user-facing development surface is the plugin-served Blueprint
+  web workbench, not the Electron desktop shell.
+- Blueprint capability should appear as a GuLiCode app route, panel, or
+  workbench entry that can be served by the plugin.
+- `/mobile` and `/console` remain part of the default debug stack.
+- Electron desktop remains available for explicit desktop-shell, IPC,
+  packaging, taskbar, or windowing work.
 - Runtime semantics remain framework-owned by `GraphRuntimeControlPlane` and `GraphRuntime`; the renderer only consumes their state.
 
 ## Current landed baseline
@@ -61,18 +69,19 @@ As of 2026-05-14, the following desktop/UI baseline is already in place:
 
 ## File ownership map
 
-Use these ownership boundaries when implementing Guli desktop UI work:
+Use these ownership boundaries when implementing GuLiCode app UI work:
 
 ```text
 GuLiCode/packages/app
-  -> desktop routes, panels, layout, session views, blueprint workbench UI
+  -> routes, panels, layout, session views, blueprint workbench UI,
+     /mobile, and /console
 
 GuLiCode/packages/ui
   -> shared icons, buttons, design tokens, reusable view primitives
 
 GuLiCode/packages/desktop-electron
-  -> Electron main/preload/window shell, packaged resources, app identity,
-     taskbar behavior, icons, startup hardening
+  -> secondary explicit desktop track: Electron main/preload/window shell,
+     packaged resources, app identity, taskbar behavior, icons, startup hardening
 
 GuLiCode/scripts/dev-desktop.ts
   -> one-click bring-up, packaged launch flow, smoke-oriented launch behavior
@@ -108,6 +117,7 @@ Current concrete anchor files:
 Use these rules when adding blueprint UI to GuLiCode:
 
 - Place blueprint entrypoints in GuLiCode-owned surfaces such as the session header, sidebar, tabs, or dedicated workbench routes.
+- Keep plugin-served workbench routes usable without Electron-only APIs.
 - Keep execution semantics in `GraphRuntimeControlPlane` and `GraphRuntime`.
 - Let the renderer consume runtime-owned status, events, queues, joins, workspace changes, artifacts, and reports.
 - Do not rebuild graph scheduling rules inside `packages/app`.
@@ -223,6 +233,8 @@ That symptom is usually stale taskbar pin caching, not proof that the latest `ex
 
 ## Current known boundaries
 
+- The default debug surface is the `gulicode-bp` plugin workbench plus
+  `/mobile` and `/console`; it should not require the Electron desktop shell.
 - The blueprint header button currently opens a right-side panel with local
   graph draft editing and desktop catalog/model lookup, not runtime-backed
   execution.
@@ -231,5 +243,6 @@ That symptom is usually stale taskbar pin caching, not proof that the latest `ex
   project JSON ownership, extending the existing Electron/preload boundary
   from catalog/model lookup into Python runtime start/status/end, and live
   status projection.
-- Tauri still exists, but Electron is the default desktop verification path on this machine.
+- Tauri still exists, but Electron is only the explicit desktop verification
+  path on this machine.
 - Blueprint UI should not regress back into a separate legacy Ryven/editor workstream unless the user explicitly reopens that direction.

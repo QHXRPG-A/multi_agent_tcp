@@ -23,3 +23,11 @@ multi_agent_tcp = "multi_agent_tcp.__main__:main"
 [tool.setuptools]
 packages = ["multi_agent_tcp", "multi_agent_tcp.collaboration_server"]
 package-dir = { "multi_agent_tcp" = "." }
+
+[tool.setuptools.package-data]
+multi_agent_tcp = [
+    "agents_registry.json",
+    "docs/*.md",
+    "examples/*.json",
+    "skill_list/**/*",
+]

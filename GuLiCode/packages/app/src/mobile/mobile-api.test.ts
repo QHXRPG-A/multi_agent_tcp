@@ -192,7 +192,7 @@ describe("mobile collaboration API projection", () => {
               upstreamNodeIds: [],
               downstreamNodeIds: ["agent-1"],
               outputPorts: ["tick: tick"],
-              everyNTicks: 3,
+              everyNSeconds: 3,
             },
           ],
           edges: [
@@ -224,7 +224,7 @@ describe("mobile collaboration API projection", () => {
     expect(data.blueprint.nodes.map((node) => node.kind)).toEqual(["worker_agent", "script", "branch", "tick"])
     expect(data.blueprint.nodes.find((node) => node.id === "script-1")?.summary).toContain("format_result")
     expect(data.blueprint.nodes.find((node) => node.id === "branch-1")?.outputPorts).toContain("true: message")
-    expect(data.blueprint.nodes.find((node) => node.id === "tick-1")?.everyNTicks).toBe(3)
+    expect(data.blueprint.nodes.find((node) => node.id === "tick-1")?.everyNSeconds).toBe(3)
     expect(data.blueprint.edges[0]).toEqual({
       source: "agent-1",
       target: "script-1",
@@ -232,6 +232,55 @@ describe("mobile collaboration API projection", () => {
       outputPort: "out",
       inputPort: "payload",
     })
+  })
+
+  test("recovers typed nodes from legacy desktop snapshots", () => {
+    const data = serverStateToMobile(
+      project,
+      {
+        ...status,
+        blueprint: {
+          nodes: [
+            {
+              id: "agent-3",
+              label: "agent-agent-3",
+              kind: "worker_agent",
+              role: "Agent",
+              state: "idle",
+              upstreamNodeIds: [],
+              downstreamNodeIds: [],
+            },
+            {
+              id: "branch-1",
+              label: "Branch",
+              kind: "worker_agent",
+              state: "idle",
+              upstreamNodeIds: [],
+              downstreamNodeIds: [],
+              inputPorts: ["condition: bool"],
+              outputPorts: ["true: message", "false: message"],
+            },
+            {
+              id: "tick-1",
+              label: "Tick",
+              kind: "worker_agent",
+              state: "idle",
+              upstreamNodeIds: [],
+              downstreamNodeIds: [],
+              outputPorts: ["tick: tick"],
+              everyNSeconds: 3,
+            },
+          ],
+          edges: [],
+        },
+        agents: [],
+      },
+      undefined,
+      [],
+      { csrfToken: "csrf-1", capabilities: [], planningRequests: [] },
+    )
+
+    expect(data.blueprint.nodes.map((node) => node.kind)).toEqual(["agent", "branch", "tick"])
   })
 
   test("loads /mobile data through the read-only API sequence", async () => {

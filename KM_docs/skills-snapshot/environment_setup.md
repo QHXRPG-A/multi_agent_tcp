@@ -5,7 +5,8 @@ Last refreshed: 2026-05-29 on
 
 This is the fast path for bringing up the current `multi_agent_tcp` repo from
 the archived GuLiCode / blueprint runtime handoff notes. The active product
-center is the GuLiCode desktop app plus the framework-owned blueprint runtime.
+center is the `gulicode-bp` Codex plugin plus the framework-owned blueprint
+runtime. GuLiCode desktop/Electron is a secondary explicit track.
 
 ## Repository Root
 
@@ -197,25 +198,37 @@ bun test ./src/main/blueprint-catalog.test.ts ./src/main/blueprint-runtime.test.
 Current focused result: app blueprint tests passed, and desktop-electron
 blueprint/runtime IPC tests passed.
 
-## Desktop Bring-Up
+## Plugin-First Debug Bring-Up
 
-Preferred Windows launcher:
-
-```powershell
-cd F:\src\Package\Script\Python\multi_agent_tcp
-.\start-gulicode-desktop.cmd
-```
-
-Full local collaboration debug startup:
+Preferred local debug launcher:
 
 ```powershell
 cd F:\src\Package\Script\Python\multi_agent_tcp
 .\start-gulicode-debug.cmd
 ```
 
-This starts or verifies the Collaboration Server on `127.0.0.1:8787`, the app
-dev server on `127.0.0.1:3040`, GuLiCode desktop/sidecar, and opens `/mobile`
-plus `/console`.
+Equivalent explicit plugin alias:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp
+.\start-gulicode-bp-plugin.cmd
+```
+
+This starts or verifies the Collaboration Server on `127.0.0.1:8787`, the
+`gulicode-bp` workbench, the app dev server on `127.0.0.1:3040`, `/mobile`,
+and `/console`. It skips the GuLiCode Electron desktop shell.
+
+Use `-SkipWebBuild` for a faster loop when `GuLiCode/packages/app/dist` is
+already current. Use `-NoOpen` to keep the browser closed.
+
+## Explicit Desktop Bring-Up
+
+Use this only for desktop-shell, IPC, packaging, taskbar, or windowing work:
+
+```powershell
+cd F:\src\Package\Script\Python\multi_agent_tcp
+.\start-gulicode-desktop.cmd
+```
 
 Packaged smoke path:
 
@@ -231,7 +244,7 @@ cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode
 bun run desktop
 ```
 
-Clean debug startup after Electron main/preload IPC changes:
+Explicit desktop debug startup after Electron main/preload IPC changes:
 
 ```powershell
 cd F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron

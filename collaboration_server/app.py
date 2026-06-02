@@ -1555,9 +1555,9 @@ def _desktop_snapshot_node_projection(item: dict[str, Any]) -> dict[str, Any]:
     if x is not None and y is not None:
         node["x"] = x
         node["y"] = y
-    every_n_ticks = _snapshot_optional_int(item.get("everyNTicks"))
-    if every_n_ticks is not None and every_n_ticks >= 1:
-        node["everyNTicks"] = every_n_ticks
+    every_n_seconds = _snapshot_optional_int(item.get("everyNSeconds") or item.get("everyNTicks"))
+    if every_n_seconds is not None and every_n_seconds >= 1:
+        node["everyNSeconds"] = every_n_seconds
     return node
 
 

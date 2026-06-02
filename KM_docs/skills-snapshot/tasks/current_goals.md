@@ -1,15 +1,16 @@
 # Current Short-Term Goals
 
-Last cleaned: 2026-05-28
+Last cleaned: 2026-06-01
 
 ## Current Main Line
 
 The active project direction is:
 
 ```text
-Guli productization
-  -> blueprint embedded in GuLiCode desktop
-  -> GraphRuntimeControlPlane
+gulicode-bp Codex plugin
+  -> local Blueprint web workbench
+  -> GuLiCode app dev surfaces: /mobile and /console
+  -> DesktopBlueprintService / GraphRuntimeControlPlane
   -> GraphRuntime
   -> AgentNode queues, outgoing batches, joins, workspace/events
   -> CLIWorkerBackend adapters
@@ -18,15 +19,60 @@ Guli productization
 Primary design source:
 
 - [`../多agents通信设计.md`](../多agents通信设计.md)
-- [`guli_desktop_ui_tasks.md`](guli_desktop_ui_tasks.md)
 - [`multi_agent_communication_tasks.md`](multi_agent_communication_tasks.md)
-- [`../knowledge_base/gulicode_desktop.md`](../knowledge_base/gulicode_desktop.md)
+- [`../knowledge_base/debug_start.md`](../knowledge_base/debug_start.md)
 - [`../knowledge_base/guli_desktop_ui.md`](../knowledge_base/guli_desktop_ui.md)
+- [`../knowledge_base/gulicode_desktop.md`](../knowledge_base/gulicode_desktop.md) for explicit desktop work
 - [`../knowledge_base/core_architecture.md`](../knowledge_base/core_architecture.md)
+
+Default debug startup is plugin-first: `start-gulicode-debug.cmd` starts the
+`gulicode-bp` workbench, Collaboration Server, `/mobile`, and `/console`, and
+skips the GuLiCode Electron desktop shell. Use `start-gulicode-desktop.cmd`
+only for explicit desktop-shell, IPC, packaging, taskbar, or windowing tasks.
+
+## Highest Priority
+
+P0: make `gulicode-bp` installable and usable without a local
+`multi_agent_tcp` source checkout.
+
+Current implementation direction:
+
+- The plugin installer builds the `multi-agent-tcp` runtime wheel and installs
+  it into a plugin-owned `.runtime/venv`.
+- Installed `.mcp.json` points at the plugin-owned Python and no longer carries
+  repo `PYTHONPATH` / `GULICODE_BP_REPO_ROOT`.
+- `GULICODE_BP_REPO_ROOT` is reserved for explicit repository development
+  mode; standalone acceptance can set `GULICODE_BP_DISABLE_REPO_FALLBACK=1`.
+- Script Function Node templates import the generated project-local
+  `gulicode_blueprint.py` shim so editor jumps stay out of runtime source.
+
+Target:
+
+- Keep `plugins/gulicode-bp` as the product entrypoint.
+- Package or install the Python runtime needed by the plugin into a
+  plugin-owned location.
+- Do not require end users to clone `F:\src\Package\Script\Python\multi_agent_tcp`.
+- Prefer a plugin-private venv or wheel-based runtime install over copying
+  loose repo source into the plugin forever.
+- Make `.mcp.json` point at the plugin-owned Python/runtime path.
+- Keep script-node authoring pointed at the local `gulicode_blueprint.py` shim.
+- Keep source-of-truth development in this repo, then build/install a
+  self-contained plugin artifact.
+
+Acceptance:
+
+- On a machine without the repo checkout, installing `gulicode-bp` can run
+  `start_blueprint_workbench`, `blueprint_list`, `blueprint_create`,
+  `blueprint_plan_create`, `blueprint_plan_validate`, and `blueprint_start`
+  for a normal project.
+- The installer reports clear repair steps if Python, wheel install, Codex CLI,
+  or required runtime dependencies are missing.
+- Existing repo-bound developer workflow remains available for local
+  development and debugging.
 
 ## Recently Completed Baseline
 
-This round has already established the first usable desktop/UI baseline:
+Historical desktop/UI baseline retained for compatibility:
 
 - One-click packaged startup now uses `start-gulicode-desktop.cmd --packaged`.
 - Packaged output is stabilized at `GuLiCode/packages/desktop-electron/dist/packaged-launch/current/win-unpacked/GuLiCode Dev.exe`.
@@ -170,6 +216,11 @@ This round has already established the first usable desktop/UI baseline:
 
 Start from these source files:
 
+- `plugins/gulicode-bp/mcp/gulicode_bp_mcp.py`
+- `plugins/gulicode-bp/scripts/install_personal_plugin.py`
+- `plugins/gulicode-bp/scripts/start_workbench.py`
+- `plugins/gulicode-bp/skills/blueprint/SKILL.md`
+- `start-gulicode-debug.ps1`
 - `GuLiCode/packages/app/src/pages/session/blueprint-model.ts`
 - `GuLiCode/packages/app/src/pages/session/blueprint-side-panel.tsx`
 - `GuLiCode/packages/app/src/pages/session/blueprint-model.test.ts`
@@ -219,7 +270,7 @@ bun test ./src/main/blueprint-catalog.test.ts ./src/main/blueprint-runtime.test.
 bun run build
 ```
 
-For clean debug startup with visible Electron errors:
+For explicit desktop-shell debugging with visible Electron errors:
 
 ```powershell
 cd GuLiCode\packages\desktop-electron
@@ -234,17 +285,34 @@ internal traversal logs.
 
 ## Active Priorities
 
-Highest priority as of 2026-05-29:
+Highest priority as of 2026-06-01:
 
-1. 前后端联调测试.
-   - Use the `调试启动` workflow to start the Collaboration Server, GuLiCode
-     desktop, mock mobile `/mobile` client, and `/console` together.
-   - Exercise the account-level desktop bridge loop end to end: mobile chat
-     submit -> Collaboration Server -> active desktop bridge -> desktop
-     PromptInput submit -> desktop session snapshot -> mobile chat refresh.
-   - Exercise blueprint planning from mobile: mobile goal -> desktop Top Agent
-     planning with `[来自移动端]` marker -> pending question/plan sync ->
-     mobile approval -> live run start.
+1. Standalone `gulicode-bp` distribution.
+   - Make the installed plugin usable without a local `multi_agent_tcp`
+     checkout.
+   - Package or install `DesktopBlueprintService`, `GraphRuntime`, and runtime
+     dependencies into a plugin-owned location.
+   - Rewrite `.mcp.json` / installer output to point at the plugin-owned
+     Python/runtime path.
+   - Smoke a no-repo install path: start workbench, list/create blueprint,
+     create/validate start plan, start/status/end live run.
+
+2. Plugin-first Blueprint debug loop.
+   - Use the debug startup workflow to start the `gulicode-bp` workbench,
+     Collaboration Server, mock mobile `/mobile`, and `/console` together.
+   - Do not start the GuLiCode Electron desktop shell unless the task is
+     explicitly about desktop-shell, IPC, packaging, taskbar, or windowing
+     behavior.
+   - Exercise the plugin workbench path end to end: open current project
+     blueprint -> validate -> start/status/events/diff -> stop/end.
+   - Keep `/mobile` and `/console` available in the same debug loop for
+     collaboration and runtime observability.
+   - Exercise the account-level bridge loop where relevant: mobile chat submit
+     -> Collaboration Server -> active runtime/session bridge -> session
+     snapshot -> mobile chat refresh.
+   - Exercise blueprint start from mobile where relevant: mobile goal ->
+     plugin start-plan create/validate -> pending confirmation -> live run
+     start.
    - Verify mobile agent message send, run cancel, diff approve audit-only,
      real rollback, viewer/logged-out read-only fallback, CSRF failures,
      runtime failure propagation, audit logs, client logs, and payload
@@ -257,6 +325,7 @@ Highest priority as of 2026-05-29:
 
 Latest detailed archive:
 
+- [`../archive/runtime-backend/gulicode_bp_plugin_direct_control_start_plan_2026-06-01.md`](../archive/runtime-backend/gulicode_bp_plugin_direct_control_start_plan_2026-06-01.md)
 - [`../archive/future-server/collaboration_server_desktop_bridge_mobile_chat_2026-05-29.md`](../archive/future-server/collaboration_server_desktop_bridge_mobile_chat_2026-05-29.md)
 - [`../archive/future-server/collaboration_server_mobile_write_loop_2026-05-28.md`](../archive/future-server/collaboration_server_mobile_write_loop_2026-05-28.md)
 
@@ -409,8 +478,8 @@ Current state:
 
 High-priority remaining checks:
 
-1. Restart GuLiCode desktop/blueprint service before retesting startup speed;
-   existing Python service processes still have old code loaded.
+1. Restart the `gulicode-bp` workbench/blueprint service before retesting
+   startup speed; existing Python service processes still have old code loaded.
 2. Manual UI smoke for native global diff sync:
    - Start a new live blueprint run in `D:\agents_work_test`.
    - Verify the blueprint Diff overlay and right native Review/FileTree diff

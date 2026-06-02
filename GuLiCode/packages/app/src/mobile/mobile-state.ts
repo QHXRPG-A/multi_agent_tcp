@@ -62,6 +62,7 @@ export type BlueprintNode = {
   summary?: string
   inputPorts?: string[]
   outputPorts?: string[]
+  everyNSeconds?: number
   everyNTicks?: number
   layout?: {
     x: number
@@ -246,4 +247,53 @@ export function nodeKindLabel(kind: BlueprintNodeKind) {
     case "tick":
       return "Tick"
   }
+}
+
+type BlueprintNodeKindInput = Partial<
+  Pick<BlueprintNode, "kind" | "label" | "role" | "summary" | "inputPorts" | "outputPorts" | "everyNSeconds" | "everyNTicks">
+>
+
+export function normalizedBlueprintNodeKind(node: BlueprintNodeKindInput): BlueprintNodeKind {
+  if (node.kind && node.kind !== "worker_agent") return node.kind
+
+  const label = (node.label ?? "").trim().toLowerCase()
+  const role = (node.role ?? "").trim().toLowerCase()
+  const summary = (node.summary ?? "").trim().toLowerCase()
+  const ports = [...(node.inputPorts ?? []), ...(node.outputPorts ?? [])].join(" ").toLowerCase()
+
+  if (
+    label === "branch" ||
+    label === "\u5206\u652f" ||
+    role.includes("branch") ||
+    ports.includes("condition") ||
+    (ports.includes("true:") && ports.includes("false:"))
+  ) {
+    return "branch"
+  }
+  if (
+    node.everyNSeconds ||
+    node.everyNTicks ||
+    label === "tick" ||
+    label === "\u8282\u62cd" ||
+    role.includes("tick") ||
+    ports.includes("tick:")
+  ) {
+    return "tick"
+  }
+  if (
+    label === "script" ||
+    label === "\u811a\u672c" ||
+    role.includes("script") ||
+    role.includes("function") ||
+    summary.includes("function")
+  ) {
+    return "script"
+  }
+  if (role === "agent") return "agent"
+  if (role.includes("worker agent")) return "worker_agent"
+  return node.kind ?? "worker_agent"
+}
+
+export function nodeDisplayKindLabel(node: BlueprintNodeKindInput) {
+  return nodeKindLabel(normalizedBlueprintNodeKind(node))
 }

@@ -13,7 +13,7 @@ import { TextField, type TextFieldProps } from "@opencode-ai/ui/text-field"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
 import { showToast } from "@opencode-ai/ui/toast"
 import { For, Index, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount, splitProps, untrack, type JSX } from "solid-js"
-import { useNavigate } from "@solidjs/router"
+import { useNavigate, useParams } from "@solidjs/router"
 import { base64Encode } from "@opencode-ai/shared/util/encode"
 import { createStore, reconcile, type SetStoreFunction } from "solid-js/store"
 import { useLanguage } from "@/context/language"
@@ -21,7 +21,6 @@ import { useLayout, type BlueprintFloatingRect } from "@/context/layout"
 import { BlueprintCollaborationAuthPanel, postDesktopBlueprintSnapshot, type DesktopBlueprintSnapshotPayload } from "@/components/collaboration-auth"
 import { Persist, persisted } from "@/utils/persist"
 import { decode64 } from "@/utils/base64"
-import { useSessionLayout } from "@/pages/session/session-layout"
 import {
   DEFAULT_INPUT_PORT,
   DEFAULT_OUTPUT_PORT,
@@ -148,20 +147,48 @@ const BLUEPRINT_THEME = {
 } as JSX.CSSProperties
 
 const BLUEPRINT_CHROME_THEME = {
-  "--background-base": "#f8fafc",
-  "--background-strong": "#ffffff",
-  "--background-stronger": "#eef2f7",
-  "--surface-base-hover": "rgba(14, 116, 144, 0.08)",
-  "--surface-base-active": "rgba(14, 116, 144, 0.14)",
-  "--border-weaker-base": "rgba(15, 23, 42, 0.12)",
-  "--border-weak-base": "rgba(15, 23, 42, 0.18)",
-  "--text-strong": "#0f172a",
-  "--text-base": "#1f2937",
-  "--text-weak": "#475569",
-  "--text-weaker": "#64748b",
-  "--icon-base": "#0f172a",
-  "--icon-weak": "#475569",
-  "--icon-strong-base": "#020617",
+  "--color-background-base": "#071019",
+  "--color-background-strong": "#0b1522",
+  "--color-background-stronger": "#0d1826",
+  "--color-surface-base-hover": "rgba(56, 214, 244, 0.12)",
+  "--color-surface-base-active": "rgba(56, 214, 244, 0.18)",
+  "--color-surface-disabled": "rgba(8, 19, 31, 0.72)",
+  "--color-button-secondary-base": "rgba(13, 24, 38, 0.98)",
+  "--color-button-secondary-hover": "rgba(18, 36, 54, 1)",
+  "--color-border-weaker-base": "rgba(103, 232, 249, 0.14)",
+  "--color-border-weak-base": "rgba(103, 232, 249, 0.22)",
+  "--color-border-disabled": "rgba(103, 232, 249, 0.12)",
+  "--color-text-strong": "#f8fdff",
+  "--color-text-base": "#d6e9f5",
+  "--color-text-weak": "#b8cede",
+  "--color-text-weaker": "#95afc4",
+  "--color-icon-base": "#d7f7ff",
+  "--color-icon-weak": "#a5d8e9",
+  "--color-icon-strong-base": "#ffffff",
+  "--color-icon-invert-base": "#b8cede",
+  "--color-icon-disabled": "#7f9db2",
+  "--color-icon-strong-disabled": "rgba(127, 157, 178, 0.28)",
+  "--background-base": "#071019",
+  "--background-strong": "#0b1522",
+  "--background-stronger": "#0d1826",
+  "--surface-base-hover": "rgba(56, 214, 244, 0.12)",
+  "--surface-base-active": "rgba(56, 214, 244, 0.18)",
+  "--surface-disabled": "rgba(8, 19, 31, 0.72)",
+  "--button-secondary-base": "rgba(13, 24, 38, 0.98)",
+  "--button-secondary-hover": "rgba(18, 36, 54, 1)",
+  "--border-weaker-base": "rgba(103, 232, 249, 0.14)",
+  "--border-weak-base": "rgba(103, 232, 249, 0.22)",
+  "--border-disabled": "rgba(103, 232, 249, 0.12)",
+  "--text-strong": "#f8fdff",
+  "--text-base": "#d6e9f5",
+  "--text-weak": "#b8cede",
+  "--text-weaker": "#95afc4",
+  "--icon-base": "#d7f7ff",
+  "--icon-weak": "#a5d8e9",
+  "--icon-strong-base": "#ffffff",
+  "--icon-invert-base": "#b8cede",
+  "--icon-disabled": "#7f9db2",
+  "--icon-strong-disabled": "rgba(127, 157, 178, 0.28)",
 } as JSX.CSSProperties
 
 const BLUEPRINT_INSPECTOR_THEME = {
@@ -257,6 +284,15 @@ export type BlueprintPlanningSubmitInput = {
   silentBlocked?: boolean
 }
 
+export type BlueprintPlanningSubmitResult =
+  | boolean
+  | {
+      accepted: boolean
+      requestId?: string
+      status?: string
+      message?: string
+    }
+
 export type BlueprintPlanningProgressPhase = "planning" | "start"
 export type BlueprintPlanningProgressState = {
   active: boolean
@@ -327,6 +363,14 @@ type BlueprintRuntimeState = {
   status?: Record<string, unknown>
   explanation?: Record<string, unknown>
   events: Record<string, unknown>[]
+  plan?: Record<string, unknown>
+  planValidation?: Record<string, unknown>
+  planningRequest?: {
+    requestId: string
+    status: string
+    summary?: string
+    message?: string
+  }
   loading: boolean
   action?: string
   error?: string
@@ -619,9 +663,9 @@ const INSPECTOR_TIPS = {
     what: "blueprint.tip.reducePrompt.what",
     usage: "blueprint.tip.reducePrompt.usage",
   },
-  everyNTicks: {
-    what: "blueprint.tip.everyNTicks.what",
-    usage: "blueprint.tip.everyNTicks.usage",
+  everyNSeconds: {
+    what: "blueprint.tip.everyNSeconds.what",
+    usage: "blueprint.tip.everyNSeconds.usage",
   },
   edge: {
     what: "blueprint.tip.edge.what",
@@ -759,28 +803,52 @@ type AddNodeOption =
     }
 
 type RuntimeNodeVisualState = "idle" | "active" | "working"
+type BlueprintPanelLayoutView = Pick<ReturnType<ReturnType<typeof useLayout>["view"]>, "blueprintPanel">
 
 export function BlueprintSidePanel(props: {
   floating?: boolean
+  initialBlueprintId?: string
   floatingRect?: BlueprintFloatingRect
   onFloat?: (rect?: Partial<BlueprintFloatingRect>) => void
   onDock?: () => void
   onFloatingRectChange?: (rect: Partial<BlueprintFloatingRect>) => void
   blueprintPlanningProgress?: BlueprintPlanningProgressState
   blueprintPlanningActiveRun?: Record<string, unknown>
-  onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => boolean | Promise<boolean>
+  onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => BlueprintPlanningSubmitResult | Promise<BlueprintPlanningSubmitResult>
   onBlueprintDiffChanged?: (payload: BlueprintDiffSyncPayload) => void
 } = {}) {
   const language = useLanguage()
   const platform = usePlatform()
-  const layout = useLayout()
+  const layout = props.floating ? undefined : useLayout()
   const navigate = useNavigate()
   const dialog = useDialog()
-  const { params, view } = useSessionLayout()
+  const params = useParams()
+  const sessionKey = createMemo(() => `${params.dir}${params.id ? "/" + params.id : ""}`)
+  const standaloneView = {
+    blueprintPanel: {
+      opened: () => true,
+      floating: () => true,
+      floatingRect: () => props.floatingRect ?? { x: 0, y: 0, width: 0, height: 0 },
+      open: () => undefined,
+      close: () => undefined,
+      toggle: () => undefined,
+      float: () => undefined,
+      dock: () => undefined,
+      move: () => undefined,
+    },
+  } satisfies BlueprintPanelLayoutView
+  const view = createMemo<BlueprintPanelLayoutView>(
+    () =>
+      layout?.view(sessionKey) ?? standaloneView,
+  )
   const projectDirectory = decode64(params.dir) ?? "global"
+  const routeInitialBlueprintId = () => props.initialBlueprintId?.trim() || ""
+  const initialBlueprintId = () => routeInitialBlueprintId() || DEFAULT_BLUEPRINT_ID
+  const initialBlueprintName = () =>
+    initialBlueprintId() === DEFAULT_BLUEPRINT_ID ? DEFAULT_BLUEPRINT_NAME : initialBlueprintId()
   const [blueprintPicker, setBlueprintPicker] = createSignal<BlueprintDocumentPickerState>({
-    id: DEFAULT_BLUEPRINT_ID,
-    name: DEFAULT_BLUEPRINT_NAME,
+    id: initialBlueprintId(),
+    name: initialBlueprintName(),
     items: [],
     loading: false,
   })
@@ -853,6 +921,8 @@ export function BlueprintSidePanel(props: {
     events: [],
     loading: false,
   })
+  const [planningCancelPending, setPlanningCancelPending] = createSignal(false)
+  const planningCancelledRequestIds = new Set<string>()
   const [blueprintDiffOpen, setBlueprintDiffOpen] = createSignal(false)
   const [blueprintDiffSelectedChangesetId, setBlueprintDiffSelectedChangesetId] = createSignal<string>()
   const [blueprintDiff, setBlueprintDiff] = createStore<BlueprintDiffState>(emptyBlueprintDiffState())
@@ -949,6 +1019,15 @@ export function BlueprintSidePanel(props: {
   function clearRuntimeManualUnlock(runId: string) {
     if (!blueprintRuntimeManualUnlockKeys.delete(runId)) return
     setRuntimeManualUnlockVersion((version) => version + 1)
+  }
+
+  function clearRuntimeStartPlan() {
+    setRuntime((current) => ({
+      ...current,
+      plan: undefined,
+      planValidation: undefined,
+      planningRequest: undefined,
+    }))
   }
 
   function planningProgressActive() {
@@ -1131,6 +1210,15 @@ export function BlueprintSidePanel(props: {
     if (action === "plan") return "planning"
     return "planning"
   })
+  const blueprintPlanningRequestCancelAvailable = createMemo(() => {
+    const request = runtime().planningRequest
+    return (
+      blueprintProgressPhase() === "planning" &&
+      !!request?.requestId &&
+      isBlueprintPlanningRequestActive(request.status) &&
+      !!platform.cancelBlueprintWindowPlanning
+    )
+  })
   const blueprintProgressHudStyle = createMemo<JSX.CSSProperties>(() => {
     progressAnchorVersion()
     const rootRect = rootRef?.getBoundingClientRect()
@@ -1240,6 +1328,8 @@ export function BlueprintSidePanel(props: {
   const runtimeBusy = createMemo(
     () => runtime().loading || (!!runtime().runId && !isTerminalRuntimeStatus(runtimeStatus(runtime().status))),
   )
+  const runtimeStartPlanReady = createMemo(() => !!runtime().plan && asRecord(runtime().planValidation)?.ok === true)
+  const blueprintPlanningBridgeAvailable = createMemo(() => !!props.onBlueprintPlanningSubmit)
   const scriptCompileDisabled = createMemo(
     () => scriptCompiling() || runtimeBusy() || !draftReady() || !platform.listBlueprintScriptNodes,
   )
@@ -1301,6 +1391,13 @@ export function BlueprintSidePanel(props: {
 
   const replaceDraft = (next: BlueprintDraft) => {
     setDraft(reconcile(next))
+  }
+
+  const syncWorkbenchBlueprintRoute = (blueprintId: string) => {
+    if (!routeInitialBlueprintId()) return
+    const targetId = blueprintId.trim()
+    if (!targetId || params.id === targetId) return
+    navigate(`/${base64Encode(projectDirectory)}/blueprint-window/${encodeURIComponent(targetId)}`, { replace: true })
   }
 
   const persistProjectDraft = async (next: BlueprintDraft) => {
@@ -1393,6 +1490,7 @@ export function BlueprintSidePanel(props: {
         loading: false,
         error: undefined,
       }))
+      syncWorkbenchBlueprintRoute(documentId)
       setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
     } catch (error) {
       const message = readableError(error)
@@ -1568,8 +1666,11 @@ export function BlueprintSidePanel(props: {
   }
 
   const openProjectSession = (targetProjectDir: string) => {
-    layout.projects.open(targetProjectDir)
-    navigate(`/${base64Encode(targetProjectDir)}/session`, { replace: true })
+    layout?.projects.open(targetProjectDir)
+    const route = props.floating
+      ? `/${base64Encode(targetProjectDir)}/blueprint-window/${encodeURIComponent(currentBlueprintId())}`
+      : `/${base64Encode(targetProjectDir)}/session`
+    navigate(route, { replace: true })
   }
 
   function showProjectWorkdirConflictDialog(targetProjectDir: string) {
@@ -1702,6 +1803,7 @@ export function BlueprintSidePanel(props: {
         loading: false,
         error: undefined,
       }))
+      syncWorkbenchBlueprintRoute(blueprintId)
       setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
       void refreshProjectBlueprints(blueprintId)
     } catch (error) {
@@ -1814,10 +1916,11 @@ export function BlueprintSidePanel(props: {
     void (async () => {
       try {
         await platform.configureBlueprintRuntime?.(currentConfig().python_path)
-        const items = platform.listBlueprints ? await refreshProjectBlueprints(DEFAULT_BLUEPRINT_ID) : []
-        const selected = items.find((item) => item.id === DEFAULT_BLUEPRINT_ID) ?? items[0]
-        const targetBlueprintId = selected?.id ?? DEFAULT_BLUEPRINT_ID
-        const targetBlueprintName = selected?.name ?? DEFAULT_BLUEPRINT_NAME
+        const requestedBlueprintId = initialBlueprintId()
+        const items = platform.listBlueprints ? await refreshProjectBlueprints(requestedBlueprintId) : []
+        const selected = items.find((item) => item.id === requestedBlueprintId) ?? items[0]
+        const targetBlueprintId = selected?.id ?? requestedBlueprintId
+        const targetBlueprintName = selected?.name ?? initialBlueprintName()
         await loadProjectBlueprint(targetBlueprintId, targetBlueprintName)
       } catch (error) {
         const code = typeof error === "object" && error !== null ? (error as { code?: string }).code : undefined
@@ -2043,6 +2146,16 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
+    const request = runtime().planningRequest
+    if (!request?.requestId || !isBlueprintPlanningRequestActive(request.status) || !platform.blueprintWindowPlanningStatus) return
+    void refreshBlueprintPlanningRequest(request.requestId, { quiet: true })
+    const interval = setInterval(() => {
+      void refreshBlueprintPlanningRequest(request.requestId, { quiet: true })
+    }, 1500)
+    onCleanup(() => clearInterval(interval))
+  })
+
+  createEffect(() => {
     const runId = runtime().runId
     const status = runtimeStatus(runtime().status)
     if (!runId || isTerminalRuntimeStatus(status) || !platform.blueprintAgentStreamToken) return
@@ -2115,6 +2228,121 @@ export function BlueprintSidePanel(props: {
       if (autoCompletingRuntimeKey() === key) setAutoCompletingRuntimeKey(undefined)
     })
   })
+
+  async function refreshBlueprintPlanningRequest(
+    requestId = runtime().planningRequest?.requestId,
+    opts: { quiet?: boolean } = {},
+  ) {
+    if (!requestId || !platform.blueprintWindowPlanningStatus) return
+    if (!opts.quiet) setRuntime((current) => ({ ...current, loading: true, action: "plan", error: undefined }))
+    try {
+      const response = await platform.blueprintWindowPlanningStatus(requestId)
+      if (response.found === false) {
+        setBlueprintFlowLock({ active: false })
+        setRuntime((current) => ({
+          ...current,
+          planningRequest: {
+            requestId,
+            status: "missing",
+            message: "planning request expired",
+          },
+          loading: false,
+          action: undefined,
+          error: "planning request expired",
+        }))
+        return
+      }
+      const request = asRecord(response.request) ?? asRecord(response)
+      const status = stringValue(request?.status) ?? "pending"
+      const plan = asRecord(request?.plan)
+      const validation = asRecord(request?.validation)
+      const summary = stringValue(request?.summary)
+      const message =
+        stringValue(request?.message) ??
+        stringValue(request?.reason) ??
+        stringValue(response.message) ??
+        stringValue(response.error)
+      const cancelledByThisPanel = planningCancelledRequestIds.has(requestId)
+      const effectiveStatus = cancelledByThisPanel && isBlueprintPlanningRequestActive(status) ? "cancelled" : status
+      const active = isBlueprintPlanningRequestActive(effectiveStatus)
+      const errors = validationErrors(validation)
+      if (!active) setBlueprintFlowLock({ active: false })
+      setRuntime((current) => ({
+        ...current,
+        planningRequest: {
+          requestId,
+          status: effectiveStatus,
+          summary,
+          message,
+        },
+        plan: plan ?? current.plan,
+        planValidation: validation ?? current.planValidation,
+        loading: active,
+        action: active ? "plan" : undefined,
+        error:
+          effectiveStatus === "failed" || (effectiveStatus === "cancelled" && !cancelledByThisPanel)
+            ? message ?? status
+            : validation?.ok === false
+              ? errors[0] ?? "start plan validation failed"
+              : undefined,
+        lastUpdatedAt: Date.now(),
+      }))
+    } catch (error) {
+      const message = readableError(error)
+      setBlueprintFlowLock({ active: false })
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
+    }
+  }
+
+  async function cancelBlueprintPlanningRequest() {
+    const requestId = runtime().planningRequest?.requestId
+    if (!requestId || !platform.cancelBlueprintWindowPlanning || planningCancelPending()) return
+    setPlanningCancelPending(true)
+    try {
+      const response = await platform.cancelBlueprintWindowPlanning(
+        requestId,
+        "cancelled from blueprint progress HUD",
+      )
+      const request = asRecord(response.request) ?? asRecord(response)
+      const status = stringValue(request?.status) ?? (response.cancelled === false ? "missing" : "cancelled")
+      const summary = stringValue(request?.summary)
+      const message =
+        stringValue(request?.message) ??
+        stringValue(request?.reason) ??
+        stringValue(response.message) ??
+        stringValue(response.error) ??
+        (status === "missing" ? "planning request expired" : undefined)
+      const plan = asRecord(request?.plan)
+      const validation = asRecord(request?.validation)
+      const errors = validationErrors(validation)
+      if (status === "cancelled" || status === "missing") planningCancelledRequestIds.add(requestId)
+      setBlueprintFlowLock({ active: false })
+      setRuntime((current) => ({
+        ...current,
+        planningRequest: {
+          requestId,
+          status,
+          summary,
+          message,
+        },
+        plan: plan ?? current.plan,
+        planValidation: validation ?? current.planValidation,
+        loading: false,
+        action: undefined,
+        error:
+          status === "failed" || status === "missing"
+            ? message ?? status
+            : validation?.ok === false
+              ? errors[0] ?? "start plan validation failed"
+              : undefined,
+        lastUpdatedAt: Date.now(),
+      }))
+    } catch (error) {
+      setRuntime((current) => ({ ...current, error: readableError(error) }))
+    } finally {
+      setPlanningCancelPending(false)
+    }
+  }
 
   async function refreshBlueprintRuntime(runId = runtime().runId, opts: { quiet?: boolean } = {}) {
     if (!runId || !platform.blueprintRunStatus) return
@@ -2415,6 +2643,7 @@ export function BlueprintSidePanel(props: {
   }
 
   function toggleRuntimeStartNode(nodeId: string) {
+    clearRuntimeStartPlan()
     setRuntimeStartNodeIds((current) => {
       if (current.includes(nodeId)) return current.filter((id) => id !== nodeId)
       return [...current, nodeId]
@@ -2424,26 +2653,26 @@ export function BlueprintSidePanel(props: {
   function buildBlueprintPlanningMessage(task: string, startNodeIds: string[]) {
     const startConstraint = startNodeIds.length
       ? [
-          "请使用以下 AgentNode 作为最终 start_nodes：",
+          "Use these AgentNode ids as the preferred start_nodes unless the graph makes them invalid:",
           ...startNodeIds.map((nodeId) => {
             const node = draft.graph.agent_nodes[nodeId]
             const agentName = node?.agent_id?.trim()
             const prompt = node?.prompt?.trim()
-            return `- ${nodeId}${agentName ? ` (${agentName})` : ""}${prompt ? `：${prompt}` : ""}`
+            return `- ${nodeId}${agentName ? ` (${agentName})` : ""}${prompt ? `: ${prompt}` : ""}`
           }),
         ].join("\n")
-      : "未手动选择开始 AgentNode，请由 Top Agent 根据当前蓝图组织视图选择；最终 staged plan 的 start_nodes 必须非空。"
+      : "No start AgentNode was manually selected. Inspect the current blueprint and choose valid start_nodes yourself."
 
     return [
-      "请为当前蓝图规划一次运行。",
+      "Please create one start plan for the current blueprint.",
       "",
-      "用户任务：",
+      "User task:",
       task,
       "",
-      "开始节点约束：",
+      "Start node guidance:",
       startConstraint,
       "",
-      "请先基于当前蓝图组织视图规划任务，调用 runtime_validate_start 验证候选 start plan，通过后再 stage start plan；不要直接启动运行。",
+      "Use blueprint_take_planning_request to claim the request for this thread, then call blueprint_complete_planning_request with the validated start plan. Do not start the run.",
     ].join("\n")
   }
 
@@ -2489,24 +2718,194 @@ export function BlueprintSidePanel(props: {
       await persistProjectDraft(startDraft)
       setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
       const startNodeIds = runtimeStartNodeIds().slice()
-      const accepted = await props.onBlueprintPlanningSubmit({
+      const submitted = await props.onBlueprintPlanningSubmit({
         task,
         blueprintId: currentBlueprintId(),
         blueprintName: currentBlueprintName(),
         startNodeIds,
         message: buildBlueprintPlanningMessage(task, startNodeIds),
       })
-      if (!accepted) {
+      const submitResult = normalizeBlueprintPlanningSubmitResult(submitted)
+      if (!submitResult.accepted) {
         setBlueprintFlowLock({ active: false })
-        setRuntime((current) => ({ ...current, loading: false, action: undefined }))
+        setRuntime((current) => ({ ...current, loading: false, action: undefined, error: submitResult.message }))
         return
       }
       setRuntimeTask("")
+      if (submitResult.requestId) {
+        const status = submitResult.status ?? "pending"
+        setRuntime((current) => ({
+          ...current,
+          planningRequest: {
+            requestId: submitResult.requestId!,
+            status,
+            message: submitResult.message,
+          },
+          loading: isBlueprintPlanningRequestActive(status),
+          action: isBlueprintPlanningRequestActive(status) ? "plan" : undefined,
+          error: undefined,
+          plan: undefined,
+          planValidation: undefined,
+        }))
+        void refreshBlueprintPlanningRequest(submitResult.requestId)
+        return
+      }
+      setBlueprintFlowLock({ active: false })
       setRuntime((current) => ({ ...current, loading: false, action: undefined, error: undefined }))
     } catch (error) {
       const message = readableError(error)
       setPersistence((current) => ({ ...current, saving: false, error: message }))
       setBlueprintFlowLock({ active: false })
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
+    }
+  }
+
+  async function generateBlueprintStartPlan() {
+    const task = runtimeTask().trim()
+    if (!task) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.taskRequired" as never) }))
+      openRuntimePlanningPanel()
+      return
+    }
+    const startNodes = runtimeStartNodeIds().slice()
+    if (!startNodes.length && !hasTickSourceNode(draft)) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.startNodeRequired" as never) }))
+      openRuntimePlanningPanel()
+      return
+    }
+    if (runtimeBusy()) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.busy" as never) }))
+      return
+    }
+    if (!platform.saveBlueprint || !platform.createBlueprintStartPlan) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
+      return
+    }
+    const startDraft = await ensureDetectedPythonPath()
+    const configIssues = validateBlueprintConfigForStart(startDraft)
+    if (configIssues.length) {
+      setConfigIssues(configIssues)
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.configMissing" as never) }))
+      dialog.show(() => <BlueprintConfigRequiredDialog issues={configIssues} />)
+      return
+    }
+    setConfigIssues([])
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+    }
+    setPanelMode("runtime")
+    setPersistence((current) => ({ ...current, saving: true, error: undefined }))
+    setRuntime((current) => ({
+      ...current,
+      loading: true,
+      action: "plan",
+      error: undefined,
+      plan: undefined,
+      planValidation: undefined,
+      planningRequest: undefined,
+    }))
+    try {
+      await platform.configureBlueprintRuntime?.(startDraft.config.python_path)
+      await persistProjectDraft(startDraft)
+      setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+      const created = await platform.createBlueprintStartPlan(projectDirectory, currentBlueprintId(), {
+        task,
+        startNodeIds: startNodes,
+      })
+      const plan = asRecord(created.plan)
+      const validation = asRecord(created.validation)
+      const errors = validationErrors(validation)
+      setRuntime((current) => ({
+        ...current,
+        plan,
+        planValidation: validation,
+        loading: false,
+        action: undefined,
+        error: validation?.ok === false ? errors[0] ?? "start plan validation failed" : undefined,
+      }))
+    } catch (error) {
+      const message = readableError(error)
+      setPersistence((current) => ({ ...current, saving: false, error: message }))
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
+    }
+  }
+
+  async function confirmBlueprintStartPlan() {
+    if (runtimeBusy()) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.busy" as never) }))
+      return
+    }
+    const plan = asRecord(runtime().plan)
+    if (!plan || asRecord(runtime().planValidation)?.ok !== true) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.startPlanRequired" as never) }))
+      openRuntimePlanningPanel()
+      return
+    }
+    if (!platform.saveBlueprint || !platform.startBlueprintRun) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
+      return
+    }
+    const startDraft = await ensureDetectedPythonPath()
+    const configIssues = validateBlueprintConfigForStart(startDraft)
+    if (configIssues.length) {
+      setConfigIssues(configIssues)
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.configMissing" as never) }))
+      dialog.show(() => <BlueprintConfigRequiredDialog issues={configIssues} />)
+      return
+    }
+    setConfigIssues([])
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+    }
+    setPanelMode("runtime")
+    setPersistence((current) => ({ ...current, saving: true, error: undefined }))
+    setRuntime((current) => ({ ...current, loading: true, action: "start", error: undefined }))
+    try {
+      await platform.configureBlueprintRuntime?.(startDraft.config.python_path)
+      await persistProjectDraft(startDraft)
+      setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+      if (platform.validateBlueprintStartPlan) {
+        const validated = await platform.validateBlueprintStartPlan(projectDirectory, currentBlueprintId(), plan)
+        const validation = asRecord(validated.validation)
+        if (validation?.ok !== true) {
+          setRuntime((current) => ({
+            ...current,
+            planValidation: validation,
+            loading: false,
+            action: undefined,
+            error: validationErrors(validation)[0] ?? "start plan validation failed",
+          }))
+          return
+        }
+      }
+      const started = await platform.startBlueprintRun(projectDirectory, currentBlueprintId(), plan, "live")
+      const status = asRecord(started.status)
+      const recentEvents = arrayOfRecords(status?.recent_events)
+      const runId = stringValue(started.runId) ?? stringValue(asRecord(started.run)?.runId) ?? stringValue(asRecord(status?.run)?.runId)
+      syncAgentPanelUserMessagesFromRuntimeEvents(recentEvents)
+      setRuntime((current) => ({
+        ...current,
+        runId,
+        runs: mergeRuntimeRunsWithStatus(current.runs, started),
+        status,
+        explanation: asRecord(started.explanation),
+        events: recentEvents,
+        plan: undefined,
+        planValidation: undefined,
+        planningRequest: undefined,
+        loading: false,
+        action: undefined,
+        error: undefined,
+        lastUpdatedAt: Date.now(),
+      }))
+      setRuntimeTask("")
+      scheduleOpenTestAgentPanelPersists()
+      if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
+    } catch (error) {
+      const message = readableError(error)
+      setPersistence((current) => ({ ...current, saving: false, error: message }))
       setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
     }
   }
@@ -2564,6 +2963,9 @@ export function BlueprintSidePanel(props: {
         status,
         explanation: asRecord(started.explanation),
         events: recentEvents,
+        plan: undefined,
+        planValidation: undefined,
+        planningRequest: undefined,
         loading: false,
         action: undefined,
         error: undefined,
@@ -4163,24 +4565,38 @@ export function BlueprintSidePanel(props: {
                   selectedStartNodeIds={runtimeStartNodeIds()}
                   task={runtimeTask()}
                   taskDisabled={runtimeBusy() || projectWorkdirRelocating() || !persistence().loaded}
-                  submitDisabled={runtimeBusy() || projectWorkdirRelocating() || !persistence().loaded || !props.onBlueprintPlanningSubmit}
-                  directRunDisabled={
+                  generatePlanDisabled={
                     runtimeBusy() ||
                     projectWorkdirRelocating() ||
                     persistence().saving ||
                     blueprintPicker().loading ||
                     !persistence().loaded ||
-                    (runtimeStartNodeIds().length === 0 && !hasTickSourceNode(draft)) ||
                     !platform.saveBlueprint ||
-                    !platform.startBlueprintRun
+                    (!blueprintPlanningBridgeAvailable() && !platform.createBlueprintStartPlan)
+                  }
+                  confirmRunDisabled={
+                    runtimeBusy() ||
+                    projectWorkdirRelocating() ||
+                    persistence().saving ||
+                    blueprintPicker().loading ||
+                    !persistence().loaded ||
+                    !platform.startBlueprintRun ||
+                    !runtimeStartPlanReady()
                   }
                   taskInputRef={(el) => {
                     runtimeTaskInputRef = el
                   }}
-                  onTaskInput={setRuntimeTask}
+                  onTaskInput={(value) => {
+                    setRuntimeTask(value)
+                    clearRuntimeStartPlan()
+                  }}
                   onStartNodeToggle={toggleRuntimeStartNode}
-                  onSubmitPlanningTask={() => void submitBlueprintPlanningTask()}
-                  onDirectRun={() => void startBlueprintRunDirect()}
+                  onGeneratePlan={() =>
+                    void (blueprintPlanningBridgeAvailable()
+                      ? submitBlueprintPlanningTask()
+                      : generateBlueprintStartPlan())
+                  }
+                  onConfirmRun={() => void confirmBlueprintStartPlan()}
                   onRefresh={() => void refreshBlueprintRuntime()}
                   onEnd={(action) => void endBlueprintRuntime(action)}
                   workspacePanelArea={workspacePanelArea()}
@@ -4214,7 +4630,15 @@ export function BlueprintSidePanel(props: {
         </Show>
       </div>
       <Show when={blueprintProgressPhase()}>
-        {(phase) => <BlueprintProgressOverlay phase={phase()} style={blueprintProgressHudStyle()} />}
+        {(phase) => (
+          <BlueprintProgressOverlay
+            phase={phase()}
+            style={blueprintProgressHudStyle()}
+            onClose={blueprintPlanningRequestCancelAvailable() ? () => void cancelBlueprintPlanningRequest() : undefined}
+            closeDisabled={planningCancelPending()}
+            closeLabel={language.t("blueprint.progress.cancelPlanning" as never)}
+          />
+        )}
       </Show>
     </div>
   )
@@ -4666,9 +5090,16 @@ function BlueprintHeaderStatus(props: { status: BlueprintHeaderStatusState }) {
   )
 }
 
-function BlueprintProgressOverlay(props: { phase: BlueprintProgressPhase; style: JSX.CSSProperties }) {
+function BlueprintProgressOverlay(props: {
+  phase: BlueprintProgressPhase
+  style: JSX.CSSProperties
+  onClose?: () => void
+  closeDisabled?: boolean
+  closeLabel?: string
+}) {
   const language = useLanguage()
   const label = () => language.t(`blueprint.progress.${props.phase}` as never)
+  const closeLabel = () => props.closeLabel ?? language.t("common.close")
 
   return (
     <div
@@ -4686,7 +5117,25 @@ function BlueprintProgressOverlay(props: { phase: BlueprintProgressPhase; style:
       >
         <div class="mb-2 flex items-center justify-between gap-3">
           <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{label()}</div>
-          <div class="shrink-0 text-10-medium uppercase text-[#67e8f9]">{language.t("blueprint.runtime.panel")}</div>
+          <div class="flex shrink-0 items-center gap-1.5">
+            <div class="text-10-medium uppercase text-[#67e8f9]">{language.t("blueprint.runtime.panel")}</div>
+            <Show when={props.onClose}>
+              <Tooltip placement="top" value={closeLabel()}>
+                <IconButton
+                  data-blueprint-progress-close
+                  icon="close-small"
+                  variant="ghost"
+                  class="h-6 w-6 text-[#67e8f9] hover:text-[#f8fdff]"
+                  disabled={props.closeDisabled}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    props.onClose?.()
+                  }}
+                  aria-label={closeLabel()}
+                />
+              </Tooltip>
+            </Show>
+          </div>
         </div>
         <div data-blueprint-progress-track class="h-1.5 overflow-hidden rounded-full bg-[rgba(103,232,249,0.16)]">
           <div data-blueprint-progress-bar />
@@ -4702,13 +5151,13 @@ function BlueprintRuntimePanel(props: {
   selectedStartNodeIds: string[]
   task: string
   taskDisabled: boolean
-  submitDisabled: boolean
-  directRunDisabled: boolean
+  generatePlanDisabled: boolean
+  confirmRunDisabled: boolean
   taskInputRef: (el: HTMLTextAreaElement) => void
   onTaskInput: (value: string) => void
   onStartNodeToggle: (nodeId: string) => void
-  onSubmitPlanningTask: () => void
-  onDirectRun: () => void
+  onGeneratePlan: () => void
+  onConfirmRun: () => void
   onRefresh: () => void
   onEnd: (action: BlueprintRunEndAction) => void
   workspacePanelArea?: WorkspacePanelArea
@@ -4737,6 +5186,13 @@ function BlueprintRuntimePanel(props: {
   const summary = createMemo(() => asRecord(explanation()?.summary))
   const runStatus = createMemo(() => runtimeStatus(props.state.status) || "idle")
   const terminal = createMemo(() => isTerminalRuntimeStatus(runStatus()))
+  const startPlanValidation = createMemo(() => asRecord(props.state.planValidation))
+  const startPlanErrors = createMemo(() => validationErrors(startPlanValidation()))
+  const startPlanWarnings = createMemo(() => {
+    const warnings = startPlanValidation()?.warnings
+    return Array.isArray(warnings) ? warnings.map((item) => String(item).trim()).filter(Boolean) : []
+  })
+  const planningRequest = createMemo(() => props.state.planningRequest)
   const [runtimePanelOrder, setRuntimePanelOrder] = createSignal<RuntimePanelId[]>([...DEFAULT_RUNTIME_PANEL_ORDER])
   const [draggedRuntimePanel, setDraggedRuntimePanel] = createSignal<RuntimePanelId>()
   const [runtimePanelDrag, setRuntimePanelDrag] = createSignal<RuntimePanelDragState>()
@@ -4868,26 +5324,67 @@ function BlueprintRuntimePanel(props: {
             </label>
             <div class="flex justify-end gap-2">
               <Button
-                data-blueprint-runtime-direct-run
+                data-blueprint-runtime-plan-create
                 size="small"
                 variant="secondary"
                 class="h-8 px-3"
-                disabled={props.directRunDisabled}
-                onClick={props.onDirectRun}
+                disabled={props.generatePlanDisabled}
+                onClick={props.onGeneratePlan}
+              >
+                {language.t("blueprint.runtime.generatePlan" as never)}
+              </Button>
+              <Button
+                data-blueprint-runtime-confirm-run
+                size="small"
+                variant="secondary"
+                class="h-8 px-3"
+                disabled={props.confirmRunDisabled}
+                onClick={props.onConfirmRun}
               >
                 {language.t("blueprint.runtime.directRun" as never)}
               </Button>
-              <Button
-                data-blueprint-runtime-task-submit
-                size="small"
-                variant="secondary"
-                class="h-8 px-3"
-                disabled={props.submitDisabled || !props.task.trim()}
-                onClick={props.onSubmitPlanningTask}
-              >
-                {language.t("common.submit")}
-              </Button>
             </div>
+            <Show when={planningRequest()}>
+              {(request) => (
+                <div
+                  data-blueprint-runtime-planning-request
+                  class="rounded-sm border border-[rgba(103,232,249,0.18)] bg-[rgba(6,16,26,0.72)] px-2 py-1 text-11-regular text-[#9fb9ca]"
+                >
+                  <span class="text-[#f8fdff]">{request().status}</span>
+                  <Show when={request().summary || request().message}>
+                    {(detail) => <span class="ml-2">{detail()}</span>}
+                  </Show>
+                </div>
+              )}
+            </Show>
+            <Show when={props.state.plan || props.state.planValidation}>
+              <div class="rounded-sm border border-[rgba(103,232,249,0.18)] bg-[rgba(6,16,26,0.72)] p-2">
+                <div class="mb-2 flex min-w-0 items-center justify-between gap-2">
+                  <div class="truncate text-11-medium text-[#f8fdff]">{language.t("blueprint.runtime.planPreview" as never)}</div>
+                  <div
+                    class="shrink-0 rounded-sm border px-1.5 py-0.5 text-10-medium uppercase"
+                    classList={{
+                      "border-[rgba(45,212,191,0.42)] text-[#5eead4]": startPlanValidation()?.ok === true,
+                      "border-[rgba(248,113,113,0.42)] text-[#fecaca]": startPlanValidation()?.ok === false,
+                      "border-[rgba(103,232,249,0.34)] text-[#67e8f9]": startPlanValidation()?.ok !== true && startPlanValidation()?.ok !== false,
+                    }}
+                  >
+                    {startPlanValidation()?.ok === true ? "OK" : startPlanValidation()?.ok === false ? "ERROR" : "DRAFT"}
+                  </div>
+                </div>
+                <Show when={startPlanErrors().length > 0}>
+                  <div class="mb-2 rounded-sm bg-[rgba(248,113,113,0.12)] px-2 py-1 text-11-regular text-[#fecaca]">
+                    <For each={startPlanErrors()}>{(error) => <div>{error}</div>}</For>
+                  </div>
+                </Show>
+                <Show when={startPlanWarnings().length > 0}>
+                  <div class="mb-2 rounded-sm bg-[rgba(250,204,21,0.10)] px-2 py-1 text-11-regular text-[#fde68a]">
+                    <For each={startPlanWarnings()}>{(warning) => <div>{warning}</div>}</For>
+                  </div>
+                </Show>
+                <Show when={props.state.plan}>{(plan) => <RuntimeJsonPreview value={plan()} />}</Show>
+              </div>
+            </Show>
           </RuntimeSection>
           </RuntimePanelShell>
           <RuntimePanelShell {...runtimePanelShellProps("status")}>
@@ -6614,13 +7111,13 @@ export function BlueprintInspector(props: {
               />
               <Show when={props.selectedCommon?.kind === "tick"}>
                 <InspectorTextField
-                  tip="everyNTicks"
-                  label={language.t("blueprint.field.everyNTicks" as never)}
+                  tip="everyNSeconds"
+                  label={language.t("blueprint.field.everyNSeconds" as never)}
                   type="number"
-                  value={String(props.selectedCommon?.kind === "tick" ? props.selectedCommon.every_n_ticks : 1)}
+                  value={String(props.selectedCommon?.kind === "tick" ? props.selectedCommon.every_n_seconds : 1)}
                   onChange={(value) => {
                     const next = Math.max(1, Math.floor(Number(value) || 1))
-                    updateCommonField("every_n_ticks" as never, next as never)
+                    updateCommonField("every_n_seconds" as never, next as never)
                   }}
                 />
               </Show>
@@ -7364,7 +7861,7 @@ function nodeSubtitle(t: (key: never, params?: Record<string, string | number | 
   }
   if (item.type === "route") return t(`blueprint.route.${routeLabelKey(item.node.route_kind)}` as never)
   if (item.type === "common") {
-    if (item.node.kind === "tick") return t("blueprint.common.tickSubtitle" as never, { n: item.node.every_n_ticks } as never)
+    if (item.node.kind === "tick") return t("blueprint.common.tickSubtitle" as never, { n: item.node.every_n_seconds } as never)
     return t("blueprint.common.branchSubtitle" as never)
   }
   if (item.type === "script") return scriptNodeDescription(t, item.node)
@@ -7511,6 +8008,32 @@ function recordEntries(value: Record<string, unknown> | undefined): Array<[strin
 
 function arrayOfRecords(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.map((entry) => asRecord(entry) ?? { value: entry }) : []
+}
+
+function validationErrors(value: Record<string, unknown> | undefined): string[] {
+  const errors = value?.errors
+  return Array.isArray(errors) ? errors.map((item) => String(item).trim()).filter(Boolean) : []
+}
+
+function normalizeBlueprintPlanningSubmitResult(value: BlueprintPlanningSubmitResult): {
+  accepted: boolean
+  requestId?: string
+  status?: string
+  message?: string
+} {
+  if (typeof value === "boolean") return { accepted: value }
+  const record = asRecord(value)
+  return {
+    accepted: record?.accepted !== false,
+    requestId: stringValue(record?.requestId),
+    status: stringValue(record?.status),
+    message: stringValue(record?.message),
+  }
+}
+
+function isBlueprintPlanningRequestActive(status: string | undefined) {
+  const normalized = (status ?? "").trim().toLowerCase()
+  return normalized === "pending" || normalized === "claimed"
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -7768,7 +8291,7 @@ function createDesktopBlueprintSnapshot(
           summary:
             node.kind === "branch"
               ? "Routes a bool condition to true or false message outputs."
-              : `Emits a tick every ${node.every_n_ticks} framework tick(s).`,
+              : `Emits a tick every ${node.every_n_seconds} second(s).`,
           state: "idle" as const,
           x: layout?.x,
           y: layout?.y,
@@ -7776,7 +8299,7 @@ function createDesktopBlueprintSnapshot(
           downstreamNodeIds: downstream.get(id) ?? [],
           inputPorts: commonNodePorts(node, "input").map((port) => port.title),
           outputPorts: commonNodePorts(node, "output").map((port) => port.title),
-          everyNTicks: node.kind === "tick" ? node.every_n_ticks : undefined,
+          everyNSeconds: node.kind === "tick" ? node.every_n_seconds : undefined,
         }
       }),
     ],

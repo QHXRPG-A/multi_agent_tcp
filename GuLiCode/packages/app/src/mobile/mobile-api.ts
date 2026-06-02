@@ -1,6 +1,6 @@
 import { mobileMockData } from "./mock-data"
 import { configureMobileLogger, logMobileEvent } from "./mobile-logger"
-import { nodeKindLabel } from "./mobile-state"
+import { nodeKindLabel, normalizedBlueprintNodeKind } from "./mobile-state"
 import type {
   BlueprintAgentPanelEvent,
   BlueprintEdge,
@@ -70,6 +70,7 @@ type ServerBlueprintNode = {
   downstreamNodeIds?: string[]
   inputPorts?: string[]
   outputPorts?: string[]
+  everyNSeconds?: number
   everyNTicks?: number
 }
 
@@ -706,13 +707,21 @@ function emptyResult(
 
 function serverNodeToMobile(node: ServerBlueprintNode, agents: ServerAgent[], events: ServerRuntimeEvent[]): BlueprintNode {
   const agent = agents.find((item) => item.nodeId === node.id)
-  const kind = nodeKind(node.kind)
   const state = nodeState(node.state || agent?.state)
   const panelEvents = (agent?.recentEvents?.length ? agent.recentEvents : events.filter((event) => event.nodeId === node.id)).map(
     eventToPanelEvent,
   )
   const inputPorts = portList(node.inputPorts)
   const outputPorts = portList(node.outputPorts)
+  const kind = normalizedBlueprintNodeKind({
+    kind: nodeKind(node.kind),
+    label: node.label,
+    role: node.role,
+    summary: node.summary,
+    inputPorts,
+    outputPorts,
+    everyNSeconds: node.everyNSeconds ?? node.everyNTicks,
+  })
 
   return {
     id: node.id,
@@ -725,7 +734,7 @@ function serverNodeToMobile(node: ServerBlueprintNode, agents: ServerAgent[], ev
     summary: node.summary,
     inputPorts,
     outputPorts,
-    everyNTicks: node.everyNTicks,
+    everyNSeconds: node.everyNSeconds ?? node.everyNTicks,
     layout: serverNodeLayout(node),
     agentPanel: {
       agentId: agent?.agentId ?? node.label,

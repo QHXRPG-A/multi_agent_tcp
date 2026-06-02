@@ -220,7 +220,7 @@ def test_graph_definition_parses_common_nodes_and_validates_port_types() -> None
             },
             "common_nodes": {
                 "gate": {"kind": "branch"},
-                "clock": {"kind": "tick", "every_n_ticks": 0},
+                "clock": {"kind": "tick", "every_n_seconds": 0},
             },
             "edges": [
                 {"from": "source", "to": "gate", "input_port": "condition", "edge_type": "exec"},
@@ -231,13 +231,13 @@ def test_graph_definition_parses_common_nodes_and_validates_port_types() -> None
     )
 
     assert graph.common_nodes["gate"].kind == "branch"
-    assert graph.common_nodes["clock"].every_n_ticks == 1
+    assert graph.common_nodes["clock"].every_n_seconds == 1
     assert graph.framework_connections()["source"] == ["gate"]
     assert graph.framework_connections()["gate"] == ["worker"]
     organization = graph.agent_organization_view()
     assert organization["graph"]["common_nodes"] == {
         "gate": {"node_id": "gate", "kind": "branch"},
-        "clock": {"node_id": "clock", "kind": "tick", "every_n_ticks": 1},
+        "clock": {"node_id": "clock", "kind": "tick", "every_n_seconds": 1},
     }
 
     with pytest.raises(ValueError, match="edge port type mismatch"):
@@ -643,6 +643,24 @@ def test_graph_runtime_control_plane_and_rpc_round_trip() -> None:
         assert ended["final_status"] == "partial_success"
     finally:
         server.close()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_sync_entrypoint_runs_start_inside_event_loop() -> None:
+    graph = graph_definition_from_dict(_graph_dict())
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph)
+
+    started = control.handle_request(
+        {
+            "command": "run.start",
+            "args": {"plan": _plan_dict()},
+        }
+    )
+
+    assert started["ok"] is True
+    assert started["queued_messages"][0]["node_id"] == "planner"
+    assert runtime.status_snapshot()["agents"]["planner"]["state"] == "queued"
 
 
 def test_control_plane_reports_cycle_groups_as_observation_only() -> None:
