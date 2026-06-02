@@ -341,6 +341,18 @@ def test_project_reference_full_scope_prunes_workspace_root_during_checkout(
     assert ".multi_agent_workspace" not in seen_dirs
 
 
+def test_windows_extended_path_prefix_is_stripped_for_copy_path_comparisons() -> None:
+    if os.name != "nt":
+        return
+
+    assert workspace_manager._strip_windows_extended_path_prefix(
+        "\\\\?\\F:\\repo\\GuLiCode\\node_modules"
+    ) == "F:\\repo\\GuLiCode\\node_modules"
+    assert workspace_manager._strip_windows_extended_path_prefix(
+        "\\\\?\\UNC\\server\\share\\repo"
+    ) == "\\\\server\\share\\repo"
+
+
 def test_run_has_private_scratch_and_shared_outcome_space(tmp_path: Path) -> None:
     _write(tmp_path / "src" / "a.txt", "base\n")
     manager = DulwichWorkspaceManager.open_or_init(tmp_path)

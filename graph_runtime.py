@@ -3992,6 +3992,45 @@ class GraphRuntime:
         )
         return target
 
+    def _write_run_manifest_end_state(self, result: RunEndResult) -> None:
+        self._run_manifest["status"] = result.run_status
+        self._run_manifest["end_reason"] = result.reason
+        self._run_manifest["ended_at"] = result.ended_at
+        if result.final_status is not None:
+            self._run_manifest["final_status"] = result.final_status
+        elif "final_status" in self._run_manifest:
+            self._run_manifest.pop("final_status", None)
+
+        manifest_path: Optional[Path] = None
+        if self.archive_run is not None and getattr(self.archive_run, "path", None) is not None:
+            manifest_path = Path(getattr(self.archive_run, "path")) / "run_manifest.json"
+        if manifest_path is None and self.private_context_run is not None and getattr(self.private_context_run, "path", None) is not None:
+            manifest_path = Path(getattr(self.private_context_run, "path")) / "run_manifest.json"
+        if manifest_path is None:
+            return
+
+        try:
+            data: Dict[str, Any] = {}
+            if manifest_path.is_file():
+                data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    data = {}
+            data.update(
+                {
+                    "status": result.run_status,
+                    "end_reason": result.reason,
+                    "ended_at": result.ended_at,
+                }
+            )
+            if result.final_status is not None:
+                data["final_status"] = result.final_status
+            else:
+                data.pop("final_status", None)
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - best-effort persistence
+            log.warning("[graph] failed to update run manifest end state: %s", exc)
+
     def _archive_run_if_available(self) -> Optional[Path]:
         if self.archive_manager is None or self.archive_run is None:
             return None
@@ -4056,6 +4095,7 @@ class GraphRuntime:
                 summary=self._summarize_for_final_state(),
                 archived=archive,
             )
+            self._write_run_manifest_end_state(result)
             self._emit(GraphEvent("RunPaused", status="paused", payload=result.to_dict()))
             return result
 
@@ -4105,6 +4145,7 @@ class GraphRuntime:
         )
         if cleanup:
             result.summary["cancelled"] = cleanup
+        self._write_run_manifest_end_state(result)
         if action == "complete":
             report_path = self._write_final_report(result)
             archive_path = self._archive_run_if_available()

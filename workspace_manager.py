@@ -102,9 +102,27 @@ def _safe_archive_id(raw: str) -> str:
     return archive_id
 
 
+def _strip_windows_extended_path_prefix(value: str) -> str:
+    if os.name != "nt":
+        return value
+    text = str(value)
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[8:]
+    if text.startswith("\\\\?\\"):
+        return text[4:]
+    return text
+
+
+def _resolved_path(path: Path) -> Path:
+    resolved = path.resolve()
+    if os.name == "nt":
+        return Path(_strip_windows_extended_path_prefix(str(resolved)))
+    return resolved
+
+
 def _path_within(path: Path, root: Path) -> bool:
     try:
-        path.resolve().relative_to(root.resolve())
+        _resolved_path(path).relative_to(_resolved_path(root))
         return True
     except ValueError:
         return False
@@ -116,8 +134,8 @@ def _relative_files(
     excluded_roots: Optional[Sequence[Path]] = None,
     exclude_patterns: Optional[Sequence[str]] = None,
 ) -> Dict[str, Path]:
-    root = root.resolve()
-    excluded = [Path(p).resolve() for p in (excluded_roots or [])]
+    root = _resolved_path(root)
+    excluded = [_resolved_path(Path(p)) for p in (excluded_roots or [])]
     patterns = [
         str(pattern).replace("\\", "/").strip()
         for pattern in (exclude_patterns or BASIC_COPY_EXCLUDE_PATTERNS)
@@ -149,7 +167,7 @@ def _relative_files(
                 exclude_patterns=patterns,
             ):
                 continue
-            out[path.resolve().relative_to(root).as_posix()] = path
+            out[_resolved_path(path).relative_to(root).as_posix()] = path
     return out
 
 
@@ -160,9 +178,9 @@ def _path_is_copy_excluded(
     excluded_roots: Optional[Sequence[Path]] = None,
     exclude_patterns: Optional[Sequence[str]] = None,
 ) -> bool:
-    root = root.resolve()
-    resolved = path.resolve()
-    excluded = [Path(p).resolve() for p in (excluded_roots or [])]
+    root = _resolved_path(root)
+    resolved = _resolved_path(path)
+    excluded = [_resolved_path(Path(p)) for p in (excluded_roots or [])]
     patterns = [
         str(pattern).replace("\\", "/").strip()
         for pattern in (exclude_patterns or BASIC_COPY_EXCLUDE_PATTERNS)

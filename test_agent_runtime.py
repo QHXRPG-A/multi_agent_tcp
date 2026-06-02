@@ -7,6 +7,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -2440,6 +2441,25 @@ def test_graph_runtime_cancel_run_clears_pending_messages_jobs_and_waiting_joins
     assert runtime.jobs["job-open"].status == "cancelled"
     assert runtime.join_barriers["join-open"].status == "cancelled"
     assert "RunPendingWorkCancelled" in [event.event_type for event in runtime.events]
+
+
+def test_graph_runtime_end_run_updates_active_run_manifest(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "run_manifest.json"
+    manifest_path.write_text(
+        json.dumps({"run_id": "run-1", "status": "running"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    runtime = GraphRuntime(_FakeCluster(), archive_run=SimpleNamespace(path=tmp_path))
+
+    result = runtime.end_run("cancel", reason="self-test complete")
+
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert result.final_status == "cancelled"
+    assert data["status"] == "cancelled"
+    assert data["final_status"] == "cancelled"
+    assert data["end_reason"] == "self-test complete"
+    assert data["ended_at"] == result.ended_at
+    assert runtime.run_manifest["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -60,6 +61,8 @@ PLANNING_STATUS_SOURCE_COMMANDS = {
     "top_agent.utterances",
 }
 TERMINAL_RUN_STATUSES = {"completed", "cancelled", "failed"}
+LIVE_START_RESULT_WAIT_SECONDS = 5.0
+LIVE_RUNTIME_CALL_STARTING_TIMEOUT_SECONDS = 2.0
 
 
 def validate_desktop_blueprint_graph(graph: Any, *, project_dir: Optional[Path] = None) -> None:
@@ -465,9 +468,12 @@ class DesktopAsyncLoop:
         return self._loop
 
     def run(self, coro: Any, *, timeout: Optional[float] = None) -> Any:
-        loop = self._ensure_started()
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        future = self.submit(coro)
         return future.result(timeout=timeout)
+
+    def submit(self, coro: Any) -> Future[Any]:
+        loop = self._ensure_started()
+        return asyncio.run_coroutine_threadsafe(coro, loop)
 
     def call(self, fn: Callable[[], Any], *, timeout: Optional[float] = None) -> Any:
         async def wrapper() -> Any:
@@ -503,6 +509,9 @@ class DesktopBlueprintRun:
     backend: Any = None
     mcp: Any = None
     diagnostics_dir: Optional[Path] = None
+    live_start_future: Optional[Future[Any]] = field(default=None, repr=False)
+    live_start_result: Optional[Dict[str, Any]] = field(default=None, repr=False)
+    live_start_error: str = ""
     planning_status_mismatch_keys: set[str] = field(default_factory=set, repr=False)
     stream_condition: Any = field(default_factory=threading.Condition)
 
@@ -523,6 +532,10 @@ class DesktopBlueprintRun:
             }
         if self.mcp is not None:
             data["mcp"] = self.mcp.summary()
+        if self.live_start_future is not None:
+            data["startPending"] = not self.live_start_future.done()
+        if self.live_start_error:
+            data["startError"] = self.live_start_error
         return data
 
 
@@ -1178,11 +1191,20 @@ class DesktopBlueprintService:
                 continue
             if normalized_blueprint_id and run.blueprint_id != normalized_blueprint_id:
                 continue
-            status = self._runtime_call(run, lambda: run.runtime.status_snapshot()["run"])
             summary = run.summary()
-            summary["status"] = status["status"]
-            summary["finalStatus"] = status.get("final_status")
-            summary["endedAt"] = status.get("ended_at")
+            try:
+                timeout = (
+                    LIVE_RUNTIME_CALL_STARTING_TIMEOUT_SECONDS
+                    if _live_start_pending(run)
+                    else None
+                )
+                status = self._runtime_call(run, lambda: run.runtime.status_snapshot()["run"], timeout=timeout)
+                summary["status"] = status["status"]
+                summary["finalStatus"] = status.get("final_status")
+                summary["endedAt"] = status.get("ended_at")
+            except FutureTimeoutError:
+                summary["status"] = "starting"
+                summary["startPending"] = True
             filtered.append(summary)
         return sorted(filtered, key=lambda item: float(item.get("updatedAt", 0)), reverse=True)
 
@@ -1275,8 +1297,8 @@ class DesktopBlueprintService:
 
         diagnostics_dir = None
         if execution_mode == "live":
-            backend, runtime, control, mcp, started, diagnostics_dir = self._async_loop.run(
-                self._start_live_runtime(run_id, validate_project_dir(project_dir), document, graph, plan)
+            backend, runtime, control, mcp, diagnostics_dir = self._async_loop.run(
+                self._prepare_live_runtime(run_id, validate_project_dir(project_dir), document, graph)
             )
         else:
             backend = DesktopBlueprintNoopBackend()
@@ -1290,7 +1312,7 @@ class DesktopBlueprintService:
             mcp = None
             runtime.agent_stream_run_id = run_id
             started = control.handle_request({"command": "run.start", "args": {"plan": plan.to_dict()}})
-        if not started.get("ok"):
+        if execution_mode != "live" and not started.get("ok"):
             if execution_mode == "live":
                 if mcp is not None:
                     mcp.close()
@@ -1326,16 +1348,66 @@ class DesktopBlueprintService:
             )
             self._attach_stream_notification(run)
             self._runs[run.run_id] = run
-        status = self._runtime_call(run, lambda: runtime.status_snapshot(graph=graph))
-        self._append_blueprint_diagnostics_event(
-            run,
-            "blueprint_run_started",
-            status=_compact_runtime_status(status),
-            validation=_compact_validation(started.get("validation")),
-            queuedMessageCount=len(started.get("queued_messages", []) or []),
-        )
+        if execution_mode == "live":
+            start_future = self._async_loop.submit(self._complete_live_start(run, plan))
+            with self._lock:
+                run.live_start_future = start_future
+            try:
+                started = start_future.result(timeout=LIVE_START_RESULT_WAIT_SECONDS)
+            except FutureTimeoutError:
+                started = {
+                    "ok": True,
+                    "pending": True,
+                    "validation": preflight_validation,
+                    "queued_messages": [],
+                    "start_manifest": {},
+                }
+                self._append_blueprint_diagnostics_event(
+                    run,
+                    "blueprint_live_start_pending",
+                    validation=_compact_validation(preflight_validation),
+                )
+            except Exception as exc:
+                with self._lock:
+                    self._runs.pop(run.run_id, None)
+                    run.live_start_error = str(exc)
+                try:
+                    self._async_loop.run(self._close_live_run(run), timeout=10)
+                except Exception:
+                    pass
+                raise BlueprintServiceError(
+                    "LIVE_AGENT_START_FAILED",
+                    "failed to start live blueprint Agents",
+                    details={"error": str(exc), "blueprintId": str(document["id"])},
+                ) from exc
+            if not started.get("ok"):
+                with self._lock:
+                    self._runs.pop(run.run_id, None)
+                    run.live_start_result = started
+                try:
+                    self._async_loop.run(self._close_live_run(run), timeout=10)
+                except Exception:
+                    pass
+                raise BlueprintServiceError(
+                    "START_PLAN_INVALID",
+                    "start plan failed validation",
+                    details={
+                        "validation": started,
+                        "blueprintId": str(document["id"]),
+                    },
+                )
+        status = self._runtime_status_snapshot_or_starting(run, graph=graph)
+        if execution_mode != "live" or not started.get("pending"):
+            self._append_blueprint_diagnostics_event(
+                run,
+                "blueprint_run_started",
+                status=_compact_runtime_status(status),
+                validation=_compact_validation(started.get("validation")),
+                queuedMessageCount=len(started.get("queued_messages", []) or []),
+            )
         return {
             "ok": True,
+            "startPending": bool(started.get("pending")),
             "runId": run.run_id,
             "run": run.summary(),
             "validation": started.get("validation"),
@@ -1348,21 +1420,38 @@ class DesktopBlueprintService:
         with self._lock:
             run = self._get_run(run_id)
             run.updated_at = float(self.now())
+            status = self._runtime_status_snapshot_or_starting(run, graph=run.graph)
+            try:
+                explanation = self._runtime_call(
+                    run,
+                    lambda: run.runtime.explain_status(graph=run.graph),
+                    timeout=(
+                        LIVE_RUNTIME_CALL_STARTING_TIMEOUT_SECONDS
+                        if _live_start_pending(run)
+                        else None
+                    ),
+                )
+            except FutureTimeoutError:
+                explanation = {
+                    "summary": "Live blueprint start is still preparing Agents.",
+                    "status": "starting",
+                }
             return {
                 "ok": True,
                 "runId": run.run_id,
                 "run": run.summary(),
-                "status": self._runtime_call(run, lambda: run.runtime.status_snapshot(graph=run.graph)),
-                "explanation": self._runtime_call(run, lambda: run.runtime.explain_status(graph=run.graph)),
+                "status": status,
+                "explanation": explanation,
             }
 
     def recent_blueprint_events(self, run_id: str, *, limit: int = 20) -> Dict[str, Any]:
         with self._lock:
             run = self._get_run(run_id)
             run.updated_at = float(self.now())
-            status = self._runtime_call(
+            status = self._runtime_status_snapshot_or_starting(
                 run,
-                lambda: run.runtime.status_snapshot(graph=run.graph, recent_events_limit=limit),
+                graph=run.graph,
+                recent_events_limit=limit,
             )
             return {
                 "ok": True,
@@ -1564,14 +1653,13 @@ class DesktopBlueprintService:
                 details={"status": status or "unknown"},
             )
 
-    async def _start_live_runtime(
+    async def _prepare_live_runtime(
         self,
         run_id: str,
         project_dir: Path,
         document: Dict[str, Any],
         graph: Any,
-        plan: TopAgentStartPlan,
-    ) -> tuple[Any, GraphRuntime, GraphRuntimeControlPlane, Optional[RunMCPRuntimeHandle], Dict[str, Any], Path]:
+    ) -> tuple[Any, GraphRuntime, GraphRuntimeControlPlane, Optional[RunMCPRuntimeHandle], Path]:
         backend = None
         runtime = None
         rpc_server = None
@@ -1640,10 +1728,7 @@ class DesktopBlueprintService:
             mcp.start()
             runtime.private_context_mcp_provider = mcp.provision_context_for_node
             runtime.agent_message_context_callback = mcp.refresh_message_context
-            started = await control.start_run(plan, prestart_all_agents=True)
-            if started.get("ok"):
-                runtime.start_tick_loop()
-            return backend, runtime, control, mcp, started, diagnostics_dir
+            return backend, runtime, control, mcp, diagnostics_dir
         except BlueprintServiceError:
             await cleanup()
             raise
@@ -1654,6 +1739,62 @@ class DesktopBlueprintService:
                 "failed to start live blueprint Agents",
                 details={"error": str(exc)},
             ) from exc
+
+    async def _complete_live_start(
+        self,
+        run: DesktopBlueprintRun,
+        plan: TopAgentStartPlan,
+    ) -> Dict[str, Any]:
+        try:
+            started = await run.control.start_run(plan, prestart_all_agents=False)
+            run.live_start_result = started
+            run.updated_at = float(self.now())
+            if not started.get("ok"):
+                try:
+                    run.runtime.end_run(
+                        "fail",
+                        reason="live blueprint start failed validation",
+                        archive=False,
+                    )
+                except Exception:
+                    pass
+                self._append_blueprint_diagnostics_event(
+                    run,
+                    "blueprint_live_start_failed",
+                    validation=_compact_validation(started.get("validation")),
+                )
+                return started
+            run.runtime.start_tick_loop()
+            status = run.runtime.status_snapshot(graph=run.graph)
+            self._append_blueprint_diagnostics_event(
+                run,
+                "blueprint_run_started",
+                status=_compact_runtime_status(status),
+                validation=_compact_validation(started.get("validation")),
+                queuedMessageCount=len(started.get("queued_messages", []) or []),
+            )
+            with run.stream_condition:
+                run.stream_condition.notify_all()
+            return started
+        except Exception as exc:
+            run.live_start_error = str(exc)
+            run.updated_at = float(self.now())
+            try:
+                run.runtime.end_run(
+                    "fail",
+                    reason=f"live blueprint start failed: {exc}",
+                    archive=False,
+                )
+            except Exception:
+                pass
+            self._append_blueprint_diagnostics_event(
+                run,
+                "blueprint_live_start_failed",
+                error=str(exc),
+            )
+            with run.stream_condition:
+                run.stream_condition.notify_all()
+            raise
 
     def end_blueprint_run(
         self,
@@ -2053,10 +2194,40 @@ class DesktopBlueprintService:
 
         run.runtime.agent_stream_event_callback = notify
 
-    def _runtime_call(self, run: DesktopBlueprintRun, fn: Callable[[], Any]) -> Any:
+    def _runtime_call(
+        self,
+        run: DesktopBlueprintRun,
+        fn: Callable[[], Any],
+        *,
+        timeout: Optional[float] = None,
+    ) -> Any:
         if run.execution_mode == "live":
-            return self._async_loop.call(fn)
+            return self._async_loop.call(fn, timeout=timeout)
         return fn()
+
+    def _runtime_status_snapshot_or_starting(
+        self,
+        run: DesktopBlueprintRun,
+        *,
+        graph: Any = None,
+        recent_events_limit: int = 20,
+    ) -> Dict[str, Any]:
+        try:
+            timeout = (
+                LIVE_RUNTIME_CALL_STARTING_TIMEOUT_SECONDS
+                if _live_start_pending(run)
+                else None
+            )
+            return self._runtime_call(
+                run,
+                lambda: run.runtime.status_snapshot(
+                    graph=graph,
+                    recent_events_limit=recent_events_limit,
+                ),
+                timeout=timeout,
+            )
+        except FutureTimeoutError:
+            return _starting_runtime_status()
 
     def _workspace_diff_source(self, run: DesktopBlueprintRun) -> Optional[tuple[DulwichWorkspaceManager, Any]]:
         manager = getattr(run.runtime, "archive_manager", None) or getattr(run.runtime, "private_context_manager", None)
@@ -3178,6 +3349,39 @@ def _compact_validation(validation: Any) -> Optional[Dict[str, Any]]:
             else None,
         }
     )
+
+
+def _live_start_pending(run: DesktopBlueprintRun) -> bool:
+    future = run.live_start_future
+    return future is not None and not future.done()
+
+
+def _starting_runtime_status() -> Dict[str, Any]:
+    return {
+        "run": {
+            "status": "starting",
+            "final_status": None,
+            "ended_at": None,
+        },
+        "agents": {
+            "by_node": {},
+            "counts": {},
+        },
+        "jobs": {
+            "items": [],
+            "counts": {},
+        },
+        "queues": {
+            "by_agent": {},
+            "pending": 0,
+        },
+        "recent_events": [],
+        "workspace": {
+            "changesets": [],
+            "artifacts": [],
+            "reports": [],
+        },
+    }
 
 
 def _compact_start_response(started: Any) -> Optional[Dict[str, Any]]:

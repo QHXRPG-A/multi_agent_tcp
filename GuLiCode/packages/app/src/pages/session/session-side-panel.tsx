@@ -31,7 +31,6 @@ import {
   BlueprintSidePanel,
   type BlueprintDiffSyncPayload,
   type BlueprintPlanningProgressState,
-  type BlueprintPlanningSubmitInput,
 } from "@/pages/session/blueprint-side-panel"
 
 export function SessionSidePanel(props: {
@@ -48,7 +47,6 @@ export function SessionSidePanel(props: {
   size: Sizing
   blueprintPlanningProgress?: BlueprintPlanningProgressState
   blueprintPlanningActiveRun?: Record<string, unknown>
-  onBlueprintPlanningSubmit?: (input: BlueprintPlanningSubmitInput) => boolean | Promise<boolean>
   onBlueprintDiffChanged?: (payload: BlueprintDiffSyncPayload) => void
 }) {
   const layout = useLayout()
@@ -241,7 +239,6 @@ export function SessionSidePanel(props: {
                   <BlueprintSidePanel
                     blueprintPlanningProgress={props.blueprintPlanningProgress}
                     blueprintPlanningActiveRun={props.blueprintPlanningActiveRun}
-                    onBlueprintPlanningSubmit={props.onBlueprintPlanningSubmit}
                     onBlueprintDiffChanged={props.onBlueprintDiffChanged}
                   />
                 </Match>

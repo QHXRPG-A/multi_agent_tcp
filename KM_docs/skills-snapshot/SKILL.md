@@ -99,6 +99,38 @@ Read these first based on the task:
 
 ## Recent Handoff
 
+For the latest `gulicode-bp` MCP direct-control start and live close-loop work
+from 2026-06-02:
+
+- Workbench planning inbox removal, Codex MCP direct start plan
+  create/validate/start flow, live-start nonblocking return with
+  `startPending`, terminal manifest persistence, Windows long-path workspace
+  copy fixes, installed runtime wheel refresh, and direct smoke results:
+  `archive/runtime-backend/gulicode_bp_mcp_direct_start_live_close_loop_2026-06-02.md`
+
+Use that file when the user reports:
+
+- Workbench still exposes planning-request UI or task text for plan generation
+- `blueprint_start` hangs, times out, or creates a run but does not return
+- MCP/UI status disagree after a live start
+- cancelled runs leave `run_manifest.status=running`
+- long Windows paths under `.bun` / `node_modules` break run workspace snapshot
+- packaged plugin runtime still runs stale Python after source changes
+
+For the latest Workbench external-run synchronization work from 2026-06-02:
+
+- Planning button/task textarea removal in the runtime panel, direct-run UI
+  retention, periodic `listBlueprintRuns` sync, active-run preference, and the
+  Ctrl+R workaround fix for already-open Workbench tabs:
+  `archive/frontend/blueprint_workbench_external_run_sync_2026-06-02.md`
+
+Use that file when the user reports:
+
+- Codex MCP starts a Blueprint run but the already-open Workbench still shows an
+  old `CANCELLED` run
+- pressing Ctrl+R makes the correct running run appear
+- Workbench should observe external MCP starts without a browser refresh
+
 For the latest `gulicode-bp` plugin singleton service and reload work from
 2026-06-02:
 

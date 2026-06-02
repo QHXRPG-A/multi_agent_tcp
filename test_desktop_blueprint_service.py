@@ -1426,10 +1426,10 @@ def test_gulicode_bp_mcp_whitelists_python_detection_command() -> None:
     )
 
     assert '"blueprint.detectPython"' in source
-    assert '"blueprint.planning.submit"' in source
-    assert "blueprint_take_planning_request" in source
-    assert "blueprint_complete_planning_request" in source
-    assert "blueprint_fail_planning_request" in source
+    assert '"blueprint.planning.submit"' not in source
+    assert "blueprint_take_planning_request" not in source
+    assert "blueprint_complete_planning_request" not in source
+    assert "blueprint_fail_planning_request" not in source
     assert "MCP_STATUS_PATH" in source
     assert "gulicode-bp-mcp.log" in source
     assert "_write_mcp_status(" in source
@@ -1458,10 +1458,11 @@ def test_gulicode_bp_plugin_manifest_default_prompts_stay_within_codex_limit() -
     assert len(default_prompts) <= 3
 
 
-def test_gulicode_bp_mcp_planning_thread_context_and_workbench_injection(tmp_path: Path, monkeypatch) -> None:
+def test_gulicode_bp_mcp_planning_thread_context_does_not_leak_into_workbench_config(tmp_path: Path, monkeypatch) -> None:
     module = _load_gulicode_bp_mcp_module()
     ctx = SimpleNamespace(request_context=SimpleNamespace(meta=SimpleNamespace(model_extra={"threadId": "thread-meta"})))
     assert module._planning_thread_id_from_context(ctx) == "thread-meta"
+    captured: dict[str, str] = {}
 
     class FakeWorkbench:
         def __init__(
@@ -1473,11 +1474,11 @@ def test_gulicode_bp_mcp_planning_thread_context_and_workbench_injection(tmp_pat
             default_blueprint_id,
             collaboration_url,
             ensure_collaboration_fn,
-            planning_thread_id,
         ):
+            captured["default_project_dir"] = default_project_dir
+            captured["default_blueprint_id"] = default_blueprint_id
             self.default_project_dir = default_project_dir
             self.default_blueprint_id = default_blueprint_id
-            self.planning_thread_id = planning_thread_id
             self.url = f"http://127.0.0.1:1/blueprint-window/{default_blueprint_id}"
 
         def start(self):
@@ -1488,12 +1489,12 @@ def test_gulicode_bp_mcp_planning_thread_context_and_workbench_injection(tmp_pat
 
     monkeypatch.setattr(module, "WorkbenchServer", FakeWorkbench)
     state = module.PluginState()
-    state.planning_requests_path = tmp_path / "planning.json"
     state.ensure_collaboration_server = lambda: None
     try:
         opened = state.start_workbench(str(tmp_path), "default", planning_thread_id="thread-meta")
-        assert opened["planningThreadId"] == "thread-meta"
-        assert state.workbench.planning_thread_id == "thread-meta"
+        assert "planningThreadId" not in opened
+        assert captured["default_project_dir"] == str(tmp_path)
+        assert captured["default_blueprint_id"] == "default"
     finally:
         state.close()
 
@@ -1513,12 +1514,10 @@ def test_gulicode_bp_mcp_persistent_workbench_process_keeps_refreshable_url(
             *,
             default_project_dir="",
             default_blueprint_id="default",
-            planning_thread_id="",
             **kwargs,
         ):  # noqa: ANN001, ANN202
             self.default_project_dir = default_project_dir
             self.default_blueprint_id = default_blueprint_id
-            self.planning_thread_id = planning_thread_id
             self.url = "http://127.0.0.1:54321/project/blueprint-window/new1"
 
         def start(self):
@@ -1533,7 +1532,6 @@ def test_gulicode_bp_mcp_persistent_workbench_process_keeps_refreshable_url(
         raise AssertionError("start_persistent_workbench must not spawn start_workbench.py")
 
     monkeypatch.setattr(module, "PERSISTENT_WORKBENCH_LOG_DIR", tmp_path / "logs")
-    monkeypatch.setattr(module, "_workbench_url_alive", lambda url: True)
     monkeypatch.setattr(module, "WorkbenchServer", FakeWorkbench)
     monkeypatch.setattr(module.PluginState, "ensure_collaboration_server", lambda self: None)
     monkeypatch.setattr(module.subprocess, "Popen", fail_popen)
@@ -1548,120 +1546,51 @@ def test_gulicode_bp_mcp_persistent_workbench_process_keeps_refreshable_url(
         assert first["reused"] is False
         assert second["reused"] is True
         assert first["pid"] == os.getpid()
-        assert first["planningThreadId"] == "thread-a"
-        assert json.loads(state.persistent_workbench_ready_path.read_text(encoding="utf-8"))["url"] == first["url"]
+        ready = json.loads(state.persistent_workbench_ready_path.read_text(encoding="utf-8"))
+        assert ready["url"] == first["url"]
+        assert "planningThreadId" not in ready
         assert popen_called is False
     finally:
         state.close()
 
 
-def test_gulicode_bp_mcp_planning_request_inbox_flow(tmp_path: Path) -> None:
+def test_gulicode_bp_mcp_removes_workbench_planning_inbox_and_keeps_direct_control_tools() -> None:
     module = _load_gulicode_bp_mcp_module()
-
-    class StubService:
-        def __init__(self):
-            self.requests = []
-
-        def handle_request(self, payload):
-            self.requests.append(payload)
-            assert payload["command"] == "blueprint.plan.validate"
-            return {"ok": True, "validation": {"ok": True, "errors": [], "warnings": []}}
-
-        def close(self):
-            return None
+    source = (Path(__file__).resolve().parent / "plugins" / "gulicode-bp" / "mcp" / "gulicode_bp_mcp.py").read_text(
+        encoding="utf-8"
+    )
+    removed = [
+        "PLANNING_REQUESTS_PATH",
+        "planning_requests.json",
+        '"blueprint.planning.submit"',
+        '"blueprint.planning.status"',
+        '"blueprint.planning.cancel"',
+        "blueprint_take_planning_request",
+        "blueprint_complete_planning_request",
+        "blueprint_fail_planning_request",
+        "service.takePlanningRequest",
+        "service.completePlanningRequest",
+        "service.failPlanningRequest",
+    ]
+    for text in removed:
+        assert text not in source
+    for text in [
+        '"blueprint.plan.create"',
+        '"blueprint.plan.validate"',
+        '"blueprint.start"',
+        "def blueprint_plan_create",
+        "def blueprint_plan_validate",
+        "def blueprint_start",
+    ]:
+        assert text in source
 
     state = module.PluginState()
-    state.service = StubService()
-    state.planning_requests_path = tmp_path / "planning.json"
-    project = tmp_path / "project"
-    project.mkdir()
     try:
-        submitted = state.request(
-            "blueprint.planning.submit",
-            {
-                "threadId": "thread-a",
-                "projectDir": str(project),
-                "blueprintId": "default",
-                "task": "test task",
-                "startNodeIds": [],
-                "message": "plan this",
-            },
-        )
-        request_id = submitted["requestId"]
-        assert submitted["accepted"] is True
-        assert (tmp_path / "planning.json").is_file()
-
-        assert state.take_planning_request({"requestId": request_id}, thread_id="thread-b")["request"] is None
-        taken = state.take_planning_request({"requestId": request_id}, thread_id="thread-a")
-        assert taken["request"]["requestId"] == request_id
-        assert taken["request"]["status"] == "claimed"
-
-        plan = {"start_nodes": ["planner"], "tasks": {"planner": {"description": "test task"}}}
-        with pytest.raises(module.BlueprintServiceError) as mismatch:
-            state.complete_planning_request(request_id, plan, "wrong thread", thread_id="thread-b")
-        assert mismatch.value.code == "PLANNING_THREAD_MISMATCH"
-
-        completed = state.complete_planning_request(request_id, plan, "done", thread_id="thread-a")
-        assert completed["validation"] == {"ok": True, "errors": [], "warnings": []}
-        assert state.service.requests[-1]["args"]["plan"] == plan
-
-        status = state.request("blueprint.planning.status", {"requestId": request_id})
-        assert status["request"]["status"] == "completed"
-        assert status["request"]["plan"] == plan
-        assert status["request"]["summary"] == "done"
-
-        second = state.request(
-            "blueprint.planning.submit",
-            {"threadId": "thread-a", "projectDir": str(project), "blueprintId": "default", "task": "fail"},
-        )
-        failed = state.fail_planning_request(second["requestId"], "bad plan", thread_id="thread-a")
-        assert failed["request"]["status"] == "failed"
-        assert failed["request"]["reason"] == "bad plan"
-
-        third = state.request(
-            "blueprint.planning.submit",
-            {"threadId": "thread-a", "projectDir": str(project), "blueprintId": "default", "task": "cancel"},
-        )
-        cancelled = state.request("blueprint.planning.cancel", {"requestId": third["requestId"]})
-        assert cancelled["request"]["status"] == "cancelled"
+        with pytest.raises(module.BlueprintServiceError) as exc:
+            state.request("blueprint.planning.submit", {})
+        assert exc.value.code == "UNKNOWN_COMMAND"
     finally:
         state.close()
-
-
-def test_gulicode_bp_mcp_planning_request_inbox_reloads_external_writes(tmp_path: Path) -> None:
-    module = _load_gulicode_bp_mcp_module()
-    planning_path = tmp_path / "planning.json"
-    project = tmp_path / "project"
-    project.mkdir()
-
-    mcp_state = module.PluginState()
-    workbench_state = module.PluginState()
-    mcp_state.planning_requests_path = planning_path
-    workbench_state.planning_requests_path = planning_path
-    try:
-        assert mcp_state.take_planning_request({}, thread_id="thread-a")["request"] is None
-
-        submitted = workbench_state.request(
-            "blueprint.planning.submit",
-            {
-                "threadId": "thread-a",
-                "projectDir": str(project),
-                "blueprintId": "default",
-                "task": "external write",
-            },
-        )
-        request_id = submitted["requestId"]
-
-        status = mcp_state.request("blueprint.planning.status", {"requestId": request_id})
-        assert status["found"] is True
-        assert status["request"]["status"] == "pending"
-
-        taken = mcp_state.take_planning_request({"requestId": request_id}, thread_id="thread-a")
-        assert taken["request"]["requestId"] == request_id
-        assert taken["request"]["status"] == "claimed"
-    finally:
-        mcp_state.close()
-        workbench_state.close()
 
 
 def test_blueprint_service_preserves_settings_and_applies_common_config_paths(tmp_path: Path) -> None:
@@ -3356,6 +3285,65 @@ def test_blueprint_service_live_mode_starts_tick_and_streams_agent_events(tmp_pa
     service.close()
 
 
+def test_blueprint_service_live_start_returns_pending_when_runtime_start_blocks(tmp_path: Path, monkeypatch) -> None:
+    class FakeLiveBackend:
+        @classmethod
+        async def create(cls, workers, *, port=9140, verbose=False, allow_empty=False):
+            return cls()
+
+        async def stop(self) -> None:
+            pass
+
+    async def blocked_start(self, plan, *, manifest_path=None, prestart_all_agents=False):
+        time.sleep(0.1)
+        return {
+            "ok": True,
+            "validation": {"ok": True, "errors": [], "warnings": []},
+            "queued_messages": [],
+            "start_manifest": {},
+        }
+
+    monkeypatch.setattr("multi_agent_tcp.desktop_blueprint_service.CLIWorkerBackend", FakeLiveBackend)
+    monkeypatch.setattr(desktop_blueprint_service_module, "LIVE_START_RESULT_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(desktop_blueprint_service_module, "LIVE_RUNTIME_CALL_STARTING_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        "multi_agent_tcp.desktop_blueprint_service.GraphRuntimeControlPlane.start_run",
+        blocked_start,
+    )
+
+    service = DesktopBlueprintService()
+    project = tmp_path / "project"
+    project.mkdir()
+    service.save_blueprint(project, _document(project))
+
+    started = service.handle_request(
+        {
+            "command": "blueprint.start",
+            "args": {
+                "projectDir": str(project),
+                "blueprintId": "default",
+                "plan": _plan(),
+                "executionMode": "live",
+            },
+        }
+    )
+
+    assert started["ok"] is True
+    assert started["startPending"] is True
+    assert started["run"]["startPending"] is True
+    runs = service.handle_request(
+        {"command": "blueprint.listRuns", "args": {"projectDir": str(project), "blueprintId": "default"}}
+    )
+    assert runs["runs"][0]["runId"] == started["runId"]
+    assert runs["runs"][0]["status"] == "starting"
+    status = service.handle_request({"command": "blueprint.status", "args": {"runId": started["runId"]}})
+    assert status["run"]["startPending"] is True
+    assert status["status"]["run"]["status"] == "starting"
+
+    service._async_loop.run(asyncio.sleep(0.2))
+    service.close()
+
+
 def test_blueprint_service_desktop_planning_context_plan_flow(tmp_path: Path, monkeypatch) -> None:
     class FakeLiveBackend:
         instances = []
@@ -3609,7 +3597,7 @@ def test_blueprint_service_desktop_planning_context_plan_flow(tmp_path: Path, mo
     service.close()
 
 
-def test_blueprint_service_live_mode_prestarts_all_agents_with_private_context(
+def test_blueprint_service_live_mode_starts_start_agents_with_private_context(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -3677,6 +3665,26 @@ def test_blueprint_service_live_mode_prestarts_all_agents_with_private_context(
         "rule_paths": ["policy.md"],
         "adapter_options": {"gulicode_test_node": True, "skip_git_repo_check": True},
     }
+    document["graph"]["agent_nodes"]["observer"] = {
+        "node_id": "observer",
+        "agent_id": "agent-observer",
+        "prompt": "Observe downstream work.",
+        "cli_kind": "codex",
+        "model": "gpt-5.4",
+        "command": "codex",
+        "adapter_options": {"skip_git_repo_check": True},
+    }
+    document["graph"]["edges"].append({"from": "planner", "to": "observer", "edge_type": "exec"})
+    document["graph"]["agent_nodes"]["leaf"] = {
+        "node_id": "leaf",
+        "agent_id": "agent-leaf",
+        "prompt": "Finish downstream work.",
+        "cli_kind": "codex",
+        "model": "gpt-5.4",
+        "command": "codex",
+        "adapter_options": {"skip_git_repo_check": True},
+    }
+    document["graph"]["edges"].append({"from": "observer", "to": "leaf", "edge_type": "exec"})
     document["ui"]["config"] = {
         "python_path": sys.executable,
         "project_workdir": str(project),
@@ -3685,6 +3693,8 @@ def test_blueprint_service_live_mode_prestarts_all_agents_with_private_context(
     }
     plan = _plan()
     plan["agent_descriptions"]["test-agent"] = "Test panel agent."
+    plan["agent_descriptions"]["observer"] = "Observer receives the start node outgoing batch."
+    plan["agent_descriptions"]["leaf"] = "Leaf should start lazily when scheduled later."
     plan["start_nodes"] = ["planner", "test-agent"]
     plan["tasks"]["test-agent"] = {
         "goal": "Exercise the test panel agent.",
@@ -3709,7 +3719,8 @@ def test_blueprint_service_live_mode_prestarts_all_agents_with_private_context(
     backend = FakeLiveBackend.instances[-1]
     assert FakeLiveBackend.create_calls[-1]["workers"] == []
     assert FakeLiveBackend.create_calls[-1]["allow_empty"] is True
-    assert set(backend.worker_configs) == {"agent-planner", "agent-test-agent"}
+    assert set(backend.worker_configs) == {"agent-planner", "agent-test-agent", "agent-observer"}
+    assert "agent-leaf" not in backend.worker_configs
 
     for agent_id, worker in backend.worker_configs.items():
         private = (

@@ -92,8 +92,6 @@ WEB_ROOT = PLUGIN_ROOT / "web"
 WEB_DIST = WEB_ROOT / "dist"
 DEFAULT_BLUEPRINT_ID = "default"
 DEFAULT_COLLABORATION_URL = os.environ.get("GULICODE_BP_COLLABORATION_URL", "http://127.0.0.1:8787").rstrip("/")
-PLANNING_REQUEST_TTL_SECONDS = 24 * 60 * 60
-PLANNING_REQUESTS_PATH = RUNTIME_DATA_DIR / "planning_requests.json"
 PERSISTENT_WORKBENCH_READY_PATH = RUNTIME_DATA_DIR / "workbench_ready.json"
 PERSISTENT_WORKBENCH_LOG_DIR = RUNTIME_DATA_DIR / "logs"
 MCP_STATUS_PATH = RUNTIME_DATA_DIR / "mcp_status.json"
@@ -128,9 +126,6 @@ ALLOWED_COMMANDS = {
     "blueprint.pickFile",
     "blueprint.relocateProjectWorkdir",
     "blueprint.validate",
-    "blueprint.planning.submit",
-    "blueprint.planning.status",
-    "blueprint.planning.cancel",
     "blueprint.plan.create",
     "blueprint.plan.validate",
     "blueprint.listRuns",
@@ -153,8 +148,6 @@ WRITE_COMMANDS = {
     "blueprint.save",
     "blueprint.createScriptNode",
     "blueprint.relocateProjectWorkdir",
-    "blueprint.planning.submit",
-    "blueprint.planning.cancel",
     "blueprint.start",
     "blueprint.rollbackChangesets",
     "blueprint.restoreRollback",
@@ -477,25 +470,12 @@ def _hidden_creationflags() -> int:
     return 0
 
 
-def _workbench_url_alive(url: str) -> bool:
-    try:
-        request = urlrequest.Request(url, headers={"Accept": "text/html,application/json"})
-        with urlrequest.urlopen(request, timeout=1.5) as response:
-            return 200 <= int(getattr(response, "status", 200)) < 400
-    except Exception:
-        return False
-
-
 def _read_json_file(path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
-
-
-def _same_text(left: str | None, right: str | None) -> bool:
-    return str(left or "").strip() == str(right or "").strip()
 
 
 def _terminate_process(pid: int) -> bool:
@@ -530,7 +510,6 @@ class WorkbenchServer:
         default_blueprint_id: str = DEFAULT_BLUEPRINT_ID,
         collaboration_url: str = DEFAULT_COLLABORATION_URL,
         ensure_collaboration_fn: Callable[[], None] | None = None,
-        planning_thread_id: str = "",
     ) -> None:
         self.service = service
         self.request_fn = request_fn
@@ -540,7 +519,6 @@ class WorkbenchServer:
         self.default_blueprint_id = default_blueprint_id or DEFAULT_BLUEPRINT_ID
         self.collaboration_url = collaboration_url.rstrip("/")
         self.ensure_collaboration_fn = ensure_collaboration_fn
-        self.planning_thread_id = planning_thread_id
         self.token = secrets.token_urlsafe(24)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -720,7 +698,6 @@ class WorkbenchServer:
                         "projectDir": owner.default_project_dir,
                         "blueprintId": owner.default_blueprint_id,
                         "apiBase": owner.origin,
-                        "planningThreadId": owner.planning_thread_id,
                     }
                     script = "window.__GULICODE_BP__ = " + json.dumps(payload, ensure_ascii=False) + ";\n"
                     self._write_bytes(script.encode("utf-8"), content_type="application/javascript; charset=utf-8", no_store=True)
@@ -750,7 +727,6 @@ class WorkbenchServer:
                         "projectDir": owner.default_project_dir,
                         "blueprintId": owner.default_blueprint_id,
                         "apiBase": owner.origin,
-                        "planningThreadId": owner.planning_thread_id,
                     }
                     script = (
                         "<script>window.__GULICODE_BP__ = "
@@ -829,10 +805,6 @@ class PluginState:
         self.collaboration_process: subprocess.Popen[bytes] | None = None
         self._collaboration_stdout: Any = None
         self._collaboration_stderr: Any = None
-        self.planning_requests_path = PLANNING_REQUESTS_PATH
-        self._planning_requests_loaded = False
-        self._planning_requests_file_signature: tuple[int, int] | None = None
-        self._planning_requests: dict[str, dict[str, Any]] = {}
         self.persistent_workbench_ready_path = PERSISTENT_WORKBENCH_READY_PATH
         self._persistent_workbench_stdout: Any = None
         self._persistent_workbench_stderr: Any = None
@@ -860,311 +832,6 @@ class PluginState:
         append_service_log(RUNTIME_DATA_DIR, "owner_changed", **event)
         return event
 
-    def _planning_request_takeover_allowed_locked(self, request: dict[str, Any], thread_id: str | None) -> bool:
-        thread_id = _string_or_none(thread_id)
-        if not thread_id or self.active_owner_thread_id != thread_id:
-            return False
-        return request.get("status") in {"pending", "claimed"}
-
-    def _reassign_planning_request_locked(self, request: dict[str, Any], thread_id: str | None) -> bool:
-        if not self._planning_request_takeover_allowed_locked(request, thread_id):
-            return False
-        thread_id = _string_or_none(thread_id) or ""
-        previous = str(request.get("threadId") or "")
-        if previous == thread_id:
-            return False
-        now = time.time()
-        request["previousThreadId"] = previous
-        request["threadId"] = thread_id
-        request["reassignedAt"] = now
-        request["updatedAt"] = now
-        append_service_log(
-            RUNTIME_DATA_DIR,
-            "planning_request_reassigned",
-            requestId=request.get("requestId"),
-            previousThreadId=previous,
-            threadId=thread_id,
-        )
-        return True
-
-    def _planning_requests_signature(self) -> tuple[int, int] | None:
-        try:
-            stat = self.planning_requests_path.stat()
-        except OSError:
-            return None
-        return (int(stat.st_mtime_ns), int(stat.st_size))
-
-    def _load_planning_requests_locked(self) -> None:
-        signature = self._planning_requests_signature()
-        if self._planning_requests_loaded and signature == self._planning_requests_file_signature:
-            return
-        self._planning_requests_loaded = True
-        self._planning_requests_file_signature = signature
-        try:
-            payload = json.loads(self.planning_requests_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            self._planning_requests = {}
-            self._planning_requests_file_signature = None
-            return
-        except Exception:
-            self._planning_requests = {}
-            return
-        raw_requests = payload.get("requests") if isinstance(payload, dict) else None
-        if not isinstance(raw_requests, dict):
-            self._planning_requests = {}
-            return
-        self._planning_requests = {
-            str(request_id): dict(request)
-            for request_id, request in raw_requests.items()
-            if isinstance(request, dict) and isinstance(request_id, str)
-        }
-        self._prune_planning_requests_locked()
-
-    def _save_planning_requests_locked(self) -> None:
-        self.planning_requests_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"schemaVersion": 1, "requests": self._planning_requests}
-        self.planning_requests_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._planning_requests_loaded = True
-        self._planning_requests_file_signature = self._planning_requests_signature()
-
-    def _prune_planning_requests_locked(self) -> None:
-        now = time.time()
-        expired = [
-            request_id
-            for request_id, request in self._planning_requests.items()
-            if float(request.get("expiresAt") or 0) <= now
-        ]
-        for request_id in expired:
-            self._planning_requests.pop(request_id, None)
-
-    def _planning_request_public(self, request: dict[str, Any], *, include_result: bool = False) -> dict[str, Any]:
-        keys = [
-            "requestId",
-            "threadId",
-            "projectDir",
-            "blueprintId",
-            "blueprintName",
-            "task",
-            "startNodeIds",
-            "message",
-            "status",
-            "summary",
-            "reason",
-            "createdAt",
-            "updatedAt",
-            "claimedAt",
-            "completedAt",
-            "failedAt",
-            "cancelledAt",
-            "previousThreadId",
-            "reassignedAt",
-            "expiresAt",
-        ]
-        public = {key: request[key] for key in keys if key in request}
-        if include_result:
-            for key in ("plan", "validation"):
-                if key in request:
-                    public[key] = request[key]
-        return public
-
-    def _planning_request_by_id_locked(self, request_id: str) -> dict[str, Any] | None:
-        self._load_planning_requests_locked()
-        self._prune_planning_requests_locked()
-        request = self._planning_requests.get(request_id)
-        return request if isinstance(request, dict) else None
-
-    def submit_planning_request(self, args: dict[str, Any]) -> dict[str, Any]:
-        thread_id = _string_or_none(args.get("threadId"))
-        if not thread_id:
-            return {
-                "ok": True,
-                "accepted": False,
-                "code": "NO_PLANNING_THREAD",
-                "message": "No current Codex thread is available for agent-assisted planning.",
-            }
-        project_dir = _string_or_none(args.get("projectDir")) or str(_default_project_dir())
-        blueprint_id = _string_or_none(args.get("blueprintId")) or DEFAULT_BLUEPRINT_ID
-        task = _string_or_none(args.get("task")) or ""
-        raw_start_nodes = args.get("startNodeIds")
-        start_node_ids = [str(item) for item in raw_start_nodes if _string_or_none(item)] if isinstance(raw_start_nodes, list) else []
-        now = time.time()
-        request_id = secrets.token_urlsafe(16)
-        request = {
-            "requestId": request_id,
-            "threadId": thread_id,
-            "projectDir": project_dir,
-            "blueprintId": blueprint_id,
-            "blueprintName": _string_or_none(args.get("blueprintName")) or blueprint_id,
-            "task": task,
-            "startNodeIds": start_node_ids,
-            "message": _string_or_none(args.get("message")) or task,
-            "status": "pending",
-            "createdAt": now,
-            "updatedAt": now,
-            "expiresAt": now + PLANNING_REQUEST_TTL_SECONDS,
-        }
-        with self.lock:
-            self._load_planning_requests_locked()
-            self._prune_planning_requests_locked()
-            self._planning_requests[request_id] = request
-            self._save_planning_requests_locked()
-        return {
-            "ok": True,
-            "accepted": True,
-            "requestId": request_id,
-            "request": self._planning_request_public(request),
-        }
-
-    def planning_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        request_id = _string_or_none(args.get("requestId"))
-        if not request_id:
-            raise BlueprintServiceError("BAD_REQUEST", "requestId is required")
-        with self.lock:
-            request = self._planning_request_by_id_locked(request_id)
-            if request is None:
-                return {"ok": True, "found": False, "requestId": request_id}
-            self._save_planning_requests_locked()
-            return {
-                "ok": True,
-                "found": True,
-                "request": self._planning_request_public(request, include_result=True),
-            }
-
-    def cancel_planning_request(self, args: dict[str, Any]) -> dict[str, Any]:
-        request_id = _string_or_none(args.get("requestId"))
-        if not request_id:
-            raise BlueprintServiceError("BAD_REQUEST", "requestId is required")
-        with self.lock:
-            request = self._planning_request_by_id_locked(request_id)
-            if request is None:
-                return {"ok": True, "cancelled": False, "requestId": request_id}
-            if request.get("status") not in {"completed", "failed", "cancelled"}:
-                now = time.time()
-                request["status"] = "cancelled"
-                request["cancelledAt"] = now
-                request["updatedAt"] = now
-                request["reason"] = _string_or_none(args.get("reason")) or "cancelled"
-                self._save_planning_requests_locked()
-            return {
-                "ok": True,
-                "cancelled": True,
-                "request": self._planning_request_public(request, include_result=True),
-            }
-
-    def take_planning_request(
-        self,
-        args: dict[str, Any] | None = None,
-        *,
-        thread_id: str | None,
-    ) -> dict[str, Any]:
-        thread_id = _string_or_none(thread_id)
-        if not thread_id:
-            return {"ok": True, "request": None, "message": "No current Codex thread id was provided."}
-        args = args or {}
-        request_id = _string_or_none(args.get("requestId"))
-        project_dir = _string_or_none(args.get("projectDir"))
-        blueprint_id = _string_or_none(args.get("blueprintId"))
-        with self.lock:
-            self._load_planning_requests_locked()
-            self._prune_planning_requests_locked()
-            candidates = list(self._planning_requests.values())
-            candidates.sort(key=lambda request: float(request.get("createdAt") or 0))
-            for request in candidates:
-                if request_id and request.get("requestId") != request_id:
-                    continue
-                if project_dir and str(request.get("projectDir") or "") != project_dir:
-                    continue
-                if blueprint_id and str(request.get("blueprintId") or "") != blueprint_id:
-                    continue
-                same_thread = str(request.get("threadId") or "") == thread_id
-                takeover = not same_thread and self._planning_request_takeover_allowed_locked(request, thread_id)
-                if not same_thread and not takeover:
-                    continue
-                if request.get("status") not in {"pending", "claimed"}:
-                    continue
-                now = time.time()
-                if takeover:
-                    self._reassign_planning_request_locked(request, thread_id)
-                request["status"] = "claimed"
-                request["claimedAt"] = request.get("claimedAt") or now
-                request["updatedAt"] = now
-                self._save_planning_requests_locked()
-                return {"ok": True, "request": self._planning_request_public(request)}
-        return {"ok": True, "request": None}
-
-    def _assert_planning_request_thread(self, request: dict[str, Any], thread_id: str | None) -> None:
-        thread_id = _string_or_none(thread_id)
-        if not thread_id:
-            raise BlueprintServiceError("NO_PLANNING_THREAD", "No current Codex thread id was provided")
-        self._reassign_planning_request_locked(request, thread_id)
-        if str(request.get("threadId") or "") != thread_id:
-            raise BlueprintServiceError("PLANNING_THREAD_MISMATCH", "planning request belongs to a different thread")
-
-    def complete_planning_request(
-        self,
-        request_id: str,
-        plan: dict[str, Any],
-        summary: str | None = None,
-        *,
-        thread_id: str | None,
-    ) -> dict[str, Any]:
-        request_id = _string_or_none(request_id) or ""
-        if not request_id:
-            raise BlueprintServiceError("BAD_REQUEST", "requestId is required")
-        if not isinstance(plan, dict):
-            raise BlueprintServiceError("BAD_REQUEST", "plan must be a JSON object")
-        with self.lock:
-            request = self._planning_request_by_id_locked(request_id)
-            if request is None:
-                raise BlueprintServiceError("PLANNING_REQUEST_NOT_FOUND", f"planning request not found: {request_id}")
-            self._assert_planning_request_thread(request, thread_id)
-            project_dir = str(request.get("projectDir") or "")
-            blueprint_id = str(request.get("blueprintId") or DEFAULT_BLUEPRINT_ID)
-        validation_response = self.service.handle_request(
-            {
-                "command": "blueprint.plan.validate",
-                "args": {"projectDir": project_dir, "blueprintId": blueprint_id, "plan": plan},
-            }
-        )
-        validation = validation_response.get("validation") if isinstance(validation_response, dict) else None
-        if not isinstance(validation, dict):
-            validation = validation_response if isinstance(validation_response, dict) else {"ok": False}
-        with self.lock:
-            request = self._planning_request_by_id_locked(request_id)
-            if request is None:
-                raise BlueprintServiceError("PLANNING_REQUEST_NOT_FOUND", f"planning request not found: {request_id}")
-            self._assert_planning_request_thread(request, thread_id)
-            now = time.time()
-            request["status"] = "completed"
-            request["plan"] = plan
-            request["validation"] = validation
-            request["summary"] = _string_or_none(summary) or request.get("summary") or ""
-            request["completedAt"] = now
-            request["updatedAt"] = now
-            self._save_planning_requests_locked()
-            return {
-                "ok": True,
-                "request": self._planning_request_public(request, include_result=True),
-                "validation": validation,
-            }
-
-    def fail_planning_request(self, request_id: str, reason: str, *, thread_id: str | None) -> dict[str, Any]:
-        request_id = _string_or_none(request_id) or ""
-        if not request_id:
-            raise BlueprintServiceError("BAD_REQUEST", "requestId is required")
-        with self.lock:
-            request = self._planning_request_by_id_locked(request_id)
-            if request is None:
-                raise BlueprintServiceError("PLANNING_REQUEST_NOT_FOUND", f"planning request not found: {request_id}")
-            self._assert_planning_request_thread(request, thread_id)
-            now = time.time()
-            request["status"] = "failed"
-            request["reason"] = _string_or_none(reason) or "failed"
-            request["failedAt"] = now
-            request["updatedAt"] = now
-            self._save_planning_requests_locked()
-            return {"ok": True, "request": self._planning_request_public(request, include_result=True)}
-
     def request(
         self,
         command: str,
@@ -1178,12 +845,6 @@ class PluginState:
         request_kind = _request_kind_for_command(command)
         if request_kind in {"write", "control"}:
             self.attach_owner(thread_id, reason=request_kind)
-        if command == "blueprint.planning.submit":
-            return self.submit_planning_request(args or {})
-        if command == "blueprint.planning.status":
-            return self.planning_status(args or {})
-        if command == "blueprint.planning.cancel":
-            return self.cancel_planning_request(args or {})
         if command == "blueprint.pickDirectory":
             return _open_directory_picker(args or {})
         if command == "blueprint.pickFile":
@@ -1276,7 +937,6 @@ class PluginState:
                     default_blueprint_id=str(blueprint_id or DEFAULT_BLUEPRINT_ID),
                     collaboration_url=self.collaboration_url,
                     ensure_collaboration_fn=self.ensure_collaboration_server,
-                    planning_thread_id=str(planning_thread_id or ""),
                 )
                 self.workbench.start()
             else:
@@ -1284,8 +944,6 @@ class PluginState:
                     self.workbench.default_project_dir = str(project_dir)
                 if blueprint_id is not None:
                     self.workbench.default_blueprint_id = str(blueprint_id or DEFAULT_BLUEPRINT_ID)
-                if planning_thread_id is not None:
-                    self.workbench.planning_thread_id = str(planning_thread_id or "")
             url = self.workbench.url
         if open_browser:
             webbrowser.open(url)
@@ -1294,26 +952,7 @@ class PluginState:
             "url": url,
             "projectDir": str(project_dir or ""),
             "blueprintId": str(blueprint_id or DEFAULT_BLUEPRINT_ID),
-            "planningThreadId": str(planning_thread_id or ""),
         }
-
-    def _persistent_workbench_matches(
-        self,
-        ready: dict[str, Any],
-        project_dir: str | None,
-        blueprint_id: str | None,
-        planning_thread_id: str | None,
-    ) -> bool:
-        url = _string_or_none(ready.get("url"))
-        if not url or not _workbench_url_alive(url):
-            return False
-        expected_project = str(project_dir or "")
-        expected_blueprint = str(blueprint_id or DEFAULT_BLUEPRINT_ID)
-        if not _same_text(ready.get("projectDir"), expected_project):
-            return False
-        if not _same_text(ready.get("blueprintId"), expected_blueprint):
-            return False
-        return _same_text(ready.get("planningThreadId"), planning_thread_id or "")
 
     def _close_persistent_workbench_logs(self) -> None:
         for handle_name in ("_persistent_workbench_stdout", "_persistent_workbench_stderr"):
@@ -1500,42 +1139,6 @@ class SingletonProxyState:
     def stop_workbench(self, *, thread_id: str | None = None) -> dict[str, Any]:
         return self._rpc("service.stopWorkbench", {}, thread_id=thread_id, request_kind="control")
 
-    def take_planning_request(
-        self,
-        args: dict[str, Any] | None = None,
-        *,
-        thread_id: str | None,
-    ) -> dict[str, Any]:
-        return self._rpc(
-            "service.takePlanningRequest",
-            args or {},
-            thread_id=thread_id,
-            request_kind="control",
-        )
-
-    def complete_planning_request(
-        self,
-        request_id: str,
-        plan: dict[str, Any],
-        summary: str | None = None,
-        *,
-        thread_id: str | None,
-    ) -> dict[str, Any]:
-        return self._rpc(
-            "service.completePlanningRequest",
-            {"requestId": request_id, "plan": plan, "summary": summary or ""},
-            thread_id=thread_id,
-            request_kind="control",
-        )
-
-    def fail_planning_request(self, request_id: str, reason: str, *, thread_id: str | None) -> dict[str, Any]:
-        return self._rpc(
-            "service.failPlanningRequest",
-            {"requestId": request_id, "reason": reason},
-            thread_id=thread_id,
-            request_kind="control",
-        )
-
     def request(
         self,
         command: str,
@@ -1617,21 +1220,6 @@ class SingletonServiceServer:
             }
         if command == "service.stopWorkbench":
             return {**self.state.stop_workbench(), "servicePid": os.getpid(), "singleton": True}
-        if command == "service.takePlanningRequest":
-            return self.state.take_planning_request(args, thread_id=thread_id)
-        if command == "service.completePlanningRequest":
-            return self.state.complete_planning_request(
-                str(args.get("requestId") or ""),
-                args.get("plan") if isinstance(args.get("plan"), dict) else {},
-                _string_or_none(args.get("summary")),
-                thread_id=thread_id,
-            )
-        if command == "service.failPlanningRequest":
-            return self.state.fail_planning_request(
-                str(args.get("requestId") or ""),
-                str(args.get("reason") or ""),
-                thread_id=thread_id,
-            )
         if command == "service.status":
             return {"ok": True, "service": self._service_info()}
         return self.state.request(command, args, thread_id=thread_id)
@@ -1796,45 +1384,6 @@ def stop_blueprint_workbench(ctx: Context = None) -> dict[str, Any]:
 def blueprint_request(command: str, args: Optional[dict[str, Any]] = None, ctx: Context = None) -> dict[str, Any]:
     """Call a whitelisted DesktopBlueprintService command."""
     return state.request(command, args or {}, thread_id=_current_planning_thread_id(ctx))
-
-
-@mcp.tool()
-def blueprint_take_planning_request(
-    projectDir: Optional[str] = None,
-    blueprintId: Optional[str] = None,
-    requestId: Optional[str] = None,
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Claim the oldest pending Workbench planning request for the current Codex thread."""
-    args: dict[str, Any] = {}
-    if projectDir:
-        args["projectDir"] = projectDir
-    if blueprintId:
-        args["blueprintId"] = blueprintId
-    if requestId:
-        args["requestId"] = requestId
-    return state.take_planning_request(args, thread_id=_current_planning_thread_id(ctx))
-
-
-@mcp.tool()
-def blueprint_complete_planning_request(
-    requestId: str,
-    plan: dict[str, Any],
-    summary: Optional[str] = None,
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Complete a Workbench planning request with a validated blueprint start plan."""
-    return state.complete_planning_request(requestId, plan, summary, thread_id=_current_planning_thread_id(ctx))
-
-
-@mcp.tool()
-def blueprint_fail_planning_request(
-    requestId: str,
-    reason: str,
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Mark a Workbench planning request failed for the current Codex thread."""
-    return state.fail_planning_request(requestId, reason, thread_id=_current_planning_thread_id(ctx))
 
 
 @mcp.tool()

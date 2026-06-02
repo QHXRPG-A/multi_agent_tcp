@@ -538,6 +538,7 @@ def main() -> None:
         preserve_runtime=True,
     )
     dest_root = Path(dest_payload["plugin"])
+    runtime_python = ensure_runtime_venv(dest_root, Path(dest_payload["runtimeWheel"]))
     update_marketplace(args.marketplace.resolve(), force=args.force)
     cache_updated: list[str] = []
     if not args.skip_codex_cache_sync:
@@ -555,7 +556,7 @@ def main() -> None:
                 "plugin": str(dest_root),
                 "marketplace": str(args.marketplace.resolve()),
                 "runtimeWheel": dest_payload["runtimeWheel"],
-                "runtimePython": str(runtime_venv_python(dest_root / ".runtime")),
+                "runtimePython": str(runtime_python),
                 "mcpMode": dest_payload["mcpMode"],
                 "webSource": dest_payload["webSource"],
                 "release": release_payload,

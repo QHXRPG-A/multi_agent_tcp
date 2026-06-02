@@ -21,7 +21,6 @@ type BlueprintWorkbenchConfig = {
   projectDir?: string
   blueprintId?: string
   apiBase?: string
-  planningThreadId?: string
 }
 
 declare global {
@@ -125,11 +124,6 @@ const blueprintRequest = async (config: BlueprintWorkbenchConfig, command: strin
   return payload
 }
 
-const blueprintRecord = (value: unknown) =>
-  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
-
-const blueprintString = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : undefined)
-
 type BlueprintPickerPaths = Awaited<ReturnType<NonNullable<Platform["openDirectoryPickerDialog"]>>>
 
 const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkbenchConfig): Platform => ({
@@ -219,37 +213,6 @@ const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkben
   openBlueprintWindow: async () => undefined,
   dockBlueprintWindow: async () => undefined,
   closeBlueprintWindow: async () => undefined,
-  ...(config.planningThreadId
-    ? ({
-        submitBlueprintWindowPlanning: async (projectDir, sessionId, input) => {
-          const payload = await blueprintRequest(config, "blueprint.planning.submit", {
-            projectDir,
-            sessionId,
-            threadId: config.planningThreadId,
-            task: input.task,
-            blueprintId: input.blueprintId,
-            blueprintName: input.blueprintName,
-            startNodeIds: input.startNodeIds,
-            message: input.message,
-            silentBlocked: input.silentBlocked,
-          })
-          const request = blueprintRecord(payload.request) ?? payload
-          return {
-            accepted: payload.accepted !== false,
-            requestId: blueprintString(request.requestId) ?? blueprintString(payload.requestId),
-            status: blueprintString(request.status) ?? blueprintString(payload.status),
-            message: blueprintString(request.message) ?? blueprintString(payload.message),
-          }
-        },
-        blueprintWindowPlanningStatus: async (requestId: string) =>
-          blueprintRequest(config, "blueprint.planning.status", { requestId }),
-        cancelBlueprintWindowPlanning: async (requestId: string, reason?: string) =>
-          blueprintRequest(config, "blueprint.planning.cancel", { requestId, reason }),
-      } satisfies Pick<
-        Platform,
-        "submitBlueprintWindowPlanning" | "blueprintWindowPlanningStatus" | "cancelBlueprintWindowPlanning"
-      >)
-    : {}),
 })
 
 const ensureBlueprintWorkbenchRoute = (config: BlueprintWorkbenchConfig) => {

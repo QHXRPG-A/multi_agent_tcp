@@ -65,22 +65,6 @@ export type BlueprintWindowRect = {
   height: number
 }
 
-export type BlueprintWindowPlanningSubmitInput = {
-  task: string
-  blueprintId?: string
-  blueprintName?: string
-  startNodeIds: string[]
-  message: string
-  silentBlocked?: boolean
-}
-
-export type BlueprintWindowPlanningSubmitResult = {
-  accepted: boolean
-  requestId?: string
-  status?: string
-  message?: string
-}
-
 export type Platform = {
   /** Platform discriminator */
   platform: "web" | "desktop"
@@ -284,19 +268,6 @@ export type Platform = {
 
   /** Close the current independent blueprint window (desktop only) */
   closeBlueprintWindow?(): Promise<void>
-
-  /** Forward a blueprint planning task from the independent window to the main session composer. */
-  submitBlueprintWindowPlanning?(
-    projectDir: string,
-    sessionId: string | undefined,
-    input: BlueprintWindowPlanningSubmitInput,
-  ): Promise<BlueprintWindowPlanningSubmitResult>
-
-  /** Poll a Workbench planning request submitted to the current thread. */
-  blueprintWindowPlanningStatus?(requestId: string): Promise<Record<string, unknown>>
-
-  /** Cancel a Workbench planning request submitted to the current thread. */
-  cancelBlueprintWindowPlanning?(requestId: string, reason?: string): Promise<Record<string, unknown>>
 
   /** Storage mechanism, defaults to localStorage */
   storage?: (name?: string) => SyncStorage | AsyncStorage

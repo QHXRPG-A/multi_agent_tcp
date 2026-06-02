@@ -2957,18 +2957,6 @@ export default function Page() {
     view().blueprintPanel.close()
   }
 
-  const handleBlueprintWindowPlanningSubmit = (event: Event) => {
-    const detail = blueprintWindowEventDetail(event)
-    if (!blueprintWindowEventMatchesSession(detail)) return
-    const input = isRecord(detail?.input) ? detail.input : undefined
-    const message = typeof input?.message === "string" ? input.message : ""
-    const blueprintId = typeof input?.blueprintId === "string" ? input.blueprintId : undefined
-    const silentBlocked = input?.silentBlocked === true
-    const respond = typeof detail?.respond === "function" ? detail.respond : undefined
-    if (!message || !respond) return
-    respond(requestBlueprintPlanningSubmit({ message, blueprintId, silentBlocked }))
-  }
-
   const deleteCurrentSessionFromBridge = async (sessionId?: string) => {
     const targetSessionId = sessionId || params.id
     if (!targetSessionId) return { ok: true, accepted: false, code: "NO_SESSION", message: "desktop session is unavailable" }
@@ -3114,7 +3102,6 @@ export default function Page() {
     makeEventListener(document, "keydown", handleKeyDown)
     makeEventListener(window, "gulicode:blueprint-window-dock", handleBlueprintWindowDock)
     makeEventListener(window, "gulicode:blueprint-window-closed", handleBlueprintWindowClosed)
-    makeEventListener(window, "gulicode:blueprint-planning-submit", handleBlueprintWindowPlanningSubmit)
     makeEventListener(window, "gulicode:desktop-control-bridge-command", handleDesktopControlBridgeCommand)
   })
 
@@ -3315,7 +3302,6 @@ export default function Page() {
           size={size}
           blueprintPlanningProgress={blueprintPlanningProgress()}
           blueprintPlanningActiveRun={blueprintPlanning.activeRun}
-          onBlueprintPlanningSubmit={requestBlueprintPlanningSubmit}
           onBlueprintDiffChanged={handleBlueprintDiffChanged}
         />
       </div>
