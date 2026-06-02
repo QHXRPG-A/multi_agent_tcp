@@ -99,6 +99,27 @@ Read these first based on the task:
 
 ## Recent Handoff
 
+For the latest `gulicode-bp` plugin singleton service and reload work from
+2026-06-02:
+
+- Codex-plugin-only singleton service boundary, stateless stdio MCP proxies,
+  `service.lock` / `service.json` / `service.log.jsonl`, Workbench attach
+  wrapper, owner takeover, planning-request reassignment, duplicate active-run
+  guard, canonical personal-plugin `.runtime` state, Windows venv launcher
+  cleanup, and final clean reload process inventory:
+  `archive/runtime-backend/gulicode_bp_plugin_singleton_service_2026-06-02.md`
+
+Use that file when the user reports:
+
+- duplicate `gulicode_bp_mcp.py --service`, Workbench, live-run registry, or
+  plugin-managed Collaboration Server ownership
+- uncertainty about which plugin processes must be unique versus allowed
+  Codex-side bootstrap/proxy access processes
+- stale `service.json`, `service.lock`, or singleton health after killing or
+  reloading the plugin
+- planning requests moving between Codex threads or owner takeover behavior
+- duplicate active blueprint starts for the same `projectDir + blueprintId`
+
 For the latest `gulicode-bp` MCP transport, bootstrap lock, and status logging
 work from 2026-06-02:
 
@@ -116,6 +137,28 @@ Use that file when the user reports:
 - `mcp_status.json` says `running` while the MCP process is gone or stale
 - the user asks what transport, bootstrap, or Workbench means
 - Codex warns that `interface.defaultPrompt` has too many prompts
+
+For the latest `gulicode-bp` first-run bootstrap and packaging work from
+2026-06-01:
+
+- New-user standalone install path, `.runtime/venv` first-run bootstrap,
+  bootstrap MCP entrypoint, Windows re-entry behavior, release package layout,
+  fixed `package-gulicode-bp-plugin.cmd` packaging command, release smoke, and
+  release-versus-trunk semantics:
+  `archive/runtime-backend/gulicode_bp_first_run_bootstrap_packaging_2026-06-01.md`
+
+Use that file when the user reports:
+
+- a new Codex user cannot run `gulicode-bp` without local `multi_agent_tcp`
+  source
+- `.runtime/venv` is missing, stale, locked, or not loading from plugin-owned
+  site-packages
+- `.mcp.json` still points at repo-local Python, `PYTHONPATH`, or
+  `GULICODE_BP_REPO_ROOT`
+- release packages include `.runtime`, lack `runtime/wheels`, or need package
+  shape verification
+- the user asks what `release` versus trunk/source means
+- the user says `鎵撳寘`, `鎻掍欢鎵撳寘`, or `package`
 
 For the latest `gulicode-bp` standalone runtime and Codex fan-out smoke work
 from 2026-06-01:
