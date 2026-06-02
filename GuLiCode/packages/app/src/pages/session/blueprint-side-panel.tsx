@@ -233,7 +233,6 @@ const BLUEPRINT_INSPECTOR_THEME = {
 } as JSX.CSSProperties
 
 const MODEL_LIST_FALLBACKS: Record<string, string[]> = {
-  codemaker: ["netease-codemaker/kimi-k2.5"],
   codex: ["gpt-5.4"],
 }
 
@@ -1954,7 +1953,7 @@ export function BlueprintSidePanel(props: {
   }
 
   createEffect(() => {
-    const cliKinds = Array.from(new Set(Object.values(draft.graph.agent_nodes).map((node) => node.cli_kind || "codemaker")))
+    const cliKinds = Array.from(new Set(Object.values(draft.graph.agent_nodes).map((node) => node.cli_kind || "codex")))
     queueMicrotask(() => {
       for (const cliKind of cliKinds) void refreshModelCatalog(cliKind)
     })
@@ -6404,7 +6403,7 @@ export function BlueprintInspector(props: {
               <SelectField
                 tip="cliKind"
                 label={language.t("blueprint.field.cliKind")}
-                value={props.selectedAgent?.cli_kind ?? "codemaker"}
+                value={props.selectedAgent?.cli_kind ?? "codex"}
                 options={CLI_KIND_OPTIONS.map((kind) => [kind, kind])}
                 onChange={updateAgentCliKind}
               />
@@ -6414,13 +6413,13 @@ export function BlueprintInspector(props: {
                 value={props.selectedAgent?.model ?? ""}
                 options={modelOptions(props.modelCatalog, props.selectedAgent?.model)}
                 status={
-                  props.modelCatalog.cliKind === (props.selectedAgent?.cli_kind ?? "codemaker") && props.modelCatalog.loading
+                  props.modelCatalog.cliKind === (props.selectedAgent?.cli_kind ?? "codex") && props.modelCatalog.loading
                     ? language.t("blueprint.model.loading")
-                    : props.modelCatalog.cliKind === (props.selectedAgent?.cli_kind ?? "codemaker") && props.modelCatalog.error
+                    : props.modelCatalog.cliKind === (props.selectedAgent?.cli_kind ?? "codex") && props.modelCatalog.error
                       ? language.t("blueprint.model.loadFailed")
                       : undefined
                 }
-                onFocus={() => void props.refreshModelCatalog(props.selectedAgent?.cli_kind ?? "codemaker")}
+                onFocus={() => void props.refreshModelCatalog(props.selectedAgent?.cli_kind ?? "codex")}
                 onChange={(value) => updateAgentField("model", value)}
               />
               <div class="grid grid-cols-2 gap-2">
@@ -7415,7 +7414,7 @@ function scriptPortY(node: BlueprintScriptNode, side: "input" | "output", portNa
 }
 
 function fallbackModels(cliKind: string) {
-  return MODEL_LIST_FALLBACKS[cliKind] ?? MODEL_LIST_FALLBACKS.codemaker
+  return MODEL_LIST_FALLBACKS[cliKind] ?? MODEL_LIST_FALLBACKS.codex
 }
 
 function slugBlueprintId(name: string) {
@@ -7442,7 +7441,7 @@ function uniqueBlueprintId(name: string, existingIds: string[]) {
 }
 
 function modelOptions(modelCatalog: ModelCatalogState, currentModel?: string): Array<[string, string]> {
-  const values = new Set(modelCatalog.models.length ? modelCatalog.models : fallbackModels(modelCatalog.cliKind || "codemaker"))
+  const values = new Set(modelCatalog.models.length ? modelCatalog.models : fallbackModels(modelCatalog.cliKind || "codex"))
   if (currentModel) values.add(currentModel)
   return Array.from(values).map((model) => [model, model])
 }

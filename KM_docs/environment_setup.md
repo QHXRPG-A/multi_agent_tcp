@@ -49,8 +49,8 @@ Notes:
 - PowerShell script execution is disabled on this machine, so `codex` resolves
   first to `codex.ps1` and fails. Use `codex.cmd` or the WindowsApps
   `codex.exe` path for direct checks.
-- `codemaker` is not currently on PATH. `python -m multi_agent_tcp doctor
-  --json` reports `codex: true` and `codemaker: false`.
+- `codex` is not currently on PATH. `python -m multi_agent_tcp doctor
+  --json` reports `codex: true` and `codex: false`.
 
 ## Cross-Machine Setup Checklist
 

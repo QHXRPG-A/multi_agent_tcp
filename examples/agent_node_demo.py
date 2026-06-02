@@ -5,7 +5,7 @@ Run from the repository parent:
     python -m multi_agent_tcp.examples.agent_node_demo
 
 This demo intentionally uses an in-process fake cluster. It exercises the
-AgentNode and GraphRuntime contracts without starting CodeMaker/Codex.
+AgentNode and GraphRuntime contracts without starting Codex.
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ async def main() -> None:
             {
                 "agent_id": "agent-background-demo",
                 "execution_mode": "nonblocking",
-                "cli_kind": "codemaker",
+                "cli_kind": "codex",
                 "cwd": str(root / "project"),
                 "workspace_id": "demo-workspace",
                 "workspace_root": str(root / "workspace"),

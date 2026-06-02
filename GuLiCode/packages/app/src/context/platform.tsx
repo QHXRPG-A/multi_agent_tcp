@@ -269,6 +269,13 @@ export type Platform = {
   /** Close the current independent blueprint window (desktop only) */
   closeBlueprintWindow?(): Promise<void>
 
+  /** Submit planning input from the independent blueprint window (desktop only) */
+  submitBlueprintWindowPlanning?(
+    projectDir: string,
+    sessionId: string | undefined,
+    input: { task: string; startNodeIds: string[]; message: string },
+  ): Promise<{ accepted: boolean }>
+
   /** Storage mechanism, defaults to localStorage */
   storage?: (name?: string) => SyncStorage | AsyncStorage
 

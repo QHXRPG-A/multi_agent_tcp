@@ -63,7 +63,7 @@ class AgentNode(Node):
     version = "v0.1"
     title = "AgentNode"
     identifier = "AgentNode"
-    tags = ["agent", "codemaker", "codex", "blueprint"]
+    tags = ["agent", "codex", "blueprint"]
     init_inputs = [
         NodeInputType(label="in", type_="exec"),
         NodeInputType(label="prompt", type_="data"),

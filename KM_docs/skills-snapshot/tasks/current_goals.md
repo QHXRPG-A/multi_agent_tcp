@@ -116,7 +116,7 @@ Historical desktop/UI baseline retained for compatibility:
 - Skill and rule fields are multi-select dropdowns backed by the common
   directories. Rule directories can be empty without error.
 - CLI kind and model are dropdowns. Electron IPC now lists skill/rule catalogs
-  and refreshes model candidates by running `codemaker models netease-codemaker`
+  and refreshes model candidates by running `codex models codex`
   or parsing `codex debug models` JSON.
 - `adapter_options` remains visible only as an advanced JSON field for
   low-level CLI adapter fallback parameters.
@@ -823,9 +823,9 @@ desktop smoke pass using user-provided common config paths.
 Secondary 2026-05-18 Codex/UI priority context:
 
 Codex-first update: for this project phase, do not spend new work on
-CodeMaker streaming. Prioritize `cli_kind=codex` live runs, `CodexAdapter`
+Codex streaming. Prioritize `cli_kind=codex` live runs, `CodexAdapter`
 JSONL streaming, WebSocket stability, and Agent information panel transcript
-quality. CodeMaker stays compatibility/fallback unless the user explicitly
+quality. Codex stays compatibility/fallback unless the user explicitly
 re-opens that track.
 
 1. Manually smoke the live blueprint path in GuLiCode desktop: start live run,
@@ -838,7 +838,7 @@ re-opens that track.
 3. Continue keeping renderer logic as runtime/control-plane projection only;
    do not move GraphRuntime scheduling semantics into the UI.
 4. Stabilize Agent output streaming on the Codex path before investigating any
-   CodeMaker adapter streaming work.
+   Codex adapter streaming work.
 5. Harden Windows packaging into a repeatable helper and keep clean debug
    startup as the default troubleshooting path.
 
@@ -905,7 +905,7 @@ Superseded 2026-05-14 priority list kept for historical context:
      fields.
    - Verify skill and rule multi-select dropdowns reflect the selected
      directories and preserve selected values across save/reopen.
-   - Switch CLI kind between `codemaker` and `codex`; verify the model dropdown
+   - Switch CLI kind between `codex` and `codex`; verify the model dropdown
      enters loading state, keeps the current value on failure, and refreshes
      choices when the CLI command succeeds.
    - Click each inspector `?` tip button class in the current section and
@@ -928,7 +928,7 @@ Superseded 2026-05-14 priority list kept for historical context:
 
 ### CLI backend adapters
 
-Continue maintaining Codex/CodeMaker adapters and `CLIWorkerBackend`, but do not let adapter mechanics drive product architecture.
+Continue maintaining Codex/Codex adapters and `CLIWorkerBackend`, but do not let adapter mechanics drive product architecture.
 
 See [`multi_cli_adapter_tasks.md`](multi_cli_adapter_tasks.md).
 
@@ -961,7 +961,7 @@ F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron\
 -> regenerated after the blueprint divider change
 
 F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\desktop-electron
--> bun test ./src/main/blueprint-catalog.test.ts passes for codemaker/codex model parsing and skill/rule directory scanning
+-> bun test ./src/main/blueprint-catalog.test.ts passes for codex/codex model parsing and skill/rule directory scanning
 -> bun run build passes
 -> default bun run package:win can still fail in a normal Windows session on winCodeSign symlink extraction
 -> successful local installer workaround: temporary electron-builder.local.config.ts, win.signAndEditExecutable=false, afterPack rcedit icon patch, CSC_IDENTITY_AUTO_DISCOVERY=false, ELECTRON_BUILDER_RCEDIT_PATH=<cached winCodeSign rcedit dir>, bunx electron-builder --win --config electron-builder.local.config.ts

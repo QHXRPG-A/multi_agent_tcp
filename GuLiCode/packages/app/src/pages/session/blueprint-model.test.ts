@@ -46,13 +46,13 @@ describe("blueprint draft model", () => {
     expect(draft.graph.agent_nodes.planner).toMatchObject({
       node_id: "planner",
       node_type: "worker_agent",
-      cli_kind: "codemaker",
-      model: "netease-codemaker/kimi-k2.5",
+      cli_kind: "codex",
+      model: "gpt-5.4",
       cwd: ".",
       timeout_sec: 1800,
       prompt_via_file: "auto",
       run_prompt: "",
-      command: "codemaker",
+      command: "codex",
       external: false,
       skill_selection: { mode: "none" },
       access_policy: {
@@ -133,9 +133,9 @@ describe("blueprint draft model", () => {
       node_id: "agent",
       node_type: "worker_agent",
       agent_id: "agent-agent",
-      cli_kind: "codemaker",
-      model: "netease-codemaker/kimi-k2.5",
-      command: "codemaker",
+      cli_kind: "codex",
+      model: "gpt-5.4",
+      command: "codex",
       timeout_sec: 1800,
       adapter_options: {},
       write_scope: ["**"],
@@ -150,7 +150,7 @@ describe("blueprint draft model", () => {
       node_id: "agent-1",
       node_type: "worker_agent",
       agent_id: "agent-agent-1",
-      cli_kind: "codemaker",
+      cli_kind: "codex",
       adapter_options: {},
     })
     expect(viaGenericAdd.graph.agent_nodes["agent-1"]?.adapter_options[TEST_AGENT_NODE_FLAG]).toBeUndefined()
@@ -163,7 +163,7 @@ describe("blueprint draft model", () => {
     expect(withFullAgent.graph.agent_nodes.agent?.node_type).toBe("agent")
     expect(withFullAgent.graph.agent_nodes.agent?.cli_kind).toBe("codex")
     expect(withWorkerAgent.graph.agent_nodes["agent-1"]?.node_type).toBe("worker_agent")
-    expect(withWorkerAgent.graph.agent_nodes["agent-1"]?.cli_kind).toBe("codemaker")
+    expect(withWorkerAgent.graph.agent_nodes["agent-1"]?.cli_kind).toBe("codex")
   })
 
   test("migrates legacy report-only write scope to project-wide default", () => {
@@ -625,7 +625,7 @@ describe("blueprint draft model", () => {
       prompt: "Plan with saved settings.",
       run_prompt: "Use the saved per-run prompt once.",
       execution_mode: "nonblocking",
-      model: "netease-codemaker/kimi-k2.5",
+      model: "gpt-5.4",
       skills: ["business-skill"],
       skill_selection: { mode: "selected", skill_hashes: ["business-skill"] },
       rule_paths: ["policy.md"],
@@ -739,7 +739,7 @@ describe("blueprint draft model", () => {
   })
 
   test("keeps supported CLI kinds explicit for inspector dropdowns", () => {
-    expect(CLI_KIND_OPTIONS).toEqual(["codemaker", "codex"])
+    expect(CLI_KIND_OPTIONS).toEqual(["codex"])
   })
 
   test("creates an empty start plan unless start nodes are explicit", () => {

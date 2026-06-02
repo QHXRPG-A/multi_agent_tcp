@@ -27,7 +27,7 @@ class AgentNodeMainWidget(NodeMainWidget, QWidget):
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setFixedHeight(64)
         self.cli_kind_combo = QComboBox()
-        self.cli_kind_combo.addItems(["codemaker", "codex"])
+        self.cli_kind_combo.addItems(["codex"])
         self.model_edit = QLineEdit()
         self.cwd_edit = QLineEdit()
         self.timeout_spin = QSpinBox()
@@ -104,7 +104,7 @@ class AgentNodeMainWidget(NodeMainWidget, QWidget):
         cfg = self.node.agent_config
         self.agent_id_edit.setText(str(cfg.get("agent_id", "")))
         self.prompt_edit.setPlainText(str(cfg.get("prompt", "")))
-        self.cli_kind_combo.setCurrentText(str(cfg.get("cli_kind", "codemaker")))
+        self.cli_kind_combo.setCurrentText(str(cfg.get("cli_kind", "codex")))
         self.model_edit.setText(str(cfg.get("model", "")))
         self.cwd_edit.setText(str(cfg.get("cwd", ".")))
         self.timeout_spin.setValue(int(float(cfg.get("timeout_sec", 1800))))
@@ -187,7 +187,7 @@ class AgentNodeMainWidget(NodeMainWidget, QWidget):
             cfg["agent_id"] = agent_id
         else:
             cfg.pop("agent_id", None)
-        cfg["cli_kind"] = self.cli_kind_combo.currentText().strip() or "codemaker"
+        cfg["cli_kind"] = self.cli_kind_combo.currentText().strip() or "codex"
         cfg["prompt"] = self.prompt_edit.toPlainText().strip()
         cfg["model"] = self.model_edit.text().strip()
         cfg["cwd"] = self.cwd_edit.text().strip() or "."
@@ -196,7 +196,7 @@ class AgentNodeMainWidget(NodeMainWidget, QWidget):
         if command:
             cfg["command"] = command
         else:
-            cfg["command"] = "codex" if cfg["cli_kind"] == "codex" else "codemaker"
+            cfg["command"] = "codex"
         cfg["prompt_via_file"] = self.prompt_via_file_combo.currentText().strip() or "auto"
         cfg["external"] = self.external_check.isChecked()
         cfg["execution_mode"] = self.execution_mode_combo.currentText().strip() or "blocking"

@@ -10,16 +10,16 @@ Typical usage::
 
     from multi_agent_tcp import CLIWorkerBackend, WorkerConfig
 
-    async with await CLIWorkerBackend.create(
+async with await CLIWorkerBackend.create(
         workers=[
-            WorkerConfig("cm1", cwd=Path(".")),
-            WorkerConfig("cm2", cwd=Path(".")),
+            WorkerConfig("agent1", cwd=Path(".")),
+            WorkerConfig("agent2", cwd=Path(".")),
         ],
         port=9140,
     ) as backend:
         result = await backend.run_parallel([
-            ("cm1", {"prompt": "Task A"}),
-            ("cm2", {"prompt": "Task B"}),
+            ("agent1", {"prompt": "Task A"}),
+            ("agent2", {"prompt": "Task B"}),
         ])
         for wr in result.succeeded:
             print(wr.worker, wr.answer[:200])
@@ -65,31 +65,23 @@ class WorkerConfig:
 
     agent_id: str
     cwd: Path
-    model: str = "netease-codemaker/kimi-k2.5"
+    model: str = "gpt-5.4"
     timeout_sec: float = 1800.0
     prompt_via_file: str = "auto"
-    command: str = "codemaker"
-    cli_kind: str = "codemaker"
+    command: str = "codex"
+    cli_kind: str = "codex"
     adapter_options: Dict[str, Any] = field(default_factory=dict)
     extra_env: Dict[str, str] = field(default_factory=dict)
 
     def to_agent_json(self, host: str, port: int) -> Dict[str, Any]:
         """Serialize to the JSON config consumed by ``__main__.py agent``."""
-        cli_kind = str(self.cli_kind or "codemaker").strip().lower()
+        cli_kind = str(self.cli_kind or "codex").strip().lower()
         command = str(self.command or "").strip()
-        if cli_kind == "codex" and (not command or command == "codemaker"):
+        if cli_kind == "codex" and not command:
             command = "codex"
-        elif not command:
-            command = "codemaker"
+        if cli_kind != "codex":
+            raise ValueError(f"unsupported cli_kind for worker config: {cli_kind!r}")
 
-        codemaker_cfg = {
-            "command": command,
-            "cwd": str(self.cwd),
-            "model": self.model,
-            "base_args": ["run", "--format", "json"],
-            "prompt_via_file": self.prompt_via_file,
-            "timeout_sec": self.timeout_sec,
-        }
         codex_cfg = {
             "command": command,
             "cwd": str(self.cwd),
@@ -101,18 +93,14 @@ class WorkerConfig:
             "ephemeral": True,
         }
         adapter_options = dict(self.adapter_options or {})
-        if cli_kind == "codex":
-            codex_cfg.update(adapter_options)
-        else:
-            codemaker_cfg.update(adapter_options)
+        codex_cfg.update(adapter_options)
         return {
             "agent_id": self.agent_id,
             "broker_host": host,
             "broker_port": port,
             "role": cli_kind,
-            "mode": f"{cli_kind}-worker" if cli_kind != "codemaker" else "codemaker-worker",
+            "mode": "codex-worker",
             "cli_kind": cli_kind,
-            "codemaker": codemaker_cfg,
             "codex": codex_cfg,
             "adapter_options": adapter_options,
             "extra_env": self.extra_env or {},
@@ -282,7 +270,7 @@ class ReduceResult:
 # ---------------------------------------------------------------------------
 
 def extract_final_text(stdout: str) -> str:
-    """Parse CodeMaker NDJSON stdout, return concatenated ``type: "text"`` entries."""
+    """Parse NDJSON stdout and return concatenated ``type: "text"`` entries."""
     parts: List[str] = []
     for line in stdout.replace("\r\n", "\n").split("\n"):
         line = line.strip()
@@ -314,13 +302,15 @@ def summarize_gather_result(result: Dict[str, Any]) -> Dict[str, Any]:
     }
     for agent_id, reply in result.get("replies", {}).items():
         body = reply.get("body", {})
-        cm = body.get("codemaker", {})
-        stdout = cm.get("stdout", "")
+        codex = body.get("codex", {})
+        stdout = codex.get("stdout", "") if isinstance(codex, dict) else ""
         summary["agents"][agent_id] = {
             "ok": body.get("ok"),
-            "returncode": cm.get("returncode"),
-            "timeout": cm.get("timeout", False),
-            "answer": extract_final_text(stdout),
+            "returncode": codex.get("returncode") if isinstance(codex, dict) else None,
+            "timeout": codex.get("timeout", False) if isinstance(codex, dict) else False,
+            "answer": str(codex.get("final_text") or codex.get("last_message") or extract_final_text(stdout))
+            if isinstance(codex, dict)
+            else "",
         }
     return summary
 
@@ -358,30 +348,11 @@ def _parse_worker_result(agent_id: str, reply: Dict[str, Any]) -> WorkerResult:
             elapsed_sec=codex.get("elapsed_sec", 0.0),
         )
 
-    cm = body.get("codemaker", {})
-    stdout = cm.get("stdout", "")
-    stderr = cm.get("stderr", "")
-    answer = extract_final_text(stdout)
-    is_timeout = cm.get("timeout", False)
-    returncode = cm.get("returncode")
-    ok = body.get("ok", False)
-
-    if is_timeout:
-        status = "timeout"
-    elif not ok:
-        status = "error"
-    elif not answer.strip():
-        status = "empty"
-    else:
-        status = "success"
-
     return WorkerResult(
         worker=agent_id,
-        status=status,
-        answer=answer,
-        raw_stdout=stdout,
-        stderr=stderr,
-        elapsed_sec=cm.get("elapsed_sec", 0.0),
+        status="error",
+        answer="",
+        stderr=json.dumps(body, ensure_ascii=False),
     )
 
 
@@ -421,16 +392,15 @@ _RETRYABLE_PATTERNS = [
 def is_retryable_error(reply: Dict[str, Any]) -> bool:
     """Return True if a worker reply indicates a transient, retryable failure.
 
-    Checks ``body.codemaker.stderr`` for known patterns like SQLite lock
-    contention that resolve on retry.
+    Checks worker stderr for known transient patterns that resolve on retry.
     """
     body = reply.get("body", {})
     if isinstance(body, str):
         return False
     if body.get("ok"):
         return False
-    cm = body.get("codemaker", {})
-    stderr = cm.get("stderr", "").lower()
+    codex = body.get("codex", {})
+    stderr = codex.get("stderr", "").lower() if isinstance(codex, dict) else ""
     return any(pat in stderr for pat in _RETRYABLE_PATTERNS)
 
 
@@ -453,11 +423,11 @@ def _reply_body_to_context(reply_msg: Dict[str, Any]) -> str:
     body = reply_msg.get("body", {})
     if isinstance(body, str):
         return body
-    cm = body.get("codemaker", {})
-    stdout = cm.get("stdout", "")
-    text = extract_final_text(stdout)
-    if text:
-        return text
+    codex = body.get("codex", {})
+    if isinstance(codex, dict):
+        text = codex.get("final_text") or codex.get("last_message")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
     return json.dumps(body, ensure_ascii=False)
 
 
@@ -515,9 +485,8 @@ def _spawn(cmd: List[str], title: str, *, verbose: bool, env: Dict[str, str]) ->
 class CLIWorkerBackend:
     """Manage a broker plus N CLI-backed worker processes and submit tasks.
 
-    The historical public name was ``CodeMakerCluster``. The implementation is
-    now CLI-agnostic: each worker chooses its adapter via ``WorkerConfig.cli_kind``
-    and can point at CodeMaker, Codex, or another compatible CLI command.
+    Each worker chooses its adapter via ``WorkerConfig.cli_kind`` and currently
+    uses Codex execution.
     """
 
     def __init__(self) -> None:
@@ -1118,11 +1087,11 @@ class CLIWorkerBackend:
             out.append(WorkerConfig(
                 agent_id=aid.strip(),
                 cwd=Path(str(cwd)).expanduser().resolve(),
-                model=str(w.get("model", "netease-codemaker/kimi-k2.5")),
+                model=str(w.get("model", "gpt-5.4")),
                 timeout_sec=float(w.get("timeout_sec", 1800.0)),
                 prompt_via_file=str(w.get("prompt_via_file", "auto")),
-                command=str(w.get("command", "codemaker")),
-                cli_kind=str(w.get("cli_kind", "codemaker")),
+                command=str(w.get("command", "codex")),
+                cli_kind=str(w.get("cli_kind", "codex")),
                 adapter_options=dict(w.get("adapter_options", {})),
                 extra_env={str(k): str(v) for k, v in w.get("extra_env", {}).items()},
             ))
@@ -1132,7 +1101,3 @@ class CLIWorkerBackend:
     def host_port_from_json(cls, data: Dict[str, Any]) -> Tuple[str, int]:
         """Extract host/port from a ``cluster.json`` config."""
         return str(data.get("host", "127.0.0.1")), int(data.get("port", 9140))
-
-
-# Backward-compatible alias. New code should import CLIWorkerBackend.
-CodeMakerCluster = CLIWorkerBackend

@@ -5,14 +5,15 @@
     "from": "sample-agent",
     "body": {
       "ok": true,
-      "codemaker": {
+      "codex": {
         "returncode": 0,
-        "stdout": "bun install v1.3.13 (bf2e2cec)\n\nChecked 25 installs across 31 packages (no changes) [54.00ms]\n{\"type\":\"step_start\",\"timestamp\":1778157346647,\"sessionID\":\"ses_1fd9077d2ffeMTwx6n9davEKPM\",\"part\":{\"id\":\"prt_e026fdf53001DCKv4NyaWcbSQg\",\"sessionID\":\"ses_1fd9077d2ffeMTwx6n9davEKPM\",\"messageID\":\"msg_e026f8987001xfFK472rI1j5zP\",\"type\":\"step-start\",\"snapshot\":\"3ba342d2beb893b38ab9625a534f01ef6c2026cd\"}}\r\n{\"type\":\"text\",\"timestamp\":1778157346657,\"sessionID\":\"ses_1fd9077d2ffeMTwx6n9davEKPM\",\"part\":{\"id\":\"prt_e026fdf57001YDl0DgC7OD9ezk\",\"sessionID\":\"ses_1fd9077d2ffeMTwx6n9davEKPM\",\"messageID\":\"msg_e026f8987001xfFK472rI1j5zP\",\"type\":\"text\",\"text\":\"SAMPLE_AGENT_OUTPUT\",\"time\":{\"start\":1778157346654,\"end\":1778157346654}}}\r\n{\"type\":\"step_finish\",\"timestamp\":1778157347138,\"sessionID\":\"ses_1fd9077d2ffeMTwx6n9davEKPM\",\"part\":{\"id\":\"prt_e026fdf610018riJNueC4xuHvU\",\"sessionID\":\"ses_1fd9077d2ffeMTwx6n9davEKPM\",\"messageID\":\"msg_e026f8987001xfFK472rI1j5zP\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"3ba342d2beb893b38ab9625a534f01ef6c2026cd\",\"cost\":0.068615,\"tokens\":{\"input\":17117,\"output\":7,\"reasoning\":0,\"cache\":{\"read\":256,\"write\":0}}}}\r\n",
-        "stderr": "[config-context] getConfigContext() called before initConfigContext(); defaulting to CLI paths.\n",
-        "timeout": false
+        "stdout": "",
+        "stderr": "",
+        "timeout": false,
+        "final_text": "SAMPLE_AGENT_OUTPUT"
       },
       "adapter": {
-        "cli_kind": "codemaker",
+        "cli_kind": "codex",
         "agent_id": "sample-agent",
         "messages_handled": 1,
         "persistent_instance": true,

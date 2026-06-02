@@ -156,7 +156,7 @@ def _reply_failure_reason(reply: Any) -> Optional[str]:
         value = body.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    for key in ("codex", "codemaker"):
+    for key in ("codex",):
         payload = body.get(key)
         if not isinstance(payload, dict):
             continue
@@ -589,15 +589,15 @@ class AgentNode:
     prompt: str = ""
     run_prompt: str = ""
     execution_mode: AgentExecutionMode = "blocking"
-    cli_kind: str = "codemaker"
-    model: str = "netease-codemaker/kimi-k2.5"
+    cli_kind: str = "codex"
+    model: str = "gpt-5.4"
     cwd: Path = Path(".")
     skills: List[str] = field(default_factory=list)
     skill_selection: AgentSkillSelection = field(default_factory=AgentSkillSelection)
     rule_paths: List[str] = field(default_factory=list)
     timeout_sec: float = 1800.0
     prompt_via_file: str = "auto"
-    command: str = "codemaker"
+    command: str = "codex"
     adapter_options: Dict[str, Any] = field(default_factory=dict)
     extra_env: Dict[str, str] = field(default_factory=dict)
     external: bool = False
@@ -721,17 +721,17 @@ class AgentNode:
                 raise ValueError(f"AgentNode.{scope_key} must be a list")
         raw_cli_kind = data.get("cli_kind")
         if raw_cli_kind is None:
-            cli_kind = "codex" if node_type == "agent" else "codemaker"
+            cli_kind = "codex"
         else:
             cli_kind = str(raw_cli_kind)
         raw_model = data.get("model")
         if raw_model is None:
-            model = "gpt-5.4" if cli_kind == "codex" else "netease-codemaker/kimi-k2.5"
+            model = "gpt-5.4"
         else:
             model = str(raw_model)
         raw_command = data.get("command")
         if raw_command is None:
-            command = "codex" if cli_kind == "codex" else "codemaker"
+            command = "codex"
         else:
             command = str(raw_command)
         return cls(
@@ -6285,18 +6285,6 @@ class GraphExecutor:
                     text = codex.get("final_text") or codex.get("last_message")
                     if isinstance(text, str) and text.strip():
                         return text.strip()
-                cm = body.get("codemaker")
-                if isinstance(cm, dict):
-                    stdout = cm.get("stdout")
-                    if isinstance(stdout, str) and stdout.strip():
-                        try:
-                            from .cluster import extract_final_text
-
-                            text = extract_final_text(stdout)
-                        except Exception:
-                            text = ""
-                        if text.strip():
-                            return text.strip()
                 for key in ("answer", "result", "text", "echo_prompt"):
                     text = body.get(key)
                     if isinstance(text, str) and text.strip():

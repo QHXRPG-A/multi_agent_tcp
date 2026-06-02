@@ -53,7 +53,7 @@ Do not treat the old Ryven/editor line as the current UI target.
 - [DONE] Converted skills and rule paths to multi-select dropdowns backed by
   the configured skill/rule directories.
 - [DONE] Converted CLI kind and model to dropdowns; model choices refresh
-  through Electron IPC for `codemaker` and `codex`.
+  through Electron IPC for `codex` and `codex`.
 - [DONE] Added desktop catalog/model IPC and tests for skill scanning, rule
   scanning, and CLI model parsing.
 - [DONE] Kept `adapter_options` as an advanced JSON escape hatch with clearer
@@ -160,7 +160,7 @@ Do not treat the old Ryven/editor line as the current UI target.
   while keeping hidden schema compatibility fields for runtime export.
 - [DONE] Added skill/rule multi-select controls with Electron catalog lookup
   and empty web/test fallback behavior.
-- [DONE] Added CLI/model dropdown behavior. `cli_kind` supports `codemaker`
+- [DONE] Added CLI/model dropdown behavior. `cli_kind` supports `codex`
   and `codex`; changing it refreshes model choices and the runtime export
   generates the command string.
 - [DONE] Added task-first Runtime entry with start AgentNode selection, task

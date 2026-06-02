@@ -3472,18 +3472,6 @@ def _agent_reply_text(reply: Any) -> str:
                     value = codex.get(key)
                     if isinstance(value, str) and value.strip():
                         return value.strip()
-            codemaker = body.get("codemaker")
-            if isinstance(codemaker, dict):
-                stdout = codemaker.get("stdout")
-                if isinstance(stdout, str) and stdout.strip():
-                    try:
-                        from .cluster import extract_final_text
-
-                        text = extract_final_text(stdout)
-                    except Exception:
-                        text = ""
-                    if text.strip():
-                        return text.strip()
             for key in ("answer", "result", "text", "message"):
                 value = body.get(key)
                 if isinstance(value, str) and value.strip():

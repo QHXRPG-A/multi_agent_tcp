@@ -63,10 +63,6 @@ export async function listBlueprintRules(dir: string): Promise<BlueprintCatalogI
 
 export async function listBlueprintModels(cliKind: string): Promise<string[]> {
   try {
-    if (cliKind === "codemaker") {
-      const output = await execFileText("codemaker", ["models", "netease-codemaker"])
-      return parseCodemakerModels(output)
-    }
     if (cliKind === "codex") {
       const output = await execFileText("codex", ["debug", "models"])
       return parseCodexModels(output)
@@ -92,15 +88,6 @@ function isMissingDirectoryError(error: unknown) {
     error instanceof Error &&
     "code" in error &&
     ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR")
-  )
-}
-
-export function parseCodemakerModels(output: string): string[] {
-  return uniqueStrings(
-    output
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean),
   )
 }
 

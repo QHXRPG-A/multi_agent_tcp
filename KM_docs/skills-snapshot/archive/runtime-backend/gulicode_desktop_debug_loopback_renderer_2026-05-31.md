@@ -99,8 +99,8 @@ D:\agent\multi_agent_tcp\logs\gulicode-window-screenshot.png
 2. The launcher workaround uses `[::1]:5173` for renderer health. If another
    machine has no IPv6 loopback support, the script may need a fallback probe
    that tries both `[::1]` and `localhost`.
-3. `codemaker` is not installed on this machine, so desktop logs can show
-   `spawn codemaker ENOENT` when model listing probes run. That error did not
+3. `codex` is not installed on this machine, so desktop logs can show
+   `spawn codex ENOENT` when model listing probes run. That error did not
    block the desktop window or bridge.
 
 ## Follow-Up Queue

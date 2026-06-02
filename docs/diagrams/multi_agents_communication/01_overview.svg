@@ -86,7 +86,7 @@
 
   <rect class="tcp" x="70" y="850" width="300" height="86"/>
   <text class="label" x="126" y="883">Worker adapter</text>
-  <text class="small" x="98" y="908">codemaker / codex CLI 真实执行</text>
+  <text class="small" x="98" y="908">codex / codex CLI 真实执行</text>
 
   <rect class="end" x="1300" y="335" width="240" height="86"/>
   <text class="label" x="1320" y="368">status_snapshot</text>

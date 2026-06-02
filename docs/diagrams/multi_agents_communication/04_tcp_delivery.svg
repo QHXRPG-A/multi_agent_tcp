@@ -50,7 +50,7 @@
 
   <rect class="head" x="1490" y="120" width="170" height="66"/>
   <text class="label" x="1525" y="149">CLIAdapter</text>
-  <text class="small" x="1510" y="174">codex / codemaker</text>
+  <text class="small" x="1510" y="174">codex / codex</text>
   <line class="life" x1="1575" y1="186" x2="1575" y2="865"/>
 
   <rect class="note" x="310" y="215" width="610" height="72"/>
@@ -82,5 +82,5 @@
   <text class="subtitle" x="90" y="985">函数 / 变量中文解释</text>
   <text class="small" x="90" y="1014">CLIWorkerBackend.run_single(worker_id, body)：运行时向指定 CLI worker 发送一条任务，并等待该 worker 回复。</text>
   <text class="small" x="90" y="1039">AgentTCPClient.send_to：向 Broker 写入 {type: "send", to, body}；Broker 再转成 {type: "message", from, body} 给目标 worker。</text>
-  <text class="small" x="90" y="1064">CLIAdapter：把框架消息转换为 Codex / CodeMaker 等 CLI 调用，并把 stdout、stderr、final_text 等整理成结构化结果。</text>
+  <text class="small" x="90" y="1064">CLIAdapter：把框架消息转换为 Codex / Codex 等 CLI 调用，并把 stdout、stderr、final_text 等整理成结构化结果。</text>
 </svg>

@@ -1,4 +1,4 @@
-"""Test: launch one CodeMaker CLI agent with skill catalog, verify on-demand read.
+"""Test: launch one Codex CLI agent with skill catalog, verify on-demand read.
 
 Usage:
     python -m multi_agent_tcp.test_skill_injection [--agent-id agent-1] [--skill excel-export-flow]
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from .registry import AgentsRegistry
-from .cli_worker_backend import CLIWorkerBackend, WorkerConfig, extract_final_text
+from .cli_worker_backend import CLIWorkerBackend, WorkerConfig
 from .log_setup import setup_logging
 
 log = logging.getLogger(__name__)
@@ -105,11 +105,14 @@ async def run_test(
         )
 
         body = result.get("body", {})
-        cm = body.get("codemaker", {})
-        stdout_raw = cm.get("stdout", "")
-        stderr_raw = cm.get("stderr", "")
-        rc = cm.get("returncode", -1)
-        answer = extract_final_text(stdout_raw)
+        codex = body.get("codex", {}) if isinstance(body, dict) else {}
+        stderr_raw = codex.get("stderr", "") if isinstance(codex, dict) else ""
+        rc = codex.get("returncode", -1) if isinstance(codex, dict) else -1
+        answer = (
+            str(codex.get("final_text") or codex.get("last_message") or "")
+            if isinstance(codex, dict)
+            else ""
+        )
 
         print("=" * 60)
         print("RESULT")
@@ -145,7 +148,7 @@ async def run_test(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Test skill injection into CodeMaker CLI agent")
+        description="Test skill injection into Codex CLI agent")
     ap.add_argument("--agent-id", default="agent-1",
                     help="Agent ID from registry")
     ap.add_argument("--skill", default="excel-export-flow",

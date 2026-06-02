@@ -456,7 +456,7 @@ Completed:
 - Stable tool/rule instructions have moved to framework skill / startup context rather than being repeated in every `framework_context`.
 - `reachable_downstream_targets` was removed from the message envelope; use `downstream_agents` plus `required_outgoing_targets`.
 - Top-Agent context now uses compact `runtime_context()` and `agent_organization_summary()` instead of forwarding full launch configuration.
-- Agent launch materialization now emits `prompt_execution_context`, and Codex/CodeMaker adapters prefer it when formatting actual prompts.
+- Agent launch materialization now emits `prompt_execution_context`, and Codex/Codex adapters prefer it when formatting actual prompts.
 - Full `execution_context` remains available internally for runtime/adapter validation and debugging.
 
 Validation observed in repository:

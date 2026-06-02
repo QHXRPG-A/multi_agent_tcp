@@ -2,10 +2,10 @@ multi_agent_tcp — Peer agent CLI communication bus
 ==================================================
 
 Project pivot (2026-04-30): the framework is no longer framed as "Cursor /
-CodeMaker as upstream orchestrator + N CodeMaker workers". It is now
+Codex as upstream orchestrator + N Codex workers". It is now
 positioned as a peer-to-peer agent CLI communication bus: any agent CLI
-(CodeMaker / Claude Code / Codex / custom) or external script can connect
-to a shared broker and act as both receiver and initiator. CodeMaker is
+(Codex / Claude Code / Codex / custom) or external script can connect
+to a shared broker and act as both receiver and initiator. Codex is
 currently the only fully-supported CLI adapter; Claude Code / Codex
 This file documents the existing broker / agent / cluster / orchestrate
 primitives, all of which work the same as before -- only the narrative
@@ -16,7 +16,7 @@ Quick Start with CLIWorkerBackend (recommended initiator entrypoint)
 
 CLIWorkerBackend is one convenient initiator-side entrypoint: it manages a
 broker plus N agent processes for you. Today the agent processes are
-CodeMaker workers; once additional CLI adapters land, other CLIs will be
+Codex workers; once additional CLI adapters land, other CLIs will be
 selectable through the same class.
 
 Python API — parallel tasks (returns ParallelResult):
@@ -126,10 +126,10 @@ Low-level components
    - broker_host, broker_port: where the broker listens (required unless nested broker below)
    - broker: optional object { "host", "port" } as alternative to broker_host/broker_port
    - role: optional string, stored in register message for your own logic
-   - mode: optional "echo" | "listen" | "codemaker-worker" — CLI --mode only used if JSON omits mode
+   - mode: optional "echo" | "listen" | "codex-worker" — CLI --mode only used if JSON omits mode
 
    CLI:
-   python -m multi_agent_tcp agent --config <path> [--mode echo|listen|codemaker-worker] [-v]
+   python -m multi_agent_tcp agent --config <path> [--mode echo|listen|codex-worker] [-v]
 
 3) Spawn several agents from one JSON (Windows opens new consoles per child):
 
@@ -137,7 +137,7 @@ Low-level components
 
    spawn JSON fields:
    - broker_host, broker_port: broker address for all children
-   - agents: list of { agent_id, role?, mode?, codemaker? }  (pass through "codemaker" for codemaker-worker)
+   - agents: list of { agent_id, role?, mode?, codex? }  (pass through "codex" for codex-worker)
    - python: optional path to interpreter (default: current sys.executable)
 
 4) Library usage (same process / tests):
@@ -182,7 +182,7 @@ Low-level components
        "gather_reply": "<same id>" }
 
    Agents that ignore gather_reply will not complete the gather (timeout). Built-in
-   echo and codemaker-worker modes pass gather_reply when the inbound message has gather.
+   echo and codex-worker modes pass gather_reply when the inbound message has gather.
 
    Broker -> initiator when all expected targets have replied (or failure)::
 
@@ -223,62 +223,62 @@ Run smoke test (broker must be running):
    Programmatic: AgentTCPClient.batch_gather(...) or send_to(..., gather_reply=...) after
    reading gather.id from an inbound message.
 
-7) Three CodeMaker workers + relay demo (one command)
+7) Three Codex workers + relay demo (one command)
 
    From f:\src\Package\Script\Python (or pass --cwd to your repo root):
 
-   python -m multi_agent_tcp.demo_three_codemakers
+   python -m multi_agent_tcp.demo_three_codexs
 
    Default broker port is 9133 (not 9123). Sets MULTI_AGENT_TCP_VERBOSE=1 to show child stdout/stderr.
 
-   Parallel search-style batch (three codemaker CLI workers + batch_gather, default port 9134):
+   Parallel search-style batch (three codex CLI workers + batch_gather, default port 9134):
 
-   python -m multi_agent_tcp.demo_three_codemaker_search
-   python -m multi_agent_tcp.demo_three_codemaker_search --cwd f:\src\Package\Script\Python
+   python -m multi_agent_tcp.demo_three_codex_search
+   python -m multi_agent_tcp.demo_three_codex_search --cwd f:\src\Package\Script\Python
 
    gclient code-location batch (default port 9140); add ``--trace`` for stderr logs on parent
    and ``-v`` on broker/agent children. Log prefixes: ``[orch]`` orchestrator client,
-   ``[gather]`` broker batch_gather / gather_reply, ``[chain]`` codemaker-worker around
-   ``codemaker_run``, ``[cil]`` codemaker subprocess spawn/exit/timeout in codemaker_bridge.
+   ``[gather]`` broker batch_gather / gather_reply, ``[chain]`` codex-worker around
+   ``codex_run``, ``[cil]`` codex subprocess spawn/exit/timeout in codex_bridge.
 
    python -m multi_agent_tcp.demo_gclient_three_search --trace
 
    Manual equivalent: start broker on 9133, then
-   python -m multi_agent_tcp spawn --config multi_agent_tcp/examples/spawn_three_codemaker.json
-   (run spawn from the directory you want as codemaker cwd, or edit JSON "cwd" to an absolute path).
+   python -m multi_agent_tcp spawn --config multi_agent_tcp/examples/spawn_three_codex.json
+   (run spawn from the directory you want as codex cwd, or edit JSON "cwd" to an absolute path).
 
-8) CodeMaker CLI integration (non-interactive `codemaker run`)
+8) Codex CLI integration (non-interactive `codex run`)
 
-   CodeMaker is not a TCP peer: run it *inside* an agent process. Mode `codemaker-worker`
-   runs (per multi_agent_tcp/codemaker_cli.md):
+   Codex is not a TCP peer: run it *inside* an agent process. Mode `codex-worker`
+   runs (per multi_agent_tcp/codex_cli.md):
 
-     codemaker <base_args...> [-m <model>] "<prompt>"
+     codex <base_args...> [-m <model>] "<prompt>"
 
-   Doc highlights: `codemaker run` for non-interactive runs; `--format json` for machine
-   readable output; `-m "netease-codemaker/<model>"` to set model; CI auth via
-   CODEMAKER_AUTH_USER + CODEMAKER_AUTH_TOKEN or CODEMAKER_AUTH_KEY.
+   Doc highlights: `codex run` for non-interactive runs; `--format json` for machine
+   readable output; `-m "codex/<model>"` to set model; CI auth via
+   CODEX_AUTH_USER + CODEX_AUTH_TOKEN or CODEX_AUTH_KEY.
 
-   Start a worker from the project directory you want CodeMaker to use (cwd):
+   Start a worker from the project directory you want Codex to use (cwd):
 
-   python -m multi_agent_tcp agent --config multi_agent_tcp/examples/agent_codemaker_worker.json
+   python -m multi_agent_tcp agent --config multi_agent_tcp/examples/agent_codex_worker.json
 
-   agent_codemaker_worker.json fields under "codemaker":
-   - command: executable (default "codemaker"; Windows may use full path to codemaker.exe)
-   - cwd: subprocess working directory (project root; codemaker.json / opencode config as per doc)
+   agent_codex_worker.json fields under "codex":
+   - command: executable (default "codex"; Windows may use full path to codex.exe)
+   - cwd: subprocess working directory (project root; codex.json / opencode config as per doc)
    - model: optional; if set, `-m` and this value are inserted before the final prompt
    - base_args: argv after command, before optional -m and prompt (default ["run","--format","json"])
    - timeout_sec: optional cap in seconds for one run (omit for no limit)
    - prompt_via_file: "auto" | "always" | "never" (default auto). If auto/always, non-ASCII prompts
-     are written as a UTF-8 temp file and passed with `codemaker run ... -f <path>` plus a short
+     are written as a UTF-8 temp file and passed with `codex run ... -f <path>` plus a short
      ASCII anchor message, avoiding Windows console / argv codepage issues.
    - anchor_message: optional; when using prompt_via_file, prepended to the UTF-8 file body.
-   - run_stub_message: optional short ASCII first positional for `codemaker run` when using -f
+   - run_stub_message: optional short ASCII first positional for `codex run` when using -f
      (default "Task in attachment."). CLI requires a message *and* treats args after -f as paths,
      so order is: stub message, then -f promptfile.
 
    TCP/JSON bodies are always UTF-8 in this framework; ensure your editor and terminal use UTF-8
    (e.g. Windows: `chcp 65001`, PowerShell 7, or set `PYTHONUTF8=1` — child processes already get
-   `PYTHONUTF8=1` from codemaker_bridge).
+   `PYTHONUTF8=1` from codex_bridge).
 
    Send a task with AgentTCPClient.send_to:
 
@@ -286,7 +286,7 @@ Run smoke test (broker must be running):
 
    Or body as a plain string. Reply shape:
 
-     { "ok": bool, "codemaker": { "returncode", "stdout", "stderr", "timeout" }, "via": ... }
+     { "ok": bool, "codex": { "returncode", "stdout", "stderr", "timeout" }, "via": ... }
 
-   For headless auth on servers, set env vars then start the agent (see codemaker_cli.md
-   section around CODEMAKER_AUTH_USER / TOKEN / KEY).
+   For headless auth on servers, set env vars then start the agent (see codex_cli.md
+   section around CODEX_AUTH_USER / TOKEN / KEY).

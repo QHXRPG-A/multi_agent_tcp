@@ -8,7 +8,7 @@ flowchart TB
   runtime["GraphRuntime 运行时<br/>掌握队列、消息分发、汇聚等待、事件和最终状态；是调度事实来源"]
   agents["AgentNode 协作调度<br/>按蓝图拓扑排队执行、补齐下游消息、处理 fan-out 与 fan-in"]
   workspace["Workspace / Reports / Events<br/>管理工程目录、Agent 私有区、运行共享区、changeset、报告、产物和事件"]
-  backend["CLIWorkerBackend<br/>适配 Codex / CodeMaker 等 CLI worker；只负责具体执行，不拥有产品调度语义"]
+  backend["CLIWorkerBackend<br/>适配 Codex / Codex 等 CLI worker；只负责具体执行，不拥有产品调度语义"]
 
   title --> desktop --> workbench --> control --> runtime --> agents --> workspace --> backend
 

@@ -3,22 +3,25 @@
   "port": 9140,
   "workers": [
     {
-      "agent_id": "cm1",
+      "agent_id": "agent1",
       "cwd": ".",
-      "model": "netease-codemaker/kimi-k2.5",
-      "timeout_sec": 1800
+      "model": "gpt-5.4",
+      "timeout_sec": 1800,
+      "cli_kind": "codex"
     },
     {
-      "agent_id": "cm2",
+      "agent_id": "agent2",
       "cwd": ".",
-      "model": "netease-codemaker/kimi-k2.5",
-      "timeout_sec": 1800
+      "model": "gpt-5.4",
+      "timeout_sec": 1800,
+      "cli_kind": "codex"
     },
     {
-      "agent_id": "cm3",
+      "agent_id": "agent3",
       "cwd": ".",
-      "model": "netease-codemaker/kimi-k2.5",
-      "timeout_sec": 1800
+      "model": "gpt-5.4",
+      "timeout_sec": 1800,
+      "cli_kind": "codex"
     }
   ]
 }

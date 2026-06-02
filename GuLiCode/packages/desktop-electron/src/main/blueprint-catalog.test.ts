@@ -7,19 +7,11 @@ import {
   listBlueprintDirectories,
   listBlueprintRules,
   listBlueprintSkills,
-  parseCodemakerModels,
   parseCodexModels,
   resolveCommandForExec,
 } from "./blueprint-catalog"
 
 describe("blueprint catalog", () => {
-  test("parses CodeMaker models from line output", () => {
-    expect(parseCodemakerModels("netease-codemaker/kimi-k2.5\n\nother/model\nother/model\n")).toEqual([
-      "netease-codemaker/kimi-k2.5",
-      "other/model",
-    ])
-  })
-
   test("parses Codex model slugs from debug JSON", () => {
     expect(
       parseCodexModels(
@@ -50,17 +42,17 @@ describe("blueprint catalog", () => {
 
   test("runs Windows exe commands directly", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "blueprint-commands-"))
-    const command = path.join(root, "codemaker.exe")
+    const command = path.join(root, "codex.exe")
     await writeFile(command, "")
 
-    const resolved = await resolveCommandForExec("codemaker", ["models", "netease-codemaker"], {
+    const resolved = await resolveCommandForExec("codex", ["debug", "models"], {
       platform: "win32",
       env: { PATH: root, PATHEXT: ".EXE;.CMD" },
       comspec: "cmd.exe",
     })
 
     expect(resolved.command.toLowerCase()).toBe(command.toLowerCase())
-    expect(resolved.args).toEqual(["models", "netease-codemaker"])
+    expect(resolved.args).toEqual(["debug", "models"])
   })
 
   test("scans skills by subdirectory SKILL.md and uses manifest descriptions as enrichment", async () => {

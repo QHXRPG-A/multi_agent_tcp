@@ -1179,7 +1179,7 @@ export const dict = {
   "blueprint.tip.executionMode.what": "图执行是否等待这个 Agent 完成后再继续。",
   "blueprint.tip.executionMode.usage": "有顺序依赖时用阻塞；异步分发路径可用非阻塞。",
   "blueprint.tip.cliKind.what": "工作进程使用的后端适配器类型。",
-  "blueprint.tip.cliKind.usage": "让运行时选择正确的 CLIWorkerBackend 适配器，例如 codemaker。",
+  "blueprint.tip.cliKind.usage": "让运行时选择正确的 CLIWorkerBackend 适配器，例如 codex。",
   "blueprint.tip.command.what": "为该工作者启动的可执行命令。",
   "blueprint.tip.command.usage": "当 CLI 命令名和适配器类型不一致时可在这里覆盖。",
   "blueprint.tip.model.what": "该 Agent 请求使用的模型标识。",
@@ -1229,7 +1229,7 @@ export const dict = {
   "blueprint.tip.workspaceRoot.usage": "为工作者执行和产物收集锚定相对路径。",
   "blueprint.tip.adapterOptions.what": "直接传给所选 CLI 适配器的高级 JSON 兜底参数。",
   "blueprint.tip.adapterOptions.usage":
-    "普通用户通常无需填写。仅在需要低层参数时使用，例如 Codex 的 sandbox/config/extra_args 或 CodeMaker 的 base_args。",
+    "普通用户通常无需填写。仅在需要低层参数时使用，例如 Codex 的 sandbox/config/extra_args。",
   "blueprint.tip.extraEnv.what": "工作进程额外获得的环境变量。",
   "blueprint.tip.extraEnv.usage": "用字符串键值对提供非密钥类运行标记或集成设置。",
   "blueprint.tip.routeKind.what": "RouteNode 的路由行为。",

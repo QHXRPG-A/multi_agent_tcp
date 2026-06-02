@@ -29,7 +29,7 @@ Implemented state:
    AgentNode `cwd`, while the actual launch cwd can still be rewritten by the
    framework to a private checkout.
 7. Generated `command` during export from `cli_kind`:
-   - `codemaker -> codemaker`
+   - `codex -> codex`
    - `codex -> codex`
 8. Converted `skills` to a multi-select dropdown populated from `skill_dir`.
    Selected skills export both as `skills` and
@@ -37,17 +37,17 @@ Implemented state:
    exports `skill_selection: { mode: "none" }`.
 9. Converted `rule_paths` to a multi-select dropdown populated from `rule_dir`.
    Empty rule directory is valid and simply shows no options.
-10. Converted `cli_kind` to a dropdown with initial options `codemaker` and
+10. Converted `cli_kind` to a dropdown with initial options `codex` and
     `codex`.
 11. Converted `model` to a dropdown that refreshes when CLI kind changes:
-    - `codemaker` calls `codemaker models netease-codemaker` and parses
+    - `codex` calls `codex models codex` and parses
       non-empty output lines.
     - `codex` calls `codex debug models` and parses JSON `models[].slug`.
     - failures preserve the current/fallback model and expose loading/failure
       state in the UI.
 12. Kept `adapter_options` as the advanced JSON field. Its intended meaning is
     "low-level fallback parameters passed directly to the selected CLI
-    adapter", such as Codex sandbox/config/extra_args or CodeMaker base_args.
+    adapter", such as Codex sandbox/config/extra_args or Codex base_args.
 13. Added Electron main/preload IPC for blueprint directory, skill, rule, and
     model catalog lookup.
 14. Added web/test fallback behavior when Electron APIs are absent.

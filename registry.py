@@ -70,7 +70,7 @@ class AgentProfile:
     skill_selection: AgentSkillSelection = field(default_factory=AgentSkillSelection)
     timeout_sec: float = 1800.0
     enabled: bool = True
-    cli_kind: str = "codemaker"
+    cli_kind: str = "codex"
     adapter_options: Dict[str, Any] = field(default_factory=dict)
     extra_env: Dict[str, str] = field(default_factory=dict)
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -153,13 +153,13 @@ class AgentsRegistry:
             agents[aid] = AgentProfile(
                 agent_id=aid,
                 display_name=cfg.get("display_name", aid),
-                model=cfg.get("model", "netease-codemaker/kimi-k2.5"),
+                model=cfg.get("model", "gpt-5.4"),
                 cwd=cfg.get("cwd", str(_MODULE_DIR.parent)),
                 skills=selected_skills,
                 skill_selection=skill_selection,
                 timeout_sec=cfg.get("timeout_sec", 1800.0),
                 enabled=cfg.get("enabled", True),
-                cli_kind=cfg.get("cli_kind", "codemaker"),
+                cli_kind=cfg.get("cli_kind", "codex"),
                 adapter_options=cfg.get("adapter_options", {}),
                 extra_env={str(k): str(v) for k, v in cfg.get("extra_env", {}).items()},
                 extra={k: v for k, v in cfg.items()

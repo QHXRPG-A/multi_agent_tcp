@@ -21,7 +21,7 @@
 - 失败 worker 逐个串行重试
 - 日志前缀：`[retry]`
 
-## `codemaker run` 易错点
+## `codex run` 易错点
 
 1. 必须提供一条 message，仅 `-f` 不够。
 2. `run_stub_message` 必须放在 `-f` 前面。
@@ -29,8 +29,8 @@
 4. 中文或非 ASCII prompt 推荐写入 UTF-8 临时文件，经 `-f` 传递。
 5. 子进程环境带 `PYTHONUTF8=1`。
 6. `--format json` 输出 NDJSON，最终文本答案在 `type=text` 条目中。
-7. 模型参数必须是 `netease-codemaker/<model>` 前缀。
-8. `cwd` 下 `codemaker.json` 的 `permission` 应为 `allow`，否则可能挂起。
+7. 模型参数必须是 `codex/<model>` 前缀。
+8. `cwd` 下 `codex.json` 的 `permission` 应为 `allow`，否则可能挂起。
 9. `prompt_via_file='never'` + 非 ASCII 在 Windows argv 编码下有风险。
 
 ## 心跳探活

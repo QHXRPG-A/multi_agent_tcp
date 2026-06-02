@@ -1,13 +1,7 @@
-"""Public semantic entrypoint for CLI-backed Agent worker execution.
-
-The implementation still lives in ``cluster.py`` for backward compatibility
-with older imports, but new code should import ``CLIWorkerBackend`` from this
-module or from the package root.
-"""
+"""Public semantic entrypoint for CLI-backed Agent worker execution."""
 
 from .cluster import (
     CLIWorkerBackend,
-    CodeMakerCluster,
     ParallelResult,
     ReduceResult,
     WorkerConfig,
@@ -19,7 +13,6 @@ from .cluster import (
 
 __all__ = (
     "CLIWorkerBackend",
-    "CodeMakerCluster",
     "WorkerConfig",
     "WorkerResult",
     "ParallelResult",

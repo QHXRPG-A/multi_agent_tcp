@@ -1,5 +1,4 @@
 # Vendor / internal CLI notes — keep local only, not on GitHub
-codemaker_cli.md
 opencode/
 vendor/dulwich/
 
@@ -7,7 +6,6 @@ logs/
 sessions/
 skill_list/
 .multi_agent_workspace/
-.codemaker/
 build/
 plugins/*/.runtime/
 .venv_vendor_ryven/

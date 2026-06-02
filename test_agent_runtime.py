@@ -21,7 +21,6 @@ from multi_agent_tcp import (
     CLIWorkerBackend,
     CommonNode,
     CodexAdapter,
-    CodeMakerAdapter,
     GuLiCodeTopAgentProfile,
     AgentTCPClient,
     GraphDefinition,
@@ -45,8 +44,6 @@ from multi_agent_tcp import (
 
 from multi_agent_tcp.skill_space import SkillSpace, SuperAgentProfile
 from multi_agent_tcp.workspace_rpc import WorkspaceRPCServer
-from multi_agent_tcp.codemaker_bridge import _merge_prompt as _merge_codemaker_prompt
-from multi_agent_tcp.codemaker_bridge import load_codemaker_runtime
 from multi_agent_tcp.codex_bridge import _merge_prompt as _merge_codex_prompt
 from multi_agent_tcp.codex_bridge import _write_codex_diagnostics
 from multi_agent_tcp.codex_bridge import _CodexStderrStreamLimiter
@@ -242,22 +239,21 @@ def test_worker_config_serializes_adapter_fields() -> None:
     cfg = WorkerConfig(
         "agent-a",
         cwd=Path("."),
-        cli_kind="codemaker",
-        adapter_options={"anchor_message": "Use attached prompt"},
-        extra_env={"CODEMAKER_AUTH_TOKEN": "token"},
+        adapter_options={"sandbox": "workspace-write"},
+        extra_env={"CODEX_HOME": ".codex-home"},
     ).to_agent_json("127.0.0.1", 9140)
 
     assert cfg["agent_id"] == "agent-a"
-    assert cfg["cli_kind"] == "codemaker"
-    assert cfg["mode"] == "codemaker-worker"
-    assert cfg["codemaker"]["anchor_message"] == "Use attached prompt"
-    assert cfg["extra_env"] == {"CODEMAKER_AUTH_TOKEN": "token"}
+    assert cfg["cli_kind"] == "codex"
+    assert cfg["mode"] == "codex-worker"
+    assert cfg["codex"]["sandbox"] == "workspace-write"
+    assert cfg["extra_env"] == {"CODEX_HOME": ".codex-home"}
 
 
-def test_codemaker_runtime_merges_blueprint_context_into_prompt(tmp_path: Path) -> None:
-    runtime = load_codemaker_runtime(
+def test_codex_runtime_merges_blueprint_context_into_prompt(tmp_path: Path) -> None:
+    runtime = load_codex_runtime(
         {
-            "codemaker": {
+            "codex": {
                 "cwd": str(tmp_path),
                 "prompt_preamble": "Blueprint workspace contract",
                 "execution_context": {"shared_code": str(tmp_path / "shared" / "code")},
@@ -265,10 +261,10 @@ def test_codemaker_runtime_merges_blueprint_context_into_prompt(tmp_path: Path) 
         }
     )
 
-    merged = _merge_codemaker_prompt("Do the task", "Upstream result", runtime)
+    merged = _merge_codex_prompt("Do the task", "Upstream result", runtime)
 
     assert "Blueprint workspace contract" in merged
-    assert "Agent Execution Context" in merged
+    assert "Codex Execution Context" in merged
     assert "shared_code" in merged
     assert "Do the task" in merged
     assert "Upstream result" in merged
@@ -299,7 +295,6 @@ def test_agent_node_from_dict_and_worker_config() -> None:
             "prompt": "Describe node 1.",
             "run_prompt": "Always follow the run contract.",
             "execution_mode": "nonblocking",
-            "cli_kind": "codemaker",
             "cwd": ".",
             "adapter_options": {"prompt_via_file": "always"},
             "extra_env": {"A": 1},
@@ -316,7 +311,7 @@ def test_agent_node_from_dict_and_worker_config() -> None:
     assert node.run_prompt == "Always follow the run contract."
     assert node.execution_mode == "nonblocking"
     assert worker.agent_id == "agent-1"
-    assert worker.cli_kind == "codemaker"
+    assert worker.cli_kind == "codex"
     assert worker.adapter_options["prompt_via_file"] == "always"
     assert worker.adapter_options["node_type"] == "worker_agent"
     assert worker.adapter_options["access_policy"] == {
@@ -4476,42 +4471,6 @@ async def test_cli_worker_backend_waits_for_worker_timeout_reply_grace(
     ]
     assert fake_client.wait_timeout_sec == 32.0
     assert stream_events == [{"kind": "part.delta", "delta": "progress"}]
-
-
-@pytest.mark.asyncio
-async def test_codemaker_adapter_reuses_instance_for_multiple_messages(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, str | None, dict[str, Any]]] = []
-
-    async def fake_codemaker_run(
-        prompt: str,
-        *,
-        stdin_context: str | None = None,
-        codemaker_cfg: dict[str, Any],
-    ) -> dict[str, Any]:
-        calls.append((prompt, stdin_context, codemaker_cfg))
-        return {
-            "returncode": 0,
-            "stdout": '{"type":"text","part":{"text":"ok"}}',
-            "stderr": "",
-            "timeout": False,
-        }
-
-    monkeypatch.setattr("multi_agent_tcp.adapters.codemaker_run", fake_codemaker_run)
-    adapter = CodeMakerAdapter("agent-a", {"cwd": Path("."), "extra_env": {"A": "B"}})
-
-    await adapter.start()
-    first = await adapter.send_message(AgentMessage(prompt="one", context="ctx"))
-    second = await adapter.send_message(AgentMessage(prompt="two"))
-    await adapter.close()
-
-    assert isinstance(first, AdapterResult)
-    assert first.ok is True
-    assert second.ok is True
-    assert adapter.messages_handled == 2
-    assert calls[0][0:2] == ("one", "ctx")
-    assert calls[1][0:2] == ("two", None)
-    assert first.payload["adapter"]["persistent_instance"] is True
-    assert first.payload["adapter"]["per_message_subprocess"] is True
 
 
 @pytest.mark.asyncio

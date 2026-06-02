@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .codex_bridge import compact_codex_result_for_transport, codex_run, load_codex_runtime
-from .codemaker_bridge import codemaker_run, load_codemaker_runtime
 
 log = logging.getLogger(__name__)
 
@@ -114,63 +113,6 @@ class CLIAdapter(ABC):
         self._started = False
 
 
-class CodeMakerAdapter(CLIAdapter):
-    """Compatibility adapter for CodeMaker CLI workers.
-
-    The adapter object is long-lived and owns the worker-side runtime config.
-    Current CodeMaker CLI execution remains per-message ``codemaker run`` for
-    compatibility, hidden behind this persistent adapter boundary.
-    """
-
-    cli_kind = "codemaker"
-
-    @classmethod
-    def from_agent_config(cls, cfg: Dict[str, Any]) -> "CodeMakerAdapter":
-        agent_id = str(cfg["agent_id"])
-        return cls(agent_id, load_codemaker_runtime(cfg))
-
-    async def send_message(
-        self,
-        message: AgentMessage,
-        *,
-        stream_callback: Optional[AgentStreamCallback] = None,
-    ) -> AdapterResult:
-        if not self._started:
-            await self.start()
-        if not message.prompt.strip():
-            raise ValueError("empty prompt")
-
-        log.info(
-            "[adapter] agent=%s cli_kind=%s message_index=%s prompt_chars=%s has_context=%s attachments=%s",
-            self.agent_id,
-            self.cli_kind,
-            self.messages_handled + 1,
-            len(message.prompt.encode("utf-8")),
-            bool(message.context),
-            len(message.attachments),
-        )
-        result = await codemaker_run(
-            message.prompt,
-            stdin_context=message.context,
-            codemaker_cfg=self.runtime_config,
-        )
-        self.messages_handled += 1
-        ok = result.get("returncode") == 0
-        status = "timeout" if result.get("timeout") else ("success" if ok else "error")
-        payload = {
-            "ok": ok,
-            "codemaker": result,
-            "adapter": {
-                "cli_kind": self.cli_kind,
-                "agent_id": self.agent_id,
-                "messages_handled": self.messages_handled,
-                "persistent_instance": True,
-                "per_message_subprocess": True,
-            },
-        }
-        return AdapterResult(ok=ok, payload=payload, status=status)
-
-
 class CodexAdapter(CLIAdapter):
     """Adapter for non-interactive Codex CLI workers.
 
@@ -232,14 +174,10 @@ class CodexAdapter(CLIAdapter):
 
 def adapter_from_agent_config(cfg: Dict[str, Any]) -> CLIAdapter:
     """Create the worker-side adapter for one agent config."""
-    cli_kind = str(cfg.get("cli_kind") or cfg.get("adapter") or "codemaker").strip().lower()
+    cli_kind = str(cfg.get("cli_kind") or cfg.get("adapter") or "codex").strip().lower()
     mode = str(cfg.get("mode", "")).strip().lower()
     if mode == "codex-worker":
         return CodexAdapter.from_agent_config(cfg)
-    if mode == "codemaker-worker":
-        return CodeMakerAdapter.from_agent_config(cfg)
     if cli_kind == "codex":
         return CodexAdapter.from_agent_config(cfg)
-    if cli_kind == "codemaker":
-        return CodeMakerAdapter.from_agent_config(cfg)
     raise ValueError(f"unsupported cli_kind for agent worker: {cli_kind!r}")

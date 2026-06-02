@@ -1175,7 +1175,7 @@ export const dict = {
   "blueprint.tip.executionMode.what": "圖執行是否等待這個 Agent 完成後再繼續。",
   "blueprint.tip.executionMode.usage": "有順序依賴時用阻塞；非同步分發路徑可用非阻塞。",
   "blueprint.tip.cliKind.what": "工作程序使用的後端適配器類型。",
-  "blueprint.tip.cliKind.usage": "讓執行時選擇正確的 CLIWorkerBackend 適配器，例如 codemaker。",
+  "blueprint.tip.cliKind.usage": "讓執行時選擇正確的 CLIWorkerBackend 適配器，例如 codex。",
   "blueprint.tip.command.what": "為該工作者啟動的可執行命令。",
   "blueprint.tip.command.usage": "當 CLI 命令名和適配器類型不一致時可在這裡覆寫。",
   "blueprint.tip.model.what": "該 Agent 要求使用的模型識別碼。",
@@ -1225,7 +1225,7 @@ export const dict = {
   "blueprint.tip.workspaceRoot.usage": "為工作者執行和產物收集錨定相對路徑。",
   "blueprint.tip.adapterOptions.what": "直接傳給所選 CLI 適配器的高階 JSON 兜底參數。",
   "blueprint.tip.adapterOptions.usage":
-    "一般使用者通常無需填寫。僅在需要低層參數時使用，例如 Codex 的 sandbox/config/extra_args 或 CodeMaker 的 base_args。",
+    "一般使用者通常無需填寫。僅在需要低層參數時使用，例如 Codex 的 sandbox/config/extra_args。",
   "blueprint.tip.extraEnv.what": "工作程序額外取得的環境變數。",
   "blueprint.tip.extraEnv.usage": "用字串鍵值對提供非密鑰類執行標記或整合設定。",
   "blueprint.tip.routeKind.what": "RouteNode 的路由行為。",

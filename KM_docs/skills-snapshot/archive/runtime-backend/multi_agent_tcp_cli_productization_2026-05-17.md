@@ -135,9 +135,9 @@ skill validator imports `yaml`.
 - package root: `D:\agent\multi_agent_tcp`
 - registry: loadable, `agent_count = 3`
 - `codex`: available
-- `codemaker`: not available on PATH
+- `codex`: not available on PATH
 
-`codemaker` absence is an environment fact, not a packaging failure.
+`codex` absence is an environment fact, not a packaging failure.
 
 ## Files
 

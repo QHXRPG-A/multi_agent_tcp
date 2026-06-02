@@ -1192,7 +1192,7 @@ export const dict = {
   "blueprint.tip.executionMode.what": "Whether graph execution waits for this agent before moving on.",
   "blueprint.tip.executionMode.usage": "Blocking is safer for ordered work; nonblocking is for asynchronous dispatch paths.",
   "blueprint.tip.cliKind.what": "The backend adapter family used by the worker process.",
-  "blueprint.tip.cliKind.usage": "It lets the runtime choose the correct CLIWorkerBackend adapter, such as codemaker.",
+  "blueprint.tip.cliKind.usage": "It lets the runtime choose the correct CLIWorkerBackend adapter, such as codex.",
   "blueprint.tip.command.what": "The executable or command name launched for this worker.",
   "blueprint.tip.command.usage": "Override it when the CLI binary differs from the adapter kind.",
   "blueprint.tip.model.what": "The model identifier requested for this agent.",
@@ -1246,7 +1246,7 @@ export const dict = {
   "blueprint.tip.adapterOptions.what":
     "Advanced JSON passthrough sent directly to the selected CLI adapter.",
   "blueprint.tip.adapterOptions.usage":
-    "Usually leave it empty. Use it only for low-level fallback parameters such as Codex sandbox/config/extra_args or CodeMaker base_args.",
+    "Usually leave it empty. Use it only for low-level fallback parameters such as Codex sandbox/config/extra_args.",
   "blueprint.tip.extraEnv.what": "Additional environment variables for the worker process.",
   "blueprint.tip.extraEnv.usage": "Provide non-secret runtime flags or integration settings as string key-value pairs.",
   "blueprint.tip.routeKind.what": "The routing behavior for a RouteNode.",

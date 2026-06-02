@@ -1,5 +1,5 @@
 """
-Three ``codemaker-worker`` agents searching gclient code **in parallel** via
+Three ``codex-worker`` agents searching gclient code **in parallel** via
 :class:`CLIWorkerBackend`.
 
 Usage (from ``f:\\src\\Package\\Script\\Python``)::
@@ -7,7 +7,7 @@ Usage (from ``f:\\src\\Package\\Script\\Python``)::
     python -m multi_agent_tcp.demo_gclient_three_search
     python -m multi_agent_tcp.demo_gclient_three_search --trace --port 9140
 
-Requires ``codemaker`` on PATH and CodeMaker auth. See codemaker_cli.md.
+Requires ``codex`` on PATH.
 """
 
 from __future__ import annotations
@@ -58,11 +58,11 @@ def _gclient_tasks() -> list[tuple[str, dict]]:
 
 async def _run(
     host: str, port: int, cwd: Path, model: str, verbose: bool,
-    gather_timeout: float, codemaker_timeout: float,
+    gather_timeout: float, worker_timeout: float,
     output: Path | None, raw_output: Path | None,
     max_retries: int = 2, retry_delay_sec: float = 5.0,
 ) -> None:
-    workers = _make_workers(cwd, model, codemaker_timeout)
+    workers = _make_workers(cwd, model, worker_timeout)
     work = Path(tempfile.gettempdir()) / "multi_agent_tcp_gclient_search"
     work.mkdir(parents=True, exist_ok=True)
 
@@ -101,13 +101,13 @@ async def _run(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="3 codemaker workers parallel search (CLIWorkerBackend)")
+    p = argparse.ArgumentParser(description="3 Codex workers parallel search (CLIWorkerBackend)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=9140)
     p.add_argument("--cwd", type=Path, default=REPO_ROOT)
-    p.add_argument("--model", default="netease-codemaker/kimi-k2.5")
+    p.add_argument("--model", default="gpt-5.4")
     p.add_argument("--trace", action="store_true")
-    p.add_argument("--codemaker-timeout-sec", type=float, default=1800.0)
+    p.add_argument("--worker-timeout-sec", type=float, default=1800.0)
     p.add_argument("--gather-timeout-sec", type=float, default=1800.0)
     p.add_argument("--max-retries", type=int, default=2)
     p.add_argument("--retry-delay-sec", type=float, default=5.0)
@@ -125,7 +125,7 @@ def main() -> None:
     try:
         asyncio.run(_run(
             args.host, args.port, cwd, args.model, args.trace,
-            args.gather_timeout_sec, args.codemaker_timeout_sec,
+            args.gather_timeout_sec, args.worker_timeout_sec,
             args.output, args.raw_output,
             max_retries=args.max_retries,
             retry_delay_sec=args.retry_delay_sec,

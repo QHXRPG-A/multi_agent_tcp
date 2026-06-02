@@ -1,9 +1,9 @@
 """
-CLI — CodeMaker CLI multi-worker orchestration framework.
+CLI-backed multi-worker orchestration framework.
 
 Low-level (broker / agent plumbing):
   python -m multi_agent_tcp broker --config path/to/broker.json
-  python -m multi_agent_tcp agent --config path/to/agent.json [--mode echo|listen|codemaker-worker|codex-worker]
+  python -m multi_agent_tcp agent --config path/to/agent.json [--mode echo|listen|codex-worker]
   python -m multi_agent_tcp spawn --config path/to/spawn.json
 
 High-level (CLIWorkerBackend):
@@ -211,10 +211,6 @@ async def _agent_loop_adapter(client: AgentTCPClient, adapter: CLIAdapter) -> No
     await adapter.close()
 
 
-async def _agent_loop_codemaker(client: AgentTCPClient, adapter: CLIAdapter) -> None:
-    await _agent_loop_adapter(client, adapter)
-
-
 async def _agent_loop_codex(client: AgentTCPClient, adapter: CLIAdapter) -> None:
     await _agent_loop_adapter(client, adapter)
 
@@ -233,14 +229,11 @@ async def _cmd_agent(cfg: Dict[str, Any], mode: str) -> None:
     await client.connect()
     log.info("connected agent_id=%s -> %s:%s mode=%s", agent_id, host, port, mode)
     adapter: Optional[CLIAdapter] = None
-    if mode in ("codemaker-worker", "codex-worker"):
+    if mode == "codex-worker":
         adapter = adapter_from_agent_config({**cfg, "mode": mode})
     try:
         if mode == "echo":
             await _agent_loop_echo(client)
-        elif mode == "codemaker-worker":
-            assert adapter is not None
-            await _agent_loop_codemaker(client, adapter)
         elif mode == "codex-worker":
             assert adapter is not None
             await _agent_loop_codex(client, adapter)
@@ -280,10 +273,8 @@ def _cmd_spawn(cfg_path: Path, verbose: bool) -> None:
             "broker_port": broker_port,
             "role": a.get("role"),
             "mode": a.get("mode", "echo"),
-            "cli_kind": a.get("cli_kind", "codemaker"),
+            "cli_kind": a.get("cli_kind", "codex"),
         }
-        if "codemaker" in a:
-            agent_cfg["codemaker"] = a["codemaker"]
         if "codex" in a:
             agent_cfg["codex"] = a["codex"]
         if "adapter_options" in a:
@@ -534,7 +525,6 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         "registry": registry,
         "checks": {
             "codex": shutil.which("codex") is not None,
-            "codemaker": shutil.which("codemaker") is not None,
         },
     }
     if args.json:
@@ -548,7 +538,6 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     if registry.get("error"):
         print(f"registry error: {registry['error']}")
     print(f"codex: {'yes' if result['checks']['codex'] else 'no'}")
-    print(f"codemaker: {'yes' if result['checks']['codemaker'] else 'no'}")
 
 
 def _cmd_rpc(args: argparse.Namespace) -> None:
@@ -964,7 +953,7 @@ def _cmd_list_agents(args: argparse.Namespace) -> None:
 
 async def _cmd_run_agent(args: argparse.Namespace) -> None:
     from .registry import AgentsRegistry
-    from .cli_worker_backend import CLIWorkerBackend, WorkerConfig, extract_final_text
+    from .cli_worker_backend import CLIWorkerBackend, WorkerConfig
 
     session_id: str = args.session_id
     agent_id: str = args.agent_id
@@ -1004,11 +993,14 @@ async def _cmd_run_agent(args: argparse.Namespace) -> None:
         )
 
     body = result.get("body", {})
-    cm = body.get("codemaker", {})
-    stdout_raw = cm.get("stdout", "")
-    stderr_raw = cm.get("stderr", "")
-    rc = cm.get("returncode", -1)
-    answer = extract_final_text(stdout_raw)
+    codex = body.get("codex", {}) if isinstance(body, dict) else {}
+    stderr_raw = codex.get("stderr", "") if isinstance(codex, dict) else ""
+    rc = codex.get("returncode", -1) if isinstance(codex, dict) else -1
+    answer = (
+        str(codex.get("final_text") or codex.get("last_message") or "")
+        if isinstance(codex, dict)
+        else ""
+    )
 
     out = {
         "session_id": session_id,
@@ -1061,7 +1053,7 @@ def _add_connect_args(p: argparse.ArgumentParser) -> None:
 def main(argv: Optional[List[str]] = None) -> None:
     argv = argv if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(
-        description="CodeMaker CLI multi-worker orchestration framework",
+        description="CLI-backed multi-worker orchestration framework",
     )
     parser.add_argument(
         "--version",
@@ -1087,7 +1079,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     p_agent.add_argument("--config", type=Path, required=True)
     p_agent.add_argument(
         "--mode",
-        choices=("echo", "listen", "codemaker-worker", "codex-worker"),
+        choices=("echo", "listen", "codex-worker"),
         default="echo",
     )
 
@@ -1095,7 +1087,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     p_spawn.add_argument("--config", type=Path, required=True)
 
     # -- high-level: cluster -------------------------------------------------
-    p_cluster = sub.add_parser("cluster", help="manage a CodeMaker worker cluster")
+    p_cluster = sub.add_parser("cluster", help="manage a CLI worker cluster")
     cluster_sub = p_cluster.add_subparsers(dest="cluster_cmd", required=True)
 
     p_cs = cluster_sub.add_parser("start", help="start broker + workers (foreground, Ctrl+C to stop)")
@@ -1386,7 +1378,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.cmd == "agent":
         cfg = _load_json(args.config)
         mode = str(cfg.get("mode", args.mode))
-        if mode not in ("echo", "listen", "codemaker-worker", "codex-worker"):
+        if mode not in ("echo", "listen", "codex-worker"):
             mode = "echo"
         try:
             asyncio.run(_cmd_agent(cfg, mode))

@@ -10,7 +10,7 @@ gulicode-bp Codex 插件 / 蓝图 Web 工作台
   -> GraphRuntime
   -> AgentNode 队列、消息分发、汇聚等待、Workspace、事件
   -> CLIWorkerBackend
-  -> Codex / CodeMaker 等 CLI worker
+  -> Codex / Codex 等 CLI worker
 ```
 
 `gulicode-bp` 插件负责默认用户入口、蓝图编排体验、蓝图 CRUD、启动计划生成和确认运行；`GraphRuntimeControlPlane` 与 `GraphRuntime` 负责框架事实、调度和生命周期；`CLIWorkerBackend` 是执行适配层，用来在需要模型工作时启动具体 CLI worker。GuLiCode Electron 桌面端保留为显式桌面壳、IPC、打包、任务栏或窗口行为开发路径。
@@ -43,7 +43,7 @@ gulicode-bp Codex 插件 / 蓝图 Web 工作台
 - 图调度运行时：`GraphRuntime` 负责 AgentNode 队列、消息投递、fan-out、fan-in、idle 提醒、事件、取消、归档和最终状态。
 - Workspace 三个区：工程目录只读给 Agent，Agent 私有区可写，运行共享区沉淀报告、产物、manifest、changeset 和冲突记录。
 - MCP 工具边界：live blueprint run 可启动 run-scoped MCP 服务，为 AgentNode 暴露受控运行时与 workspace 工具集合。
-- Codex-first 适配：当前 live Agent 主线优先使用 Codex CLI；CodeMaker 保留为兼容和备选路径。
+- Codex-first 适配：当前 live Agent 主线优先使用 Codex CLI；Codex 保留为兼容和备选路径。
 - 本地 Collaboration Server：支持 `gulicode-bp` 调试、`/mobile` 和 `/console` 的账号级协作调试；桌面端 bridge 只在显式桌面调试时使用。
 
 ## 环境要求
@@ -188,7 +188,7 @@ bun run typecheck
 | `desktop_blueprint_service.py` | GuLiCode 桌面与 Python runtime 之间的服务外壳。 |
 | `blueprint_mcp_runtime.py` | live blueprint run 的 MCP 工具边界与 run-scoped MCP 服务。 |
 | `workspace_manager.py` / `workspace_api.py` / `workspace_rpc.py` | 三个区、private checkout、changeset、冲突检测、报告和产物发布。 |
-| `codex_bridge.py` / `codemaker_bridge.py` / `cluster.py` | CLI worker 适配和兼容层。新文档中优先使用 `CLIWorkerBackend` 这个语义名。 |
+| `codex_bridge.py` / `codex_bridge.py` / `cluster.py` | CLI worker 适配和兼容层。新文档中优先使用 `CLIWorkerBackend` 这个语义名。 |
 | `docs/` | 设计文档、Workspace API 说明、蓝图 fixture、架构图。 |
 | `KM_docs/skills-snapshot/` | 当前 Codex skill 知识快照，记录近期架构方向、验证命令和交接状态。 |
 | `start-gulicode-debug.cmd` / `start-gulicode-debug.ps1` | 插件优先调试启动脚本，默认拉起 `gulicode-bp` 蓝图工作台、`/mobile` 和 `/console`，不启动 Electron 桌面壳。 |

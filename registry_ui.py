@@ -73,8 +73,8 @@ def _save_registry(data: Dict[str, Any], path: Path) -> None:
     )
 
 
-def _fetch_codemaker_models(*, force: bool = False) -> List[str]:
-    """Run ``codemaker models`` and return the list of model names.
+def _fetch_codex_models(*, force: bool = False) -> List[str]:
+    """Run ``codex debug models`` and return the list of model names.
 
     Results are cached after the first successful call.  Pass *force* to
     bypass the cache (e.g. on user retry).
@@ -84,24 +84,27 @@ def _fetch_codemaker_models(*, force: bool = False) -> List[str]:
         return _models_cache
     try:
         proc = subprocess.run(
-            ["codemaker", "models"],
+            ["codex", "debug", "models"],
             capture_output=True, text=True, timeout=_FETCH_TIMEOUT_SEC,
             encoding="utf-8", errors="replace",
         )
         if proc.returncode == 0 and proc.stdout.strip():
-            _models_cache = [
-                line.strip() for line in proc.stdout.splitlines()
-                if line.strip()
-            ]
+            data = json.loads(proc.stdout)
+            raw_models = data.get("models", []) if isinstance(data, dict) else []
+            _models_cache = sorted({
+                str(model.get("slug", "")).strip()
+                for model in raw_models
+                if isinstance(model, dict) and str(model.get("slug", "")).strip()
+            })
             return _models_cache
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-        log.warning("codemaker models failed: %s", exc)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+        log.warning("codex model listing failed: %s", exc)
     return []
 
 
 def _collect_models(registry: Dict[str, Any]) -> List[str]:
-    """Merge live codemaker models with models already used in the registry."""
-    live = _fetch_codemaker_models()
+    """Merge live Codex models with models already used in the registry."""
+    live = _fetch_codex_models()
     models = set(live)
     for agent in registry.get("agents", {}).values():
         m = agent.get("model", "")
@@ -475,7 +478,7 @@ class AgentDetailDialog(tk.Toplevel):
         Uses cached models (pre-warmed at startup) to avoid blocking the
         UI thread with a subprocess call.
         """
-        fresh = _fetch_codemaker_models()  # cached, no subprocess
+        fresh = _fetch_codex_models()  # cached, no subprocess
         current = self._model_var.get().strip()
         if current and current not in fresh:
             fresh = sorted(set(fresh) | {current})
@@ -593,7 +596,7 @@ class RegistryUI(tk.Tk):
         self._setup_style()
 
         self._manifest = _load_manifest()
-        _fetch_codemaker_models()  # pre-warm cache so first dialog open is instant
+        _fetch_codex_models()  # pre-warm cache so first dialog open is instant
         self._saved_state = _load_registry()
         self._current_state = copy.deepcopy(self._saved_state)
 
@@ -774,7 +777,7 @@ class RegistryUI(tk.Tk):
 
         # model
         model = data.get("model", "")
-        short = model.replace("netease-codemaker/", "")
+        short = model
         tk.Label(
             card, text=f"Model: {short}",
             font=("Segoe UI", 9), bg=C["card"], fg=C["subtext"], anchor="w",

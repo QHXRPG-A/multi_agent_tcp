@@ -20,7 +20,7 @@ flowchart TD
   QN --> TICK
   TICK --> CLUSTER["cluster.run_single：调用单个 worker"]
   CLUSTER --> TCP["AgentTCPClient / Broker TCP：底层通信"]
-  TCP --> WORKER["codemaker / codex worker adapter：真实 CLI 执行"]
+  TCP --> WORKER["codex / codex worker adapter：真实 CLI 执行"]
   WORKER --> TCP
   TCP --> CLUSTER
   CLUSTER --> GR

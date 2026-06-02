@@ -13,7 +13,7 @@ GuLiCode desktop / top Agent
   -> CLIWorkerBackend adapter path
 ```
 
-Historical TCP / CodeMaker information may still be useful, but it is not the center of the project. The old Ryven/editor UI track has been removed from the active skill snapshot.
+Historical TCP / Codex information may still be useful, but it is not the center of the project. The old Ryven/editor UI track has been removed from the active skill snapshot.
 
 ## Current Modules
 
@@ -24,7 +24,7 @@ Historical TCP / CodeMaker information may still be useful, but it is not the ce
 - `ring_structure_solution.md`: ring / 环状结构 handling under the current runtime semantics.
 - `registry_and_skills.md`: `agents_registry.json`, skill selection, skill injection, and registry workflow.
 - `runtime_notes.md`: encoding, logs, process cleanup, heartbeats, retries, and CLI runtime pitfalls.
-- `cluster_api.md`: `CLIWorkerBackend` / legacy `CodeMakerCluster` compatibility API.
+- `cluster_api.md`: `CLIWorkerBackend` / legacy `CLIWorkerBackend` compatibility API.
 - `multi_cli_workflow.md`: CLI adapter/backend history and still-relevant adapter constraints.
 
 ## Rules
@@ -32,5 +32,5 @@ Historical TCP / CodeMaker information may still be useful, but it is not the ce
 - Keep current behavior here.
 - Put short-term work in `../tasks/`.
 - Put historical transitions in `../archive/`.
-- If a document still says CodeMakerCluster/TCP is the main product direction, update or clearly mark it as legacy.
+- If a document still says CLIWorkerBackend/TCP is the main product direction, update or clearly mark it as legacy.
 - If a task tries to restore Ryven/editor as the current UI center, treat it as a deliberate direction change that must be explicitly requested by the user.

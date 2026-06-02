@@ -1,6 +1,6 @@
 # 多 CLI Adapter 方向任务
 
-> 当前定位：本文件是后端 CLI 适配层任务，不是 GuLiCode / GraphRuntime 的产品主线。新设计应使用 `CLIWorkerBackend` / `CLIAdapter` 术语；`CodeMaker` 只是一个兼容 adapter，不能重新成为架构中心。
+> 当前定位：本文件是后端 CLI 适配层任务，不是 GuLiCode / GraphRuntime 的产品主线。新设计应使用 `CLIWorkerBackend` / `CLIAdapter` 术语；`Codex` 只是一个兼容 adapter，不能重新成为架构中心。
 
 ## 目标
 
@@ -8,15 +8,15 @@
 
 适配层职责：
 
-- 把 Codex、CodeMaker、未来 Claude 等 CLI 包装成 runtime 可调用的 backend。
+- 把 Codex、Codex、未来 Claude 等 CLI 包装成 runtime 可调用的 backend。
 - 承接 `AgentNode` 的 prompt、context、workspace contract、attachments、timeout、cancel 和结果解析。
 - 对上保持稳定的 `CLIWorkerBackend` / `CLIAdapter` 边界，不让具体 CLI 细节渗透到 GraphRuntime 调度语义中。
 
 非目标：
 
-- 不把 `CodeMakerCluster` 重新定义为当前主架构。
+- 不把 `CLIWorkerBackend` 重新定义为当前主架构。
 - 不用 adapter 任务替代 GuLiCode top-Agent、control plane、message batch、join、workspace/events 主线。
-- 不把 registry-ui 的旧 CodeMaker 字段作为新 UI 的默认信息架构。
+- 不把 registry-ui 的旧 Codex 字段作为新 UI 的默认信息架构。
 
 ## 近期任务
 
@@ -30,9 +30,9 @@ Current adapter priority override - 2026-05-18:
 - Codex is the active implementation path for live Agent output streaming.
 - Prioritize `cli_kind=codex`, `CodexAdapter`, `codex exec --json`, and Codex
   JSONL normalization into `AgentStreamEvent`.
-- Do not spend new effort on CodeMaker streaming or CodeMaker model UX in this
+- Do not spend new effort on Codex streaming or Codex model UX in this
   project phase unless the user explicitly re-opens that track.
-- Keep CodeMaker as a compatibility/fallback adapter behind `CLIWorkerBackend`.
+- Keep Codex as a compatibility/fallback adapter behind `CLIWorkerBackend`.
 
 ## 2026-05-20 Status Update - Agent Prompt Surface Simplification
 
@@ -57,7 +57,7 @@ Current adapter guidance:
 - Treat CLI framework commands as backend/debug compatibility, not Agent UI.
 - Keep Codex streaming and Agent information panel continuity as the active
   adapter quality focus.
-- Do not reintroduce CodeMaker streaming work unless explicitly requested.
+- Do not reintroduce Codex streaming work unless explicitly requested.
 
 ## 2026-05-19 Status Update - Codex MCP Transport Hardening
 
@@ -113,7 +113,7 @@ Remaining:
 1. Manual desktop live smoke with Codex Agent nodes and user-provided common
    config paths.
 
-1. 将已落地的 Codex / CodeMaker adapter 收敛到 `CLIWorkerBackend` 边界：
+1. 将已落地的 Codex / Codex adapter 收敛到 `CLIWorkerBackend` 边界：
    - prompt contract
    - execution context
    - workspace API / VCS checkout contract
@@ -148,11 +148,11 @@ Remaining:
 
 已完成：
 
-1. 已新增 `adapters.py`，包含 `AgentMessage`、`AdapterResult`、`CLIAdapter`、`CodeMakerAdapter` 与 `adapter_from_agent_config`。
-2. `CodeMakerAdapter` 已把现有 `codemaker_bridge.codemaker_run` 包在 adapter 边界后，保持 CodeMaker 现有 per-message `codemaker run` 行为兼容。
+1. 已新增 `adapters.py`，包含 `AgentMessage`、`AdapterResult`、`CLIAdapter`、`CodexAdapter` 与 `adapter_from_agent_config`。
+2. `CodexAdapter` 已把现有 `codex_bridge.codex_run` 包在 adapter 边界后，保持 Codex 现有 per-message `codex run` 行为兼容。
 3. `WorkerConfig`、`AgentProfile`、registry 加载与 `AgentNode.to_worker_config()` 已包含 `cli_kind`、`adapter_options`、`extra_env`。
 4. `body_to_agent_message()` 已统一 prompt、context、attachments 的基础消息解析。
-5. `test_agent_runtime.py` 已覆盖 adapter 消息解析、`WorkerConfig` 扩展字段序列化、`CodeMakerAdapter` 复用实例边界。
+5. `test_agent_runtime.py` 已覆盖 adapter 消息解析、`WorkerConfig` 扩展字段序列化、`CodexAdapter` 复用实例边界。
 6. 已新增 `codex_bridge.py`，封装 `codex exec` 的非交互执行、stdin prompt、`--json`、`--output-last-message`、`--cd`、`--model`、`--image`、超时杀进程树和 JSONL / last-message 提取。
 7. 已新增 `CodexAdapter`，`adapter_from_agent_config()` 支持 `cli_kind=codex` 与 `mode=codex-worker`。
 8. `__main__.py agent --mode` 已支持 `codex-worker`，统一复用 `_agent_loop_adapter()`。
@@ -163,10 +163,10 @@ Remaining:
 
 部分完成：
 
-1. `CLIAdapter` 目前具备 `start()`、`send_message()`、`health_check()`、`close()`；具体 CLI 的配置校验、prompt 传递、附件处理和输出解析仍分散在 `codemaker_bridge.py` / `codex_bridge.py`。
+1. `CLIAdapter` 目前具备 `start()`、`send_message()`、`health_check()`、`close()`；具体 CLI 的配置校验、prompt 传递、附件处理和输出解析仍分散在 `codex_bridge.py` / `codex_bridge.py`。
 2. Codex adapter 已能执行真实 `codex exec`，但仍是 per-message 子进程模式；worker 级 adapter 长生命周期不等于 Codex CLI 内部会话持久化。
 3. `AgentSkillView` 已可注入 Codex prompt/context，但自动临时 `CODEX_HOME` 强隔离还没有和 workspace manager / run lifecycle 完整联动。
-4. `registry_ui.py` 仍主要面向 CodeMaker model 候选和通用 agent 字段，尚未按 `cli_kind` 渲染差异化字段。
+4. `registry_ui.py` 仍主要面向 Codex model 候选和通用 agent 字段，尚未按 `cli_kind` 渲染差异化字段。
 5. Claude adapter spike 仍处于待确认状态：本机未发现 `claude` CLI，不预设调用方式或输出格式。
 
 未完成 / 下一步：
@@ -177,7 +177,7 @@ Remaining:
 4. 把 adapter 配置校验收敛为明确接口，避免所有校验都散落在具体 bridge 中。
 5. 评估是否需要 Codex session resume / persistent semantics，而不是仅每条消息 `codex exec`。
 6. 让 `registry_ui.py` 按 `cli_kind` 渲染不同字段与 model 候选。
-7. 设计非 CodeMaker adapter 的最小测试替身，用于验证 `cli_kind` 分派和 registry-ui 字段差异。
+7. 设计非 Codex adapter 的最小测试替身，用于验证 `cli_kind` 分派和 registry-ui 字段差异。
 
 ## 依赖知识
 

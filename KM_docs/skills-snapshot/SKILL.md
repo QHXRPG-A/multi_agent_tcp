@@ -53,7 +53,7 @@ Interpretation rules:
   call `blueprint_start` with the confirmed plan.
 - Treat low-level TCP workers as a backend adapter path, not the product
   architecture center.
-- Prefer `CLIWorkerBackend` in new writing. Mention `CodeMakerCluster` only as a
+- Prefer `CLIWorkerBackend` in new writing. Mention `CLIWorkerBackend` only as a
   backward-compatible alias for the old cluster facade.
 - Keep Codex-first adapter work as the default for live blueprint smoke,
   streaming, and MCP workspace-tool validation.
@@ -210,7 +210,7 @@ Use that file when the user reports:
   batches
 - a side-browser workbench URL shows `ERR_CONNECTION_REFUSED` after runtime
   restart
-- live worker smoke should use Codex rather than CodeMaker
+- live worker smoke should use Codex rather than Codex
 
 For the latest `gulicode-bp` plugin direct-control and start-plan work from
 2026-06-01:
@@ -422,12 +422,12 @@ files for implementation decisions unless an archive is explicitly called out.
 - `GraphDefinition.agent_cycle_groups()` and cycle/loop handling:
   read `knowledge_base/ring_structure_solution.md`, then
   `knowledge_base/core_architecture.md`.
-- Legacy `CodeMakerCluster`, `run_parallel`, `run_chain`, broker, and TCP worker
+- Legacy `CLIWorkerBackend`, `run_parallel`, `run_chain`, broker, and TCP worker
   path: read `knowledge_base/cluster_api.md`.
 - Workspace API, changesets, archive, private checkout, conflict flow, and MCP
   workspace tools: read `knowledge_base/core_architecture.md` and
   `tasks/multi_agent_communication_tasks.md`.
-- Multi CLI adapters, Codex/CodeMaker process adapters, and `CLIAdapter`:
+- Multi CLI adapters, Codex/Codex process adapters, and `CLIAdapter`:
   read `knowledge_base/multi_cli_workflow.md`.
 
 ## Working Rules

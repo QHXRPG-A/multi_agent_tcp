@@ -24,7 +24,7 @@ export type BlueprintAddNodeKind =
   | "route-parallel-reduce"
   | "start"
   | "end"
-export type BlueprintCliKind = "codemaker" | "codex"
+export type BlueprintCliKind = "codex"
 
 export type BlueprintSkillSelection = {
   mode: "none" | "all" | "selected" | "upstream"
@@ -256,12 +256,12 @@ const DEFAULT_VIEWPORT: BlueprintViewport = {
 
 const DEFAULT_AGENT_SCOPE = ["**"]
 const LEGACY_REPORT_ONLY_AGENT_SCOPE = ["shared/reports/**"]
-const DEFAULT_MODEL = "netease-codemaker/kimi-k2.5"
+const DEFAULT_MODEL = "gpt-5.4"
 const DEFAULT_PROJECT_WORKDIR = "."
 export const DEFAULT_PYTHON_PATH = ""
 export const DEFAULT_SKILL_DIR = ""
 export const DEFAULT_RULE_DIR = ""
-export const CLI_KIND_OPTIONS: BlueprintCliKind[] = ["codemaker", "codex"]
+export const CLI_KIND_OPTIONS: BlueprintCliKind[] = ["codex"]
 export const TEST_AGENT_NODE_FLAG = "gulicode_test_node"
 const TEST_AGENT_TIMEOUT_SEC = 1800
 const DANGEROUS_CODEX_EXTRA_ARGS = ["--dangerously-bypass-approvals-and-sandbox"]
@@ -283,12 +283,10 @@ export const DEFAULT_WORKER_AGENT_ACCESS_POLICY: BlueprintAgentAccessPolicy = {
 }
 
 export function defaultCommandForCliKind(cliKind: string) {
-  if (cliKind === "codex") return "codex"
-  return "codemaker"
+  return "codex"
 }
 
 export function defaultModelForCliKind(cliKind: string) {
-  if (cliKind === "codex") return "gpt-5.4"
   return DEFAULT_MODEL
 }
 
@@ -1217,7 +1215,7 @@ function createAgentNode(input: {
 }): BlueprintAgentNode {
   const nodeType = input.node_type ?? "worker_agent"
   const fullAgent = nodeType === "agent"
-  const cliKind = fullAgent ? "codex" : "codemaker"
+  const cliKind = "codex"
   const accessPolicy = fullAgent ? DEFAULT_AGENT_ACCESS_POLICY : DEFAULT_WORKER_AGENT_ACCESS_POLICY
   return {
     node_id: input.node_id,

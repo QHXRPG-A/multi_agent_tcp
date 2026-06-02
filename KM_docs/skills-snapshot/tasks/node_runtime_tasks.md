@@ -1,4 +1,4 @@
-﻿## 2026-05-12 Agent ring circulation limits
+## 2026-05-12 Agent ring circulation limits
 
 Completed:
 
@@ -207,7 +207,7 @@ Follow-up:
 - `shared/code/` is the per-run code outcome area, `shared/artifacts/` stores generated assets, and `shared/reports/` stores reports and structured results. These paths are preserved in the run archive.
 - `shared/.locks/`, `acquire_shared_lease()`, `release_shared_lease()`, and `write_shared_text()` provide the first file-level lease and manifest path to prevent silent same-path overwrites.
 - `ryven_blueprint.py` now points AgentNode `cwd` at private scratch and injects the Workspace API contract instead of exposing shared workspace paths as the primary interface.
-- `codemaker_bridge.py` now consumes the same `prompt_preamble` and `execution_context` fields as `codex_bridge.py`, so both CodeMaker and Codex CLI-backed AgentNodes receive the workspace contract in their actual prompt.
+- `codex_bridge.py` now consumes the same `prompt_preamble` and `execution_context` fields as `codex_bridge.py`, so both Codex and Codex CLI-backed AgentNodes receive the workspace contract in their actual prompt.
 - The blueprint controller writes `shared/reports/blueprint_result.json` before archive, recording run status, events, result, and the private workspace mapping.
 - Compatibility note: legacy `prepare_job()` / `merge_job()` remains for old isolated-worktree tests and later Dulwich merge experiments, but the minimum blueprint run path no longer auto-merges private scratch as task output.
 

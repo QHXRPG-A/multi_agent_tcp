@@ -13,7 +13,7 @@ Mobile PWA / Web / GuLiCode Desktop
   -> GraphRuntime
   -> AgentNode queues / outgoing batches / joins / workspace events
   -> CLIWorkerBackend
-  -> Codex / CodeMaker / other CLI worker
+  -> Codex / Codex / other CLI worker
 ```
 
 核心开发原则：
@@ -649,7 +649,7 @@ PWA：
 - GuLiCode Collaboration Server：账号、权限、存盘、审计、移动 API、事件转发。
 - DesktopBlueprintService / Python Runtime：本地 runtime bridge 和 control-plane 实现。
 - `GraphRuntimeControlPlane` / `GraphRuntime`：调度事实源。
-- `CLIWorkerBackend`：Codex、CodeMaker 或其他 CLI worker 的执行适配层。
+- `CLIWorkerBackend`：Codex、Codex 或其他 CLI worker 的执行适配层。
 
 ## 参考输入
 

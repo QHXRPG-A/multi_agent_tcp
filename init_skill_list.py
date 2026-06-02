@@ -1,7 +1,4 @@
-"""Merge skills from .codemaker/skills and .cursor/skills into skill_list/.
-
-Deduplication rule: when both sources contain the same skill name,
-the .codemaker version wins (it's the CodeMaker CLI native directory).
+"""Merge skills from .cursor/skills into skill_list/.
 
 Usage:
     python -m multi_agent_tcp.init_skill_list [--force]
@@ -17,7 +14,6 @@ from pathlib import Path
 from typing import Dict, List
 
 _WORKSPACE = Path(__file__).resolve().parent.parent  # Package/Script/Python
-_CODEMAKER_SKILLS = _WORKSPACE / ".codemaker" / "skills"
 _CURSOR_SKILLS = _WORKSPACE / ".cursor" / "skills"
 _SKILL_LIST_DIR = Path(__file__).resolve().parent / "skill_list"
 
@@ -51,7 +47,7 @@ def _copy_skill(src: Path, dst: Path) -> int:
 
 
 def merge_skills(*, force: bool = False) -> Dict[str, dict]:
-    """Merge both skill sources into skill_list/. Returns manifest dict."""
+    """Merge the configured skill source into skill_list/. Returns manifest dict."""
     if _SKILL_LIST_DIR.exists():
         if not force:
             print(f"skill_list/ already exists. Use --force to overwrite.", file=sys.stderr)
@@ -60,20 +56,14 @@ def merge_skills(*, force: bool = False) -> Dict[str, dict]:
     _SKILL_LIST_DIR.mkdir(parents=True)
 
     cursor_skills = _discover_skills(_CURSOR_SKILLS)
-    codemaker_skills = _discover_skills(_CODEMAKER_SKILLS)
 
-    all_names = sorted(set(cursor_skills) | set(codemaker_skills))
+    all_names = sorted(cursor_skills)
     manifest: Dict[str, dict] = {}
 
     for name in all_names:
-        if name in codemaker_skills:
-            src = codemaker_skills[name]
-            source = ".codemaker/skills"
-            override = name in cursor_skills
-        else:
-            src = cursor_skills[name]
-            source = ".cursor/skills"
-            override = False
+        src = cursor_skills[name]
+        source = ".cursor/skills"
+        override = False
 
         dst = _SKILL_LIST_DIR / name
         file_count = _copy_skill(src, dst)

@@ -16,15 +16,23 @@ taskbar behavior.
 
 When this skill is invoked by name with no other concrete task, for example the
 user only enters `$gulicode-bp:gulicode-bp:blueprint`, immediately open the
-local Blueprint workbench for the current project. Use `blueprint_list` with the
-current absolute project directory to discover available blueprints, choose the
-current/default blueprint when the user did not specify one, then call
-`start_blueprint_workbench` and open the returned URL in Codex's in-app browser.
-If the Browser plugin is available, use it to show the browser (`visibility`
-set to true) and navigate a tab to the workbench URL. Do not rely on
-`openBrowser: true` for the side browser; that MCP flag uses Python
-`webbrowser.open()` and only targets the system default browser. Do not wait for
-a second "open blueprint" message.
+local Blueprint workbench for the current project and put it in Codex's
+in-app side browser. This is the required flow:
+
+1. Call `blueprint_list` with the current absolute project directory.
+2. Choose the explicitly requested blueprint when the user named one; otherwise
+   choose the current/default blueprint, preferring `default` when it exists.
+3. Call `start_blueprint_workbench` with `openBrowser: false`.
+4. If the Browser plugin is available, use it to set the in-app browser
+   `visibility` capability to `true`, reuse the selected tab when possible or
+   create one when needed, and navigate that tab to the workbench URL returned
+   by `start_blueprint_workbench`.
+5. If the Browser plugin is unavailable, return the workbench URL and clearly
+   say that the Codex side browser could not be opened automatically.
+
+Do not rely on `openBrowser: true` for the side browser; that MCP flag uses
+Python `webbrowser.open()` and only targets the system default browser. Do not
+wait for a second "open blueprint" message.
 
 ## Runtime Boundary
 

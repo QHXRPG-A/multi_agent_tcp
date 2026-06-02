@@ -36,8 +36,8 @@ python -m multi_agent_tcp run-chain --registry --tasks tasks.json -o result.json
 
 ```text
 python -m multi_agent_tcp broker --config multi_agent_tcp/examples/broker.json
-python -m multi_agent_tcp agent --config <agent.json> [--mode echo|listen|codemaker-worker]
-python -m multi_agent_tcp spawn --config multi_agent_tcp/examples/spawn_three_codemaker.json
+python -m multi_agent_tcp agent --config <agent.json> [--mode echo|listen|codex-worker]
+python -m multi_agent_tcp spawn --config multi_agent_tcp/examples/spawn_three_codex.json
 python -m multi_agent_tcp.orchestrate --recipe multi_agent_tcp/examples/recipe_chain.json
 ```
 
@@ -65,7 +65,7 @@ python -m multi_agent_tcp.init_skill_list [--force]
 ## 演示 / 测试
 
 ```text
-python -m multi_agent_tcp.demo_three_codemakers [--port 9133]
+python -m multi_agent_tcp.demo_three_codexs [--port 9133]
 python -m multi_agent_tcp.demo_gclient_three_search [--trace] [--port 9140] [--max-retries 2] [--retry-delay-sec 5]
 python -m multi_agent_tcp.test_skill_injection [--agent-id agent-1] [--skill excel-export-flow] [--mode catalog|full]
 ```

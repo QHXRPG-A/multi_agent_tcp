@@ -21,7 +21,7 @@
 | GuLiCode Desktop App | Electron + SolidJS + Vite | 桌面壳、项目导航、Blueprint Workbench UI、本地能力桥接 | 不直接执行 Python，不持有调度真相 |
 | Python Runtime | Python | `GraphRuntimeControlPlane`、`GraphRuntime`、AgentNode 队列、outgoing batch、join、workspace、events | 不负责多用户账号、远程消息存盘、协作广播 |
 | GuLiCode Collaboration Server | 待定，长期服务端 | 用户、项目、权限、消息存盘、消息转发、订阅广播、run/event 索引 | 不重新实现 GraphRuntime 调度 |
-| Worker Backend | Python adapter / CLI / TCP | 具体执行 Agent 任务，例如 Codex、CodeMaker、CLI worker | 不等同于产品服务端，也不拥有蓝图调度语义 |
+| Worker Backend | Python adapter / CLI / TCP | 具体执行 Agent 任务，例如 Codex、Codex、CLI worker | 不等同于产品服务端，也不拥有蓝图调度语义 |
 
 ## 当前基础
 

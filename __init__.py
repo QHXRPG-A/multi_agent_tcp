@@ -5,9 +5,9 @@ Quick start::
     from multi_agent_tcp import CLIWorkerBackend, WorkerConfig
 
     backend = await CLIWorkerBackend.create(
-        workers=[WorkerConfig("cm1", cwd=Path(".")), WorkerConfig("cm2", cwd=Path("."))],
+        workers=[WorkerConfig("agent1", cwd=Path(".")), WorkerConfig("agent2", cwd=Path("."))],
     )
-    result = await backend.run_parallel([("cm1", {"prompt": "A"}), ("cm2", {"prompt": "B"})])
+    result = await backend.run_parallel([("agent1", {"prompt": "A"}), ("agent2", {"prompt": "B"})])
     for wr in result.succeeded:
         print(wr.worker, wr.answer[:200])
     await backend.stop()
@@ -17,21 +17,18 @@ from .broker import Broker
 from .client import AgentTCPClient
 from .cli_worker_backend import (
     CLIWorkerBackend,
-    CodeMakerCluster,
     ParallelResult,
     ReduceResult,
     WorkerConfig,
     WorkerResult,
     is_retryable_error,
 )
-from .codemaker_bridge import codemaker_run, load_codemaker_runtime
 from .codex_bridge import codex_run, extract_codex_final_text, load_codex_runtime
 from .adapters import (
     AdapterResult,
     AgentMessage,
     CLIAdapter,
     CodexAdapter,
-    CodeMakerAdapter,
     adapter_from_agent_config,
     body_to_agent_message,
 )
@@ -108,7 +105,6 @@ from .registry import AgentsRegistry, AgentProfile, AgentSession, SkillInfo, sho
 
 __all__ = (
     "CLIWorkerBackend",
-    "CodeMakerCluster",
     "WorkerConfig",
     "WorkerResult",
     "ParallelResult",
@@ -116,8 +112,6 @@ __all__ = (
     "is_retryable_error",
     "AgentTCPClient",
     "Broker",
-    "codemaker_run",
-    "load_codemaker_runtime",
     "codex_run",
     "extract_codex_final_text",
     "load_codex_runtime",
@@ -125,7 +119,6 @@ __all__ = (
     "AdapterResult",
     "CLIAdapter",
     "CodexAdapter",
-    "CodeMakerAdapter",
     "adapter_from_agent_config",
     "body_to_agent_message",
     "AgentNode",

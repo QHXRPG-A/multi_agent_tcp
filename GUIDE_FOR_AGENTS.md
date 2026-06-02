@@ -1,13 +1,13 @@
 # multi_agent_tcp — Agent CLI / 调用方接入指南
 
-> **目标读者**：任何想要通过本框架向**对等 agent CLI**（CodeMaker / Claude Code / Codex / 自研）派发子任务、聚合结果的发起方——可以是：
+> **目标读者**：任何想要通过本框架向**对等 agent CLI**（Codex / Claude Code / Codex / 自研）派发子任务、聚合结果的发起方——可以是：
 >
 > - 一段外部 Python 脚本 / CI 任务 / 工具脚本；
 > - **另一个正在运行的 agent CLI**——通过它自己的 bash / shell 工具调用本框架的 CLI，为自己拆分子任务给对等 agent。
 >
 > 框架本身不替代任何 agent CLI 的 LLM 推理、tool calling、规划与决策；它只提供"对等节点之间的通信总线 + 多 agent 生命周期/会话/能力管理"。
 
-> **历史说明**：本文件取代了已被删除的 `GUIDE_FOR_CODEMAKER.md`（原文件假设调用方就是 CodeMaker / Cursor 这一种"上游"角色）。**原 `GUIDE_FOR_CODEMAKER.md` 的全部内容已并入本文件**，并按对等 agent 视角重新组织：把"你是 CodeMaker"换成"你是某个发起方（脚本或 agent CLI）"，命令、参数、返回格式与旧版 100% 兼容。
+> **历史说明**：本文件取代了已被删除的 `GUIDE_FOR_AGENTS.md`（原文件假设调用方就是 Codex / Cursor 这一种"上游"角色）。**原 `GUIDE_FOR_AGENTS.md` 的全部内容已并入本文件**，并按对等 agent 视角重新组织：把"你是 Codex"换成"你是某个发起方（脚本或 agent CLI）"，命令、参数、返回格式与旧版 100% 兼容。
 
 ---
 
@@ -102,7 +102,7 @@ python -m multi_agent_tcp show-registry -o agents.json
     {
       "agent_id": "agent-1",
       "display_name": "助手 Alpha",
-      "model": "netease-codemaker/kimi-k2.5",
+      "model": "gpt-5.4",
       "skills": [
         {"name": "excel-export-flow", "description": "导表流程"},
         {"name": "messiah-ui-dev", "description": "弥赛亚引擎游戏UI开发"}
@@ -113,7 +113,7 @@ python -m multi_agent_tcp show-registry -o agents.json
     {
       "agent_id": "agent-2",
       "display_name": "助手 Beta",
-      "model": "netease-codemaker/kimi-k2.5",
+      "model": "gpt-5.4",
       "skills": [
         {"name": "game-client-telnet", "description": "游戏客户端 Telnet"},
         {"name": "query-logtail", "description": "Logtail 日志查询"}
@@ -124,7 +124,7 @@ python -m multi_agent_tcp show-registry -o agents.json
     {
       "agent_id": "agent-3",
       "display_name": "助手 Gamma",
-      "model": "netease-codemaker/kimi-k2.5",
+      "model": "gpt-5.4",
       "skills": [
         {"name": "messiah-engine-structure", "description": "弥赛亚引擎目录结构"},
         {"name": "messiah-panpan-dev", "description": "盘盘系统开发"}
@@ -390,7 +390,7 @@ python -m multi_agent_tcp dispatch-status --job-id <job_id> --wait 25
 
 每个对等 agent 在 `agents_registry.json` 中配置了 skills 列表。当发起方使用 `dispatch` 时，框架会自动在 prompt 前面注入 skill 信息（**catalog 模式**）。
 
-> 当前 catalog 注入语义为 **CodeMaker / OpenCode 体系下的"agent 自带 read 工具 + SKILL.md 触发约定"**；其它 CLI 接入后由对应 CLI Adapter 适配。
+> 当前 catalog 注入语义为 **Codex / OpenCode 体系下的"agent 自带 read 工具 + SKILL.md 触发约定"**；其它 CLI 接入后由对应 CLI Adapter 适配。
 
 **例如 agent-1 配置了 `messiah-ui-dev` skill，发起方发送的 prompt 是**：
 ```
@@ -446,11 +446,11 @@ python -m multi_agent_tcp dispatch --tasks tasks.json -o result.json
 
 ### 场景 2：agent CLI 发起方 - "我自己干一份，让另一个 agent 干另一份"
 
-发起方是某个 agent CLI（比如 CodeMaker）正在处理一个复合任务，它自己干其中一份，把剩下的派给对等 agent：
+发起方是某个 agent CLI（比如 Codex）正在处理一个复合任务，它自己干其中一份，把剩下的派给对等 agent：
 
 ```bash
 # 在自己的 prompt 处理过程中，通过 bash 工具触发：
-python -m multi_agent_tcp show-registry -o .codemaker/tmp/agents.json
+python -m multi_agent_tcp show-registry -o .codex/tmp/agents.json
 
 # 决策：N-1 个子任务派给对等 agent，自己留一个"需要编辑文件 / 与用户交互"的子任务
 python -m multi_agent_tcp dispatch --async \
@@ -460,7 +460,7 @@ python -m multi_agent_tcp dispatch --async \
 # 自留任务做完后，read status_file 拿对等 agent 的结果，整合输出
 ```
 
-> 这正是 `.codemaker/skills/multi-agent-tcp/SKILL.md` 中"5 步工作流"描述的对等协作模式：发起方 agent 不空等，自留 1 个子任务亲自做，N-1 个派给对等 agent。
+> 这正是 `.codex/skills/multi-agent-tcp/SKILL.md` 中"5 步工作流"描述的对等协作模式：发起方 agent 不空等，自留 1 个子任务亲自做，N-1 个派给对等 agent。
 
 ### 场景 3：单 agent 调用
 
@@ -493,7 +493,7 @@ python -m multi_agent_tcp dispatch \
   "agents": {
     "agent-1": {
       "display_name": "助手 Alpha",
-      "model": "netease-codemaker/kimi-k2.5",
+      "model": "gpt-5.4",
       "cwd": "F:/src/Package/Script/Python",
       "skills": ["excel-export-flow", "messiah-ui-dev"],
       "timeout_sec": 1800,
@@ -501,7 +501,7 @@ python -m multi_agent_tcp dispatch \
     },
     "agent-2": {
       "display_name": "助手 Beta",
-      "model": "netease-codemaker/kimi-k2.5",
+      "model": "gpt-5.4",
       "cwd": "F:/src/Package/Script/Python",
       "skills": ["game-client-telnet", "query-logtail"],
       "timeout_sec": 1800,
@@ -515,15 +515,15 @@ python -m multi_agent_tcp dispatch \
 |------|------|
 | `agent_id`（key） | agent 唯一标识，`dispatch` 时使用 |
 | `display_name` | 可读名称 |
-| `model` | 使用的 LLM 模型，格式 `netease-codemaker/<模型名>` |
-| `cwd` | 对等 agent CLI（当前为 CodeMaker）的工作目录 |
+| `model` | 使用的 LLM 模型，格式 `codex/<模型名>` |
+| `cwd` | 对等 agent CLI（当前为 Codex）的工作目录 |
 | `skills` | 该 agent 擅长的领域知识（SKILL.md 列表） |
 | `timeout_sec` | 单次任务超时 |
 | `enabled` | 是否可用 |
 
 可用 `python -m multi_agent_tcp registry-ui` 打开图形界面编辑。
 
-> **未来**：等 CLI Adapter 落地（ROADMAP P0），将增加 `cli_kind` 字段（`codemaker` / `claude_code` / `codex` / 自研），同一个 registry 可混合多种对等 agent CLI。
+> **未来**：等 CLI Adapter 落地（ROADMAP P0），将增加 `cli_kind` 字段（`codex` / `claude_code` / `codex` / 自研），同一个 registry 可混合多种对等 agent CLI。
 
 ---
 
@@ -604,20 +604,20 @@ python -m multi_agent_tcp run-chain --registry --tasks tasks.json [-o result.jso
 
 ## 10. 注意事项
 
-### 模型名称格式（当前 CodeMaker Adapter）
+### 模型名称格式（当前 Codex Adapter）
 
-所有模型必须以 `netease-codemaker/` 为前缀：
+所有模型必须以 `codex/` 为前缀：
 ```
-netease-codemaker/kimi-k2.5
-netease-codemaker/claude-opus-4-6
-netease-codemaker/gpt-5.2-codex-2026-01-14
+gpt-5.4
+gpt-5.4
+gpt-5.4
 ```
 
 > 等 CLI Adapter 落地后，每种 adapter 会有自己的模型前缀规则（详见 ROADMAP P0）。
 
-### CodeMaker 权限
+### Codex 权限
 
-每个 agent 的 `cwd` 下需有 `codemaker.json`，且 `"permission": "allow"`。
+每个 agent 的 `cwd` 下需有 `codex.json`，且 `"permission": "allow"`。
 
 ### Windows 编码
 
@@ -626,7 +626,7 @@ netease-codemaker/gpt-5.2-codex-2026-01-14
 
 ### 同一 agent 多任务
 
-一个对等 agent 进程一次只能执行一个 `codemaker run`。如果 tasks.json 中给同一个 agent_id 发了多个任务，它们会由 batch_gather 协议在同一个 worker 上排队执行。要真正并行，必须使用不同的 agent_id。
+一个对等 agent 进程一次只能执行一个 `codex run`。如果 tasks.json 中给同一个 agent_id 发了多个任务，它们会由 batch_gather 协议在同一个 worker 上排队执行。要真正并行，必须使用不同的 agent_id。
 
 ---
 
@@ -636,13 +636,13 @@ netease-codemaker/gpt-5.2-codex-2026-01-14
 multi_agent_tcp/
 ├── __init__.py             # 包导出（v0.5.0）
 ├── __main__.py             # CLI 入口（show-registry / dispatch / ...）
-├── cluster.py              # CLIWorkerBackend（create_from_registry 等；CodeMakerCluster 为兼容别名）
+├── cluster.py              # CLIWorkerBackend（create_from_registry 等；CLIWorkerBackend 为兼容别名）
 ├── registry.py             # AgentsRegistry + show_registry_response
 ├── agents_registry.json    # ★ 所有对等 agent 的配置源
 ├── broker.py               # TCP 通信总线核心
 ├── client.py               # AgentTCPClient（任意发起方/agent 接入）
 ├── protocol.py             # 帧协议
-├── codemaker_bridge.py     # codemaker run 子进程桥接（当前唯一 CLI Adapter）
+├── codex_bridge.py     # codex run 子进程桥接（当前唯一 CLI Adapter）
 ├── init_skill_list.py      # Skill 合并脚本
 ├── registry_ui.py          # Tkinter GUI
 ├── log_setup.py            # 日志配置
