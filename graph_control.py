@@ -27,6 +27,7 @@ from .graph_runtime import (
     GraphEvent,
     GraphRuntime,
     GuLiCodeTopAgentProfile,
+    PromptNode,
     RouteNode,
     ScriptNode,
     TopAgentStartPlan,
@@ -141,6 +142,22 @@ def graph_definition_from_dict(data: Dict[str, Any]) -> GraphDefinition:
             raise ValueError("terminal_nodes entries must be strings or objects")
         terminal_nodes[node_id] = BlueprintTerminalNode(node_id, kind)
 
+    prompts_raw = data.get("prompt_nodes", {})
+    prompt_nodes: Dict[str, PromptNode] = {}
+    if isinstance(prompts_raw, list):
+        prompt_items = enumerate(prompts_raw)
+    elif isinstance(prompts_raw, dict):
+        prompt_items = prompts_raw.items()
+    else:
+        raise ValueError("graph prompt_nodes must be an object or array")
+    for key, value in prompt_items:
+        if not isinstance(value, dict):
+            raise ValueError("prompt_nodes entries must be objects")
+        node_data = dict(value)
+        node_data.setdefault("node_id", str(key))
+        node = PromptNode.from_dict(node_data)
+        prompt_nodes[node.node_id] = node
+
     scripts_raw = data.get("script_nodes", {})
     script_nodes: Dict[str, ScriptNode] = {}
     if isinstance(scripts_raw, list):
@@ -216,6 +233,7 @@ def graph_definition_from_dict(data: Dict[str, Any]) -> GraphDefinition:
         agent_nodes=agent_nodes,
         route_nodes=route_nodes,
         terminal_nodes=terminal_nodes,
+        prompt_nodes=prompt_nodes,
         script_nodes=script_nodes,
         common_nodes=common_nodes,
         edges=edges,

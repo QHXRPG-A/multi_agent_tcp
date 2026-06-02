@@ -34,7 +34,7 @@ The old low-level TCP worker path remains valid as an execution backend. It is n
 | Runtime scheduler | `graph_runtime.py` | Trusted scheduler for AgentNode queues, dispatch state, outgoing batches, join barriers, events, jobs, final status |
 | Graph model | `graph_runtime.py`, `ryven_blueprint.py` | AgentNode definitions, graph edges, organization view, runnable graph validation, graph scheduling, exec-edge SCC cycle grouping for agents |
 | Workspace / archive | `workspace_manager.py`, `workspace_api.py`, `workspace_rpc.py` | Private checkout, scoped changesets, conflict detection, accepted changes, reports, artifacts, archive indexing |
-| Backend adapter | `cluster.py`, `client.py`, `broker.py`, `adapters.py`, `codex_bridge.py`, `codex_bridge.py` | Run concrete CLI workers when a scheduled AgentNode needs model work |
+| Backend adapter | `cluster.py`, `client.py`, `broker.py`, `adapters.py`, `codex_bridge.py`, `codemaker_bridge.py` | Run concrete CLI workers when a scheduled AgentNode needs model work |
 | Registry / skills | `registry.py`, `skill_space.py`, `agents_registry.json` | Agent profiles, skill selection, skill catalog, per-agent skill views |
 
 ## Current Runtime Semantics
@@ -58,7 +58,7 @@ The old low-level TCP worker path remains valid as an execution backend. It is n
 
 `CLIWorkerBackend` is the preferred semantic name for the old cluster execution concept.
 
-`CLIWorkerBackend` still exists for compatibility and for old APIs such as `run_parallel`, `run_chain`, and `run_parallel_reduce`. Use it only when explaining legacy flows or the concrete TCP backend path.
+`CodeMakerCluster` still exists for compatibility and for old APIs such as `run_parallel`, `run_chain`, and `run_parallel_reduce`. Use it only when explaining legacy flows or the concrete TCP backend path.
 
 Current backend path:
 
@@ -98,8 +98,8 @@ Implementation: `graph_runtime.py` (`GraphDefinition.agent_cycle_groups`).
 
 Avoid presenting the project as primarily:
 
-- "Cursor talks to many Codex CLI workers"
-- "CLIWorkerBackend is the core architecture"
+- "Cursor talks to many CodeMaker CLI workers"
+- "CodeMakerCluster is the core architecture"
 - "Ryven Start -> AgentNode -> End is the main current loop"
 
 Those are historical or secondary views. The current center is the

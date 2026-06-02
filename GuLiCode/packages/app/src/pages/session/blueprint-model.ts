@@ -1,6 +1,7 @@
 export const GRID_SIZE = 24
 export const DEFAULT_OUTPUT_PORT = "out"
 export const DEFAULT_INPUT_PORT = "in"
+export const AGENT_PROMPT_INPUT_PORT = "prompt"
 export const DEFAULT_BLUEPRINT_ID = "default"
 export const DEFAULT_BLUEPRINT_NAME = "Default Blueprint"
 
@@ -8,14 +9,16 @@ export type BlueprintExecutionMode = "blocking" | "nonblocking"
 export type BlueprintTerminalKind = "start" | "end"
 export type BlueprintRouteKind = "sequence" | "parallel" | "parallel_reduce"
 export type BlueprintCommonNodeKind = "branch" | "tick"
-export type BlueprintPortDataType = "message" | "bool" | "tick"
+export type BlueprintPortDataType = "message" | "bool" | "tick" | "str"
 export type BlueprintPromptViaFile = "auto" | "always" | "never"
+export type BlueprintPromptTrigger = "once" | "always"
 export type BlueprintAgentNodeType = "agent" | "worker_agent"
-export type BlueprintNodeKind = "agent" | "route" | "terminal" | "script" | "common"
+export type BlueprintNodeKind = "agent" | "route" | "terminal" | "script" | "common" | "prompt"
 export type BlueprintAddNodeKind =
   | "agent"
   | "worker-agent"
   | "test-agent"
+  | "prompt"
   | "script"
   | "branch"
   | "tick"
@@ -60,6 +63,7 @@ export type BlueprintAgentNode = {
   agent_id?: string
   prompt: string
   run_prompt: string
+  collapsed: boolean
   execution_mode: BlueprintExecutionMode
   cli_kind: string
   model: string
@@ -79,6 +83,10 @@ export type BlueprintAgentNode = {
   write_scope: string[]
   artifact_scope: string[]
   access_policy: BlueprintAgentAccessPolicy
+}
+
+type LegacyBlueprintAgentNode = Partial<BlueprintAgentNode> & {
+  prompt_input_enabled?: unknown
 }
 
 export type BlueprintRouteNode = {
@@ -105,6 +113,13 @@ export type BlueprintScriptNode = {
   inputs: BlueprintScriptPort[]
   outputs: BlueprintScriptPort[]
   collapsed: boolean
+}
+
+export type BlueprintPromptNode = {
+  node_id: string
+  text: string
+  trigger: BlueprintPromptTrigger
+  expanded: boolean
 }
 
 export type BlueprintCommonNode =
@@ -179,6 +194,7 @@ export type BlueprintDraft = {
     agent_nodes: Record<string, BlueprintAgentNode>
     route_nodes: Record<string, BlueprintRouteNode>
     terminal_nodes: Record<string, BlueprintTerminalKind>
+    prompt_nodes: Record<string, BlueprintPromptNode>
     script_nodes: Record<string, BlueprintScriptNode>
     common_nodes: Record<string, BlueprintCommonNode>
     edges: BlueprintEdge[]
@@ -197,6 +213,7 @@ export type RuntimeGraphDraft = {
   route_nodes: Record<string, BlueprintRouteNode>
   common_nodes?: Record<string, BlueprintCommonNode>
   script_nodes?: Record<string, BlueprintScriptNode>
+  prompt_nodes?: Record<string, BlueprintPromptNode>
   edges: Array<{
     from: string
     to: string
@@ -324,6 +341,7 @@ export function createDefaultBlueprintDraft(projectWorkdir = DEFAULT_PROJECT_WOR
     graph: {
       terminal_nodes: {},
       route_nodes: {},
+      prompt_nodes: {},
       script_nodes: {},
       common_nodes: {},
       agent_nodes: {
@@ -383,6 +401,9 @@ export function cloneBlueprintDraft(draft: BlueprintDraft): BlueprintDraft {
       common_nodes: Object.fromEntries(
         Object.entries(draft.graph.common_nodes ?? {}).map(([id, node]) => [id, normalizeCommonNode(id, node)]),
       ),
+      prompt_nodes: Object.fromEntries(
+        Object.entries(draft.graph.prompt_nodes ?? {}).map(([id, node]) => [id, normalizePromptNode(id, node)]),
+      ),
       script_nodes: Object.fromEntries(
         Object.entries(draft.graph.script_nodes ?? {}).map(([id, node]) => [id, normalizeScriptNode(id, node)]),
       ),
@@ -437,6 +458,9 @@ export function fromBlueprintDocument(
       ),
       common_nodes: Object.fromEntries(
         Object.entries(graph.common_nodes ?? {}).map(([id, node]) => [id, normalizeCommonNode(id, node)]),
+      ),
+      prompt_nodes: Object.fromEntries(
+        Object.entries(graph.prompt_nodes ?? {}).map(([id, node]) => [id, normalizePromptNode(id, node)]),
       ),
       script_nodes: Object.fromEntries(
         Object.entries(graph.script_nodes ?? {}).map(([id, node]) => [id, normalizeScriptNode(id, node)]),
@@ -505,6 +529,7 @@ export function nodeIds(draft: BlueprintDraft) {
     ...Object.keys(draft.graph.terminal_nodes),
     ...Object.keys(draft.graph.route_nodes ?? {}),
     ...Object.keys(draft.graph.common_nodes ?? {}),
+    ...Object.keys(draft.graph.prompt_nodes ?? {}),
     ...Object.keys(draft.graph.script_nodes ?? {}),
     ...Object.keys(draft.graph.agent_nodes),
   ]
@@ -514,6 +539,7 @@ export function nodeKind(draft: BlueprintDraft, id: string): BlueprintNodeKind |
   if (isAgentNode(draft, id)) return "agent"
   if (isRouteNode(draft, id)) return "route"
   if (isTerminalNode(draft, id)) return "terminal"
+  if (isPromptNode(draft, id)) return "prompt"
   if (isScriptNode(draft, id)) return "script"
   if (isCommonNode(draft, id)) return "common"
 }
@@ -538,6 +564,10 @@ export function isCommonNode(draft: BlueprintDraft, id: string) {
   return draft.graph.common_nodes?.[id] !== undefined
 }
 
+export function isPromptNode(draft: BlueprintDraft, id: string) {
+  return draft.graph.prompt_nodes?.[id] !== undefined
+}
+
 export function addNode(
   draft: BlueprintDraft,
   input: {
@@ -548,6 +578,7 @@ export function addNode(
 ) {
   if (input.kind === "agent") return addFullAgentNode(draft, input)
   if (input.kind === "worker-agent" || input.kind === "test-agent") return addAgentNode(draft, input)
+  if (input.kind === "prompt") return addPromptNode(draft, input)
   if (input.kind === "script") return addScriptNode(draft, input)
   if (input.kind === "branch" || input.kind === "tick") return addCommonNode(draft, input.kind, input)
   if (input.kind === "start" || input.kind === "end") return addTerminalNode(draft, input.kind, input)
@@ -604,6 +635,27 @@ export function addTestAgentNode(
   } = {},
 ) {
   return addAgentNode(draft, input)
+}
+
+export function addPromptNode(
+  draft: BlueprintDraft,
+  input: {
+    node_id?: string
+    position?: BlueprintNodeLayout
+  } = {},
+) {
+  const next = cloneBlueprintDraft(draft)
+  const node_id = uniqueNodeId(next, input.node_id ?? "prompt")
+  next.graph.prompt_nodes[node_id] = normalizePromptNode(node_id, {
+    node_id,
+    text: "",
+    trigger: "once",
+    expanded: false,
+  })
+  next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
+  next.selection = { type: "node", id: node_id }
+  next.inspector = { type: "node", id: node_id }
+  return next
 }
 
 export function addRouteNode(
@@ -707,29 +759,37 @@ export function addEdge(
   const next = cloneBlueprintDraft(draft)
   if (from === to) return next
   if (!nodeIds(next).includes(from) || !nodeIds(next).includes(to)) return next
+  const normalizedEdgeType = edgeTypeForPorts(next, from, outputPort, to, inputPort, edgeType)
   const ports = expandedScriptFanPorts(next, from, outputPort, to, inputPort)
   for (const port of ports) {
     if (!canConnectPorts(next, from, port.outputPort, to, port.inputPort).ok) return next
   }
   for (const port of ports) {
-    const id = edgeId(from, to, edgeType, port.outputPort, port.inputPort)
+    const portEdgeType = edgeTypeForPorts(next, from, port.outputPort, to, port.inputPort, normalizedEdgeType)
+    const id = edgeId(from, to, portEdgeType, port.outputPort, port.inputPort)
     if (
       !next.graph.edges.some(
         (edge) =>
           edge.id === id ||
           (edge.from === from &&
             edge.to === to &&
-            edge.edge_type === edgeType &&
+            edge.edge_type === portEdgeType &&
             (edge.output_port || DEFAULT_OUTPUT_PORT) === port.outputPort &&
             (edge.input_port || DEFAULT_INPUT_PORT) === port.inputPort),
       )
     ) {
-      next.graph.edges.push(createEdge(from, to, edgeType, port.outputPort, port.inputPort))
+      next.graph.edges.push(createEdge(from, to, portEdgeType, port.outputPort, port.inputPort))
     }
   }
   const selectedId = ports.some((port) => port.outputPort === outputPort && port.inputPort === inputPort)
-    ? edgeId(from, to, edgeType, outputPort, inputPort)
-    : edgeId(from, to, edgeType, ports[0]?.outputPort ?? outputPort, ports[0]?.inputPort ?? inputPort)
+    ? edgeId(from, to, normalizedEdgeType, outputPort, inputPort)
+    : edgeId(
+        from,
+        to,
+        edgeTypeForPorts(next, from, ports[0]?.outputPort ?? outputPort, to, ports[0]?.inputPort ?? inputPort, normalizedEdgeType),
+        ports[0]?.outputPort ?? outputPort,
+        ports[0]?.inputPort ?? inputPort,
+      )
   next.selection = { type: "edge", id: selectedId }
   return next
 }
@@ -811,6 +871,7 @@ export function deleteNode(draft: BlueprintDraft, id: string) {
   delete next.graph.route_nodes[id]
   delete next.graph.common_nodes[id]
   delete next.graph.terminal_nodes[id]
+  delete next.graph.prompt_nodes[id]
   delete next.graph.script_nodes[id]
   delete next.layout.nodes[id]
   next.graph.edges = next.graph.edges.filter((edge) => edge.from !== id && edge.to !== id)
@@ -857,6 +918,17 @@ export function updateAgentNode(draft: BlueprintDraft, id: string, patch: Partia
   return next
 }
 
+export function updatePromptNode(draft: BlueprintDraft, id: string, patch: Partial<BlueprintPromptNode>) {
+  const next = cloneBlueprintDraft(draft)
+  const current = next.graph.prompt_nodes[id]
+  if (!current) return next
+  next.graph.prompt_nodes[id] = normalizePromptNode(id, {
+    ...current,
+    ...patch,
+  })
+  return next
+}
+
 export function canConnectPorts(
   draft: BlueprintDraft,
   from: string,
@@ -868,6 +940,12 @@ export function canConnectPorts(
   const sourceType = blueprintPortDataType(draft, from, "output", outputPort)
   const targetType = blueprintPortDataType(draft, to, "input", inputPort)
   if (sourceType.reason || targetType.reason) return { ok: false, reason: "unknown_port", sourceType: sourceType.type, targetType: targetType.type }
+  const sourcePrompt = isPromptNode(draft, from)
+  const targetPromptInput = isAgentPromptInput(draft, to, inputPort)
+  if (sourcePrompt || targetPromptInput) {
+    if (sourcePrompt && targetPromptInput) return { ok: true, sourceType: "str", targetType: "str" }
+    return { ok: false, reason: "type_mismatch", sourceType: sourceType.type, targetType: targetType.type }
+  }
   if (sourceType.type === undefined || targetType.type === undefined) return { ok: true }
   if (sourceType.type !== targetType.type) {
     return {
@@ -878,6 +956,23 @@ export function canConnectPorts(
     }
   }
   return { ok: true, sourceType: sourceType.type, targetType: targetType.type }
+}
+
+function isAgentPromptInput(draft: BlueprintDraft, nodeId: string, portName: string) {
+  return !!draft.graph.agent_nodes[nodeId] && portName === AGENT_PROMPT_INPUT_PORT
+}
+
+function edgeTypeForPorts(
+  draft: BlueprintDraft,
+  from: string,
+  outputPort: string,
+  to: string,
+  inputPort: string,
+  fallback: string,
+) {
+  return isPromptNode(draft, from) && isAgentPromptInput(draft, to, inputPort) && outputPort === DEFAULT_OUTPUT_PORT
+    ? "data"
+    : (fallback || "exec")
 }
 
 export function updateRouteNode(draft: BlueprintDraft, id: string, patch: Partial<BlueprintRouteNode>) {
@@ -963,11 +1058,11 @@ export function updateEdge(draft: BlueprintDraft, id: string, patch: Partial<Blu
   const index = next.graph.edges.findIndex((edge) => edge.id === id)
   if (index === -1) return next
   const current = next.graph.edges[index]
-  const edge_type = patch.edge_type?.trim() || current.edge_type || "exec"
   const from = patch.from ?? current.from
   const to = patch.to ?? current.to
   const output_port = patch.output_port ?? current.output_port ?? DEFAULT_OUTPUT_PORT
   const input_port = patch.input_port ?? current.input_port ?? DEFAULT_INPUT_PORT
+  const edge_type = edgeTypeForPorts(next, from, output_port, to, input_port, patch.edge_type?.trim() || current.edge_type || "exec")
   if (!canConnectPorts(next, from, output_port, to, input_port).ok) return next
   const updated = {
     ...current,
@@ -1091,6 +1186,9 @@ export function toRuntimeGraphDraft(draft: BlueprintDraft): RuntimeGraphDraft {
     common_nodes: Object.fromEntries(
       Object.entries(draft.graph.common_nodes ?? {}).map(([id, node]) => [id, normalizeCommonNode(id, node)]),
     ),
+    prompt_nodes: Object.fromEntries(
+      Object.entries(draft.graph.prompt_nodes ?? {}).map(([id, node]) => [id, normalizePromptNode(id, node)]),
+    ),
     script_nodes: Object.fromEntries(
       Object.entries(draft.graph.script_nodes ?? {}).map(([id, node]) => [id, normalizeScriptNode(id, node)]),
     ),
@@ -1173,6 +1271,7 @@ function visibleNodeIdSet(draft: BlueprintDraft) {
   return new Set([
     ...Object.keys(draft.graph.route_nodes ?? {}),
     ...Object.keys(draft.graph.common_nodes ?? {}),
+    ...Object.keys(draft.graph.prompt_nodes ?? {}),
     ...Object.keys(draft.graph.script_nodes ?? {}),
     ...Object.keys(draft.graph.agent_nodes),
   ])
@@ -1223,6 +1322,7 @@ function createAgentNode(input: {
     agent_id: input.agent_id,
     prompt: input.prompt,
     run_prompt: input.run_prompt ?? "",
+    collapsed: true,
     execution_mode: "blocking",
     cli_kind: cliKind,
     model: defaultModelForCliKind(cliKind),
@@ -1280,7 +1380,8 @@ function normalizeBlueprintConfig(config?: Partial<BlueprintConfig>): BlueprintC
   }
 }
 
-function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): BlueprintAgentNode {
+function normalizeAgentNode(id: string, node: LegacyBlueprintAgentNode): BlueprintAgentNode {
+  const { prompt_input_enabled: _legacyPromptInputEnabled, ...nodeFields } = node
   const nodeType = normalizeAgentNodeType(node.node_type)
   const defaults = createAgentNode({
     node_id: id,
@@ -1310,10 +1411,11 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
       : configuredWriteScope
   return {
     ...defaults,
-    ...node,
+    ...nodeFields,
     node_id: id,
     node_type: nodeType,
     run_prompt: String(node.run_prompt ?? defaults.run_prompt),
+    collapsed: node.collapsed !== false,
     skills,
     skill_selection: skillSelection,
     rule_paths: [...(node.rule_paths ?? defaults.rule_paths)],
@@ -1331,7 +1433,7 @@ function normalizeAgentNode(id: string, node: Partial<BlueprintAgentNode>): Blue
 
 function normalizeAgentNodeForRuntime(
   id: string,
-  node: Partial<BlueprintAgentNode>,
+  node: LegacyBlueprintAgentNode,
   config: BlueprintConfig,
 ): BlueprintAgentNode {
   const normalized = normalizeAgentNode(id, node)
@@ -1399,13 +1501,37 @@ function normalizeCommonNode(
   }
 }
 
+function normalizePromptNode(
+  id: string,
+  node: Partial<BlueprintPromptNode> & { prompt?: unknown; mode?: unknown },
+): BlueprintPromptNode {
+  const trigger = node.trigger === "always" || node.mode === "always" ? "always" : "once"
+  return {
+    node_id: id,
+    text: String(node.text ?? node.prompt ?? ""),
+    trigger,
+    expanded: node.expanded === true,
+  }
+}
+
 function blueprintPortDataType(
   draft: BlueprintDraft,
   nodeId: string,
   side: "input" | "output",
   portName: string,
 ): { type?: BlueprintPortDataType; reason?: "unknown_node" | "unknown_port" } {
-  if (isAgentNode(draft, nodeId) || isScriptNode(draft, nodeId)) return {}
+  const agent = draft.graph.agent_nodes[nodeId]
+  if (agent) {
+    if (side === "input" && portName === AGENT_PROMPT_INPUT_PORT) {
+      return { type: "str" }
+    }
+    return {}
+  }
+  if (isScriptNode(draft, nodeId)) return {}
+  if (isPromptNode(draft, nodeId)) {
+    if (side === "output" && portName === DEFAULT_OUTPUT_PORT) return { type: "str" }
+    return { reason: "unknown_port" }
+  }
   const common = draft.graph.common_nodes?.[nodeId]
   if (common) {
     if (common.kind === "branch") {

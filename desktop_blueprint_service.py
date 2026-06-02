@@ -3611,6 +3611,7 @@ def default_blueprint_document(project_dir: Path, blueprint_id: str, name: str) 
         "graph": {
             "terminal_nodes": {},
             "route_nodes": {},
+            "prompt_nodes": {},
             "script_nodes": {},
             "common_nodes": {},
             "agent_nodes": {

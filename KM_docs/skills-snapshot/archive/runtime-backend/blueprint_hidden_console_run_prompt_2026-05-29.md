@@ -17,7 +17,7 @@ Process launch:
    Windows subprocess helper.
 2. Replaced visible `CREATE_NEW_CONSOLE` worker launches with hidden process
    flags.
-3. Applied hidden launch kwargs to Codex and Codex adapter subprocesses.
+3. Applied hidden launch kwargs to Codex and CodeMaker adapter subprocesses.
 4. Kept non-Windows launch behavior unchanged.
 
 Runtime graph:
@@ -52,7 +52,7 @@ Runtime/backend:
 2. `__main__.py`
 3. `cluster.py`
 4. `codex_bridge.py`
-5. `codex_bridge.py`
+5. `codemaker_bridge.py`
 6. `graph_runtime.py`
 7. `test_agent_runtime.py`
 8. `test_graph_control.py`

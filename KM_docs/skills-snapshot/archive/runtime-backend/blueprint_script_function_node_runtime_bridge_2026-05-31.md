@@ -1,4 +1,4 @@
-# Blueprint Script Function Node Runtime and Bridge - 2026-05-31
+﻿# Blueprint Script Function Node Runtime and Bridge - 2026-05-31
 
 ## Summary
 

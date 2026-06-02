@@ -12,7 +12,7 @@
   "agents": {
     "agent-1": {
       "display_name": "助手 Alpha",
-      "model": "gpt-5.4",
+      "model": "netease-codemaker/kimi-k2.5",
       "cwd": "F:/src/Package/Script/Python",
       "skills": ["excel-export-flow", "messiah-ui-dev"],
       "skill_selection": {
@@ -77,8 +77,8 @@
 python -m multi_agent_tcp.init_skill_list [--force]
 ```
 
-将 `.codex/skills` 和 `.cursor/skills` 合并到 `skill_list/`：
-- 重复 skill 以 `.codex` 为准
+将 `.codemaker/skills` 和 `.cursor/skills` 合并到 `skill_list/`：
+- 重复 skill 以 `.codemaker` 为准
 - 生成 `skill_list/manifest.json`
 - `skill_list/` 为重建产物，必要时重跑即可
 

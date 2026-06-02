@@ -1,4 +1,4 @@
-# Blueprint Common Branch/Tick UI and Port Types - 2026-05-31
+﻿# Blueprint Common Branch/Tick UI and Port Types - 2026-05-31
 
 ## Summary
 

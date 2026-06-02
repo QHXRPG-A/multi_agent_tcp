@@ -1,4 +1,4 @@
-# Blueprint Full Agent Node UI - 2026-05-30
+﻿# Blueprint Full Agent Node UI - 2026-05-30
 
 ## Summary
 

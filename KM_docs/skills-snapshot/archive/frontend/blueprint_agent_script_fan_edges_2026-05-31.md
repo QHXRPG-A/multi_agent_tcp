@@ -1,4 +1,4 @@
-# Blueprint Agent Script Fan Edges - 2026-05-31
+﻿# Blueprint Agent Script Fan Edges - 2026-05-31
 
 ## Summary
 

@@ -121,7 +121,7 @@ python -m pytest test_workspace_api.py test_workspace_manager.py test_agent_runt
 
 #### 摘要
 1. 路径与入口校正：补充当前仓库常见路径 `d:\agents\multi_agent_tcp`，并明确 `multi_agent_tcp/__main__.py`、`multi_agent_tcp/cluster.py`、`multi_agent_tcp/registry.py` 位于根包目录。
-2. 文档对齐范围补充：归档时除代码外，同时对照 `README.md`、`GUIDE_FOR_AGENTS.md`、`examples/HOWTO.txt`。
+2. 文档对齐范围补充：归档时除代码外，同时对照 `README.md`、`GUIDE_FOR_CODEMAKER.md`、`examples/HOWTO.txt`。
 3. vendored Ryven 结论沉淀：记录 `vendor/ryven`、`vendor/ryvencore_qt`、`.venv_vendor_ryven` 的职责与用途，并确认 GUI 启动验证和中文界面定制已完成。
 4. 归档协议增强：若后续工作涉及 `vendor/` 方向的重要运行基线、启动验证或 GUI 汉化，应继续沉淀到对应归档中。
 
@@ -221,7 +221,7 @@ multi_agent_tcp/
    - AgentNode startup injects the Workspace API document and command contract;
    - AgentNode `cwd` is private scratch, while shared publishing goes through the API.
 3. The blueprint runtime writes `shared/reports/blueprint_result.json` before archive.
-4. Codex and Codex adapters both consume injected `prompt_preamble` and `execution_context`.
+4. CodeMaker and Codex adapters both consume injected `prompt_preamble` and `execution_context`.
 5. Shared writes go through manager-owned manifest/lease APIs.
 6. Added per-path read/write locking:
    - concurrent readers are allowed;
@@ -256,7 +256,7 @@ multi_agent_tcp/
    - the full execution context is still available to the runtime and adapters;
    - tests continue to validate internal launch materialization and actual prompt-merging behavior.
 5. Added/updated adapter support:
-   - Codex and Codex bridges now prefer `prompt_execution_context` when formatting prompts;
+   - Codex and CodeMaker bridges now prefer `prompt_execution_context` when formatting prompts;
    - both bridges fall back to the full `execution_context` if the reduced prompt view is absent.
 
 ## Affected Code
@@ -265,7 +265,7 @@ multi_agent_tcp/
 - `multi_agent_tcp/graph_control.py`
 - `multi_agent_tcp/graph_runtime.py`
 - `multi_agent_tcp/codex_bridge.py`
-- `multi_agent_tcp/codex_bridge.py`
+- `multi_agent_tcp/codemaker_bridge.py`
 - `multi_agent_tcp/test_graph_control.py`
 - `multi_agent_tcp/test_agent_runtime.py`
 
@@ -276,7 +276,7 @@ python -m pytest -q
 116 passed
 ```
 - `multi_agent_tcp/ryven_blueprint.py`
-- `multi_agent_tcp/codex_bridge.py`
+- `multi_agent_tcp/codemaker_bridge.py`
 - `multi_agent_tcp/codex_bridge.py`
 - `multi_agent_tcp/docs/workspace_api.md`
 - `multi_agent_tcp/test_workspace_api.py`
@@ -327,7 +327,7 @@ The minimum workspace-control loop is now implemented as a controlled local CLI 
    - `SuperAgentProfile.can_assign_downstream_workdir`;
    - optional `assignable_workdir_roots`;
    - `GraphRuntime.assign_agent_workdir()`;
-   - `CLIWorkerBackend.restart_worker()` kills and relaunches a worker with the same config plus the new `cwd`.
+   - `CodeMakerCluster.restart_worker()` kills and relaunches a worker with the same config plus the new `cwd`.
 8. Added basic agent busy tracking:
    - blocking messages and nonblocking jobs increment `AgentInstance.busy_count`;
    - workdir reassignment returns `AGENT_BUSY` when the target agent is executing.

@@ -1,4 +1,4 @@
-# CLIWorkerBackend and Legacy CLIWorkerBackend API
+# CLIWorkerBackend and Legacy CodeMakerCluster API
 
 ## Status
 
@@ -13,10 +13,10 @@ CLIWorkerBackend
 The older name remains available in code and historical docs:
 
 ```text
-CLIWorkerBackend
+CodeMakerCluster
 ```
 
-Use `CLIWorkerBackend` only when working with legacy high-level APIs or the low-level TCP backend path.
+Use `CodeMakerCluster` only when working with legacy high-level APIs or the low-level TCP backend path.
 
 ## Current Interpretation
 
@@ -36,11 +36,11 @@ It should not own product-level orchestration decisions. Those belong to `GraphR
 ## Legacy Facade Example
 
 ```python
-from multi_agent_tcp import CLIWorkerBackend, WorkerConfig, AgentsRegistry
+from multi_agent_tcp import CodeMakerCluster, WorkerConfig, AgentsRegistry
 
 reg = AgentsRegistry.load()
 
-cluster = await CLIWorkerBackend.create_from_registry(
+cluster = await CodeMakerCluster.create_from_registry(
     reg,
     agent_ids=["agent-1", "agent-2"],
     skill_mode="catalog",

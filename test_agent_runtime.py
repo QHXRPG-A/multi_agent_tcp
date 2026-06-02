@@ -30,6 +30,7 @@ from multi_agent_tcp import (
     GraphRuntime,
     GraphRuntimeControlPlane,
     MultiModalEnvelope,
+    PromptNode,
     RouteNode,
     TopAgentStartPlan,
     WorkspaceManifest,
@@ -1288,6 +1289,111 @@ async def test_graph_runtime_injects_run_prompt_independently_per_agent() -> Non
     assert cluster.sent[1][1] == {
         "prompt": "# Agent Run Prompt\n\nB runtime rules.\n\n---\n\nwork b"
     }
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_injects_prompt_nodes_by_trigger_and_edge_order() -> None:
+    cluster = _FakeCluster()
+    node = AgentNode(
+        node_id="node-a",
+        cwd=Path("."),
+        timeout_sec=42.0,
+        run_prompt="Follow the per-run contract.",
+    )
+    graph = GraphDefinition(
+        agent_nodes={"node-a": node},
+        prompt_nodes={
+            "first_prompt": PromptNode("first_prompt", text="First extra prompt.", trigger="once"),
+            "second_prompt": PromptNode("second_prompt", text="Second extra prompt.", trigger="always"),
+        },
+        edges=[
+            GraphEdge("first_prompt", "node-a", output_port="out", input_port="prompt", edge_type="data"),
+            GraphEdge("second_prompt", "node-a", output_port="out", input_port="prompt", edge_type="data"),
+        ],
+    )
+
+    async with GraphRuntime(cluster) as runtime:
+        runtime.configure_completion_tracking(graph)
+        await runtime.send_agent_message(node, {"prompt": "first task"})
+        await runtime.send_agent_message(node, {"prompt": "second task"})
+        runtime.reset_run_prompt_injections()
+        await runtime.send_agent_message(node, {"prompt": "new run task"})
+
+    assert cluster.sent[0] == (
+        "node-a",
+        {
+            "prompt": "\n\n".join(
+                [
+                    "# Agent Run Prompt",
+                    "Follow the per-run contract.",
+                    "# Blueprint Prompt: first_prompt",
+                    "First extra prompt.",
+                    "# Blueprint Prompt: second_prompt",
+                    "Second extra prompt.",
+                    "---",
+                    "first task",
+                ]
+            )
+        },
+        42.0,
+    )
+    assert cluster.sent[1] == (
+        "node-a",
+        {
+            "prompt": "\n\n".join(
+                [
+                    "# Blueprint Prompt: second_prompt",
+                    "Second extra prompt.",
+                    "---",
+                    "second task",
+                ]
+            )
+        },
+        42.0,
+    )
+    assert cluster.sent[2] == (
+        "node-a",
+        {
+            "prompt": "\n\n".join(
+                [
+                    "# Agent Run Prompt",
+                    "Follow the per-run contract.",
+                    "# Blueprint Prompt: first_prompt",
+                    "First extra prompt.",
+                    "# Blueprint Prompt: second_prompt",
+                    "Second extra prompt.",
+                    "---",
+                    "new run task",
+                ]
+            )
+        },
+        42.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_does_not_consume_once_prompt_node_for_no_op() -> None:
+    cluster = _FakeCluster()
+    node = AgentNode(node_id="node-a", cwd=Path("."))
+    graph = GraphDefinition(
+        agent_nodes={"node-a": node},
+        prompt_nodes={"guard": PromptNode("guard", text="Only real work.", trigger="once")},
+        edges=[GraphEdge("guard", "node-a", output_port="out", input_port="prompt", edge_type="data")],
+    )
+
+    async with GraphRuntime(cluster) as runtime:
+        runtime.configure_completion_tracking(graph)
+        await runtime.send_agent_message(node, "")
+        await runtime.send_agent_message(node, {"payload": "missing prompt"})
+        await runtime.send_agent_message(node, {"prompt": "real task"})
+
+    assert cluster.sent[0] == ("node-a", "", 1800.0)
+    assert cluster.sent[1] == ("node-a", {"payload": "missing prompt"}, 1800.0)
+    assert cluster.sent[2] == (
+        "node-a",
+        {"prompt": "# Blueprint Prompt: guard\n\nOnly real work.\n\n---\n\nreal task"},
+        1800.0,
+    )
 
 
 @pytest.mark.asyncio
@@ -3988,7 +4094,7 @@ def test_compile_ryven_flow_builds_graph_definition_with_port_semantics() -> Non
     ] == [
         ("blueprint-start", "agent-a", "next", "in", "exec"),
         ("agent-a", "agent-b", "out", "in", "exec"),
-        ("agent-a", "agent-b", "result", "prompt", "data"),
+        ("agent-a", "agent-b", "result", "context", "data"),
         ("agent-b", "blueprint-end", "out", "done", "exec"),
     ]
 
@@ -4026,12 +4132,20 @@ async def test_graph_executor_runs_minimal_blueprint_and_starts_agents() -> None
         },
         agent_nodes={
             "a": AgentNode(node_id="a", prompt="first", timeout_sec=12),
-            "b": AgentNode(node_id="b", prompt="second", timeout_sec=13),
+            "b": AgentNode(
+                node_id="b",
+                prompt="second",
+                timeout_sec=13,
+            ),
+        },
+        prompt_nodes={
+            "prompt-b": PromptNode("prompt-b", text="Follow B runtime notes.", trigger="always"),
         },
         edges=[
             GraphEdge("start", "a", output_port="next", input_port="in", edge_type="exec"),
             GraphEdge("a", "b", output_port="out", input_port="in", edge_type="exec"),
-            GraphEdge("a", "b", output_port="result", input_port="prompt", edge_type="data"),
+            GraphEdge("a", "b", output_port="result", input_port="context", edge_type="data"),
+            GraphEdge("prompt-b", "b", output_port="out", input_port="prompt", edge_type="data"),
             GraphEdge("b", "end", output_port="out", input_port="done", edge_type="exec"),
         ],
     )
@@ -4044,7 +4158,15 @@ async def test_graph_executor_runs_minimal_blueprint_and_starts_agents() -> None
     assert cluster.started == ["a", "b"]
     assert cluster.sent[0] == ("a", {"prompt": "first"}, 12)
     assert cluster.sent[1][0] == "b"
-    assert "prompt" in cluster.sent[1][1]
+    assert cluster.sent[1][1]["prompt"] == "\n\n".join(
+        [
+            "# Blueprint Prompt: prompt-b",
+            "Follow B runtime notes.",
+            "---",
+            "second",
+        ]
+    )
+    assert "context" in cluster.sent[1][1]
     assert [event.event_type for event in events] == [
         "BlueprintStarted",
         "NodeQueued",

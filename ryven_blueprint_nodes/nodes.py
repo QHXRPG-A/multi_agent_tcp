@@ -66,7 +66,7 @@ class AgentNode(Node):
     tags = ["agent", "codex", "blueprint"]
     init_inputs = [
         NodeInputType(label="in", type_="exec"),
-        NodeInputType(label="prompt", type_="data"),
+        NodeInputType(label="context", type_="data"),
     ]
     init_outputs = [
         NodeOutputType(label="out", type_="exec"),

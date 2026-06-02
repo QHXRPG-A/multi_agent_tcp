@@ -100,6 +100,62 @@ def test_graph_definition_json_and_scoped_organization_view() -> None:
     assert scoped["graph"]["agent_nodes"] == ["coder"]
 
 
+def test_graph_definition_json_loads_prompt_nodes_and_validates_prompt_edges() -> None:
+    graph = graph_definition_from_dict(
+        {
+            "agent_nodes": {
+                "coder": {
+                    "agent_id": "worker-coder",
+                    "prompt_input_enabled": False,
+                },
+            },
+            "prompt_nodes": {
+                "guidance": {
+                    "text": "Use the project conventions.",
+                    "trigger": "always",
+                    "expanded": True,
+                },
+            },
+            "edges": [
+                {
+                    "from": "guidance",
+                    "to": "coder",
+                    "edge_type": "data",
+                    "output_port": "out",
+                    "input_port": "prompt",
+                },
+            ],
+        }
+    )
+
+    assert graph.prompt_nodes["guidance"].text == "Use the project conventions."
+    assert graph.prompt_nodes["guidance"].trigger == "always"
+    assert graph.agent_organization_view()["graph"]["prompt_nodes"]["guidance"]["expanded"] is True
+
+    with pytest.raises(ValueError, match="PromptNode edges must connect"):
+        graph_definition_from_dict(
+            {
+                "agent_nodes": {"coder": {"prompt_input_enabled": False}},
+                "script_nodes": {
+                    "formatter": {
+                        "script_id": "formatter.py:formatter",
+                        "module_path": "formatter.py",
+                        "function_name": "formatter",
+                    },
+                },
+                "edges": [
+                    {
+                        "from": "formatter",
+                        "to": "coder",
+                        "edge_type": "data",
+                        "output_port": "result",
+                        "input_port": "prompt",
+                    }
+                ],
+            }
+        )
+
+
 def test_control_plane_executes_script_nodes_between_agents(tmp_path: Path) -> None:
     script_root = tmp_path / ".multi_agent_workspace" / "scripts"
     script_root.mkdir(parents=True)

@@ -2,11 +2,11 @@
 
 本文件整理 `multi_agent_tcp` 在多 CLI agent、节点化编排与多模态消息方面的近期方向性知识。它记录的是当前已明确的设计方向与术语，不等价于“功能已实现”。
 
-> 当前定位：本文件是 backend adapter / worker execution 知识，不是产品主架构入口。当前主线是 GuLiCode desktop / top Agent -> `GraphRuntimeControlPlane` -> `GraphRuntime` -> AgentNode queues / workspace/events -> `CLIWorkerBackend` adapters。阅读本文件时应把 Codex、Codex、Claude 等 CLI 都理解为可替换后端。
+> 当前定位：本文件是 backend adapter / worker execution 知识，不是产品主架构入口。当前主线是 GuLiCode desktop / top Agent -> `GraphRuntimeControlPlane` -> `GraphRuntime` -> AgentNode queues / workspace/events -> `CLIWorkerBackend` adapters。阅读本文件时应把 CodeMaker、Codex、Claude 等 CLI 都理解为可替换后端。
 
 ## 定位
 
-早期材料 [D:\agents\multi_agent_tcp\KM_docs\multi-cli-node-workflow-brainstorm.md](D:\agents\multi_agent_tcp\KM_docs\multi-cli-node-workflow-brainstorm.md) 提出过从“围绕 Codex CLI 的薄编排框架”扩展到以下 adapter 能力：
+早期材料 [D:\agents\multi_agent_tcp\KM_docs\multi-cli-node-workflow-brainstorm.md](D:\agents\multi_agent_tcp\KM_docs\multi-cli-node-workflow-brainstorm.md) 提出过从“围绕 CodeMaker CLI 的薄编排框架”扩展到以下 adapter 能力：
 
 - 多 CLI agent 接入
 - 节点化工作流编排
@@ -19,7 +19,7 @@
 
 ### 1. CLIAdapter 抽象
 
-早期 `codex_bridge.py` 是最先落地的 CLI adapter 形态。当前写法应优先使用 `CLIWorkerBackend` / `CLIAdapter` 边界：
+早期 `codemaker_bridge.py` 是最先落地的 CLI adapter 形态。当前写法应优先使用 `CLIWorkerBackend` / `CLIAdapter` 边界：
 
 - 只负责进程 IO、prompt 传递、输出解析、附件落地
 - 不负责 LLM 推理、tool routing、对话历史管理
@@ -203,7 +203,7 @@ The current blueprint runtime implementation has started enforcing the split bet
 - `agents/<agent_id>/private/` is private scratch for temporary files, cache, skill views, and CLI-local state. It is not treated as a result worktree and is deleted before archive.
 - `shared/code/`, `shared/artifacts/`, and `shared/reports/` are the only per-run outcome areas preserved in the archive.
 - AgentNode `cwd` points at the private checkout. Agents read project and current-run shared files directly from injected read-only physical paths; Workspace API remains the write/submit/publish command interface.
-- Codex and Codex CLI adapters both consume the injected `prompt_preamble` and `execution_context`, so the workspace contract reaches the actual CLI prompt.
+- Codex and CodeMaker CLI adapters both consume the injected `prompt_preamble` and `execution_context`, so the workspace contract reaches the actual CLI prompt.
 - Shared writes have a first-pass file lease API plus manifest records; this prevents basic same-path races but is not yet a complete merge/conflict protocol.
 - The controller now writes `shared/reports/blueprint_result.json` before archiving so each run has a durable summary.
 
@@ -214,7 +214,7 @@ Follow-up adjustment: agents are now taught physical read-only project/shared pa
 ## 2026-05-11 prompt-facing context note
 
 - The runtime now keeps a full internal `execution_context` and a smaller `prompt_execution_context`.
-- Codex and Codex bridges should merge `prompt_execution_context` into the actual prompt when present.
+- Codex and CodeMaker bridges should merge `prompt_execution_context` into the actual prompt when present.
 - The prompt-facing view now intentionally includes read-only `project_context` / `project_code_root`, `checkout_path`, and current-run `shared_workspace` paths, while still omitting Codex home, real skill-space source paths, bearer/RPC tokens, and unrelated private internals.
 - Ordinary-Agent prompt context should include MCP tool context, direct-read roots, scope summaries, and authorized skill/rule names and descriptions, not CLI command recipes.
 

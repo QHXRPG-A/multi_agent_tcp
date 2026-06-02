@@ -1,4 +1,4 @@
-# GuLiCode Desktop Debug Loopback Renderer - 2026-05-31
+﻿# GuLiCode Desktop Debug Loopback Renderer - 2026-05-31
 
 ## Summary
 

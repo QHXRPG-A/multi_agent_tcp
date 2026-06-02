@@ -8,8 +8,8 @@ used a fan-out Blueprint run to expose runtime scheduling blockers.
 The installed plugin path now uses a plugin-owned runtime venv, the Codex cache
 `.mcp.json` is synchronized to that private Python, and standalone smoke checks
 load `multi_agent_tcp` from plugin `site-packages` with repository fallback
-disabled. The live fan-out smoke was switched from Codex to Codex after the
-local Codex model `gpt-5.4` proved unavailable.
+disabled. The live fan-out smoke was switched from CodeMaker to Codex after the
+local CodeMaker model `netease-codemaker/kimi-k2.5` proved unavailable.
 
 The main runtime fix from the fan-out smoke is reminder scheduling:
 `framework_outgoing_targets_reminder` is now an actual queued agent message, but
@@ -119,8 +119,8 @@ Fan-out status smoke:
 
 Codex live smoke:
 
-1. Codex run was abandoned because local `codex models
-   codex` listed `kimi-k2.6` but not `kimi-k2.5`.
+1. CodeMaker run was abandoned because local `codemaker models
+   netease-codemaker` listed `kimi-k2.6` but not `kimi-k2.5`.
 2. A Codex live run (`run-f9f6b07cd8a4`) proved planner could call
    `agent_dispatch` to all three workers.
 3. That run exposed duplicate reminder/batch behavior when reminders raced

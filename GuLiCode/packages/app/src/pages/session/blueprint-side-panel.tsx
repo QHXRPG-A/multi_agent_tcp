@@ -22,6 +22,7 @@ import { BlueprintCollaborationAuthPanel, postDesktopBlueprintSnapshot, type Des
 import { Persist, persisted } from "@/utils/persist"
 import { decode64 } from "@/utils/base64"
 import {
+  AGENT_PROMPT_INPUT_PORT,
   DEFAULT_INPUT_PORT,
   DEFAULT_OUTPUT_PORT,
   GRID_SIZE,
@@ -55,7 +56,9 @@ import {
   isAbsoluteBlueprintPath,
   toBlueprintDocument,
   toRuntimeGraphDraft,
+  updateAgentNode,
   updateEdge,
+  updatePromptNode,
   updateScriptNode,
   validateBlueprintConfigForStart,
   type BlueprintAddNodeKind,
@@ -68,6 +71,7 @@ import {
   type BlueprintDraft,
   type BlueprintEdge,
   type BlueprintNodeLayout,
+  type BlueprintPromptNode,
   type BlueprintRouteNode,
   type BlueprintScriptCompileResult,
   type BlueprintScriptNode,
@@ -92,6 +96,9 @@ const SCRIPT_NODE_PORT_ROW_HEIGHT = 22
 const SCRIPT_NODE_MIN_EXPANDED_HEIGHT = 102
 const COMMON_BRANCH_WIDTH = SCRIPT_NODE_WIDTH
 const COMMON_BRANCH_HEIGHT = SCRIPT_NODE_MIN_EXPANDED_HEIGHT
+const PROMPT_NODE_WIDTH = 220
+const PROMPT_NODE_COLLAPSED_HEIGHT = 96
+const PROMPT_NODE_EXPANDED_HEIGHT = 156
 const SCRIPT_NODE_BLUE_CLIP_PATH = "polygon(0 0, 42% 0, 55% 30%, 47% 30%, 60% 58%, 52% 58%, 64% 100%, 0 100%)"
 const SCRIPT_NODE_SPLIT_LINE_POINTS = "42,0 55,30 47,30 60,58 52,58 64,100"
 const TERMINAL_WIDTH = 92
@@ -111,6 +118,22 @@ const BLUEPRINT_FLOAT_DRAG_THRESHOLD = 8
 const RIGHT_CLICK_PAN_THRESHOLD = 5
 const NODE_SEARCH_CARD_WIDTH = 320
 const NODE_SEARCH_CARD_MAX_HEIGHT = 360
+
+type BlueprintCanvasPortShape = "circle" | "triangle"
+
+type BlueprintCanvasPortDefinition = {
+  name: string
+  title: string
+  shape: BlueprintCanvasPortShape
+}
+
+const AGENT_INPUT_PORT_DEFINITIONS: BlueprintCanvasPortDefinition[] = [
+  { name: DEFAULT_INPUT_PORT, title: "Input", shape: "circle" },
+  { name: AGENT_PROMPT_INPUT_PORT, title: "prompt: str", shape: "triangle" },
+]
+const AGENT_OUTPUT_PORT_DEFINITIONS: BlueprintCanvasPortDefinition[] = [
+  { name: DEFAULT_OUTPUT_PORT, title: "Output", shape: "circle" },
+]
 const RUNTIME_WORKING_AGENT_STATES = new Set(["dispatching", "running", "waiting_for_reply", "processing_reply"])
 const RUNTIME_FLOW_MESSAGE_STATUSES = new Set(["queued", "dispatching"])
 const BLUEPRINT_RUNTIME_FLOW_DOTS = [0, 1, 2, 3, 4]
@@ -512,6 +535,14 @@ const INSPECTOR_TIPS = {
     what: "blueprint.tip.runPrompt.what",
     usage: "blueprint.tip.runPrompt.usage",
   },
+  promptText: {
+    what: "blueprint.tip.promptText.what",
+    usage: "blueprint.tip.promptText.usage",
+  },
+  promptTrigger: {
+    what: "blueprint.tip.promptTrigger.what",
+    usage: "blueprint.tip.promptTrigger.usage",
+  },
   executionMode: {
     what: "blueprint.tip.executionMode.what",
     usage: "blueprint.tip.executionMode.usage",
@@ -750,6 +781,11 @@ type NodeItem =
       type: "common"
       id: string
       node: BlueprintCommonNode
+    }
+  | {
+      type: "prompt"
+      id: string
+      node: BlueprintPromptNode
     }
   | {
       type: "agent"
@@ -1005,6 +1041,11 @@ export function BlueprintSidePanel(props: {
       description: language.t("blueprint.add.workerAgent.description" as never),
     },
     {
+      kind: "prompt" as const,
+      label: language.t("blueprint.node.prompt" as never),
+      description: language.t("blueprint.add.prompt.description" as never),
+    },
+    {
       kind: "branch" as const,
       label: language.t("blueprint.node.branch" as never),
       description: language.t("blueprint.add.branch.description" as never),
@@ -1094,6 +1135,11 @@ export function BlueprintSidePanel(props: {
       id,
       node,
       type: "common" as const,
+    })),
+    ...Object.entries(draft.graph.prompt_nodes ?? {}).map(([id, node]) => ({
+      id,
+      node,
+      type: "prompt" as const,
     })),
     ...Object.entries(draft.graph.script_nodes ?? {}).map(([id, node]) => ({
       id,
@@ -1246,6 +1292,10 @@ export function BlueprintSidePanel(props: {
     if (draft.inspector?.type !== "node") return
     return draft.graph.common_nodes?.[draft.inspector.id]
   })
+  const inspectedPrompt = createMemo(() => {
+    if (draft.inspector?.type !== "node") return
+    return draft.graph.prompt_nodes?.[draft.inspector.id]
+  })
   const inspectedScript = createMemo(() => {
     if (draft.inspector?.type !== "node") return
     return draft.graph.script_nodes?.[draft.inspector.id]
@@ -1256,7 +1306,7 @@ export function BlueprintSidePanel(props: {
     return visibleEdges().find((edge) => edge.id === draft.inspector?.id)
   })
   const inspectorOpen = createMemo(
-    () => !!inspectedAgent() || !!inspectedRoute() || !!inspectedCommon() || !!inspectedScript() || !!inspectedEdge(),
+    () => !!inspectedAgent() || !!inspectedRoute() || !!inspectedCommon() || !!inspectedPrompt() || !!inspectedScript() || !!inspectedEdge(),
   )
   const runtimeGraph = createMemo(() => toRuntimeGraphDraft(draft))
   const currentConfig = createMemo(() => ({
@@ -3293,6 +3343,7 @@ export function BlueprintSidePanel(props: {
 
   const handleNodePointerDown = (event: PointerEvent, item: NodeItem) => {
     const id = item.id
+    const target = event.target as HTMLElement | null
     closeFloatingAgentPanels()
     setNodeSearch(undefined)
     if (event.button === 2) {
@@ -3305,6 +3356,10 @@ export function BlueprintSidePanel(props: {
     event.stopPropagation()
 
     selectNode(id)
+    if (target?.closest("button,input,textarea,select,[data-blueprint-prompt-editor]")) {
+      cancelAgentPanelLongPress()
+      return
+    }
     startAgentPanelLongPress(event, item)
     const layout = draft.layout.nodes[id]
     if (!layout) return
@@ -3984,11 +4039,22 @@ export function BlueprintSidePanel(props: {
                       void openScriptNodeInEditor(item.node)
                       return
                     }
+                    if (item.type === "prompt") {
+                      replaceDraft(updatePromptNode(draft, item.id, { expanded: !item.node.expanded }))
+                      return
+                    }
                     inspectNode(item.id)
                   }}
                   onDelete={() => replaceDraft(deleteNode(draft, item.id))}
                   onEdit={() => inspectNode(item.id)}
                   onInfoPanel={() => void openAgentPanel(item.id, false)}
+                  onAgentCollapsedChange={(collapsed) => replaceDraft(updateAgentNode(draft, item.id, { collapsed }))}
+                  onPromptTextChange={(text) => {
+                    if (item.type === "prompt") replaceDraft(updatePromptNode(draft, item.id, { text }))
+                  }}
+                  onPromptTriggerChange={(trigger) => {
+                    if (item.type === "prompt") replaceDraft(updatePromptNode(draft, item.id, { trigger }))
+                  }}
                   onScriptCollapsedChange={(collapsed) => replaceDraft(updateScriptNode(draft, item.id, { collapsed }))}
                   onOutputPointerDown={(event, portName) => handleOutputPortPointerDown(event, item.id, portName)}
                   onInputPointerUp={(event, portName) => handleInputPortPointerUp(event, item.id, portName)}
@@ -4163,6 +4229,7 @@ export function BlueprintSidePanel(props: {
                   selectedAgent={inspectedAgent()}
                   selectedRoute={inspectedRoute()}
                   selectedCommon={inspectedCommon()}
+                  selectedPrompt={inspectedPrompt()}
                   selectedScript={inspectedScript()}
                   selectedTerminal={inspectedTerminal()}
                   selectedNodeId={draft.inspector?.type === "node" ? draft.inspector.id : undefined}
@@ -5448,7 +5515,7 @@ function AgentInfoPanel(props: {
   })
   const live = createMemo(() => !!props.runId && !isTerminalRuntimeStatus(props.runtimeStatus))
   const state = createMemo(() =>
-    String(statusField("agent_state") ?? runtime()?.state ?? (props.runId ? props.runtimeStatus ?? "running" : "未运行")),
+    String(statusField("agent_state") ?? runtime()?.state ?? (props.runId ? "idle" : "未运行")),
   )
   const taskStatus = createMemo(() =>
     String(latestTaskStatusRecord()?.status ?? statusField("task_status") ?? runtime()?.task_status ?? "not_started"),
@@ -5811,6 +5878,9 @@ function BlueprintNodeView(props: {
   onDelete: () => void
   onEdit: () => void
   onInfoPanel: () => void
+  onAgentCollapsedChange: (collapsed: boolean) => void
+  onPromptTextChange: (text: string) => void
+  onPromptTriggerChange: (trigger: "once" | "always") => void
   onScriptCollapsedChange: (collapsed: boolean) => void
   onOutputPointerDown: (event: PointerEvent, portName: string) => void
   onInputPointerUp: (event: PointerEvent, portName: string) => void
@@ -5822,20 +5892,21 @@ function BlueprintNodeView(props: {
   const height = () => size().height
   const interactive = () => props.selected || props.inspecting || props.connecting || hovering()
   const supportsInput = () =>
-    props.item.type === "common"
+    props.item.type === "prompt"
+      ? false
+      : props.item.type === "common"
       ? props.item.node.kind !== "tick"
       : props.item.type !== "terminal" || props.item.kind === "end"
   const supportsOutput = () => props.item.type !== "terminal" || props.item.kind === "start"
   const expandedScript = () => props.item.type === "script" && !props.item.node.collapsed
-  const portShape = (side: "input" | "output") =>
-    props.item.type === "script" || (props.item.type === "common" && props.item.node.kind === "branch" && side === "input")
-      ? "triangle"
-      : "circle"
+  const expandedAgent = () => props.item.type === "agent" && props.item.node.collapsed === false
+  const portShape = (side: "input" | "output", portName: string) =>
+    nodePortShape(props.item, side, portName)
   const inputPorts = () => nodePorts(props.item, "input")
   const outputPorts = () => nodePorts(props.item, "output")
   const showBranchPortLabels = () => props.item.type === "common" && props.item.node.kind === "branch"
-  const showInput = () => supportsInput() && (props.hasIncomingEdge || props.isConnectTargetVisible || interactive() || expandedScript())
-  const showOutput = () => supportsOutput() && (props.hasOutgoingEdge || interactive() || expandedScript())
+  const showInput = () => supportsInput() && (props.hasIncomingEdge || props.isConnectTargetVisible || interactive() || expandedScript() || expandedAgent())
+  const showOutput = () => supportsOutput() && (props.hasOutgoingEdge || interactive() || expandedScript() || expandedAgent())
   const agentPanelProgress = () => clamp(props.agentPanelProgress, 0, 1)
   const nodeTone = createMemo(() => {
     if (props.item.type === "terminal") {
@@ -5888,6 +5959,15 @@ function BlueprintNodeView(props: {
         icon: "#1f4e79",
         text: "#082f49",
         subtitle: "#2f3a18",
+      }
+    }
+    if (props.item.type === "prompt") {
+      return {
+        background: "linear-gradient(135deg, rgba(32, 45, 52, 0.98), rgba(11, 25, 31, 0.98))",
+        border: props.selected ? "rgba(251, 191, 36, 0.96)" : "rgba(251, 191, 36, 0.52)",
+        icon: "#fbbf24",
+        text: "#f8fdff",
+        subtitle: "#b8cede",
       }
     }
     if (props.item.node.node_type === "agent") {
@@ -5947,7 +6027,7 @@ function BlueprintNodeView(props: {
                   portName={port.name}
                   title={port.title}
                   top={port.top}
-                  shape={portShape("input")}
+                  shape={portShape("input", port.name)}
                   onPointerUp={(event) => props.onInputPointerUp(event, port.name)}
                   onPointerDown={(event) => event.stopPropagation()}
                 />
@@ -5963,7 +6043,7 @@ function BlueprintNodeView(props: {
                   portName={port.name}
                   title={port.title}
                   top={port.top}
-                  shape={portShape("output")}
+                  shape={portShape("output", port.name)}
                   onPointerDown={(event) => props.onOutputPointerDown(event, port.name)}
                 />
               )}
@@ -5975,20 +6055,135 @@ function BlueprintNodeView(props: {
               <Show
                 when={showBranchPortLabels()}
                 fallback={
-                  <>
-                    <div class="flex w-full min-w-0 items-center gap-2">
-                      <Icon
-                        size="small"
-                        name={props.item.type === "terminal" ? "selector" : props.item.type === "route" || props.item.type === "common" ? "branch" : "blueprint"}
-                        class="shrink-0"
-                        style={{ color: nodeTone().icon }}
-                      />
-                      <div class="min-w-0 truncate text-12-medium" style={{ color: nodeTone().text }}>{props.title}</div>
-                    </div>
-                    <Show when={props.item.type !== "terminal"}>
-                      <div class="w-full truncate text-11-regular" style={{ color: nodeTone().subtitle }}>{props.subtitle}</div>
-                    </Show>
-                  </>
+                  <Show
+                    when={props.item.type === "prompt" ? props.item : undefined}
+                    fallback={
+                      <Show
+                        when={props.item.type === "agent" && props.item.node.collapsed === false ? props.item : undefined}
+                        fallback={
+                          <>
+                            <div class="flex w-full min-w-0 items-center gap-2">
+                              <Icon
+                                size="small"
+                                name={props.item.type === "terminal" ? "selector" : props.item.type === "route" || props.item.type === "common" ? "branch" : "blueprint"}
+                                class="shrink-0"
+                                style={{ color: nodeTone().icon }}
+                              />
+                              <div class="min-w-0 truncate text-12-medium" style={{ color: nodeTone().text }}>{props.title}</div>
+                            </div>
+                            <Show when={props.item.type !== "terminal"}>
+                              <div class="w-full truncate text-11-regular" style={{ color: nodeTone().subtitle }}>{props.subtitle}</div>
+                            </Show>
+                          </>
+                        }
+                      >
+                        {(agentItem) => (
+                          <>
+                            <div class="pointer-events-none absolute left-3 right-3 top-3 z-10 flex min-w-0 items-center gap-2">
+                              <Icon size="small" name="blueprint" class="shrink-0" style={{ color: nodeTone().icon }} />
+                              <div class="min-w-0 truncate text-13-medium" style={{ color: nodeTone().text }}>{props.title}</div>
+                            </div>
+                            <div
+                              class="pointer-events-none absolute left-3 right-7 top-[34px] z-10 truncate text-12-regular"
+                              style={{ color: nodeTone().subtitle }}
+                            >
+                              {props.subtitle}
+                            </div>
+                            <For each={agentPortDefinitions("input")}>
+                              {(port) => (
+                                <div
+                                  data-blueprint-agent-port-label="input"
+                                  class="pointer-events-none absolute left-4 z-10 h-[18px] max-w-[calc(50%_-_28px)] truncate text-10-medium leading-[18px]"
+                                  style={{
+                                    top: `${agentPortY(agentItem().node, "input", port.name) - 9}px`,
+                                    color: nodeTone().text,
+                                  }}
+                                >
+                                  {port.title}
+                                </div>
+                              )}
+                            </For>
+                            <For each={agentPortDefinitions("output")}>
+                              {(port) => (
+                                <div
+                                  data-blueprint-agent-port-label="output"
+                                  class="pointer-events-none absolute right-4 z-10 h-[18px] max-w-[calc(50%_-_28px)] truncate text-right text-10-medium leading-[18px]"
+                                  style={{
+                                    top: `${agentPortY(agentItem().node, "output", port.name) - 9}px`,
+                                    color: nodeTone().subtitle,
+                                  }}
+                                >
+                                  {port.title}
+                                </div>
+                              )}
+                            </For>
+                          </>
+                        )}
+                      </Show>
+                    }
+                  >
+                    {(promptItem) => (
+                      <div data-blueprint-prompt-node class="flex h-full w-full min-w-0 flex-col gap-2 py-1">
+                        <div class="flex min-w-0 items-center gap-2">
+                          <Icon size="small" name="blueprint" class="shrink-0" style={{ color: nodeTone().icon }} />
+                          <div class="min-w-0 truncate text-12-medium" style={{ color: nodeTone().text }}>{props.title}</div>
+                          <div class="ml-auto shrink-0 rounded-sm border border-[rgba(251,191,36,0.34)] px-1.5 text-10-medium uppercase tracking-normal text-[#fde68a]">
+                            {promptItem().node.trigger === "always" ? "multi" : "once"}
+                          </div>
+                        </div>
+                        <Show
+                          when={promptItem().node.expanded}
+                          fallback={
+                            <input
+                              data-blueprint-prompt-editor
+                              class="min-h-8 w-full min-w-0 rounded-sm border border-[rgba(103,232,249,0.18)] bg-[#020817]/82 px-2 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(251,191,36,0.72)]"
+                              value={promptItem().node.text}
+                              placeholder={language.t("blueprint.prompt.placeholder" as never)}
+                              onPointerDown={(event) => event.stopPropagation()}
+                              onInput={(event) => props.onPromptTextChange(event.currentTarget.value)}
+                            />
+                          }
+                        >
+                          <textarea
+                            data-blueprint-prompt-editor
+                            class="min-h-[70px] w-full resize-none rounded-sm border border-[rgba(103,232,249,0.18)] bg-[#020817]/82 px-2 py-1.5 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(251,191,36,0.72)]"
+                            value={promptItem().node.text}
+                            placeholder={language.t("blueprint.prompt.placeholder" as never)}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onInput={(event) => props.onPromptTextChange(event.currentTarget.value)}
+                          />
+                        </Show>
+                        <div class="mt-auto grid grid-cols-2 overflow-hidden rounded-sm border border-[rgba(103,232,249,0.16)] text-10-medium">
+                          <button
+                            type="button"
+                            data-blueprint-prompt-trigger="once"
+                            class="h-6 bg-[#020817]/56 text-[#b8cede] hover:bg-[rgba(251,191,36,0.14)]"
+                            classList={{ "bg-[rgba(251,191,36,0.24)] text-[#fde68a]": promptItem().node.trigger === "once" }}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              props.onPromptTriggerChange("once")
+                            }}
+                          >
+                            {language.t("blueprint.prompt.trigger.once" as never)}
+                          </button>
+                          <button
+                            type="button"
+                            data-blueprint-prompt-trigger="always"
+                            class="h-6 border-l border-[rgba(103,232,249,0.16)] bg-[#020817]/56 text-[#b8cede] hover:bg-[rgba(251,191,36,0.14)]"
+                            classList={{ "bg-[rgba(251,191,36,0.24)] text-[#fde68a]": promptItem().node.trigger === "always" }}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              props.onPromptTriggerChange("always")
+                            }}
+                          >
+                            {language.t("blueprint.prompt.trigger.always" as never)}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </Show>
                 }
               >
                 <div class="pointer-events-none absolute left-3 right-3 top-3 z-10 flex min-w-0 items-center gap-2">
@@ -6179,6 +6374,33 @@ function BlueprintNodeView(props: {
               </svg>
             </div>
           </Show>
+          <Show when={props.item.type === "agent" ? props.item : undefined}>
+            {(agentItem) => (
+              <button
+                type="button"
+                data-blueprint-agent-collapse-toggle
+                class="absolute bottom-0 left-1/2 z-20 grid size-4 -translate-x-1/2 translate-y-1/2 place-items-center rounded-full border border-[rgba(186,230,253,0.74)] bg-[#071019] text-[#bae6fd] shadow-[0_4px_12px_rgba(0,0,0,0.3)] hover:bg-[#0f2434]"
+                title={language.t((agentItem().node.collapsed === false ? "blueprint.agent.collapse" : "blueprint.agent.expand") as never)}
+                aria-label={language.t((agentItem().node.collapsed === false ? "blueprint.agent.collapse" : "blueprint.agent.expand") as never)}
+                aria-expanded={agentItem().node.collapsed === false}
+                onPointerDown={(event: PointerEvent) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                }}
+                onClick={(event: MouseEvent) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  props.onAgentCollapsedChange(agentItem().node.collapsed === false)
+                }}
+              >
+                <Icon
+                  size="small"
+                  name="chevron-down"
+                  class={agentItem().node.collapsed === false ? "rotate-180" : ""}
+                />
+              </button>
+            )}
+          </Show>
         </div>
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
@@ -6252,6 +6474,7 @@ export function BlueprintInspector(props: {
   selectedAgent?: BlueprintAgentNode
   selectedRoute?: BlueprintRouteNode
   selectedCommon?: BlueprintCommonNode
+  selectedPrompt?: BlueprintPromptNode
   selectedScript?: BlueprintScriptNode
   selectedTerminal?: BlueprintTerminalKind
   selectedNodeId?: string
@@ -6318,6 +6541,12 @@ export function BlueprintInspector(props: {
     props.setStore("graph", "common_nodes", id, field as never, value as never)
   }
 
+  const updatePromptField = <K extends keyof BlueprintPromptNode>(field: K, value: BlueprintPromptNode[K]) => {
+    const id = props.selectedNodeId
+    if (!id || !props.selectedPrompt) return
+    props.setDraft(updatePromptNode(props.draft, id, { [field]: value } as Partial<BlueprintPromptNode>))
+  }
+
   const updateSelectedEdge = (edge: BlueprintEdge, patch: Partial<BlueprintEdge>) => {
     const from = patch.from ?? edge.from
     const to = patch.to ?? edge.to
@@ -6382,13 +6611,6 @@ export function BlueprintInspector(props: {
                 value={props.selectedAgent?.prompt ?? ""}
                 multiline
                 onChange={(value) => updateAgentField("prompt", value)}
-              />
-              <InspectorTextField
-                tip="runPrompt"
-                label={language.t("blueprint.field.runPrompt")}
-                value={props.selectedAgent?.run_prompt ?? ""}
-                multiline
-                onChange={(value) => updateAgentField("run_prompt", value)}
               />
               <SelectField
                 tip="executionMode"
@@ -6574,6 +6796,34 @@ export function BlueprintInspector(props: {
                   }}
                 />
               </Show>
+            </div>
+          </Match>
+
+          <Match when={props.selectedPrompt && props.selectedNodeId}>
+            <div class="flex flex-col gap-3">
+              <InspectorIdentity tip="nodeId" label={language.t("blueprint.field.nodeId")} value={props.selectedNodeId ?? ""} />
+              <InspectorTextField
+                tip="promptText"
+                label={language.t("blueprint.field.promptText" as never)}
+                value={props.selectedPrompt?.text ?? ""}
+                multiline
+                onChange={(value) => updatePromptField("text", value)}
+              />
+              <SelectField
+                tip="promptTrigger"
+                label={language.t("blueprint.field.promptTrigger" as never)}
+                value={props.selectedPrompt?.trigger ?? "once"}
+                options={[
+                  ["once", language.t("blueprint.prompt.trigger.once" as never)],
+                  ["always", language.t("blueprint.prompt.trigger.always" as never)],
+                ]}
+                onChange={(value) => updatePromptField("trigger", value === "always" ? "always" : "once")}
+              />
+              <CheckboxField
+                label={language.t("blueprint.field.expanded" as never)}
+                checked={props.selectedPrompt?.expanded === true}
+                onChange={(checked) => updatePromptField("expanded", checked)}
+              />
             </div>
           </Match>
 
@@ -7303,6 +7553,7 @@ function InspectorTipButton(props: { label: string; tip: InspectorTipKey; placem
 function nodeTitle(t: (key: never, params?: Record<string, string | number | boolean>) => string, item: NodeItem) {
   if (item.type === "terminal") return item.kind === "start" ? t("blueprint.node.start" as never) : t("blueprint.node.end" as never)
   if (item.type === "common") return item.node.kind === "tick" ? t("blueprint.node.tick" as never) : t("blueprint.node.branch" as never)
+  if (item.type === "prompt") return t("blueprint.node.prompt" as never)
   if (item.type === "script") return item.node.title || item.node.function_name || t("blueprint.node.script" as never)
   return item.id
 }
@@ -7317,6 +7568,7 @@ function nodeSubtitle(t: (key: never, params?: Record<string, string | number | 
     if (item.node.kind === "tick") return t("blueprint.common.tickSubtitle" as never, { n: item.node.every_n_seconds } as never)
     return t("blueprint.common.branchSubtitle" as never)
   }
+  if (item.type === "prompt") return item.node.text.trim() || t("blueprint.prompt.empty" as never)
   if (item.type === "script") return scriptNodeDescription(t, item.node)
   return t("blueprint.node.terminal" as never)
 }
@@ -7327,7 +7579,7 @@ function routeLabelKey(routeKind: string) {
 }
 
 function addNodeIcon(kind: BlueprintAddNodeKind): "blueprint" | "branch" | "selector" {
-  if (kind === "agent" || kind === "worker-agent" || kind === "test-agent" || kind === "script") return "blueprint"
+  if (kind === "agent" || kind === "worker-agent" || kind === "test-agent" || kind === "prompt" || kind === "script") return "blueprint"
   if (kind === "start" || kind === "end") return "selector"
   return "branch"
 }
@@ -7355,9 +7607,20 @@ function scriptPortLabel(port: BlueprintScriptPort) {
 
 function nodeItemSize(item: NodeItem) {
   if (item.type === "terminal") return { width: TERMINAL_WIDTH, height: TERMINAL_HEIGHT }
+  if (item.type === "agent") return agentNodeSize(item.node)
   if (item.type === "script") return scriptNodeSize(item.node)
   if (item.type === "common") return commonNodeSize(item.node)
+  if (item.type === "prompt") return promptNodeSize(item.node)
   return { width: NODE_WIDTH, height: NODE_HEIGHT }
+}
+
+function agentNodeSize(node: BlueprintAgentNode) {
+  if (node.collapsed !== false) return { width: NODE_WIDTH, height: NODE_HEIGHT }
+  const rows = Math.max(AGENT_INPUT_PORT_DEFINITIONS.length, AGENT_OUTPUT_PORT_DEFINITIONS.length, 1)
+  return {
+    width: SCRIPT_NODE_WIDTH,
+    height: Math.max(SCRIPT_NODE_MIN_EXPANDED_HEIGHT, SCRIPT_NODE_HEADER_HEIGHT + rows * SCRIPT_NODE_PORT_ROW_HEIGHT + 14),
+  }
 }
 
 function scriptNodeSize(node: BlueprintScriptNode) {
@@ -7371,6 +7634,11 @@ function scriptNodeSize(node: BlueprintScriptNode) {
 
 function nodePorts(item: NodeItem, side: "input" | "output") {
   if (item.type === "common") return commonNodePorts(item.node, side)
+  if (item.type === "prompt") {
+    if (side === "input") return []
+    return [{ name: DEFAULT_OUTPUT_PORT, title: "out: str", top: promptNodeSize(item.node).height / 2 }]
+  }
+  if (item.type === "agent") return agentNodePorts(item.node, side)
   if (item.type !== "script" || item.node.collapsed !== false) {
     const name = side === "input" ? DEFAULT_INPUT_PORT : DEFAULT_OUTPUT_PORT
     return [{ name, title: side === "input" ? "Input" : "Output", top: undefined as number | undefined }]
@@ -7381,6 +7649,39 @@ function nodePorts(item: NodeItem, side: "input" | "output") {
     title: scriptPortLabel(port),
     top: scriptPortY(item.node, side, port.name),
   }))
+}
+
+function agentPortDefinitions(side: "input" | "output") {
+  return side === "input" ? AGENT_INPUT_PORT_DEFINITIONS : AGENT_OUTPUT_PORT_DEFINITIONS
+}
+
+function agentNodePorts(node: BlueprintAgentNode, side: "input" | "output") {
+  if (node.collapsed !== false) {
+    const name = side === "input" ? DEFAULT_INPUT_PORT : DEFAULT_OUTPUT_PORT
+    const port = agentPortDefinitions(side).find((definition) => definition.name === name)
+    return [{ name, title: port?.title ?? (side === "input" ? "Input" : "Output"), top: undefined as number | undefined }]
+  }
+  return agentPortDefinitions(side).map((port) => ({
+    name: port.name,
+    title: port.title,
+    top: agentPortY(node, side, port.name),
+  }))
+}
+
+function nodePortShape(item: NodeItem, side: "input" | "output", portName: string): BlueprintCanvasPortShape {
+  if (item.type === "agent") {
+    return agentPortDefinitions(side).find((port) => port.name === portName)?.shape ?? "circle"
+  }
+  if (item.type === "script" || item.type === "prompt") return "triangle"
+  if (item.type === "common" && item.node.kind === "branch" && side === "input") return "triangle"
+  return "circle"
+}
+
+function promptNodeSize(node: Pick<BlueprintPromptNode, "expanded">) {
+  return {
+    width: PROMPT_NODE_WIDTH,
+    height: node.expanded ? PROMPT_NODE_EXPANDED_HEIGHT : PROMPT_NODE_COLLAPSED_HEIGHT,
+  }
 }
 
 function commonNodePorts(node: BlueprintCommonNode, side: "input" | "output") {
@@ -7405,6 +7706,17 @@ function commonNodeSize(node: Pick<BlueprintCommonNode, "kind">) {
 function scriptPortY(node: BlueprintScriptNode, side: "input" | "output", portName?: string) {
   if (node.collapsed !== false) return scriptNodeSize(node).height / 2
   const ports = side === "input" ? node.inputs : node.outputs
+  const fallback = side === "input" ? DEFAULT_INPUT_PORT : DEFAULT_OUTPUT_PORT
+  const index = Math.max(
+    0,
+    ports.findIndex((port) => port.name === (portName || fallback)),
+  )
+  return SCRIPT_NODE_HEADER_HEIGHT + index * SCRIPT_NODE_PORT_ROW_HEIGHT + SCRIPT_NODE_PORT_ROW_HEIGHT / 2
+}
+
+function agentPortY(node: BlueprintAgentNode, side: "input" | "output", portName?: string) {
+  if (node.collapsed !== false) return agentNodeSize(node).height / 2
+  const ports = agentPortDefinitions(side)
   const fallback = side === "input" ? DEFAULT_INPUT_PORT : DEFAULT_OUTPUT_PORT
   const index = Math.max(
     0,
@@ -8502,8 +8814,11 @@ function portPoint(draft: BlueprintDraft, id: string, side: "input" | "output", 
   const size = nodeSize(draft, id)
   const script = draft.graph.script_nodes?.[id]
   const common = draft.graph.common_nodes?.[id]
+  const prompt = draft.graph.prompt_nodes?.[id]
+  const agent = draft.graph.agent_nodes[id]
   const commonPort = common ? commonNodePorts(common, side).find((port) => port.name === portName) : undefined
-  const portTop = script ? scriptPortY(script, side, portName) : (commonPort?.top ?? size.height / 2)
+  const promptPort = prompt ? nodePorts({ type: "prompt", id, node: prompt }, side).find((port) => port.name === (portName ?? DEFAULT_OUTPUT_PORT)) : undefined
+  const portTop = script ? scriptPortY(script, side, portName) : (commonPort?.top ?? (agent ? agentPortY(agent, side, portName) : undefined) ?? promptPort?.top ?? size.height / 2)
   return {
     x: side === "output" ? layout.x + size.width : layout.x,
     y: layout.y + portTop,
@@ -8511,10 +8826,14 @@ function portPoint(draft: BlueprintDraft, id: string, side: "input" | "output", 
 }
 
 function nodeSize(draft: BlueprintDraft, id: string) {
+  const agent = draft.graph.agent_nodes[id]
+  if (agent) return agentNodeSize(agent)
   const script = draft.graph.script_nodes?.[id]
   if (script) return scriptNodeSize(script)
   const common = draft.graph.common_nodes?.[id]
   if (common) return commonNodeSize(common)
+  const prompt = draft.graph.prompt_nodes?.[id]
+  if (prompt) return promptNodeSize(prompt)
   return nodeKind(draft, id) === "terminal"
     ? { width: TERMINAL_WIDTH, height: TERMINAL_HEIGHT }
     : { width: NODE_WIDTH, height: NODE_HEIGHT }
@@ -8522,6 +8841,7 @@ function nodeSize(draft: BlueprintDraft, id: string) {
 
 function sizeForAddKind(kind: BlueprintAddNodeKind) {
   if (kind === "branch") return { width: COMMON_BRANCH_WIDTH, height: COMMON_BRANCH_HEIGHT }
+  if (kind === "prompt") return { width: PROMPT_NODE_WIDTH, height: PROMPT_NODE_COLLAPSED_HEIGHT }
   return kind === "start" || kind === "end"
     ? { width: TERMINAL_WIDTH, height: TERMINAL_HEIGHT }
     : { width: NODE_WIDTH, height: NODE_HEIGHT }

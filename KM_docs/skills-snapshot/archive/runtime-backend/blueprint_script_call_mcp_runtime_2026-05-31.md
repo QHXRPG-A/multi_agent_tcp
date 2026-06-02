@@ -1,4 +1,4 @@
-# Blueprint Script Call MCP Runtime - 2026-05-31
+﻿# Blueprint Script Call MCP Runtime - 2026-05-31
 
 ## Summary
 

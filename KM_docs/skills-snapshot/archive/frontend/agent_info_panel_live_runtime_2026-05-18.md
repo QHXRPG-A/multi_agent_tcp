@@ -111,7 +111,7 @@ bun run dev
 ## 当前未完成 / 后续建议
 
 - `blueprint-list-models` 仍可能因本机 spawn `EPERM` 失败，需要把
-  `codex` / `codex` 可执行文件解析、权限错误提示和 fallback 做得更友好。
+  `codex` / `codemaker` 可执行文件解析、权限错误提示和 fallback 做得更友好。
 - Agent 信息面板的 pin 图标当前复用现有 icon，后续可接入专门 pin icon。
 - runtime 状态面板仍是 `HTTP/IPC` 轮询的状态投影；Agent transcript 已走
   WebSocket。后续可决定是否把更细粒度运行时状态也迁移到统一事件面。

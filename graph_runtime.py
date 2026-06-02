@@ -32,13 +32,15 @@ RunFinalStatus = str
 AgentNodeType = str
 CommonNodeKind = str
 BlueprintPortDataType = str
+PromptNodeTrigger = str
 
 _VALID_ENVELOPE_KINDS = {"text", "image", "audio", "file", "blob"}
 _VALID_ENVELOPE_ENCODINGS = {"inline", "fileref", "blobref"}
 _VALID_EXECUTION_MODES = {"blocking", "nonblocking"}
 _VALID_ROUTE_KINDS = {"sequence", "parallel", "parallel_reduce"}
 _VALID_COMMON_NODE_KINDS = {"branch", "tick"}
-_VALID_BLUEPRINT_PORT_DATA_TYPES = {"message", "bool", "tick"}
+_VALID_BLUEPRINT_PORT_DATA_TYPES = {"message", "bool", "tick", "str"}
+_VALID_PROMPT_NODE_TRIGGERS = {"once", "always"}
 _VALID_SKILL_SELECTION_MODES = {"none", "all", "selected", "upstream"}
 _VALID_BLUEPRINT_TERMINAL_KINDS = {"start", "end"}
 _VALID_TOP_AGENT_RUN_PERMISSIONS = {"ask", "start", "status", "end", "utterances", "fixture"}
@@ -52,6 +54,9 @@ DEFAULT_AGENT_WRITE_SCOPE = ["**"]
 LEGACY_REPORT_ONLY_WRITE_SCOPE = ["shared/reports/**"]
 COMPLETION_IDLE_THRESHOLD_SEC = 30.0
 AGENT_RUN_PROMPT_HEADER = "# Agent Run Prompt"
+BLUEPRINT_PROMPT_HEADER_PREFIX = "# Blueprint Prompt:"
+AGENT_PROMPT_INPUT_PORT = "prompt"
+DEFAULT_OUTPUT_PORT = "out"
 DEFAULT_AGENT_ACCESS_POLICY = {
     "direct_project_io": True,
     "outside_project_io": True,
@@ -120,21 +125,33 @@ def is_dispatch_no_op_body(body: Any) -> bool:
     return body == "" or (type(body) is int and body == 0)
 
 
-def _prepend_agent_run_prompt_to_body(body: Any, run_prompt: str) -> tuple[Any, bool]:
-    run_prompt = str(run_prompt or "").strip()
-    if not run_prompt or is_dispatch_no_op_body(body):
+def _prepend_prompt_sections_to_body(
+    body: Any,
+    sections: Sequence[tuple[str, str]],
+) -> tuple[Any, bool]:
+    prompt_sections = [
+        (str(header).strip(), str(text or "").strip())
+        for header, text in sections
+        if str(header).strip() and str(text or "").strip()
+    ]
+    if not prompt_sections or is_dispatch_no_op_body(body):
         return body, False
+    prefix = "\n\n".join(f"{header}\n\n{text}" for header, text in prompt_sections)
     if isinstance(body, dict):
         prompt = body.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             return body, False
         return {
             **body,
-            "prompt": f"{AGENT_RUN_PROMPT_HEADER}\n\n{run_prompt}\n\n---\n\n{prompt}",
+            "prompt": f"{prefix}\n\n---\n\n{prompt}",
         }, True
     if isinstance(body, str) and body.strip():
-        return f"{AGENT_RUN_PROMPT_HEADER}\n\n{run_prompt}\n\n---\n\n{body}", True
+        return f"{prefix}\n\n---\n\n{body}", True
     return body, False
+
+
+def _prepend_agent_run_prompt_to_body(body: Any, run_prompt: str) -> tuple[Any, bool]:
+    return _prepend_prompt_sections_to_body(body, [(AGENT_RUN_PROMPT_HEADER, run_prompt)])
 
 
 def is_framework_summary_request_body(body: Any) -> bool:
@@ -1258,6 +1275,7 @@ class AgentInstance:
     summary_prompted_at: Optional[float] = None
     summary_prompt_message_id: Optional[str] = None
     run_prompt_injected: bool = False
+    prompt_node_injected_ids: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.set_state(self.state)
@@ -1843,6 +1861,7 @@ class GraphRuntime:
         self._launch_nodes: Dict[str, AgentNode] = {}
         self._agent_message_queues: Dict[str, List[PendingAgentMessage]] = {}
         self._pending_messages: Dict[str, PendingAgentMessage] = {}
+        self._prompt_nodes_by_agent: Dict[str, List[PromptNode]] = {}
         self._common_nodes: Dict[str, CommonNode] = {}
         self._common_graph: Optional["GraphDefinition"] = None
         self._common_node_message_queues: Dict[str, List[PendingCommonNodeMessage]] = {}
@@ -2281,8 +2300,32 @@ class GraphRuntime:
     def configure_completion_tracking(self, graph: "GraphDefinition") -> None:
         self.reset_run_prompt_injections()
         self._completion_agent_node_ids = list(graph.agent_nodes)
+        self.configure_prompt_nodes(graph)
         self.configure_agent_rings(graph)
         self.configure_common_nodes(graph)
+
+    def configure_prompt_nodes(self, graph: "GraphDefinition") -> None:
+        prompt_nodes_by_agent: Dict[str, List[PromptNode]] = {
+            node_id: []
+            for node_id in graph.agent_nodes
+        }
+        for edge in graph.edges:
+            if edge.edge_type != "data":
+                continue
+            if edge.source not in graph.prompt_nodes:
+                continue
+            if edge.target not in graph.agent_nodes:
+                continue
+            if (edge.output_port or DEFAULT_OUTPUT_PORT) != DEFAULT_OUTPUT_PORT:
+                continue
+            if (edge.input_port or "in") != AGENT_PROMPT_INPUT_PORT:
+                continue
+            prompt_nodes_by_agent.setdefault(edge.target, []).append(graph.prompt_nodes[edge.source])
+        self._prompt_nodes_by_agent = {
+            node_id: prompts
+            for node_id, prompts in prompt_nodes_by_agent.items()
+            if prompts
+        }
 
     def configure_common_nodes(self, graph: "GraphDefinition") -> None:
         self._common_graph = graph
@@ -2304,6 +2347,29 @@ class GraphRuntime:
     def reset_run_prompt_injections(self) -> None:
         for inst in self._instances.values():
             inst.run_prompt_injected = False
+            inst.prompt_node_injected_ids.clear()
+
+    def _agent_prompt_sections(
+        self,
+        inst: AgentInstance,
+    ) -> tuple[List[tuple[str, str]], bool, List[str]]:
+        sections: List[tuple[str, str]] = []
+        run_prompt_included = False
+        prompt_node_ids: List[str] = []
+        run_prompt = str(inst.node.run_prompt or "").strip()
+        if run_prompt and not inst.run_prompt_injected:
+            sections.append((AGENT_RUN_PROMPT_HEADER, run_prompt))
+            run_prompt_included = True
+        for prompt_node in self._prompt_nodes_by_agent.get(inst.node.node_id, []):
+            text = str(prompt_node.text or "").strip()
+            if not text:
+                continue
+            if prompt_node.trigger == "once" and prompt_node.node_id in inst.prompt_node_injected_ids:
+                continue
+            sections.append((f"{BLUEPRINT_PROMPT_HEADER_PREFIX} {prompt_node.node_id}", text))
+            if prompt_node.trigger == "once":
+                prompt_node_ids.append(prompt_node.node_id)
+        return sections, run_prompt_included, prompt_node_ids
 
     def _mark_completion_activity(self) -> None:
         self._completion_generation += 1
@@ -5052,10 +5118,12 @@ class GraphRuntime:
     ) -> Dict[str, Any]:
         message_id = message_id or f"msg-{uuid.uuid4().hex[:12]}"
         inst = await self.ensure_agent(node)
-        if not inst.run_prompt_injected:
-            body, injected = _prepend_agent_run_prompt_to_body(body, inst.node.run_prompt)
-            if injected:
+        sections, run_prompt_included, prompt_node_ids = self._agent_prompt_sections(inst)
+        body, injected = _prepend_prompt_sections_to_body(body, sections)
+        if injected:
+            if run_prompt_included:
                 inst.run_prompt_injected = True
+            inst.prompt_node_injected_ids.update(prompt_node_ids)
         inst.busy_count += 1
         busy_released = False
 
@@ -5564,6 +5632,45 @@ class BlueprintTerminalNode:
 
 
 @dataclass
+class PromptNode:
+    """Canvas prompt text node connected to Agent prompt data inputs."""
+
+    node_id: str
+    text: str = ""
+    trigger: PromptNodeTrigger = "once"
+    expanded: bool = False
+
+    def __post_init__(self) -> None:
+        self.node_id = str(self.node_id).strip()
+        if not self.node_id:
+            raise ValueError("PromptNode.node_id must be non-empty")
+        self.text = str(self.text or "")
+        self.trigger = str(self.trigger or "once").strip().lower()
+        if self.trigger not in _VALID_PROMPT_NODE_TRIGGERS:
+            raise ValueError("PromptNode.trigger must be 'once' or 'always'")
+        self.expanded = bool(self.expanded)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "text": self.text,
+            "trigger": self.trigger,
+            "expanded": self.expanded,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PromptNode":
+        if not isinstance(data, dict):
+            raise ValueError("PromptNode data must be an object")
+        return cls(
+            node_id=str(data.get("node_id", "")).strip(),
+            text=str(data.get("text", data.get("prompt", ""))),
+            trigger=str(data.get("trigger", data.get("mode", "once"))),
+            expanded=bool(data.get("expanded", False)),
+        )
+
+
+@dataclass
 class ScriptNode:
     """User-authored Python function node compiled into a blueprint graph."""
 
@@ -5671,6 +5778,7 @@ class GraphDefinition:
     agent_nodes: Dict[str, AgentNode] = field(default_factory=dict)
     route_nodes: Dict[str, RouteNode] = field(default_factory=dict)
     terminal_nodes: Dict[str, BlueprintTerminalNode] = field(default_factory=dict)
+    prompt_nodes: Dict[str, PromptNode] = field(default_factory=dict)
     script_nodes: Dict[str, ScriptNode] = field(default_factory=dict)
     common_nodes: Dict[str, CommonNode] = field(default_factory=dict)
     edges: List[GraphEdge] = field(default_factory=list)
@@ -5701,6 +5809,14 @@ class GraphDefinition:
                 )
             terminal_ids.add(node.node_id)
 
+        prompt_ids = set()
+        for key, node in self.prompt_nodes.items():
+            if key != node.node_id:
+                raise ValueError(
+                    f"prompt node key {key!r} does not match node_id {node.node_id!r}"
+                )
+            prompt_ids.add(node.node_id)
+
         script_ids = set()
         for key, node in self.script_nodes.items():
             if key != node.node_id:
@@ -5716,7 +5832,7 @@ class GraphDefinition:
                     f"common node key {key!r} does not match node_id {node.node_id!r}"
                 )
             common_ids.add(node.node_id)
-        return agent_ids | route_ids | terminal_ids | script_ids | common_ids
+        return agent_ids | route_ids | terminal_ids | prompt_ids | script_ids | common_ids
 
     def _adjacency(self, node_ids: set[str], *, exec_only: bool = False) -> Dict[str, List[str]]:
         adjacency: Dict[str, List[str]] = {node_id: [] for node_id in node_ids}
@@ -5793,9 +5909,18 @@ class GraphDefinition:
         """Return a port data type or ``None`` for unchecked Agent/Script ports."""
 
         node = str(node_id)
-        if node in self.agent_nodes or node in self.script_nodes:
+        if node in self.agent_nodes:
+            port = str(port_name or ("out" if side == "output" else "in")).strip()
+            if side == "input" and port == AGENT_PROMPT_INPUT_PORT:
+                return "str"
+            return None
+        if node in self.script_nodes:
             return None
         port = str(port_name or ("out" if side == "output" else "in")).strip()
+        if node in self.prompt_nodes:
+            if side == "output" and port == DEFAULT_OUTPUT_PORT:
+                return "str"
+            raise ValueError(f"unknown PromptNode port: {node}.{port}")
         if node in self.common_nodes:
             common = self.common_nodes[node]
             if common.kind == "branch":
@@ -5814,6 +5939,18 @@ class GraphDefinition:
 
     def validate_port_types(self) -> None:
         for edge in self.edges:
+            source_prompt = edge.source in self.prompt_nodes
+            target_prompt_input = (
+                edge.target in self.agent_nodes
+                and (edge.input_port or "in") == AGENT_PROMPT_INPUT_PORT
+            )
+            if source_prompt or target_prompt_input:
+                if not source_prompt or not target_prompt_input:
+                    raise ValueError(
+                        "PromptNode edges must connect PromptNode:out to AgentNode:prompt"
+                    )
+                if edge.edge_type != "data":
+                    raise ValueError("PromptNode edges must use edge_type='data'")
             source_type = self.node_port_data_type(
                 edge.source,
                 side="output",
@@ -6086,6 +6223,10 @@ class GraphDefinition:
                 "common_nodes": {
                     node_id: node.to_dict()
                     for node_id, node in self.common_nodes.items()
+                },
+                "prompt_nodes": {
+                    node_id: node.to_dict()
+                    for node_id, node in self.prompt_nodes.items()
                 },
                 "script_nodes": {
                     node_id: node.to_dict()
@@ -6518,7 +6659,7 @@ class GraphExecutor:
         """
 
         graph.validate_runnable()
-        self.runtime.reset_run_prompt_injections()
+        self.runtime.configure_completion_tracking(graph)
         await self.runtime.prestart_agents(list(graph.agent_nodes.values()))
         decisions = self._scenario_decisions(runtime_scenarios)
         executed: List[str] = []
@@ -6672,7 +6813,7 @@ class GraphExecutor:
         """
 
         graph.validate_runnable()
-        self.runtime.reset_run_prompt_injections()
+        self.runtime.configure_completion_tracking(graph)
         await self.runtime.prestart_agents(list(graph.agent_nodes.values()))
 
         def emit(event: GraphEvent) -> None:

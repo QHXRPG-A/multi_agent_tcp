@@ -53,7 +53,7 @@ Interpretation rules:
   call `blueprint_start` with the confirmed plan.
 - Treat low-level TCP workers as a backend adapter path, not the product
   architecture center.
-- Prefer `CLIWorkerBackend` in new writing. Mention `CLIWorkerBackend` only as a
+- Prefer `CLIWorkerBackend` in new writing. Mention `CodeMakerCluster` only as a
   backward-compatible alias for the old cluster facade.
 - Keep Codex-first adapter work as the default for live blueprint smoke,
   streaming, and MCP workspace-tool validation.
@@ -98,6 +98,30 @@ Read these first based on the task:
   `knowledge_base/debug_start.md`
 
 ## Recent Handoff
+
+For the latest Blueprint Prompt node and Agent port expansion work from
+2026-06-02:
+
+- Prompt node model/UI, editable prompt text, once/always trigger controls,
+  fixed Agent `prompt: str` input, expandable Agent port rows, and frontend
+  smoke:
+  `archive/frontend/blueprint_prompt_node_agent_ports_ui_2026-06-02.md`
+- Python `PromptNode`, `GraphDefinition.prompt_nodes`, fixed Agent prompt-port
+  validation, once/always prompt injection, no-op dispatch behavior, and runtime
+  tests:
+  `archive/runtime-backend/blueprint_prompt_node_runtime_2026-06-02.md`
+
+Use those files when the user reports:
+
+- Prompt nodes are missing from node search, do not expand into a textarea, or
+  do not save trigger mode.
+- Agent/Worker Agent nodes should show fixed port rows like Script nodes, the
+  `prompt: str` triangle pin is missing, or the old add/remove prompt menu
+  appears.
+- `PromptNode(out)` cannot connect to `Agent(prompt)`, creates an exec edge
+  instead of a data edge, or non-Prompt sources can target Agent `prompt`.
+- Prompt text does not inject with legacy `run_prompt`, once/always behavior is
+  wrong, or no-op dispatches consume once prompts.
 
 For the latest `gulicode-bp` MCP direct-control start and live close-loop work
 from 2026-06-02:
@@ -210,7 +234,7 @@ Use that file when the user reports:
   batches
 - a side-browser workbench URL shows `ERR_CONNECTION_REFUSED` after runtime
   restart
-- live worker smoke should use Codex rather than Codex
+- live worker smoke should use Codex rather than CodeMaker
 
 For the latest `gulicode-bp` plugin direct-control and start-plan work from
 2026-06-01:
@@ -422,12 +446,12 @@ files for implementation decisions unless an archive is explicitly called out.
 - `GraphDefinition.agent_cycle_groups()` and cycle/loop handling:
   read `knowledge_base/ring_structure_solution.md`, then
   `knowledge_base/core_architecture.md`.
-- Legacy `CLIWorkerBackend`, `run_parallel`, `run_chain`, broker, and TCP worker
+- Legacy `CodeMakerCluster`, `run_parallel`, `run_chain`, broker, and TCP worker
   path: read `knowledge_base/cluster_api.md`.
 - Workspace API, changesets, archive, private checkout, conflict flow, and MCP
   workspace tools: read `knowledge_base/core_architecture.md` and
   `tasks/multi_agent_communication_tasks.md`.
-- Multi CLI adapters, Codex/Codex process adapters, and `CLIAdapter`:
+- Multi CLI adapters, Codex/CodeMaker process adapters, and `CLIAdapter`:
   read `knowledge_base/multi_cli_workflow.md`.
 
 ## Working Rules

@@ -4,6 +4,7 @@ import {
   addFullAgentNode,
   addEdge,
   addNode,
+  addPromptNode,
   addRouteNode,
   addScriptNode,
   addTestAgentNode,
@@ -25,6 +26,7 @@ import {
   toRuntimeGraphDraft,
   updateAgentNode,
   updateEdge,
+  updatePromptNode,
   hasTickSourceNode,
   validateBlueprintConfigForStart,
 } from "./blueprint-model"
@@ -42,6 +44,7 @@ describe("blueprint draft model", () => {
     expect(draft.graph.terminal_nodes).toEqual({})
     expect(draft.graph.route_nodes).toEqual({})
     expect(draft.graph.common_nodes).toEqual({})
+    expect(draft.graph.prompt_nodes).toEqual({})
     expect(Object.keys(draft.graph.agent_nodes)).toEqual(["planner", "coder", "review", "summary"])
     expect(draft.graph.agent_nodes.planner).toMatchObject({
       node_id: "planner",
@@ -52,6 +55,7 @@ describe("blueprint draft model", () => {
       timeout_sec: 1800,
       prompt_via_file: "auto",
       run_prompt: "",
+      collapsed: true,
       command: "codex",
       external: false,
       skill_selection: { mode: "none" },
@@ -214,6 +218,71 @@ describe("blueprint draft model", () => {
     expect(document.graph.common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 1 })
     expect(restored.graph.common_nodes.gate).toEqual({ node_id: "gate", kind: "branch" })
     expect(toRuntimeGraphDraft(restored).common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 1 })
+  })
+
+  test("adds Prompt nodes and enforces fixed Agent prompt data input", () => {
+    let draft = addPromptNode(createDefaultBlueprintDraft(), {
+      node_id: "style_prompt",
+      position: { x: 131, y: 77 },
+    })
+    draft = updatePromptNode(draft, "style_prompt", {
+      text: "Use concise implementation notes.",
+      trigger: "always",
+      expanded: true,
+    })
+
+    expect(draft.graph.prompt_nodes.style_prompt).toEqual({
+      node_id: "style_prompt",
+      text: "Use concise implementation notes.",
+      trigger: "always",
+      expanded: true,
+    })
+    expect(draft.layout.nodes.style_prompt).toEqual({ x: 120, y: 72 })
+    const connected = addEdge(draft, "style_prompt", "coder", "exec", "out", "prompt")
+    expect(connected.graph.edges.at(-1)).toMatchObject({
+      from: "style_prompt",
+      to: "coder",
+      edge_type: "data",
+      output_port: "out",
+      input_port: "prompt",
+    })
+    expect(connected.selection).toEqual({ type: "edge", id: "style_prompt:out->coder:prompt:data" })
+
+    const rejectedDefaultInput = addEdge(connected, "style_prompt", "review", "exec", "out", "in")
+    expect(rejectedDefaultInput.graph.edges).toEqual(connected.graph.edges)
+
+    const script = addScriptNode(connected, {
+      node_id: "script_str",
+      script: {
+        script_id: "script_str.py:script_str",
+        module_path: "script_str.py",
+        function_name: "script_str",
+        outputs: [{ name: "result", type: "str", required: true }],
+      },
+    })
+    const rejectedScriptSource = addEdge(script, "script_str", "coder", "exec", "result", "prompt")
+    expect(rejectedScriptSource.graph.edges).toEqual(script.graph.edges)
+
+    const document = toBlueprintDocument(connected)
+    const restored = fromBlueprintDocument(document)
+    expect(document.graph.prompt_nodes?.style_prompt).toEqual(connected.graph.prompt_nodes.style_prompt)
+    expect(document.graph.agent_nodes.coder.collapsed).toBe(true)
+    expect(toRuntimeGraphDraft(restored).prompt_nodes?.style_prompt).toEqual(connected.graph.prompt_nodes.style_prompt)
+
+    const legacyRestored = fromBlueprintDocument({
+      ...document,
+      graph: {
+        ...document.graph,
+        agent_nodes: {
+          ...document.graph.agent_nodes,
+          coder: {
+            ...document.graph.agent_nodes.coder,
+            prompt_input_enabled: false,
+          } as never,
+        },
+      },
+    })
+    expect(canConnectPorts(legacyRestored, "style_prompt", "out", "coder", "prompt")).toMatchObject({ ok: true })
   })
 
   test("enforces port types for non-Agent and non-Script connections only", () => {
