@@ -1180,6 +1180,7 @@ export const dict = {
   "blueprint.resident.add": "新建常驻服务",
   "blueprint.resident.refresh": "刷新",
   "blueprint.resident.empty": "暂无常驻服务",
+  "blueprint.resident.connectionFailed": "常驻服务面板连接已断开，请重新打开当前蓝图工作台。",
   "blueprint.resident.noDescription": "未描述",
   "blueprint.resident.noLogs": "暂无日志",
   "blueprint.resident.clearView": "清空视图",

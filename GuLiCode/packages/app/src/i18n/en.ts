@@ -1193,6 +1193,7 @@ export const dict = {
   "blueprint.resident.add": "New resident service",
   "blueprint.resident.refresh": "Refresh",
   "blueprint.resident.empty": "No resident services",
+  "blueprint.resident.connectionFailed": "Resident service panel is disconnected. Reopen the current Blueprint workbench.",
   "blueprint.resident.noDescription": "No description",
   "blueprint.resident.noLogs": "No logs",
   "blueprint.resident.clearView": "Clear view",

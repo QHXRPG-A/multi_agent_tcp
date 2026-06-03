@@ -91,6 +91,9 @@ describe("blueprint inspector source", () => {
     expect(source).toContain("data-blueprint-resident-console")
     expect(source).toContain("BlueprintResidentServiceCreateDialog")
     expect(source).toContain("platform.createBlueprintResidentService")
+    expect(source).toContain("residentServiceErrorMessage")
+    expect(source).toContain('"blueprint.resident.connectionFailed"')
+    expect(source).toContain("refreshResidentServices({ silent: true })")
   })
 })
 

@@ -1176,6 +1176,7 @@ export const dict = {
   "blueprint.resident.add": "新增常駐服務",
   "blueprint.resident.refresh": "重新整理",
   "blueprint.resident.empty": "暫無常駐服務",
+  "blueprint.resident.connectionFailed": "常駐服務面板連線已中斷，請重新開啟目前藍圖工作台。",
   "blueprint.resident.noDescription": "未描述",
   "blueprint.resident.noLogs": "暫無日誌",
   "blueprint.resident.clearView": "清空視圖",

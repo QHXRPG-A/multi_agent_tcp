@@ -1618,9 +1618,21 @@ export function BlueprintSidePanel(props: {
     }
   }
 
-  const refreshResidentServices = async () => {
+  const residentServiceErrorMessage = (error: unknown) => {
+    const message = readableError(error)
+    if (message === "Failed to fetch" || message === "Load failed" || message.includes("NetworkError")) {
+      return language.t("blueprint.resident.connectionFailed" as never)
+    }
+    return message
+  }
+
+  const refreshResidentServices = async (opts?: { silent?: boolean }) => {
     if (!platform.listBlueprintResidentServices) return
-    setResidentServices((current) => ({ ...current, loading: true, error: undefined }))
+    setResidentServices((current) => ({
+      ...current,
+      loading: !opts?.silent && current.services.length === 0,
+      error: opts?.silent ? current.error : undefined,
+    }))
     try {
       const result = await platform.listBlueprintResidentServices()
       const services = Array.isArray(result?.services)
@@ -1628,7 +1640,7 @@ export function BlueprintSidePanel(props: {
         : []
       setResidentServices({ services, loading: false, error: undefined })
     } catch (error) {
-      setResidentServices((current) => ({ ...current, loading: false, error: readableError(error) }))
+      setResidentServices((current) => ({ ...current, loading: false, error: residentServiceErrorMessage(error) }))
     }
   }
 
@@ -2377,7 +2389,7 @@ export function BlueprintSidePanel(props: {
     if (!platform.listBlueprintResidentServices) return
     void refreshResidentServices()
     const interval = setInterval(() => {
-      void refreshResidentServices()
+      void refreshResidentServices({ silent: true })
     }, 3000)
     onCleanup(() => clearInterval(interval))
   })
