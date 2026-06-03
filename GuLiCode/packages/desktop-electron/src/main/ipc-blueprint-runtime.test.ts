@@ -98,12 +98,18 @@ describe("blueprint runtime IPC handlers", () => {
     expect(ipcSource).toContain('"blueprint-create-script-node"')
     expect(ipcSource).toContain('"blueprint-list-editors"')
     expect(ipcSource).toContain('"blueprint-open-script-in-editor"')
+    expect(ipcSource).toContain('"blueprint-resident-services"')
+    expect(ipcSource).toContain('"blueprint-create-resident-service"')
+    expect(ipcSource).toContain('"blueprint-start-resident-service"')
+    expect(ipcSource).toContain('"blueprint-stop-resident-service"')
     expect(ipcSource).toContain("shell.openPath(scriptRoot)")
     expect(ipcSource).toContain("await launchEditor(editor, scriptRoot)")
     expect(ipcSource).toContain("windowsHide: false")
     expect(ipcSource).toContain("editorForegroundArgs")
     expect(preloadSource).toContain("openBlueprintWindow")
     expect(preloadSource).toContain("blueprintCreateScriptNode")
+    expect(preloadSource).toContain("blueprintResidentServices")
+    expect(preloadSource).toContain("blueprintCreateResidentService")
     expect(preloadSource).toContain("blueprintListEditors")
     expect(preloadSource).toContain("blueprintOpenScriptInEditor")
     expect(preloadSource).toContain("blueprintRunDiff")
@@ -114,6 +120,8 @@ describe("blueprint runtime IPC handlers", () => {
     expect(rendererSource).toContain("typeof blueprintCreateScriptNode === \"function\"")
     expect(rendererSource).toContain("typeof blueprintListEditors === \"function\"")
     expect(rendererSource).toContain("typeof blueprintOpenScriptInEditor === \"function\"")
+    expect(rendererSource).toContain("typeof blueprintResidentServices === \"function\"")
+    expect(rendererSource).toContain("typeof blueprintCreateResidentService === \"function\"")
     expect(rendererSource).toContain("typeof api.blueprintChangesetDiff")
     expect(rendererSource).toContain("typeof api.blueprintRollbackChangesets")
     expect(rendererSource).toContain("typeof api.blueprintRestoreRollback")
@@ -175,6 +183,34 @@ describe("blueprint runtime IPC handlers", () => {
       createScriptNode: (projectDir: string, name: string, description?: string) => {
         calls.push(`script-create:${projectDir}:${name}:${description ?? ""}`)
         return { ok: true, module_path: "format_score.py", function_name: "format_score" }
+      },
+      residentServices: () => {
+        calls.push("resident-services")
+        return { ok: true, services: [] }
+      },
+      createResidentService: (name: string, description?: string) => {
+        calls.push(`resident-create:${name}:${description ?? ""}`)
+        return { ok: true, service_name: "echo_service", module_path: "echo_service.py" }
+      },
+      openResidentServiceInEditor: (modulePath: string, editorId?: string) => {
+        calls.push(`resident-open:${modulePath}:${editorId ?? ""}`)
+        return { ok: true, path: "resident_services" }
+      },
+      startResidentService: (serviceName: string) => {
+        calls.push(`resident-start:${serviceName}`)
+        return { ok: true }
+      },
+      stopResidentService: (serviceName: string) => {
+        calls.push(`resident-stop:${serviceName}`)
+        return { ok: true }
+      },
+      residentServiceLogs: (serviceName: string, limit?: number) => {
+        calls.push(`resident-logs:${serviceName}:${limit ?? ""}`)
+        return { ok: true, logs: "" }
+      },
+      residentServiceDocs: (serviceName: string) => {
+        calls.push(`resident-docs:${serviceName}`)
+        return { ok: true, service: { service_name: serviceName } }
       },
       start: (projectDir: string, blueprintId: string, plan: Record<string, unknown>, executionMode?: string) => {
         calls.push(`start:${projectDir}:${blueprintId}:${plan.goal}:${executionMode}`)
@@ -304,6 +340,13 @@ describe("blueprint runtime IPC handlers", () => {
     await expect(
       handlers.get("blueprint-open-script-in-editor")?.({}, testLogDir, "../escape.py", "system"),
     ).rejects.toThrow("modulePath must stay inside the script directory")
+    await handlers.get("blueprint-resident-services")?.({})
+    await handlers.get("blueprint-create-resident-service")?.({}, "Echo Service", "Echoes payloads")
+    await handlers.get("blueprint-open-resident-service-in-editor")?.({}, "echo_service.py", "system")
+    await handlers.get("blueprint-start-resident-service")?.({}, "echo_service")
+    await handlers.get("blueprint-resident-service-logs")?.({}, "echo_service", 40)
+    await handlers.get("blueprint-resident-service-docs")?.({}, "echo_service")
+    await handlers.get("blueprint-stop-resident-service")?.({}, "echo_service")
     await handlers.get("blueprint-start")?.({}, "C:\\repo", "default", { goal: "ship" }, "live")
     await handlers.get("blueprint-status")?.({}, "run-1")
     await handlers.get("blueprint-run-diff")?.({}, "run-1")
@@ -394,6 +437,13 @@ describe("blueprint runtime IPC handlers", () => {
       "configure:C:\\Python\\python.exe",
       "script-nodes:C:\\repo",
       "script-create:C:\\repo:Format Score:Formats a score",
+      "resident-services",
+      "resident-create:Echo Service:Echoes payloads",
+      "resident-open:echo_service.py:system",
+      "resident-start:echo_service",
+      "resident-logs:echo_service:40",
+      "resident-docs:echo_service",
+      "resident-stop:echo_service",
       "start:C:\\repo:default:ship:live",
       "status:run-1",
       "run-diff:run-1",

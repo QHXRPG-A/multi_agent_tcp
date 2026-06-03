@@ -324,6 +324,7 @@ def ordinary_agent_framework_context(
     organization["agent_connections"] = {node_id: list(downstream_agents)}
     organization["agent"]["downstream_nodes"] = list(downstream_nodes)
     organization["agent"]["downstream_agents"] = list(downstream_agents)
+    organization["resident_services"] = []
     if runtime is not None:
         ring_counts = runtime.agent_ring_circulation_counts_for(node_id)
         if ring_counts:
@@ -347,6 +348,7 @@ def ordinary_agent_framework_context(
             common_id: node.to_dict()
             for common_id, node in graph.common_nodes.items()
         },
+        "resident_services": [],
         "organization": organization,
         "message_envelope": message_envelope,
     }
@@ -354,7 +356,32 @@ def ordinary_agent_framework_context(
         ring_counts = runtime.agent_ring_circulation_counts_for(node_id)
         if ring_counts:
             context["ring_circulation_counts"] = dict(ring_counts)
+        resident_services = _resident_services_summary(runtime)
+        context["resident_services"] = resident_services
+        organization["resident_services"] = resident_services
     return context
+
+
+def _resident_services_summary(runtime: GraphRuntime) -> list[Dict[str, Any]]:
+    provider = getattr(runtime, "resident_services_provider", None)
+    if not callable(provider):
+        return []
+    try:
+        services = provider()
+    except Exception:
+        return []
+    if not isinstance(services, list):
+        return []
+    return [
+        {
+            "service_name": str(item.get("service_name") or ""),
+            "title": str(item.get("title") or item.get("service_name") or ""),
+            "description": str(item.get("description") or ""),
+            "status": str(item.get("status") or "stopped"),
+        }
+        for item in services
+        if isinstance(item, dict)
+    ]
 
 
 def inject_framework_context(body: Any, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -397,11 +424,15 @@ class GraphRuntimeControlPlane:
         *,
         top_agent: Optional[GuLiCodeTopAgentProfile] = None,
         script_root: Optional[Path] = None,
+        resident_services: Optional[Any] = None,
     ) -> None:
         self.runtime = runtime
         self.graph = graph
         self.top_agent = top_agent or GuLiCodeTopAgentProfile()
         self.script_root = script_root
+        self.resident_services = resident_services
+        if resident_services is not None and callable(getattr(resident_services, "summary", None)):
+            setattr(self.runtime, "resident_services_provider", resident_services.summary)
 
     def handle_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         command = str(payload.get("command", "")).strip()
@@ -518,6 +549,23 @@ class GraphRuntimeControlPlane:
                     )
                 },
             ).to_dict()
+
+        if command == "resident_service.docs":
+            docs = self.resident_service_docs(str(args.get("service_name") or args.get("serviceName") or ""))
+            return GraphControlResponse(
+                bool(docs.get("ok")),
+                {"docs": docs},
+            ).to_dict()
+
+        if command == "resident_service.call":
+            return _run_control_coro(
+                self.call_resident_service(
+                    str(args["source_node_id"]),
+                    str(args.get("service_name") or args.get("serviceName") or ""),
+                    str(args.get("method_name") or args.get("methodName") or ""),
+                    dict(args.get("arguments") or {}),
+                )
+            )
 
         if command == "agent.task_status":
             data = self.runtime.record_agent_task_status(
@@ -887,6 +935,108 @@ class GraphRuntimeControlPlane:
                 "batch": batch.to_dict(),
             },
         ).to_dict()
+
+    def resident_service_docs(self, service_name: str) -> Dict[str, Any]:
+        if self.resident_services is None or not callable(getattr(self.resident_services, "docs", None)):
+            return {
+                "ok": False,
+                "code": "RESIDENT_SERVICES_UNAVAILABLE",
+                "error": "resident service manager is not configured",
+                "service_name": str(service_name),
+            }
+        result = self.resident_services.docs(str(service_name))
+        return dict(result) if isinstance(result, dict) else {"ok": False, "error": "invalid resident service docs response"}
+
+    async def call_resident_service(
+        self,
+        source_node_id: str,
+        service_name: str,
+        method_name: str,
+        arguments: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        source_node_id = str(source_node_id).strip()
+        if source_node_id not in self.graph.agent_nodes:
+            raise KeyError(f"unknown source AgentNode: {source_node_id}")
+        if not isinstance(arguments, dict):
+            raise ValueError("blueprint_service_call arguments must be a JSON object")
+        if self.resident_services is None or not callable(getattr(self.resident_services, "call", None)):
+            result = {
+                "ok": False,
+                "code": "RESIDENT_SERVICES_UNAVAILABLE",
+                "error": "resident service manager is not configured",
+                "service_name": str(service_name),
+                "method_name": str(method_name),
+            }
+        else:
+            result = self.resident_services.call(str(service_name), str(method_name), dict(arguments))
+            if not isinstance(result, dict):
+                result = {
+                    "ok": False,
+                    "code": "RESIDENT_SERVICE_BAD_RESPONSE",
+                    "error": "resident service call returned a non-object response",
+                    "service_name": str(service_name),
+                    "method_name": str(method_name),
+                }
+
+        queued = self._queue_resident_service_result(
+            source_node_id,
+            service_name=str(result.get("service_name") or service_name),
+            method_name=str(result.get("method_name") or method_name),
+            arguments=dict(arguments),
+            result=dict(result),
+        )
+        return GraphControlResponse(
+            bool(result.get("ok")),
+            {
+                "service_call": dict(result),
+                "result": result.get("result"),
+                "queued_message": queued,
+            },
+        ).to_dict()
+
+    def _queue_resident_service_result(
+        self,
+        source_node_id: str,
+        *,
+        service_name: str,
+        method_name: str,
+        arguments: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        ok = bool(result.get("ok"))
+        body_type = "blueprint_service_result" if ok else "blueprint_service_error"
+        body = {
+            "type": body_type,
+            "prompt": (
+                f"Use the result from resident service `{service_name}.{method_name}`."
+                if ok
+                else f"Resident service `{service_name}.{method_name}` returned an error."
+            ),
+            "service_name": service_name,
+            "method_name": method_name,
+            "arguments": dict(arguments),
+            "result": result.get("result"),
+            "error": result.get("error"),
+            "code": result.get("code"),
+            "service_call": dict(result),
+            "source": {
+                "node_id": source_node_id,
+            },
+        }
+        pending = self.runtime.queue_agent_message(
+            self.graph.agent_nodes[source_node_id],
+            inject_framework_context(
+                body,
+                ordinary_agent_framework_context(
+                    self.graph,
+                    source_node_id,
+                    runtime=self.runtime,
+                ),
+            ),
+            message_id=f"resident-service-{secrets.token_hex(6)}",
+            queue_mode="top",
+        )
+        return pending.to_dict()
 
     def _select_required_script_call(
         self,

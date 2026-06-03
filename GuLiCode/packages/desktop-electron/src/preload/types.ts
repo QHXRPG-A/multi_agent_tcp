@@ -153,6 +153,13 @@ export type ElectronAPI = {
     modulePath: string,
     editorId?: string,
   ) => Promise<Record<string, unknown>>
+  blueprintResidentServices: () => Promise<Record<string, unknown>>
+  blueprintCreateResidentService: (name: string, description?: string) => Promise<Record<string, unknown>>
+  blueprintOpenResidentServiceInEditor: (modulePath: string, editorId?: string) => Promise<Record<string, unknown>>
+  blueprintStartResidentService: (serviceName: string) => Promise<Record<string, unknown>>
+  blueprintStopResidentService: (serviceName: string) => Promise<Record<string, unknown>>
+  blueprintResidentServiceLogs: (serviceName: string, limit?: number) => Promise<Record<string, unknown>>
+  blueprintResidentServiceDocs: (serviceName: string) => Promise<Record<string, unknown>>
   blueprintRelocateProjectWorkdir: (
     projectDir: string,
     blueprintId: string,

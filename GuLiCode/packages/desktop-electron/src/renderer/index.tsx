@@ -86,10 +86,24 @@ const createPlatform = (): Platform => {
       modulePath: string,
       editorId?: string,
     ) => Promise<Record<string, unknown>>
+    blueprintResidentServices?: () => Promise<Record<string, unknown>>
+    blueprintCreateResidentService?: (name: string, description?: string) => Promise<Record<string, unknown>>
+    blueprintOpenResidentServiceInEditor?: (modulePath: string, editorId?: string) => Promise<Record<string, unknown>>
+    blueprintStartResidentService?: (serviceName: string) => Promise<Record<string, unknown>>
+    blueprintStopResidentService?: (serviceName: string) => Promise<Record<string, unknown>>
+    blueprintResidentServiceLogs?: (serviceName: string, limit?: number) => Promise<Record<string, unknown>>
+    blueprintResidentServiceDocs?: (serviceName: string) => Promise<Record<string, unknown>>
   }
   const blueprintCreateScriptNode = api.blueprintCreateScriptNode
   const blueprintListEditors = api.blueprintListEditors
   const blueprintOpenScriptInEditor = api.blueprintOpenScriptInEditor
+  const blueprintResidentServices = api.blueprintResidentServices
+  const blueprintCreateResidentService = api.blueprintCreateResidentService
+  const blueprintOpenResidentServiceInEditor = api.blueprintOpenResidentServiceInEditor
+  const blueprintStartResidentService = api.blueprintStartResidentService
+  const blueprintStopResidentService = api.blueprintStopResidentService
+  const blueprintResidentServiceLogs = api.blueprintResidentServiceLogs
+  const blueprintResidentServiceDocs = api.blueprintResidentServiceDocs
   const os = (() => {
     const ua = navigator.userAgent
     if (ua.includes("Mac")) return "macos"
@@ -223,6 +237,34 @@ const createPlatform = (): Platform => {
             return blueprintOpenScriptInEditor(resolvedProjectDir, modulePath, editorId)
           },
         }
+      : {}),
+
+    ...(typeof blueprintResidentServices === "function"
+      ? { listBlueprintResidentServices: () => blueprintResidentServices() }
+      : {}),
+
+    ...(typeof blueprintCreateResidentService === "function"
+      ? { createBlueprintResidentService: (name: string, description?: string) => blueprintCreateResidentService(name, description) }
+      : {}),
+
+    ...(typeof blueprintOpenResidentServiceInEditor === "function"
+      ? { openBlueprintResidentServiceInEditor: (modulePath: string, editorId?: string) => blueprintOpenResidentServiceInEditor(modulePath, editorId) }
+      : {}),
+
+    ...(typeof blueprintStartResidentService === "function"
+      ? { startBlueprintResidentService: (serviceName: string) => blueprintStartResidentService(serviceName) }
+      : {}),
+
+    ...(typeof blueprintStopResidentService === "function"
+      ? { stopBlueprintResidentService: (serviceName: string) => blueprintStopResidentService(serviceName) }
+      : {}),
+
+    ...(typeof blueprintResidentServiceLogs === "function"
+      ? { blueprintResidentServiceLogs: (serviceName: string, limit?: number) => blueprintResidentServiceLogs(serviceName, limit) }
+      : {}),
+
+    ...(typeof blueprintResidentServiceDocs === "function"
+      ? { blueprintResidentServiceDocs: (serviceName: string) => blueprintResidentServiceDocs(serviceName) }
       : {}),
 
     relocateBlueprintProjectWorkdir: (projectDir: string, blueprintId: string, document, targetProjectWorkdir, conflictPolicy) =>

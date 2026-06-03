@@ -1840,6 +1840,7 @@ class GraphRuntime:
         self.private_context_rpc_server = private_context_rpc_server
         self.skill_space = skill_space
         self.private_context_mcp_provider = private_context_mcp_provider
+        self.resident_services_provider: Optional[Any] = None
         self.tick_interval_sec = float(tick_interval_sec)
         if message_journal_path is not None:
             self.message_journal_path: Optional[Path] = Path(message_journal_path).expanduser()

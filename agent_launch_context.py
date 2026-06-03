@@ -208,6 +208,7 @@ def framework_agent_rules() -> str:
             "- Upstream/source batch ids mentioned in message text are provenance/audit labels; do not pass them to `agent_context(batch_id=...)`.",
             "- To inspect the current readable batch, call `agent_context({})` with no explicit batch_id.",
             "- When `framework_context.message_envelope.required_script_calls` is non-empty, call `blueprint_script_call` for the listed function(s); the framework executes the ScriptNode and delivers outputs to connected downstream AgentNodes.",
+            "- `framework_context.resident_services` lists global resident services by name, description, and status. Use `blueprint_service_docs(service_name)` for method signatures and `blueprint_service_call(service_name, method_name, arguments)` to call one. Ordinary Agent tools cannot start or stop resident services.",
             "- To provide information to another AgentNode, use `agent_dispatch` for the current batch.",
             "- Sending an empty string `\"\"` or numeric `0` through `agent_dispatch` means this target has no task and should not receive a downstream message.",
             "- When `framework_context.message_envelope.required_outgoing_targets` is empty, this is leaf work: do not call `agent_dispatch` or `join_contribute`; process the message and publish durable results through `workspace_publish` / `workspace_publish_file`.",
@@ -286,6 +287,8 @@ def framework_agent_skill() -> str:
             "`framework_context.message_envelope.required_outgoing_targets`.",
             "If `framework_context.message_envelope.required_script_calls` is non-empty, call `blueprint_script_call` for each listed Script Function Node instead of dispatching directly to its downstream AgentNode. "
             "The framework executes the Python function and automatically delivers function name, description, arguments, and outputs to connected downstream AgentNodes.",
+            "`framework_context.resident_services` lists global resident services visible to Agent class nodes. "
+            "Use `blueprint_service_docs(service_name)` to inspect interfaces and `blueprint_service_call(service_name, method_name, arguments)` to call a service; ordinary Agent tools cannot start or stop services.",
             "If a target has no work, dispatch `\"\"` or `0` for that target; the framework records it as no-op and does not queue a downstream task.",
             "If `required_outgoing_targets` is empty, there is no downstream dispatch to perform.",
             "",

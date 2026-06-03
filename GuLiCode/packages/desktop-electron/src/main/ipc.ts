@@ -184,6 +184,31 @@ export function registerIpcHandlers(deps: Deps) {
       return { ok: true, path: scriptRoot, editorId: editor.id }
     },
   )
+  ipcMain.handle("blueprint-resident-services", () => deps.blueprintRuntime.residentServices())
+  ipcMain.handle(
+    "blueprint-create-resident-service",
+    (_event: IpcMainInvokeEvent, name: string, description?: string) =>
+      deps.blueprintRuntime.createResidentService(name, description),
+  )
+  ipcMain.handle(
+    "blueprint-open-resident-service-in-editor",
+    (_event: IpcMainInvokeEvent, modulePath: string, editorId?: string) =>
+      deps.blueprintRuntime.openResidentServiceInEditor(modulePath, editorId),
+  )
+  ipcMain.handle("blueprint-start-resident-service", (_event: IpcMainInvokeEvent, serviceName: string) =>
+    deps.blueprintRuntime.startResidentService(serviceName),
+  )
+  ipcMain.handle("blueprint-stop-resident-service", (_event: IpcMainInvokeEvent, serviceName: string) =>
+    deps.blueprintRuntime.stopResidentService(serviceName),
+  )
+  ipcMain.handle(
+    "blueprint-resident-service-logs",
+    (_event: IpcMainInvokeEvent, serviceName: string, limit?: number) =>
+      deps.blueprintRuntime.residentServiceLogs(serviceName, limit),
+  )
+  ipcMain.handle("blueprint-resident-service-docs", (_event: IpcMainInvokeEvent, serviceName: string) =>
+    deps.blueprintRuntime.residentServiceDocs(serviceName),
+  )
   ipcMain.handle(
     "blueprint-relocate-project-workdir",
     (

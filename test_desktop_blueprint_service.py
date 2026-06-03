@@ -35,6 +35,7 @@ from multi_agent_tcp.blueprint_mcp_runtime import (
 )
 from multi_agent_tcp.codex_bridge import codex_jsonl_event_to_agent_stream_events
 from multi_agent_tcp.agent_launch_context import (
+    CODEX_RUNTIME_STATE_FILES,
     write_private_codex_mcp_config,
 )
 from multi_agent_tcp._asyncio_utils import (
@@ -157,6 +158,60 @@ def test_blueprint_service_creates_and_soft_deletes_blueprint(tmp_path: Path) ->
     assert deleted["ok"] is True
     assert Path(deleted["trashPath"]).is_file()
     assert listed_after_delete["blueprints"] == []
+
+
+def test_resident_service_template_docs_lifecycle_and_logs(tmp_path: Path) -> None:
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "bp-data")
+    created = service.handle_request(
+        {
+            "command": "blueprint.createResidentService",
+            "args": {"name": "Echo Service", "description": "Echo test payloads."},
+        }
+    )
+    service_name = created["service_name"]
+
+    try:
+        listed = service.handle_request({"command": "blueprint.residentServices", "args": {}})
+        docs = service.handle_request(
+            {"command": "blueprint.residentServiceDocs", "args": {"serviceName": service_name}}
+        )
+        started = service.handle_request(
+            {"command": "blueprint.startResidentService", "args": {"serviceName": service_name}}
+        )
+        called = service.resident_service_manager().call(service_name, "echo", {"message": "hello"})
+        logs = service.handle_request(
+            {"command": "blueprint.residentServiceLogs", "args": {"serviceName": service_name, "limit": 40}}
+        )
+
+        assert created["ok"] is True
+        assert Path(created["file_path"]).is_file()
+        assert listed["services"][0]["service_name"] == service_name
+        assert listed["services"][0]["status"] in {"stopped", "stale"}
+        assert docs["ok"] is True
+        assert docs["service"]["methods"][0]["name"] == "echo"
+        assert started["ok"] is True
+        assert started["service"]["status"] == "running"
+        assert called["ok"] is True
+        assert called["result"] == {"message": "hello"}
+        assert "Resident service" in logs["logs"]
+    finally:
+        with suppress(Exception):
+            service.handle_request({"command": "blueprint.stopResidentService", "args": {"serviceName": service_name}})
+
+
+def test_resident_service_call_returns_error_when_not_running(tmp_path: Path) -> None:
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "bp-data")
+    created = service.handle_request(
+        {
+            "command": "blueprint.createResidentService",
+            "args": {"name": "Stopped Service", "description": ""},
+        }
+    )
+
+    called = service.resident_service_manager().call(created["service_name"], "echo", {"message": "hello"})
+
+    assert called["ok"] is False
+    assert called["code"] == "RESIDENT_SERVICE_NOT_RUNNING"
 
 
 def test_blueprint_service_delete_rejects_active_run(tmp_path: Path) -> None:
@@ -1666,6 +1721,40 @@ def test_blueprint_service_preserves_settings_and_applies_common_config_paths(tm
     assert graph.common_nodes["clock"].every_n_seconds == 11
 
 
+def test_blueprint_service_lists_default_codex_home_skills(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    skill = codex_home / "skills" / "business-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: business-skill\n"
+        "description: >-\n"
+        "  Business skill description\n"
+        "  from Codex home\n"
+        "---\n"
+        "# Business Skill\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    service = DesktopBlueprintService()
+    response = service.handle_request({"command": "blueprint.listSkills", "args": {}})
+
+    assert response == {
+        "ok": True,
+        "skills": [
+            {
+                "value": "business-skill",
+                "label": "business-skill",
+                "description": "Business skill description from Codex home",
+            }
+        ],
+    }
+
+
 def test_blueprint_service_relocates_project_workdir_and_handles_target_conflicts(tmp_path: Path) -> None:
     service = DesktopBlueprintService()
     source = tmp_path / "source"
@@ -2611,6 +2700,8 @@ def test_run_mcp_provisions_full_agent_message_only_context(tmp_path: Path) -> N
         "agent_dispatch",
         "agent_context",
         "blueprint_script_call",
+        "blueprint_service_docs",
+        "blueprint_service_call",
         "agent_task_status",
         "join_contribute",
     ]
@@ -2788,6 +2879,8 @@ def test_run_mcp_streamable_http_tools_are_split_by_token(tmp_path: Path) -> Non
     assert "agent_dispatch" in ordinary_tools
     assert "agent_context" in ordinary_tools
     assert "agent_task_status" in ordinary_tools
+    assert "blueprint_service_docs" in ordinary_tools
+    assert "blueprint_service_call" in ordinary_tools
     assert "join_contribute" in ordinary_tools
     assert "workspace_status" in ordinary_tools
     assert "workspace_read" not in ordinary_tools
@@ -2801,6 +2894,8 @@ def test_run_mcp_streamable_http_tools_are_split_by_token(tmp_path: Path) -> Non
         "agent_dispatch",
         "agent_task_status",
         "blueprint_script_call",
+        "blueprint_service_call",
+        "blueprint_service_docs",
         "join_contribute",
     ]
     assert "workspace_checkout" not in message_only_tools
@@ -3629,7 +3724,9 @@ def test_blueprint_service_live_mode_starts_start_agents_with_private_context(
 
     project = tmp_path / "project"
     project.mkdir()
-    skill_dir = project / "skills"
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    skill_dir = codex_home / "skills"
     business_skill = skill_dir / "business-skill"
     business_skill.mkdir(parents=True)
     (business_skill / "SKILL.md").write_text(
@@ -3688,7 +3785,7 @@ def test_blueprint_service_live_mode_starts_start_agents_with_private_context(
     document["ui"]["config"] = {
         "python_path": sys.executable,
         "project_workdir": str(project),
-        "skill_dir": str(skill_dir),
+        "skill_dir": str(project / "legacy-skills"),
         "rule_dir": str(rules_dir),
     }
     plan = _plan()
@@ -3928,7 +4025,9 @@ def test_live_blueprint_mcp_workspace_dispatch_flow_with_agent_backend(
     probe = project / "src" / "mcp_probe.txt"
     probe.parent.mkdir()
     probe.write_text("base mcp probe\n", encoding="utf-8")
-    skill_dir = project / "skills"
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    skill_dir = codex_home / "skills"
     business_skill = skill_dir / "s"
     business_skill.mkdir(parents=True)
     (business_skill / "SKILL.md").write_text(
@@ -3979,7 +4078,7 @@ def test_live_blueprint_mcp_workspace_dispatch_flow_with_agent_backend(
     document["ui"]["config"] = {
         "python_path": sys.executable,
         "project_workdir": str(project),
-        "skill_dir": str(skill_dir),
+        "skill_dir": str(project / "legacy-skills"),
         "rule_dir": str(rules_dir),
     }
     plan = {
@@ -4124,7 +4223,16 @@ def test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow(
     probe = project / "src" / "mcp_probe.txt"
     probe.parent.mkdir()
     probe.write_text("base mcp probe\n", encoding="utf-8")
-    skill_dir = project / "skills"
+    source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    codex_home = tmp_path / "codex-home"
+    for name in CODEX_RUNTIME_STATE_FILES:
+        src = source_codex_home / name
+        if src.is_file():
+            dst = codex_home / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    skill_dir = codex_home / "skills"
     business_skill = skill_dir / "business-skill"
     business_skill.mkdir(parents=True)
     (business_skill / "SKILL.md").write_text(
@@ -4190,7 +4298,7 @@ def test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow(
     document["ui"]["config"] = {
         "python_path": sys.executable,
         "project_workdir": str(project),
-        "skill_dir": str(skill_dir),
+        "skill_dir": str(project / "legacy-skills"),
         "rule_dir": str(rules_dir),
     }
     planner_goal = (

@@ -76,6 +76,30 @@ describe("blueprint catalog", () => {
     ])
   })
 
+  test("uses CODEX_HOME skills when no skill directory is provided", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "blueprint-codex-home-"))
+    const previous = process.env.CODEX_HOME
+    process.env.CODEX_HOME = root
+    try {
+      await mkdir(path.join(root, "skills", "codex-skill"), { recursive: true })
+      await writeFile(
+        path.join(root, "skills", "codex-skill", "SKILL.md"),
+        "---\nname: codex-skill\ndescription: >-\n  Codex Skill\n  from Codex home\n---\n# Codex Skill\n",
+      )
+
+      expect(await listBlueprintSkills("")).toEqual([
+        {
+          value: "codex-skill",
+          label: "codex-skill",
+          description: "Codex Skill from Codex home",
+        },
+      ])
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = previous
+    }
+  })
+
   test("treats missing catalog directories as empty lists", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "blueprint-missing-catalog-"))
     const missing = path.join(root, "missing")

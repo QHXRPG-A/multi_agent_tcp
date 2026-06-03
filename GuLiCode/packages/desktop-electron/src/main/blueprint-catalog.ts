@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process"
 import { constants } from "node:fs"
 import { access, readdir, readFile } from "node:fs/promises"
+import { homedir } from "node:os"
 import path from "node:path"
 
 export type BlueprintCatalogItem = {
@@ -27,8 +28,7 @@ export async function listBlueprintDirectories(root: string): Promise<BlueprintC
 }
 
 export async function listBlueprintSkills(dir: string): Promise<BlueprintCatalogItem[]> {
-  const skillDir = dir.trim()
-  if (!skillDir) return []
+  const skillDir = dir.trim() || defaultCodexSkillsDir()
   const [entries, manifest] = await Promise.all([readCatalogDirectory(skillDir), readSkillManifest(skillDir)])
   const skills: Array<BlueprintCatalogItem | undefined> = await Promise.all(
     entries
@@ -46,6 +46,11 @@ export async function listBlueprintSkills(dir: string): Promise<BlueprintCatalog
       }),
   )
   return skills.filter(isCatalogItem).sort(compareCatalogItems)
+}
+
+function defaultCodexSkillsDir() {
+  const codexHome = process.env.CODEX_HOME?.trim() || path.join(homedir(), ".codex")
+  return path.join(codexHome, "skills")
 }
 
 export async function listBlueprintRules(dir: string): Promise<BlueprintCatalogItem[]> {
@@ -106,12 +111,30 @@ function parseSkillMetadata(source: string) {
   const frontmatter = source.match(/^---\r?\n([\s\S]*?)\r?\n---/)
   const metadata = frontmatter?.[1] ?? ""
   const name = metadata.match(/^name:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "")
-  const rawDescription = metadata.match(/^description:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "")
-  const description = rawDescription && ![">", ">-", "|", "|-"].includes(rawDescription) ? rawDescription : firstHeading(source)
+  const description = frontmatterDescription(metadata) || firstHeading(source)
   return {
     name,
     description,
   }
+}
+
+function frontmatterDescription(metadata: string) {
+  const lines = metadata.split(/\r?\n/)
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const match = line.match(/^description:\s*(.*)$/)
+    if (!match) continue
+    const value = match[1]?.trim().replace(/^["']|["']$/g, "")
+    if (![">", ">-", "|", "|-"].includes(value)) return value
+    const blockLines: string[] = []
+    for (const continuation of lines.slice(index + 1)) {
+      if (continuation && !/^\s/.test(continuation)) break
+      const text = continuation.trim()
+      if (text) blockLines.push(text)
+    }
+    return blockLines.join(" ").trim()
+  }
+  return undefined
 }
 
 function firstHeading(source: string) {

@@ -267,6 +267,84 @@ def test_control_plane_executes_script_nodes_between_agents(tmp_path: Path) -> N
     assert "ScriptNodeCompleted" in event_types
 
 
+class _FakeResidentServices:
+    def __init__(self, result: dict[str, Any]) -> None:
+        self.result = result
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def summary(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "service_name": "echo_service",
+                "title": "Echo Service",
+                "description": "Echoes payloads.",
+                "status": "running",
+            }
+        ]
+
+    def docs(self, service_name: str) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "service": {"service_name": service_name, "methods": [{"name": "echo"}]},
+        }
+
+    def call(self, service_name: str, method_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((service_name, method_name, arguments))
+        return dict(self.result)
+
+
+def test_control_plane_exposes_resident_services_and_queues_call_result() -> None:
+    graph = graph_definition_from_dict({"agent_nodes": {"planner": {"agent_id": "planner"}}})
+    runtime = GraphRuntime(_FakeCluster())
+    services = _FakeResidentServices(
+        {
+            "ok": True,
+            "service_name": "echo_service",
+            "method_name": "echo",
+            "result": {"message": "hello"},
+        }
+    )
+    control = GraphRuntimeControlPlane(runtime, graph, resident_services=services)
+
+    context = control.handle_request({"command": "agent.context", "args": {"source_node_id": "planner"}})
+    docs = control.handle_request({"command": "resident_service.docs", "args": {"service_name": "echo_service"}})
+    called = asyncio.run(control.call_resident_service("planner", "echo_service", "echo", {"message": "hello"}))
+
+    assert context["context"]["resident_services"] == services.summary()
+    assert docs["docs"]["service"]["service_name"] == "echo_service"
+    assert services.calls == [("echo_service", "echo", {"message": "hello"})]
+    assert called["ok"] is True
+    assert called["result"] == {"message": "hello"}
+    queued = runtime.status_snapshot()["queues"]["by_agent"]["planner"][0]["body"]
+    assert queued["type"] == "blueprint_service_result"
+    assert queued["service_name"] == "echo_service"
+    assert queued["result"] == {"message": "hello"}
+    assert queued["context"]["framework_context"]["resident_services"][0]["service_name"] == "echo_service"
+
+
+def test_control_plane_queues_resident_service_error_for_stopped_service() -> None:
+    graph = graph_definition_from_dict({"agent_nodes": {"planner": {"agent_id": "planner"}}})
+    runtime = GraphRuntime(_FakeCluster())
+    services = _FakeResidentServices(
+        {
+            "ok": False,
+            "code": "RESIDENT_SERVICE_NOT_RUNNING",
+            "error": "resident service is not running: echo_service",
+            "service_name": "echo_service",
+            "method_name": "echo",
+        }
+    )
+    control = GraphRuntimeControlPlane(runtime, graph, resident_services=services)
+
+    called = asyncio.run(control.call_resident_service("planner", "echo_service", "echo", {"message": "hello"}))
+
+    assert called["ok"] is False
+    queued = runtime.status_snapshot()["queues"]["by_agent"]["planner"][0]["body"]
+    assert queued["type"] == "blueprint_service_error"
+    assert queued["code"] == "RESIDENT_SERVICE_NOT_RUNNING"
+    assert queued["error"] == "resident service is not running: echo_service"
+
+
 def test_graph_definition_parses_common_nodes_and_validates_port_types() -> None:
     graph = graph_definition_from_dict(
         {

@@ -142,6 +142,7 @@ const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkben
     (await blueprintRequest(config, "blueprint.save", { projectDir, document })).document,
   detectBlueprintPython: async (projectDir?: string, pythonCommand?: string) =>
     blueprintRequest(config, "blueprint.detectPython", { projectDir, pythonCommand }),
+  listBlueprintSkills: async () => (await blueprintRequest(config, "blueprint.listSkills")).skills ?? [],
   listBlueprintScriptNodes: async (projectDir: string) =>
     blueprintRequest(config, "blueprint.scriptNodes", { projectDir }),
   createBlueprintScriptNode: async (projectDir: string, name: string, description?: string) =>
@@ -149,6 +150,19 @@ const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkben
   listBlueprintEditors: async () => (await blueprintRequest(config, "blueprint.listEditors")).editors ?? [],
   openBlueprintScriptInEditor: async (projectDir: string, modulePath: string, editorId?: string) =>
     blueprintRequest(config, "blueprint.openScriptInEditor", { projectDir, modulePath, editorId }),
+  listBlueprintResidentServices: async () => blueprintRequest(config, "blueprint.residentServices"),
+  createBlueprintResidentService: async (name: string, description?: string) =>
+    blueprintRequest(config, "blueprint.createResidentService", { name, description }),
+  openBlueprintResidentServiceInEditor: async (modulePath: string, editorId?: string) =>
+    blueprintRequest(config, "blueprint.openResidentServiceInEditor", { modulePath, editorId }),
+  startBlueprintResidentService: async (serviceName: string) =>
+    blueprintRequest(config, "blueprint.startResidentService", { serviceName }),
+  stopBlueprintResidentService: async (serviceName: string) =>
+    blueprintRequest(config, "blueprint.stopResidentService", { serviceName }),
+  blueprintResidentServiceLogs: async (serviceName: string, limit?: number) =>
+    blueprintRequest(config, "blueprint.residentServiceLogs", { serviceName, limit }),
+  blueprintResidentServiceDocs: async (serviceName: string) =>
+    blueprintRequest(config, "blueprint.residentServiceDocs", { serviceName }),
   openDirectoryPickerDialog: async (opts) => {
     const payload = await blueprintRequest(config, "blueprint.pickDirectory", {
       title: opts?.title,

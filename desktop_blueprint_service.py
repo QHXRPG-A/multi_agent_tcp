@@ -40,6 +40,10 @@ from .blueprint_script_nodes import (
     script_nodes_dir,
     validate_script_node_references,
 )
+from .blueprint_resident_services import (
+    ResidentServiceManager,
+    ensure_resident_services_dir,
+)
 from .graph_control import GraphRuntimeControlPlane, graph_definition_from_dict
 from .graph_runtime import GraphRuntime, GuLiCodeTopAgentProfile, TopAgentStartPlan
 from ._asyncio_utils import install_asyncio_connection_reset_filter
@@ -151,6 +155,20 @@ def open_blueprint_script_in_editor(
     return {"ok": True, "path": str(script_root), "editorId": str(editor.get("id") or "")}
 
 
+def open_blueprint_resident_service_in_editor(
+    data_dir: Path,
+    module_path: str,
+    editor_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    service_root = _blueprint_resident_service_root_for_module(data_dir, module_path)
+    editor = resolve_blueprint_editor(editor_id)
+    if editor.get("systemDefault") or not editor.get("command"):
+        _open_path_with_system_default(service_root)
+        return {"ok": True, "path": str(service_root), "editorId": "system"}
+    _launch_blueprint_editor(editor, service_root)
+    return {"ok": True, "path": str(service_root), "editorId": str(editor.get("id") or "")}
+
+
 def _blueprint_editor_from_env(env_name: str) -> Optional[Dict[str, Any]]:
     raw = os.environ.get(env_name, "").strip()
     if not raw:
@@ -248,6 +266,28 @@ def _blueprint_script_root_for_module(project_dir: Path, module_path: str) -> Pa
     except ValueError as exc:
         raise BlueprintServiceError("BAD_REQUEST", "modulePath escapes the script directory") from exc
     return script_root
+
+
+def _blueprint_resident_service_root_for_module(data_dir: Path, module_path: str) -> Path:
+    service_root = ensure_resident_services_dir(data_dir).resolve()
+    normalized = str(module_path or "").replace("\\", "/").strip()
+    parts = [part for part in normalized.split("/") if part]
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or WINDOWS_ABSOLUTE_PATH_RE.match(normalized)
+        or any(part == ".." for part in parts)
+    ):
+        raise BlueprintServiceError("BAD_REQUEST", "modulePath must stay inside the resident service directory")
+    if not normalized.endswith(".py"):
+        raise BlueprintServiceError("BAD_REQUEST", "modulePath must point to a .py file")
+
+    target = service_root.joinpath(*parts).resolve()
+    try:
+        target.relative_to(service_root)
+    except ValueError as exc:
+        raise BlueprintServiceError("BAD_REQUEST", "modulePath escapes the resident service directory") from exc
+    return service_root
 
 
 def _open_path_with_system_default(path: Path) -> None:
@@ -680,11 +720,31 @@ class DesktopBlueprintSkillCatalog:
         return records
 
 
+def default_codex_skill_dir() -> Path:
+    raw = os.environ.get("CODEX_HOME")
+    if raw and raw.strip():
+        return Path(raw).expanduser() / "skills"
+    return Path.home() / ".codex" / "skills"
+
+
+def list_default_blueprint_skills() -> list[Dict[str, str]]:
+    records = DesktopBlueprintSkillCatalog(default_codex_skill_dir()).records()
+    return [
+        {
+            "value": rec.skill_hash,
+            "label": rec.name,
+            "description": rec.description,
+        }
+        for rec in sorted(records.values(), key=lambda item: item.name.lower())
+    ]
+
+
 @dataclass
 class DesktopBlueprintService:
     """Project blueprint persistence and validation facade."""
 
     now: Any = time.time
+    resident_services_data_dir: Optional[Path] = None
     _lock: Any = field(default_factory=threading.RLock, init=False, repr=False)
     _runs: Dict[str, DesktopBlueprintRun] = field(default_factory=dict, init=False, repr=False)
     _planning_sessions: Dict[str, DesktopBlueprintPlanningSession] = field(default_factory=dict, init=False, repr=False)
@@ -762,6 +822,50 @@ class DesktopBlueprintService:
             if editor_id is not None and not isinstance(editor_id, str):
                 raise BlueprintServiceError("BAD_REQUEST", "editorId must be a string")
             return open_blueprint_script_in_editor(project_dir, module_path, editor_id)
+        if command == "blueprint.listSkills":
+            return {"ok": True, "skills": list_default_blueprint_skills()}
+        if command == "blueprint.residentServices":
+            return {"ok": True, **self.resident_service_manager().discover()}
+        if command == "blueprint.createResidentService":
+            name = args.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise BlueprintServiceError("BAD_REQUEST", "name must be a non-empty string")
+            description = args.get("description")
+            if description is not None and not isinstance(description, str):
+                raise BlueprintServiceError("BAD_REQUEST", "description must be a string")
+            return {"ok": True, **self.resident_service_manager().create(name, description or "")}
+        if command == "blueprint.openResidentServiceInEditor":
+            module_path = args.get("modulePath")
+            if not isinstance(module_path, str) or not module_path.strip():
+                raise BlueprintServiceError("BAD_REQUEST", "modulePath must be a non-empty string")
+            editor_id = args.get("editorId")
+            if editor_id is not None and not isinstance(editor_id, str):
+                raise BlueprintServiceError("BAD_REQUEST", "editorId must be a string")
+            return open_blueprint_resident_service_in_editor(
+                self.resident_service_data_dir(),
+                module_path,
+                editor_id,
+            )
+        if command == "blueprint.startResidentService":
+            service_name = args.get("serviceName")
+            if not isinstance(service_name, str) or not service_name.strip():
+                raise BlueprintServiceError("BAD_REQUEST", "serviceName must be a non-empty string")
+            return self.resident_service_manager().start(service_name)
+        if command == "blueprint.stopResidentService":
+            service_name = args.get("serviceName")
+            if not isinstance(service_name, str) or not service_name.strip():
+                raise BlueprintServiceError("BAD_REQUEST", "serviceName must be a non-empty string")
+            return self.resident_service_manager().stop(service_name)
+        if command == "blueprint.residentServiceLogs":
+            service_name = args.get("serviceName")
+            if not isinstance(service_name, str) or not service_name.strip():
+                raise BlueprintServiceError("BAD_REQUEST", "serviceName must be a non-empty string")
+            return self.resident_service_manager().logs(service_name, limit=int(args.get("limit", 200)))
+        if command == "blueprint.residentServiceDocs":
+            service_name = args.get("serviceName")
+            if not isinstance(service_name, str) or not service_name.strip():
+                raise BlueprintServiceError("BAD_REQUEST", "serviceName must be a non-empty string")
+            return self.resident_service_manager().docs(service_name)
         if command == "blueprint.relocateProjectWorkdir":
             project_dir = request_project_dir(args)
             document = args.get("document")
@@ -908,6 +1012,18 @@ class DesktopBlueprintService:
             )
 
         raise BlueprintServiceError("UNKNOWN_COMMAND", f"unsupported desktop blueprint command: {command!r}")
+
+    def resident_service_data_dir(self) -> Path:
+        if self.resident_services_data_dir is not None:
+            return Path(self.resident_services_data_dir).expanduser().resolve()
+        env_data_dir = os.environ.get("GULICODE_BP_DATA_DIR")
+        if env_data_dir:
+            return Path(env_data_dir).expanduser().resolve()
+        codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+        return (codex_home / "gulicode-bp" / "state").resolve()
+
+    def resident_service_manager(self) -> ResidentServiceManager:
+        return ResidentServiceManager(self.resident_service_data_dir())
 
     def list_blueprints(self, project_dir: Path) -> list[Dict[str, Any]]:
         directory = blueprint_dir(project_dir)
@@ -1308,6 +1424,7 @@ class DesktopBlueprintService:
                 graph,
                 top_agent=GuLiCodeTopAgentProfile(),
                 script_root=script_nodes_dir(validate_project_dir(project_dir)),
+                resident_services=self.resident_service_manager(),
             )
             mcp = None
             runtime.agent_stream_run_id = run_id
@@ -1711,6 +1828,7 @@ class DesktopBlueprintService:
                 graph,
                 top_agent=GuLiCodeTopAgentProfile(),
                 script_root=script_nodes_dir(project_dir),
+                resident_services=self.resident_service_manager(),
             )
             mcp = RunMCPRuntimeHandle(
                 run_id=run_id,
@@ -2297,6 +2415,7 @@ class DesktopBlueprintService:
                 graph,
                 top_agent=GuLiCodeTopAgentProfile(),
                 script_root=script_nodes_dir(project_dir),
+                resident_services=self.resident_service_manager(),
             )
             mcp = RunMCPRuntimeHandle(
                 run_id=session_id,
@@ -3528,13 +3647,7 @@ def _desktop_skill_catalog_from_document(
     document: Dict[str, Any],
     project_dir: Path,
 ) -> DesktopBlueprintSkillCatalog:
-    ui = document.get("ui", {})
-    config = ui.get("config", {}) if isinstance(ui, dict) else {}
-    raw_skill_dir = config.get("skill_dir") if isinstance(config, dict) else None
-    if not isinstance(raw_skill_dir, str) or not raw_skill_dir.strip():
-        return DesktopBlueprintSkillCatalog(None)
-    skill_dir = Path(raw_skill_dir).expanduser()
-    return DesktopBlueprintSkillCatalog(skill_dir)
+    return DesktopBlueprintSkillCatalog(default_codex_skill_dir())
 
 
 def _description_from_skill_md(skill_md: Path) -> str:
@@ -3545,10 +3658,21 @@ def _description_from_skill_md(skill_md: Path) -> str:
     if text.startswith("---"):
         parts = text.split("---", 2)
         if len(parts) >= 3:
-            for line in parts[1].splitlines():
+            lines = parts[1].splitlines()
+            for index, line in enumerate(lines):
                 stripped = line.strip()
                 if stripped.startswith("description:"):
-                    return stripped.split(":", 1)[1].strip().strip("\"'")
+                    value = stripped.split(":", 1)[1].strip().strip("\"'")
+                    if value in {">", ">-", "|", "|-"}:
+                        block_lines: list[str] = []
+                        for continuation in lines[index + 1 :]:
+                            if continuation and not continuation[0].isspace():
+                                break
+                            text_value = continuation.strip()
+                            if text_value:
+                                block_lines.append(text_value)
+                        return " ".join(block_lines).strip()
+                    return value
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
@@ -3771,13 +3895,11 @@ def document_with_project_workdir(
 def blueprint_common_config_issues(document: Dict[str, Any]) -> list[Dict[str, str]]:
     config = _blueprint_common_config(document)
     required = {"python_path", "project_workdir"}
-    if _document_uses_skill_dir(document):
-        required.add("skill_dir")
     if _document_uses_rule_dir(document):
         required.add("rule_dir")
 
     issues: list[Dict[str, str]] = []
-    for field_name in ("python_path", "project_workdir", "skill_dir", "rule_dir"):
+    for field_name in ("python_path", "project_workdir", "rule_dir"):
         raw_value = config.get(field_name) if isinstance(config, dict) else None
         value = raw_value.strip() if isinstance(raw_value, str) else ""
         if not value:
@@ -3832,26 +3954,6 @@ def _document_agent_nodes(document: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     agent_nodes = graph.get("agent_nodes", {})
     return agent_nodes if isinstance(agent_nodes, dict) else {}
-
-
-def _document_uses_skill_dir(document: Dict[str, Any]) -> bool:
-    for raw_node in _document_agent_nodes(document).values():
-        if not isinstance(raw_node, dict):
-            continue
-        skills = raw_node.get("skills")
-        if isinstance(skills, list) and any(str(item).strip() for item in skills):
-            return True
-        selection = raw_node.get("skill_selection")
-        if not isinstance(selection, dict):
-            continue
-        mode = str(selection.get("mode") or "").strip()
-        if mode in {"all", "upstream"}:
-            return True
-        if mode == "selected":
-            hashes = selection.get("skill_hashes")
-            if not isinstance(hashes, list) or any(str(item).strip() for item in hashes):
-                return True
-    return False
 
 
 def _document_uses_rule_dir(document: Dict[str, Any]) -> bool:

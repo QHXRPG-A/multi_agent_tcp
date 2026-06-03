@@ -154,6 +154,27 @@ export type Platform = {
     editorId?: string,
   ): Promise<Record<string, unknown>>
 
+  /** Discover global resident services (desktop only) */
+  listBlueprintResidentServices?(): Promise<Record<string, unknown>>
+
+  /** Create a global resident service template (desktop only) */
+  createBlueprintResidentService?(name: string, description?: string): Promise<Record<string, unknown>>
+
+  /** Open the resident services folder in the selected IDE/editor (desktop only) */
+  openBlueprintResidentServiceInEditor?(modulePath: string, editorId?: string): Promise<Record<string, unknown>>
+
+  /** Start a global resident service (desktop only) */
+  startBlueprintResidentService?(serviceName: string): Promise<Record<string, unknown>>
+
+  /** Stop a global resident service (desktop only) */
+  stopBlueprintResidentService?(serviceName: string): Promise<Record<string, unknown>>
+
+  /** Read recent resident service logs (desktop only) */
+  blueprintResidentServiceLogs?(serviceName: string, limit?: number): Promise<Record<string, unknown>>
+
+  /** Read resident service interface docs (desktop only) */
+  blueprintResidentServiceDocs?(serviceName: string): Promise<Record<string, unknown>>
+
   /** Move the current blueprint document to a new project workdir and make that directory the blueprint root. */
   relocateBlueprintProjectWorkdir?(
     projectDir: string,

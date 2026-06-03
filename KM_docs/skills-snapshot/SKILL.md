@@ -99,6 +99,23 @@ Read these first based on the task:
 
 ## Recent Handoff
 
+For the latest Blueprint Prompt editor and popout chrome polish from
+2026-06-03:
+
+- Prompt node compact canvas editing, double-click draggable/resizable editor
+  dialog, custom resize handle, Escape close behavior, hidden redundant
+  Blueprint popout title bar, and browser smoke:
+  `archive/frontend/blueprint_prompt_editor_popout_chrome_2026-06-03.md`
+
+Use that file when the user reports:
+
+- Prompt node double-click editing should open a separate text dialog
+- the Prompt editor dialog cannot be dragged by its title bar
+- the Prompt editor dialog cannot be resized from the bottom-right handle
+- dragging/resizing Prompt dialogs behaves incorrectly after canvas pan/zoom
+- `/blueprint-window/...` still shows the redundant top title bar, dock button,
+  or close button above the real Blueprint toolbar
+
 For the latest Blueprint Prompt node and Agent port expansion work from
 2026-06-02:
 

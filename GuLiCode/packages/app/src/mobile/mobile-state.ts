@@ -239,7 +239,7 @@ export function nodeKindLabel(kind: BlueprintNodeKind) {
     case "agent":
       return "Agent"
     case "worker_agent":
-      return "Worker Agent"
+      return "Worker"
     case "script":
       return "Script"
     case "branch":

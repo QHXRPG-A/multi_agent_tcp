@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import atexit
 import json
 import mimetypes
 import os
@@ -122,6 +123,14 @@ ALLOWED_COMMANDS = {
     "blueprint.createScriptNode",
     "blueprint.listEditors",
     "blueprint.openScriptInEditor",
+    "blueprint.listSkills",
+    "blueprint.residentServices",
+    "blueprint.createResidentService",
+    "blueprint.openResidentServiceInEditor",
+    "blueprint.startResidentService",
+    "blueprint.stopResidentService",
+    "blueprint.residentServiceLogs",
+    "blueprint.residentServiceDocs",
     "blueprint.pickDirectory",
     "blueprint.pickFile",
     "blueprint.relocateProjectWorkdir",
@@ -147,8 +156,14 @@ WRITE_COMMANDS = {
     "blueprint.delete",
     "blueprint.save",
     "blueprint.createScriptNode",
+    "blueprint.createResidentService",
+    "blueprint.openResidentServiceInEditor",
+    "blueprint.startResidentService",
+    "blueprint.stopResidentService",
     "blueprint.relocateProjectWorkdir",
     "blueprint.start",
+    "blueprint.startResidentService",
+    "blueprint.stopResidentService",
     "blueprint.rollbackChangesets",
     "blueprint.restoreRollback",
     "blueprint.end",
@@ -798,7 +813,8 @@ class WorkbenchServer:
 
 class PluginState:
     def __init__(self) -> None:
-        self.service = DesktopBlueprintService()
+        self.service = DesktopBlueprintService(resident_services_data_dir=RUNTIME_DATA_DIR)
+        atexit.register(self._stop_resident_services_at_exit)
         self.lock = threading.RLock()
         self.workbench: WorkbenchServer | None = None
         self.collaboration_url = DEFAULT_COLLABORATION_URL
@@ -810,6 +826,12 @@ class PluginState:
         self._persistent_workbench_stderr: Any = None
         self.active_owner_thread_id: str | None = None
         self.owner_changed_at: float | None = None
+
+    def _stop_resident_services_at_exit(self) -> None:
+        try:
+            self.service.resident_service_manager().stop_all()
+        except Exception:
+            pass
 
     def attach_owner(self, thread_id: str | None, *, reason: str = "control") -> dict[str, Any] | None:
         thread_id = _string_or_none(thread_id)
@@ -1443,6 +1465,71 @@ def blueprint_open_script_in_editor(
     if editorId:
         args["editorId"] = editorId
     return state.request("blueprint.openScriptInEditor", args)
+
+
+@mcp.tool()
+def blueprint_resident_services() -> dict[str, Any]:
+    """List global resident services and their current statuses."""
+    return state.request("blueprint.residentServices", {})
+
+
+@mcp.tool()
+def blueprint_create_resident_service(
+    name: str,
+    description: str = "",
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """Create one global resident service template."""
+    return state.request(
+        "blueprint.createResidentService",
+        {"name": name, "description": description},
+        thread_id=_current_planning_thread_id(ctx),
+    )
+
+
+@mcp.tool()
+def blueprint_open_resident_service_in_editor(
+    modulePath: str,
+    editorId: Optional[str] = None,
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """Open the resident services folder in the selected IDE/editor."""
+    args: dict[str, Any] = {"modulePath": modulePath}
+    if editorId:
+        args["editorId"] = editorId
+    return state.request("blueprint.openResidentServiceInEditor", args, thread_id=_current_planning_thread_id(ctx))
+
+
+@mcp.tool()
+def blueprint_start_resident_service(serviceName: str, ctx: Context = None) -> dict[str, Any]:
+    """Start a global resident service."""
+    return state.request(
+        "blueprint.startResidentService",
+        {"serviceName": serviceName},
+        thread_id=_current_planning_thread_id(ctx),
+    )
+
+
+@mcp.tool()
+def blueprint_stop_resident_service(serviceName: str, ctx: Context = None) -> dict[str, Any]:
+    """Stop a global resident service."""
+    return state.request(
+        "blueprint.stopResidentService",
+        {"serviceName": serviceName},
+        thread_id=_current_planning_thread_id(ctx),
+    )
+
+
+@mcp.tool()
+def blueprint_resident_service_logs(serviceName: str, limit: int = 200) -> dict[str, Any]:
+    """Read recent logs for a global resident service."""
+    return state.request("blueprint.residentServiceLogs", {"serviceName": serviceName, "limit": limit})
+
+
+@mcp.tool()
+def blueprint_resident_service_docs(serviceName: str) -> dict[str, Any]:
+    """Read interface documentation for a global resident service."""
+    return state.request("blueprint.residentServiceDocs", {"serviceName": serviceName})
 
 
 @mcp.tool()

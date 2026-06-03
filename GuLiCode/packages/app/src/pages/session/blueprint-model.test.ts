@@ -160,7 +160,7 @@ describe("blueprint draft model", () => {
     expect(viaGenericAdd.graph.agent_nodes["agent-1"]?.adapter_options[TEST_AGENT_NODE_FLAG]).toBeUndefined()
   })
 
-  test("generic add node creates full Agent and Worker Agent explicitly", () => {
+  test("generic add node creates full Agent and Worker explicitly", () => {
     const withFullAgent = addNode(createDefaultBlueprintDraft(), { kind: "agent", node_id: "agent" })
     const withWorkerAgent = addNode(withFullAgent, { kind: "worker-agent", node_id: "agent" })
 
@@ -579,7 +579,7 @@ describe("blueprint draft model", () => {
     expect("id" in graph.edges[0]).toBe(false)
   })
 
-  test("normalizes legacy agent nodes as worker agents", () => {
+  test("normalizes legacy agent nodes as workers", () => {
     const draft = fromBlueprintDocument({
       schema_version: 1,
       id: "legacy",
@@ -637,10 +637,10 @@ describe("blueprint draft model", () => {
       skills: ["multi-agent-tcp"],
       skill_selection: { mode: "none" },
     })
-    expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "skill_dir", reason: "missing" }])
+    expect(validateBlueprintConfigForStart(draft)).toEqual([])
 
     draft.config.skill_dir = "skill_list"
-    expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "skill_dir", reason: "not_absolute" }])
+    expect(validateBlueprintConfigForStart(draft)).toEqual([])
 
     draft.config.skill_dir = "/repo/skill_list"
     draft = updateAgentNode(draft, "planner", {

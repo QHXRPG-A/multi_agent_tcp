@@ -97,8 +97,11 @@ const SCRIPT_NODE_MIN_EXPANDED_HEIGHT = 102
 const COMMON_BRANCH_WIDTH = SCRIPT_NODE_WIDTH
 const COMMON_BRANCH_HEIGHT = SCRIPT_NODE_MIN_EXPANDED_HEIGHT
 const PROMPT_NODE_WIDTH = 220
-const PROMPT_NODE_COLLAPSED_HEIGHT = 96
-const PROMPT_NODE_EXPANDED_HEIGHT = 156
+const PROMPT_NODE_HEIGHT = 150
+const PROMPT_EDITOR_DEFAULT_WIDTH = 440
+const PROMPT_EDITOR_DEFAULT_HEIGHT = 300
+const PROMPT_EDITOR_MIN_WIDTH = 300
+const PROMPT_EDITOR_MIN_HEIGHT = 180
 const SCRIPT_NODE_BLUE_CLIP_PATH = "polygon(0 0, 42% 0, 55% 30%, 47% 30%, 60% 58%, 52% 58%, 64% 100%, 0 100%)"
 const SCRIPT_NODE_SPLIT_LINE_POINTS = "42,0 55,30 47,30 60,58 52,58 64,100"
 const TERMINAL_WIDTH = 92
@@ -272,6 +275,31 @@ export type CatalogState = {
 }
 
 export type BlueprintScriptCatalogNode = BlueprintScriptNode
+
+export type BlueprintResidentServiceItem = {
+  service_name: string
+  title: string
+  description: string
+  module_path: string
+  status: string
+  log_path?: string
+  pid?: number
+  port?: number
+}
+
+type ResidentServiceState = {
+  services: BlueprintResidentServiceItem[]
+  loading: boolean
+  error?: string
+}
+
+type ResidentServiceConsoleState = {
+  serviceName: string
+  title: string
+  logs: string
+  loading: boolean
+  error?: string
+}
 
 export type ModelCatalogState = {
   cliKind: string
@@ -739,6 +767,26 @@ type DragState =
       startWidth: number
       startHeight: number
     }
+  | {
+      type: "prompt-editor-move"
+      nodeId: string
+      startClientX: number
+      startClientY: number
+      startX: number
+      startY: number
+      width: number
+      height: number
+    }
+  | {
+      type: "prompt-editor-resize"
+      nodeId: string
+      startClientX: number
+      startClientY: number
+      startX: number
+      startY: number
+      startWidth: number
+      startHeight: number
+    }
 
 type ConnectionState = {
   source: string
@@ -754,6 +802,14 @@ type AgentPanelPressState = {
 type NodeSearchState = {
   clientX: number
   clientY: number
+}
+
+type PromptEditorState = {
+  nodeId: string
+  x: number
+  y: number
+  width: number
+  height: number
 }
 
 type ScriptEditorPreferences = {
@@ -819,7 +875,6 @@ export function BlueprintSidePanel(props: {
   initialBlueprintId?: string
   floatingRect?: BlueprintFloatingRect
   onFloat?: (rect?: Partial<BlueprintFloatingRect>) => void
-  onDock?: () => void
   onFloatingRectChange?: (rect: Partial<BlueprintFloatingRect>) => void
   blueprintPlanningProgress?: BlueprintPlanningProgressState
   blueprintPlanningActiveRun?: Record<string, unknown>
@@ -880,6 +935,8 @@ export function BlueprintSidePanel(props: {
   const [agentPanelPress, setAgentPanelPress] = createSignal<AgentPanelPressState>()
   const [nodeSearch, setNodeSearch] = createSignal<NodeSearchState>()
   const [nodeSearchQuery, setNodeSearchQuery] = createSignal("")
+  const [promptEditor, setPromptEditor] = createSignal<PromptEditorState>()
+  const [promptEditorElement, setPromptEditorElement] = createSignal<HTMLDivElement>()
   const [scriptEditorMenuOpen, setScriptEditorMenuOpen] = createSignal(false)
   const [globalConfigOpen, setGlobalConfigOpen] = createSignal(false)
   const [catalogRefreshVersion, setCatalogRefreshVersion] = createSignal(0)
@@ -902,6 +959,11 @@ export function BlueprintSidePanel(props: {
     rules: [],
     scriptNodes: [],
   })
+  const [residentServices, setResidentServices] = createSignal<ResidentServiceState>({
+    services: [],
+    loading: false,
+  })
+  const [residentServiceConsole, setResidentServiceConsole] = createSignal<ResidentServiceConsoleState>()
   const [modelCatalog, setModelCatalog] = createSignal<ModelCatalogState>({
     cliKind: "",
     models: [],
@@ -989,6 +1051,20 @@ export function BlueprintSidePanel(props: {
       queueMicrotask(() => nodeSearchInputRef?.focus())
     }),
   )
+
+  createEffect(() => {
+    const editor = promptEditor()
+    if (editor && !draft.graph.prompt_nodes?.[editor.nodeId]) setPromptEditor(undefined)
+  })
+
+  createEffect(() => {
+    const editor = promptEditor()
+    const element = promptEditorElement()
+    if (!editor || !element || typeof ResizeObserver === "undefined") return
+    const resizeObserver = new ResizeObserver(() => syncPromptEditorSize(editor.nodeId, element))
+    resizeObserver.observe(element)
+    onCleanup(() => resizeObserver.disconnect())
+  })
 
   createEffect(() => {
     if (agentPanelTestLogActive()) return
@@ -1522,9 +1598,8 @@ export function BlueprintSidePanel(props: {
     }, 450)
   }
 
-  const listSkills = async (skillDir: string) => {
-    if (!skillDir) return [] as BlueprintCatalogItem[]
-    const items = await platform.listBlueprintSkills?.(skillDir)
+  const listSkills = async () => {
+    const items = await platform.listBlueprintSkills?.("")
     return items ?? []
   }
 
@@ -1541,6 +1616,153 @@ export function BlueprintSidePanel(props: {
       scriptDir: typeof result?.script_dir === "string" ? result.script_dir : "",
       nodes: nodes.map(normalizeScriptCatalogNode).filter(Boolean) as BlueprintScriptCatalogNode[],
     }
+  }
+
+  const refreshResidentServices = async () => {
+    if (!platform.listBlueprintResidentServices) return
+    setResidentServices((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      const result = await platform.listBlueprintResidentServices()
+      const services = Array.isArray(result?.services)
+        ? (result.services.map(normalizeResidentServiceItem).filter(Boolean) as BlueprintResidentServiceItem[])
+        : []
+      setResidentServices({ services, loading: false, error: undefined })
+    } catch (error) {
+      setResidentServices((current) => ({ ...current, loading: false, error: readableError(error) }))
+    }
+  }
+
+  const openResidentServiceInEditor = async (service: Pick<BlueprintResidentServiceItem, "module_path">) => {
+    if (!service.module_path || !platform.openBlueprintResidentServiceInEditor) return
+    try {
+      const result = await platform.openBlueprintResidentServiceInEditor(service.module_path, selectedScriptEditor().id)
+      const path = typeof result?.path === "string" ? result.path : service.module_path
+      showToast({
+        variant: "success",
+        title: language.t("blueprint.resident.openSuccess" as never),
+        description: language.t("blueprint.script.openSuccessDescription" as never, { path }),
+      })
+    } catch (error) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.resident.openFailed" as never),
+        description: readableError(error),
+      })
+    }
+  }
+
+  const createResidentService = async (name: string, description: string) => {
+    if (!platform.createBlueprintResidentService) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.resident.createFailed" as never),
+        description: language.t("blueprint.runtime.unavailable" as never),
+      })
+      return
+    }
+    try {
+      const result = await platform.createBlueprintResidentService(name, description)
+      await refreshResidentServices()
+      const service =
+        normalizeResidentServiceItem(result?.service) ??
+        normalizeResidentServiceItem({
+          service_name: result?.service_name,
+          module_path: result?.module_path,
+          title: name,
+          description,
+          status: "stopped",
+        })
+      if (service) await openResidentServiceInEditor(service)
+    } catch (error) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.resident.createFailed" as never),
+        description: readableError(error),
+      })
+    }
+  }
+
+  const openCreateResidentServiceDialog = () => {
+    if (!platform.createBlueprintResidentService) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.resident.createFailed" as never),
+        description: language.t("blueprint.script.bridgeUnavailable" as never),
+      })
+      return
+    }
+    dialog.show(() => (
+      <BlueprintResidentServiceCreateDialog onCreate={(name, description) => createResidentService(name, description)} />
+    ))
+  }
+
+  const startResidentService = async (service: BlueprintResidentServiceItem) => {
+    if (!platform.startBlueprintResidentService) return
+    try {
+      await platform.startBlueprintResidentService(service.service_name)
+      await refreshResidentServices()
+      await refreshResidentServiceConsole(service.service_name, service.title)
+    } catch (error) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.resident.startFailed" as never),
+        description: readableError(error),
+      })
+    }
+  }
+
+  const stopResidentService = async (service: BlueprintResidentServiceItem) => {
+    if (!platform.stopBlueprintResidentService) return
+    try {
+      await platform.stopBlueprintResidentService(service.service_name)
+      await refreshResidentServices()
+      await refreshResidentServiceConsole(service.service_name, service.title)
+    } catch (error) {
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.resident.stopFailed" as never),
+        description: readableError(error),
+      })
+    }
+  }
+
+  const refreshResidentServiceConsole = async (serviceName: string, title?: string) => {
+    if (!platform.blueprintResidentServiceLogs) return
+    setResidentServiceConsole((current) => ({
+      serviceName,
+      title: title || current?.title || serviceName,
+      logs: current?.serviceName === serviceName ? current.logs : "",
+      loading: true,
+      error: undefined,
+    }))
+    try {
+      const result = await platform.blueprintResidentServiceLogs(serviceName, 240)
+      setResidentServiceConsole({
+        serviceName,
+        title: title || serviceName,
+        logs: typeof result?.logs === "string" ? result.logs : "",
+        loading: false,
+        error: undefined,
+      })
+    } catch (error) {
+      setResidentServiceConsole((current) => ({
+        serviceName,
+        title: title || current?.title || serviceName,
+        logs: current?.logs ?? "",
+        loading: false,
+        error: readableError(error),
+      }))
+    }
+  }
+
+  const openResidentServiceConsole = async (service: BlueprintResidentServiceItem) => {
+    setResidentServiceConsole({
+      serviceName: service.service_name,
+      title: service.title,
+      logs: "",
+      loading: true,
+    })
+    await refreshResidentServiceConsole(service.service_name, service.title)
   }
 
   const refreshScriptCatalog = () => setCatalogRefreshVersion((version) => version + 1)
@@ -1632,8 +1854,6 @@ export function BlueprintSidePanel(props: {
     const trimmed = value?.trim() ?? ""
     return !trimmed || trimmed === "."
   }
-  const samePath = (left?: string, right?: string) =>
-    (left ?? "").trim().replace(/[\\/]+$/, "").toLowerCase() === (right ?? "").trim().replace(/[\\/]+$/, "").toLowerCase()
 
   const detectBlueprintPythonPath = async (projectRoot?: string, pythonCommand?: string) => {
     const root = projectRoot?.trim()
@@ -1852,12 +2072,6 @@ export function BlueprintSidePanel(props: {
     }
     if (blankCommonPath(config.project_workdir)) updates.project_workdir = projectRoot
 
-    const skillDirCandidate = joinProjectPath(projectRoot, "skill_list")
-    if (blankCommonPath(config.skill_dir) || samePath(config.skill_dir, projectRoot)) {
-      const skills = await listSkills(skillDirCandidate).catch(() => [] as BlueprintCatalogItem[])
-      if (skills.length > 0) updates.skill_dir = skillDirCandidate
-    }
-
     const ruleDirCandidate = joinProjectPath(projectRoot, "rules")
     if (blankCommonPath(config.rule_dir)) {
       const rules = await listRules(ruleDirCandidate).catch(() => [] as BlueprintCatalogItem[])
@@ -1875,15 +2089,14 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
-    const skillDir = currentConfig().skill_dir
     const ruleDir = currentConfig().rule_dir
     catalogRefreshVersion()
     let cancelled = false
 
-    void Promise.allSettled([listSkills(skillDir), listRules(ruleDir), listScriptNodes()]).then(([skills, rules, scripts]) => {
+    void Promise.allSettled([listSkills(), listRules(ruleDir), listScriptNodes()]).then(([skills, rules, scripts]) => {
       if (cancelled) return
       setCatalog({
-        skillDir,
+        skillDir: "$CODEX_HOME/skills",
         ruleDir,
         scriptDir: scripts.status === "fulfilled" ? scripts.value.scriptDir : "",
         skills: skills.status === "fulfilled" ? skills.value : [],
@@ -2161,6 +2374,15 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
+    if (!platform.listBlueprintResidentServices) return
+    void refreshResidentServices()
+    const interval = setInterval(() => {
+      void refreshResidentServices()
+    }, 3000)
+    onCleanup(() => clearInterval(interval))
+  })
+
+  createEffect(() => {
     const runId = runtime().runId
     const status = runtimeStatus(runtime().status)
     if (!runId || isTerminalRuntimeStatus(status) || !platform.blueprintAgentStreamToken) return
@@ -2424,14 +2646,6 @@ export function BlueprintSidePanel(props: {
         description: readableError(error),
       })
     }
-  }
-
-  async function dockBlueprintWindow() {
-    if (props.floating && platform.dockBlueprintWindow) {
-      await platform.dockBlueprintWindow(projectDirectory, params.id)
-      return
-    }
-    ;(props.onDock ?? view().blueprintPanel.dock)()
   }
 
   async function closeBlueprintPanel() {
@@ -3327,6 +3541,156 @@ export function BlueprintSidePanel(props: {
     } as JSX.CSSProperties
   }
 
+  const openPromptEditor = (nodeId: string) => {
+    const node = draft.graph.prompt_nodes?.[nodeId]
+    const layout = draft.layout.nodes[nodeId]
+    if (!node || !layout) return
+    const viewport = draft.layout.viewport
+    const size = promptNodeSize(node)
+    const preferredX = layout.x * viewport.zoom + viewport.x + size.width * viewport.zoom + 18
+    const preferredY = layout.y * viewport.zoom + viewport.y
+    setPromptEditor({
+      nodeId,
+      ...clampPromptEditorFrame({
+        width: PROMPT_EDITOR_DEFAULT_WIDTH,
+        height: PROMPT_EDITOR_DEFAULT_HEIGHT,
+        x: preferredX,
+        y: preferredY,
+      }),
+    })
+  }
+
+  const clampPromptEditorFrame = (frame: { x: number; y: number; width: number; height: number }) => {
+    const rect = canvasRef?.getBoundingClientRect()
+    const canvasWidth = rect?.width ?? 960
+    const canvasHeight = rect?.height ?? 640
+    const width = clamp(frame.width, PROMPT_EDITOR_MIN_WIDTH, Math.max(PROMPT_EDITOR_MIN_WIDTH, canvasWidth - 16))
+    const height = clamp(frame.height, PROMPT_EDITOR_MIN_HEIGHT, Math.max(PROMPT_EDITOR_MIN_HEIGHT, canvasHeight - 16))
+    return {
+      width,
+      height,
+      x: clamp(frame.x, 8, Math.max(8, canvasWidth - width - 8)),
+      y: clamp(frame.y, 8, Math.max(8, canvasHeight - height - 8)),
+    }
+  }
+
+  const updatePromptEditorFrame = (nodeId: string, frame: { x: number; y: number; width: number; height: number }) => {
+    const next = clampPromptEditorFrame(frame)
+    setPromptEditor((current) =>
+      current && current.nodeId === nodeId
+        ? {
+            ...current,
+            ...next,
+          }
+        : current,
+    )
+  }
+
+  const syncPromptEditorSize = (nodeId: string, element: HTMLDivElement) => {
+    const rect = element.getBoundingClientRect()
+    setPromptEditor((current) => {
+      if (!current || current.nodeId !== nodeId) return current
+      const next = clampPromptEditorFrame({
+        x: current.x,
+        y: current.y,
+        width: rect.width,
+        height: rect.height,
+      })
+      if (Math.abs(current.width - next.width) < 1 && Math.abs(current.height - next.height) < 1) return current
+      return {
+        ...current,
+        ...next,
+      }
+    })
+  }
+
+  const handlePromptEditorMovePointerDown = (event: PointerEvent, editor: PromptEditorState) => {
+    if (event.button !== 0) return
+    const target = event.target as HTMLElement | null
+    if (target?.closest("button")) return
+    event.preventDefault()
+    event.stopPropagation()
+    cancelAgentPanelLongPress()
+    setConnection(undefined)
+    const element = promptEditorElement()
+    const rect = element?.getBoundingClientRect()
+    const canvasRect = canvasRef?.getBoundingClientRect()
+    const frame =
+      rect && canvasRect
+        ? {
+            x: rect.left - canvasRect.left,
+            y: rect.top - canvasRect.top,
+            width: rect.width,
+            height: rect.height,
+          }
+        : {
+            x: editor.x,
+            y: editor.y,
+            width: editor.width,
+          height: editor.height,
+        }
+    const clampedFrame = clampPromptEditorFrame(frame)
+    updatePromptEditorFrame(editor.nodeId, clampedFrame)
+    setDrag({
+      type: "prompt-editor-move",
+      nodeId: editor.nodeId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: clampedFrame.x,
+      startY: clampedFrame.y,
+      width: clampedFrame.width,
+      height: clampedFrame.height,
+    })
+  }
+
+  const handlePromptEditorResizePointerDown = (event: PointerEvent, editor: PromptEditorState) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    cancelAgentPanelLongPress()
+    setConnection(undefined)
+    const element = promptEditorElement()
+    const rect = element?.getBoundingClientRect()
+    const canvasRect = canvasRef?.getBoundingClientRect()
+    const frame =
+      rect && canvasRect
+        ? {
+            x: rect.left - canvasRect.left,
+            y: rect.top - canvasRect.top,
+            width: rect.width,
+            height: rect.height,
+          }
+        : {
+            x: editor.x,
+            y: editor.y,
+            width: editor.width,
+            height: editor.height,
+          }
+    const clampedFrame = clampPromptEditorFrame(frame)
+    updatePromptEditorFrame(editor.nodeId, clampedFrame)
+    setDrag({
+      type: "prompt-editor-resize",
+      nodeId: editor.nodeId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: clampedFrame.x,
+      startY: clampedFrame.y,
+      startWidth: clampedFrame.width,
+      startHeight: clampedFrame.height,
+    })
+  }
+
+  const promptEditorStyle = (editor: PromptEditorState) =>
+    ({
+      left: `${editor.x}px`,
+      top: `${editor.y}px`,
+      width: `${editor.width}px`,
+      height: `${editor.height}px`,
+      "min-width": `${PROMPT_EDITOR_MIN_WIDTH}px`,
+      "min-height": `${PROMPT_EDITOR_MIN_HEIGHT}px`,
+      overflow: "hidden",
+    }) as JSX.CSSProperties
+
   const handleWindowDragOver = (event: DragEvent) => {
     if (!isAddNodeDrag(event.dataTransfer)) return
     if (!clientInsideCanvas(event.clientX, event.clientY)) return
@@ -3504,6 +3868,26 @@ export function BlueprintSidePanel(props: {
       return
     }
 
+    if (current.type === "prompt-editor-move") {
+      updatePromptEditorFrame(current.nodeId, {
+        x: current.startX + event.clientX - current.startClientX,
+        y: current.startY + event.clientY - current.startClientY,
+        width: current.width,
+        height: current.height,
+      })
+      return
+    }
+
+    if (current.type === "prompt-editor-resize") {
+      updatePromptEditorFrame(current.nodeId, {
+        x: current.startX,
+        y: current.startY,
+        width: current.startWidth + event.clientX - current.startClientX,
+        height: current.startHeight + event.clientY - current.startClientY,
+      })
+      return
+    }
+
     if (!draft.layout.nodes[current.id]) return
     const snapped = snapPosition({
       x: current.startX + (event.clientX - current.startClientX) / current.zoom,
@@ -3547,6 +3931,11 @@ export function BlueprintSidePanel(props: {
     if (event.key === "Escape" && nodeSearch()) {
       event.preventDefault()
       setNodeSearch(undefined)
+      return
+    }
+    if (event.key === "Escape" && promptEditor()) {
+      event.preventDefault()
+      setPromptEditor(undefined)
       return
     }
     if (event.key !== "Delete" && event.key !== "Backspace") return
@@ -3603,55 +3992,40 @@ export function BlueprintSidePanel(props: {
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
-      <div
-        data-blueprint-float-handle
-        class="h-10 shrink-0 flex items-center justify-between gap-3 border-b border-border-weaker-base bg-background-strong px-3"
-        classList={{
-          "cursor-grab active:cursor-grabbing": !props.floating,
-        }}
-        style={BLUEPRINT_CHROME_THEME}
-        onPointerDown={handleBlueprintHeaderPointerDown}
-      >
-        <div class="flex min-w-0 items-center gap-2">
-          <Icon size="small" name="blueprint" class="text-[var(--blueprint-edge-active)]" />
-          <div class="min-w-0 truncate text-13-medium text-text-strong">
-            {language.t("session.header.blueprint")}
+      <Show when={!props.floating}>
+        <div
+          data-blueprint-float-handle
+          class="h-10 shrink-0 flex items-center justify-between gap-3 border-b border-border-weaker-base bg-background-strong px-3 cursor-grab active:cursor-grabbing"
+          style={BLUEPRINT_CHROME_THEME}
+          onPointerDown={handleBlueprintHeaderPointerDown}
+        >
+          <div class="flex min-w-0 items-center gap-2">
+            <Icon size="small" name="blueprint" class="text-[var(--blueprint-edge-active)]" />
+            <div class="min-w-0 truncate text-13-medium text-text-strong">
+              {language.t("session.header.blueprint")}
+            </div>
+            <Show when={!draftReady()}>
+              <div class="text-11-regular text-text-weaker">{language.t("common.loading")}</div>
+            </Show>
+            <Show when={headerStatus()}>
+              {(status) => <BlueprintHeaderStatus status={status()} />}
+            </Show>
           </div>
-          <Show when={!draftReady()}>
-            <div class="text-11-regular text-text-weaker">{language.t("common.loading")}</div>
-          </Show>
-          <Show when={headerStatus()}>
-            {(status) => <BlueprintHeaderStatus status={status()} />}
-          </Show>
-        </div>
-        <div class="flex items-center gap-1 shrink-0">
-          <Show when={props.floating}>
-            <Tooltip placement="bottom" value={language.t("blueprint.window.dock" as never)}>
+          <div class="flex items-center gap-1 shrink-0">
+            <Tooltip placement="bottom" value={language.t("common.close")}>
               <IconButton
-                data-blueprint-dock-button
-                icon="layout-right"
+                icon="close-small"
                 variant="ghost"
                 class="h-6 w-6 shrink-0"
                 onClick={() => {
-                  void dockBlueprintWindow()
+                  void closeBlueprintPanel()
                 }}
-                aria-label={language.t("blueprint.window.dock" as never)}
+                aria-label={language.t("common.close")}
               />
             </Tooltip>
-          </Show>
-          <Tooltip placement="bottom" value={language.t("common.close")}>
-            <IconButton
-              icon="close-small"
-              variant="ghost"
-              class="h-6 w-6 shrink-0"
-              onClick={() => {
-                void closeBlueprintPanel()
-              }}
-              aria-label={language.t("common.close")}
-            />
-          </Tooltip>
+          </div>
         </div>
-      </div>
+      </Show>
 
       <div
         class="h-10 shrink-0 flex items-center justify-between gap-2 border-b border-border-weaker-base bg-background-base px-2"
@@ -3748,9 +4122,7 @@ export function BlueprintSidePanel(props: {
                 onConfigChange={updateConfigField}
                 onProjectWorkdirBrowse={() => void pickProjectWorkdir(currentConfig().project_workdir)}
                 locked={blueprintConfigLocked()}
-                skillCount={catalog().skills.length}
                 ruleCount={catalog().rules.length}
-                skillError={catalog().skillError}
                 ruleError={catalog().ruleError}
                 invalidFields={configIssues().map((issue) => issue.field)}
                 detectingPython={pythonDetecting()}
@@ -3860,10 +4232,15 @@ export function BlueprintSidePanel(props: {
           ref={canvasRef}
           class="relative flex-1 min-w-0 min-h-0 overflow-hidden touch-none outline-none"
           classList={{
-            "cursor-grabbing": drag()?.type === "pan" || drag()?.type === "agent-panel-move",
-            "cursor-nwse-resize": drag()?.type === "agent-panel-resize",
+            "cursor-grabbing":
+              drag()?.type === "pan" || drag()?.type === "agent-panel-move" || drag()?.type === "prompt-editor-move",
+            "cursor-nwse-resize": drag()?.type === "agent-panel-resize" || drag()?.type === "prompt-editor-resize",
             "cursor-default":
-              drag()?.type !== "pan" && drag()?.type !== "agent-panel-move" && drag()?.type !== "agent-panel-resize",
+              drag()?.type !== "pan" &&
+              drag()?.type !== "agent-panel-move" &&
+              drag()?.type !== "agent-panel-resize" &&
+              drag()?.type !== "prompt-editor-move" &&
+              drag()?.type !== "prompt-editor-resize",
           }}
           style={{
             "background-color": "var(--blueprint-canvas-base)",
@@ -3899,6 +4276,27 @@ export function BlueprintSidePanel(props: {
               </Button>
             </Tooltip>
           </div>
+          <Show when={platform.listBlueprintResidentServices}>
+            <ResidentServicesPanel
+              state={residentServices()}
+              onCreate={openCreateResidentServiceDialog}
+              onRefresh={refreshResidentServices}
+              onOpenInEditor={openResidentServiceInEditor}
+              onStart={startResidentService}
+              onStop={stopResidentService}
+              onOpenConsole={openResidentServiceConsole}
+            />
+            <Show when={residentServiceConsole()}>
+              {(consoleState) => (
+                <ResidentServiceConsole
+                  state={consoleState()}
+                  onClose={() => setResidentServiceConsole(undefined)}
+                  onRefresh={() => refreshResidentServiceConsole(consoleState().serviceName, consoleState().title)}
+                  onClear={() => setResidentServiceConsole((current) => current && { ...current, logs: "" })}
+                />
+              )}
+            </Show>
+          </Show>
           <div
             class="absolute left-0 top-0"
             style={{
@@ -4040,7 +4438,7 @@ export function BlueprintSidePanel(props: {
                       return
                     }
                     if (item.type === "prompt") {
-                      replaceDraft(updatePromptNode(draft, item.id, { expanded: !item.node.expanded }))
+                      openPromptEditor(item.id)
                       return
                     }
                     inspectNode(item.id)
@@ -4062,6 +4460,56 @@ export function BlueprintSidePanel(props: {
               )}
             </For>
           </div>
+          <Show when={promptEditor()}>
+            {(editor) => (
+              <Show when={draft.graph.prompt_nodes?.[editor().nodeId]}>
+                {(promptNode) => (
+                  <div
+                    ref={setPromptEditorElement}
+                    data-blueprint-prompt-dialog
+                    class="absolute z-50 box-border flex flex-col rounded-md border border-[rgba(251,191,36,0.72)] bg-[#071019]/98 shadow-[0_18px_44px_rgba(0,0,0,0.52)] backdrop-blur"
+                    style={promptEditorStyle(editor())}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onDblClick={(event) => event.stopPropagation()}
+                  >
+                    <div
+                      data-blueprint-prompt-dialog-header
+                      class="flex h-10 shrink-0 cursor-move select-none items-center gap-2 border-b border-[rgba(251,191,36,0.2)] px-3"
+                      onPointerDown={(event) => handlePromptEditorMovePointerDown(event, editor())}
+                    >
+                      <Icon size="small" name="blueprint" class="shrink-0 text-[#fbbf24]" />
+                      <div class="min-w-0 truncate text-13-medium text-[#f8fdff]">
+                        {language.t("blueprint.node.prompt" as never)}
+                      </div>
+                      <div class="ml-auto shrink-0 rounded-sm border border-[rgba(251,191,36,0.34)] px-1.5 text-10-medium uppercase tracking-normal text-[#fde68a]">
+                        {promptNode().trigger === "always" ? "multi" : "once"}
+                      </div>
+                      <IconButton
+                        icon="close"
+                        variant="ghost"
+                        class="h-7 w-7 shrink-0 text-[#b8cede] hover:text-[#f8fdff]"
+                        aria-label={language.t("common.close")}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={() => setPromptEditor(undefined)}
+                      />
+                    </div>
+                    <textarea
+                      data-blueprint-prompt-dialog-editor
+                      class="min-h-0 flex-1 resize-none border-0 bg-[#020817]/82 px-3 py-2 text-13-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c]"
+                      value={promptNode().text}
+                      placeholder={language.t("blueprint.prompt.placeholder" as never)}
+                      onInput={(event) => replaceDraft(updatePromptNode(draft, editor().nodeId, { text: event.currentTarget.value }))}
+                    />
+                    <div
+                      data-blueprint-prompt-dialog-resize
+                      class="absolute bottom-0 right-0 h-4 w-4 cursor-nwse-resize rounded-br-md border-b-2 border-r-2 border-[rgba(251,191,36,0.72)] bg-[linear-gradient(135deg,transparent_0%,transparent_45%,rgba(251,191,36,0.18)_46%,rgba(251,191,36,0.18)_100%)]"
+                      onPointerDown={(event) => handlePromptEditorResizePointerDown(event, editor())}
+                    />
+                  </div>
+                )}
+              </Show>
+            )}
+          </Show>
           <Show when={nodeSearch()}>
             <div
               data-blueprint-node-search
@@ -4650,6 +5098,228 @@ function BlueprintScriptCreateDialog(props: {
         </div>
       </div>
     </Dialog>
+  )
+}
+
+function BlueprintResidentServiceCreateDialog(props: {
+  onCreate: (name: string, description: string) => void | Promise<void>
+}) {
+  const language = useLanguage()
+  const dialog = useDialog()
+  const [name, setName] = createSignal("")
+  const [description, setDescription] = createSignal("")
+  const submit = () => {
+    const value = name().trim()
+    if (!value) return
+    dialog.close()
+    void props.onCreate(value, description().trim())
+  }
+
+  return (
+    <Dialog title={language.t("blueprint.resident.createTitle" as never)} action={<span aria-hidden="true" />} fit>
+      <div data-blueprint-resident-create-dialog class="flex w-[420px] max-w-[calc(100vw-2rem)] flex-col gap-4 px-6 pb-4">
+        <label class="flex flex-col gap-1">
+          <span class="text-12-medium text-text-strong">{language.t("blueprint.resident.name" as never)}</span>
+          <input
+            data-blueprint-resident-name
+            class="h-9 rounded-md border border-border-weaker-base bg-background-stronger px-2 text-13-regular text-text-strong outline-none focus:border-border-selected"
+            value={name()}
+            autofocus
+            onInput={(event) => setName(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") submit()
+            }}
+          />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-12-medium text-text-strong">{language.t("blueprint.resident.description" as never)}</span>
+          <textarea
+            data-blueprint-resident-description
+            class="h-20 resize-none rounded-md border border-border-weaker-base bg-background-stronger px-2 py-1.5 text-13-regular text-text-strong outline-none placeholder:text-text-weaker focus:border-border-selected"
+            value={description()}
+            placeholder={language.t("blueprint.resident.descriptionPlaceholder" as never)}
+            onInput={(event) => setDescription(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) submit()
+            }}
+          />
+        </label>
+        <div class="rounded-sm border border-border-weaker-base bg-background-stronger px-2 py-1.5 text-12-regular text-text-weaker">
+          {language.t("blueprint.resident.templateHint" as never)}
+        </div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" size="large" onClick={() => dialog.close()}>
+            {language.t("common.cancel")}
+          </Button>
+          <Button variant="primary" size="large" disabled={!name().trim()} onClick={submit}>
+            {language.t("blueprint.resident.create" as never)}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
+function ResidentServicesPanel(props: {
+  state: ResidentServiceState
+  onCreate: () => void
+  onRefresh: () => void
+  onOpenInEditor: (service: BlueprintResidentServiceItem) => void
+  onStart: (service: BlueprintResidentServiceItem) => void
+  onStop: (service: BlueprintResidentServiceItem) => void
+  onOpenConsole: (service: BlueprintResidentServiceItem) => void
+}) {
+  const language = useLanguage()
+  const services = () => props.state.services
+  const serviceRunning = (service: BlueprintResidentServiceItem) => service.status === "running"
+
+  return (
+    <div
+      data-blueprint-resident-services-panel
+      class="pointer-events-auto absolute right-3 top-3 z-40 flex w-[320px] max-w-[calc(100%-6rem)] flex-col gap-2 rounded-md border border-[rgba(103,232,249,0.28)] bg-[#08111d]/94 p-2 shadow-[0_18px_46px_rgba(0,0,0,0.36)] backdrop-blur"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <div class="flex min-w-0 items-center justify-between gap-2 px-1">
+        <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.resident.panelTitle" as never)}</div>
+        <Tooltip value={language.t("blueprint.resident.refresh" as never)} placement="left">
+          <IconButton
+            icon="close"
+            variant="ghost"
+            size="small"
+            class="h-6 w-6"
+            disabled={props.state.loading}
+            aria-label={language.t("blueprint.resident.refresh" as never)}
+            onClick={() => props.onRefresh()}
+          />
+        </Tooltip>
+      </div>
+      <Show when={props.state.error}>
+        {(error) => (
+          <div class="rounded-sm border border-[#ef4444]/30 bg-[#450a0a]/40 px-2 py-1 text-11-regular text-[#fecaca]">
+            {error()}
+          </div>
+        )}
+      </Show>
+      <div class="flex max-h-[260px] min-h-[96px] flex-col gap-2 overflow-y-auto">
+        <Show
+          when={services().length > 0}
+          fallback={
+            <div class="flex min-h-[88px] items-center justify-center rounded border border-dashed border-[rgba(103,232,249,0.18)] px-3 text-center text-12-regular text-[#95afc4]">
+              {props.state.loading ? language.t("common.loading") : language.t("blueprint.resident.empty" as never)}
+            </div>
+          }
+        >
+          <For each={services()}>
+            {(service) => (
+              <ContextMenu>
+                <ContextMenu.Trigger class="contents">
+                  <div
+                    data-blueprint-resident-service
+                    data-status={service.status}
+                    role="button"
+                    tabIndex={0}
+                    class="grid min-h-[72px] grid-cols-[1fr_auto] gap-2 rounded border border-[rgba(103,232,249,0.22)] bg-[#101a28]/88 p-2 text-left hover:border-[rgba(103,232,249,0.54)]"
+                    onDblClick={(event) => {
+                      event.stopPropagation()
+                      props.onOpenInEditor(service)
+                    }}
+                  >
+                    <div class="min-w-0">
+                      <div class="truncate text-12-medium text-[#f8fdff]">{service.title || service.service_name}</div>
+                      <div class="mt-1 line-clamp-2 text-11-regular leading-4 text-[#95afc4]">
+                        {service.description || language.t("blueprint.resident.noDescription" as never)}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="h-7 shrink-0 rounded-sm border px-2 text-10-medium uppercase"
+                      classList={{
+                        "border-[#22c55e]/40 bg-[#052e16]/70 text-[#bbf7d0]": serviceRunning(service),
+                        "border-[#64748b]/40 bg-[#020617]/70 text-[#cbd5e1]": !serviceRunning(service),
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        props.onOpenConsole(service)
+                      }}
+                    >
+                      {service.status}
+                    </button>
+                  </div>
+                </ContextMenu.Trigger>
+                <ContextMenu.Portal>
+                  <ContextMenu.Content>
+                    <ContextMenu.Item onSelect={() => (serviceRunning(service) ? props.onStop(service) : props.onStart(service))}>
+                      <Icon size="small" name={serviceRunning(service) ? "reset" : "status"} />
+                      <ContextMenu.ItemLabel>
+                        {language.t((serviceRunning(service) ? "blueprint.resident.stop" : "blueprint.resident.start") as never)}
+                      </ContextMenu.ItemLabel>
+                    </ContextMenu.Item>
+                  </ContextMenu.Content>
+                </ContextMenu.Portal>
+              </ContextMenu>
+            )}
+          </For>
+        </Show>
+      </div>
+      <Button
+        data-blueprint-resident-create
+        size="small"
+        variant="secondary"
+        icon="plus-small"
+        class="h-8 justify-center border border-[rgba(103,232,249,0.26)] bg-[#071019]/88"
+        onClick={props.onCreate}
+      >
+        {language.t("blueprint.resident.add" as never)}
+      </Button>
+    </div>
+  )
+}
+
+function ResidentServiceConsole(props: {
+  state: ResidentServiceConsoleState
+  onClose: () => void
+  onRefresh: () => void
+  onClear: () => void
+}) {
+  const language = useLanguage()
+  return (
+    <div
+      data-blueprint-resident-console
+      class="pointer-events-auto absolute right-3 top-[360px] z-50 flex h-[300px] w-[520px] max-w-[calc(100%-1.5rem)] flex-col rounded-md border border-[rgba(103,232,249,0.32)] bg-[#06101a]/96 shadow-[0_22px_54px_rgba(0,0,0,0.42)]"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <div class="flex min-w-0 items-center justify-between gap-2 border-b border-[rgba(103,232,249,0.18)] px-3 py-2">
+        <div class="min-w-0">
+          <div class="truncate text-12-medium text-[#f8fdff]">{props.state.title}</div>
+          <div class="truncate text-10-regular text-[#95afc4]">{props.state.serviceName}</div>
+        </div>
+        <div class="flex shrink-0 items-center gap-1">
+          <Button size="small" variant="ghost" class="h-7 px-2" disabled={props.state.loading} onClick={props.onRefresh}>
+            {language.t("blueprint.resident.refresh" as never)}
+          </Button>
+          <Button size="small" variant="ghost" class="h-7 px-2" onClick={props.onClear}>
+            {language.t("blueprint.resident.clearView" as never)}
+          </Button>
+          <IconButton
+            icon="reset"
+            variant="ghost"
+            size="small"
+            class="h-7 w-7"
+            aria-label={language.t("common.close")}
+            onClick={props.onClose}
+          />
+        </div>
+      </div>
+      <Show when={props.state.error}>
+        {(error) => <div class="border-b border-[#ef4444]/20 px-3 py-1.5 text-11-regular text-[#fecaca]">{error()}</div>}
+      </Show>
+      <pre class="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-[11px] leading-5 text-[#cbd5e1]">
+        {props.state.loading && !props.state.logs
+          ? language.t("common.loading")
+          : props.state.logs || language.t("blueprint.resident.noLogs" as never)}
+      </pre>
+    </div>
   )
 }
 
@@ -5908,6 +6578,11 @@ function BlueprintNodeView(props: {
   const showInput = () => supportsInput() && (props.hasIncomingEdge || props.isConnectTargetVisible || interactive() || expandedScript() || expandedAgent())
   const showOutput = () => supportsOutput() && (props.hasOutgoingEdge || interactive() || expandedScript() || expandedAgent())
   const agentPanelProgress = () => clamp(props.agentPanelProgress, 0, 1)
+  const handlePromptDoubleClick = (event: MouseEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
+    props.onDoubleClick()
+  }
   const nodeTone = createMemo(() => {
     if (props.item.type === "terminal") {
       return props.item.kind === "start"
@@ -6123,7 +6798,7 @@ function BlueprintNodeView(props: {
                     }
                   >
                     {(promptItem) => (
-                      <div data-blueprint-prompt-node class="flex h-full w-full min-w-0 flex-col gap-2 py-1">
+                      <div data-blueprint-prompt-node class="flex h-full w-full min-w-0 flex-col gap-2 py-1" onDblClick={handlePromptDoubleClick}>
                         <div class="flex min-w-0 items-center gap-2">
                           <Icon size="small" name="blueprint" class="shrink-0" style={{ color: nodeTone().icon }} />
                           <div class="min-w-0 truncate text-12-medium" style={{ color: nodeTone().text }}>{props.title}</div>
@@ -6131,28 +6806,15 @@ function BlueprintNodeView(props: {
                             {promptItem().node.trigger === "always" ? "multi" : "once"}
                           </div>
                         </div>
-                        <Show
-                          when={promptItem().node.expanded}
-                          fallback={
-                            <input
-                              data-blueprint-prompt-editor
-                              class="min-h-8 w-full min-w-0 rounded-sm border border-[rgba(103,232,249,0.18)] bg-[#020817]/82 px-2 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(251,191,36,0.72)]"
-                              value={promptItem().node.text}
-                              placeholder={language.t("blueprint.prompt.placeholder" as never)}
-                              onPointerDown={(event) => event.stopPropagation()}
-                              onInput={(event) => props.onPromptTextChange(event.currentTarget.value)}
-                            />
-                          }
-                        >
-                          <textarea
-                            data-blueprint-prompt-editor
-                            class="min-h-[70px] w-full resize-none rounded-sm border border-[rgba(103,232,249,0.18)] bg-[#020817]/82 px-2 py-1.5 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(251,191,36,0.72)]"
-                            value={promptItem().node.text}
-                            placeholder={language.t("blueprint.prompt.placeholder" as never)}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onInput={(event) => props.onPromptTextChange(event.currentTarget.value)}
-                          />
-                        </Show>
+                        <textarea
+                          data-blueprint-prompt-editor
+                          class="min-h-[66px] w-full resize-none rounded-sm border border-[rgba(103,232,249,0.18)] bg-[#020817]/82 px-2 py-1.5 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(251,191,36,0.72)]"
+                          value={promptItem().node.text}
+                          placeholder={language.t("blueprint.prompt.placeholder" as never)}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onDblClick={handlePromptDoubleClick}
+                          onInput={(event) => props.onPromptTextChange(event.currentTarget.value)}
+                        />
                         <div class="mt-auto grid grid-cols-2 overflow-hidden rounded-sm border border-[rgba(103,232,249,0.16)] text-10-medium">
                           <button
                             type="button"
@@ -6819,11 +7481,6 @@ export function BlueprintInspector(props: {
                 ]}
                 onChange={(value) => updatePromptField("trigger", value === "always" ? "always" : "once")}
               />
-              <CheckboxField
-                label={language.t("blueprint.field.expanded" as never)}
-                checked={props.selectedPrompt?.expanded === true}
-                onChange={(checked) => updatePromptField("expanded", checked)}
-              />
             </div>
           </Match>
 
@@ -6929,9 +7586,7 @@ function BlueprintGlobalConfigPanel(props: {
   onConfigChange: <K extends keyof BlueprintConfig>(field: K, value: BlueprintConfig[K]) => void
   onProjectWorkdirBrowse: () => void
   locked?: boolean
-  skillCount: number
   ruleCount: number
-  skillError?: string
   ruleError?: string
   invalidFields: BlueprintConfigField[]
   detectingPython: boolean
@@ -6998,16 +7653,6 @@ function BlueprintGlobalConfigPanel(props: {
           readOnly
           disabled={props.locked}
           onBrowse={props.onProjectWorkdirBrowse}
-        />
-        <DirectoryConfigField
-          label={language.t("blueprint.field.skillDir")}
-          tip="skillDir"
-          value={props.config.skill_dir}
-          note={props.skillError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.count", { count: props.skillCount })}
-          invalid={invalid("skill_dir")}
-          disabled={props.locked}
-          onChange={(value) => props.onConfigChange("skill_dir", value)}
-          onBrowse={() => void pickDirectory("skill_dir", language.t("blueprint.directory.pickSkill"), props.config.skill_dir)}
         />
         <DirectoryConfigField
           label={language.t("blueprint.field.ruleDir")}
@@ -7677,10 +8322,10 @@ function nodePortShape(item: NodeItem, side: "input" | "output", portName: strin
   return "circle"
 }
 
-function promptNodeSize(node: Pick<BlueprintPromptNode, "expanded">) {
+function promptNodeSize(_node?: Pick<BlueprintPromptNode, "expanded">) {
   return {
     width: PROMPT_NODE_WIDTH,
-    height: node.expanded ? PROMPT_NODE_EXPANDED_HEIGHT : PROMPT_NODE_COLLAPSED_HEIGHT,
+    height: PROMPT_NODE_HEIGHT,
   }
 }
 
@@ -7812,6 +8457,23 @@ function normalizeScriptCatalogNode(value: unknown): BlueprintScriptCatalogNode 
     inputs,
     outputs: outputs.length ? outputs : [{ name: "result", type: "Any", required: true }],
     collapsed: record.collapsed !== false,
+  }
+}
+
+function normalizeResidentServiceItem(value: unknown): BlueprintResidentServiceItem | undefined {
+  const record = asRecord(value)
+  if (!record) return
+  const serviceName = stringValue(record.service_name) ?? stringValue(record.serviceName) ?? ""
+  if (!serviceName) return
+  return {
+    service_name: serviceName,
+    title: stringValue(record.title) ?? serviceName,
+    description: stringValue(record.description) ?? "",
+    module_path: (stringValue(record.module_path) ?? stringValue(record.modulePath) ?? "").replace(/\\/g, "/"),
+    status: stringValue(record.status) ?? "stopped",
+    log_path: stringValue(record.log_path) ?? stringValue(record.logPath),
+    pid: typeof record.pid === "number" ? record.pid : undefined,
+    port: typeof record.port === "number" ? record.port : undefined,
   }
 }
 
@@ -7985,7 +8647,7 @@ function createDesktopBlueprintSnapshot(
           id,
           label: node.agent_id?.trim() || id,
           kind: node.node_type,
-          role: node.node_type === "agent" ? "Agent" : "Worker Agent",
+          role: node.node_type === "agent" ? "Agent" : "Worker",
           summary: node.prompt?.trim() || node.run_prompt?.trim() || undefined,
           state: desktopSnapshotNodeState(stringValue(runtime?.state)),
           x: layout?.x,
@@ -8841,7 +9503,7 @@ function nodeSize(draft: BlueprintDraft, id: string) {
 
 function sizeForAddKind(kind: BlueprintAddNodeKind) {
   if (kind === "branch") return { width: COMMON_BRANCH_WIDTH, height: COMMON_BRANCH_HEIGHT }
-  if (kind === "prompt") return { width: PROMPT_NODE_WIDTH, height: PROMPT_NODE_COLLAPSED_HEIGHT }
+  if (kind === "prompt") return { width: PROMPT_NODE_WIDTH, height: PROMPT_NODE_HEIGHT }
   return kind === "start" || kind === "end"
     ? { width: TERMINAL_WIDTH, height: TERMINAL_HEIGHT }
     : { width: NODE_WIDTH, height: NODE_HEIGHT }

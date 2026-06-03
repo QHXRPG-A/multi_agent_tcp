@@ -51,6 +51,16 @@ const api: ElectronAPI = {
   blueprintListEditors: () => ipcRenderer.invoke("blueprint-list-editors"),
   blueprintOpenScriptInEditor: (projectDir, modulePath, editorId) =>
     ipcRenderer.invoke("blueprint-open-script-in-editor", projectDir, modulePath, editorId),
+  blueprintResidentServices: () => ipcRenderer.invoke("blueprint-resident-services"),
+  blueprintCreateResidentService: (name, description) =>
+    ipcRenderer.invoke("blueprint-create-resident-service", name, description),
+  blueprintOpenResidentServiceInEditor: (modulePath, editorId) =>
+    ipcRenderer.invoke("blueprint-open-resident-service-in-editor", modulePath, editorId),
+  blueprintStartResidentService: (serviceName) => ipcRenderer.invoke("blueprint-start-resident-service", serviceName),
+  blueprintStopResidentService: (serviceName) => ipcRenderer.invoke("blueprint-stop-resident-service", serviceName),
+  blueprintResidentServiceLogs: (serviceName, limit) =>
+    ipcRenderer.invoke("blueprint-resident-service-logs", serviceName, limit),
+  blueprintResidentServiceDocs: (serviceName) => ipcRenderer.invoke("blueprint-resident-service-docs", serviceName),
   blueprintRelocateProjectWorkdir: (projectDir, blueprintId, document, targetProjectWorkdir, conflictPolicy) =>
     ipcRenderer.invoke(
       "blueprint-relocate-project-workdir",

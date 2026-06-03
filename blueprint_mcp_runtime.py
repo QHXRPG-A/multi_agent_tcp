@@ -913,6 +913,28 @@ class RunMCPRuntimeHandle:
             )
 
         @mcp.tool()
+        async def blueprint_service_docs(service_name: str) -> Dict[str, Any]:
+            scope = _require_scope("ordinary", "blueprint_service_docs")
+            return await self._ordinary_blueprint_service_docs(
+                scope,
+                service_name=service_name,
+            )
+
+        @mcp.tool()
+        async def blueprint_service_call(
+            service_name: str,
+            method_name: str,
+            arguments: Optional[dict[str, Any]] = None,
+        ) -> Dict[str, Any]:
+            scope = _require_scope("ordinary", "blueprint_service_call")
+            return await self._ordinary_blueprint_service_call(
+                scope,
+                service_name=service_name,
+                method_name=method_name,
+                arguments=arguments or {},
+            )
+
+        @mcp.tool()
         async def agent_task_status(
             status: str,
             summary: str = "",
@@ -1577,6 +1599,51 @@ class RunMCPRuntimeHandle:
             )
         )
 
+    async def _ordinary_blueprint_service_docs(
+        self,
+        scope: MCPTokenScope,
+        *,
+        service_name: str,
+    ) -> Dict[str, Any]:
+        if scope.agent_node_id is None:
+            raise PermissionError("ordinary MCP token is not bound to an AgentNode")
+        _require_allowed_tool(scope, "blueprint_service_docs")
+        args = {"service_name": str(service_name)}
+        self._record_mcp_tool_call(scope, "blueprint_service_docs", args)
+        return await self._runtime_call(
+            lambda: self.control.handle_request({"command": "resident_service.docs", "args": args})
+        )
+
+    async def _ordinary_blueprint_service_call(
+        self,
+        scope: MCPTokenScope,
+        *,
+        service_name: str,
+        method_name: str,
+        arguments: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if scope.agent_node_id is None:
+            raise PermissionError("ordinary MCP token is not bound to an AgentNode")
+        _require_allowed_tool(scope, "blueprint_service_call")
+        context = scope.current_message_context
+        if context is not None and context.expires_at < float(self.token_store.now()):
+            raise PermissionError("active message context has expired")
+        clean_args = {
+            "source_node_id": scope.agent_node_id,
+            "service_name": str(service_name),
+            "method_name": str(method_name),
+            "arguments": dict(arguments or {}),
+        }
+        self._record_mcp_tool_call(scope, "blueprint_service_call", clean_args)
+        return await self._runtime_coro(
+            lambda: self.control.call_resident_service(
+                scope.agent_node_id or "",
+                str(service_name),
+                str(method_name),
+                dict(arguments or {}),
+            )
+        )
+
     async def _ordinary_agent_task_status(
         self,
         scope: MCPTokenScope,
@@ -1803,6 +1870,8 @@ ORDINARY_MESSAGE_TOOL_NAMES = [
     "agent_dispatch",
     "agent_context",
     "blueprint_script_call",
+    "blueprint_service_docs",
+    "blueprint_service_call",
     "agent_task_status",
     "join_contribute",
 ]

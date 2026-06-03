@@ -63,6 +63,34 @@ export class BlueprintRuntime {
     return this.request("blueprint.createScriptNode", { projectDir, name, description })
   }
 
+  residentServices() {
+    return this.request("blueprint.residentServices", {})
+  }
+
+  createResidentService(name: string, description?: string) {
+    return this.request("blueprint.createResidentService", { name, description })
+  }
+
+  openResidentServiceInEditor(modulePath: string, editorId?: string) {
+    return this.request("blueprint.openResidentServiceInEditor", { modulePath, editorId })
+  }
+
+  startResidentService(serviceName: string) {
+    return this.request("blueprint.startResidentService", { serviceName })
+  }
+
+  stopResidentService(serviceName: string) {
+    return this.request("blueprint.stopResidentService", { serviceName })
+  }
+
+  residentServiceLogs(serviceName: string, limit?: number) {
+    return this.request("blueprint.residentServiceLogs", { serviceName, limit })
+  }
+
+  residentServiceDocs(serviceName: string) {
+    return this.request("blueprint.residentServiceDocs", { serviceName })
+  }
+
   relocateProjectWorkdir(
     projectDir: string,
     blueprintId: string,

@@ -619,7 +619,7 @@ export function addAgentNode(
     node_id,
     node_type: "worker_agent",
     agent_id: `agent-${node_id}`,
-    prompt: "Describe this worker agent's work.",
+    prompt: "Describe this worker's work.",
   })
   next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
   next.selection = { type: "node", id: node_id }
@@ -1141,7 +1141,6 @@ export function isAbsoluteBlueprintPath(value: string) {
 
 export function requiredBlueprintConfigFields(draft: BlueprintDraft): BlueprintConfigField[] {
   const fields: BlueprintConfigField[] = ["python_path", "project_workdir"]
-  if (blueprintUsesSkillDirectory(draft)) fields.push("skill_dir")
   if (blueprintUsesRuleDirectory(draft)) fields.push("rule_dir")
   return fields
 }
@@ -1149,7 +1148,7 @@ export function requiredBlueprintConfigFields(draft: BlueprintDraft): BlueprintC
 export function validateBlueprintConfigForStart(draft: BlueprintDraft): BlueprintConfigValidationIssue[] {
   const config = draft.config ?? createDefaultBlueprintConfig()
   const required = new Set(requiredBlueprintConfigFields(draft))
-  const fields: BlueprintConfigField[] = ["python_path", "project_workdir", "skill_dir", "rule_dir"]
+  const fields: BlueprintConfigField[] = ["python_path", "project_workdir", "rule_dir"]
   const issues: BlueprintConfigValidationIssue[] = []
 
   for (const field of fields) {
@@ -1387,7 +1386,7 @@ function normalizeAgentNode(id: string, node: LegacyBlueprintAgentNode): Bluepri
     node_id: id,
     node_type: nodeType,
     agent_id: node.agent_id ?? `agent-${id}`,
-    prompt: node.prompt ?? (nodeType === "agent" ? "Describe this full CLI agent's work." : "Describe this worker agent's work."),
+    prompt: node.prompt ?? (nodeType === "agent" ? "Describe this full CLI agent's work." : "Describe this worker's work."),
     run_prompt: node.run_prompt ?? "",
   })
   const skills = [...(node.skills ?? node.skill_selection?.skill_hashes ?? defaults.skills)]
@@ -1631,13 +1630,6 @@ function normalizeSkillSelection(selection: BlueprintSkillSelection, skills: str
     mode: "selected",
     skill_hashes: [...skills],
   }
-}
-
-function blueprintUsesSkillDirectory(draft: BlueprintDraft) {
-  return Object.entries(draft.graph.agent_nodes).some(([id, node]) => {
-    const normalized = normalizeAgentNode(id, node)
-    return normalized.skill_selection.mode !== "none" || normalized.skills.length > 0
-  })
 }
 
 function blueprintUsesRuleDirectory(draft: BlueprintDraft) {

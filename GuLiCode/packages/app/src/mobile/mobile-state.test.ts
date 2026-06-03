@@ -84,7 +84,7 @@ describe("mobile display mock state", () => {
     expect(nodeStateLabel("queued")).toBe("排队中")
     expect(nodeStateTone("running")).toContain("rose")
     expect(nodeKindLabel("script")).toBe("Script")
-    expect(nodeKindLabel("worker_agent")).toBe("Worker Agent")
+    expect(nodeKindLabel("worker_agent")).toBe("Worker")
     expect(normalizedBlueprintNodeKind({ kind: "worker_agent", label: "Branch", outputPorts: ["true: message", "false: message"] })).toBe(
       "branch",
     )
