@@ -11,7 +11,6 @@ import {
   canConnectPorts,
   CLI_KIND_OPTIONS,
   compileScriptNodesFromCatalog,
-  createBlueprintStartPlan,
   createDefaultBlueprintDraft,
   fromBlueprintDocument,
   DEFAULT_PYTHON_PATH,
@@ -29,6 +28,7 @@ import {
   updatePromptNode,
   hasTickSourceNode,
   validateBlueprintConfigForStart,
+  createDefaultPopoEntry,
 } from "./blueprint-model"
 
 describe("blueprint draft model", () => {
@@ -41,6 +41,7 @@ describe("blueprint draft model", () => {
       skill_dir: DEFAULT_SKILL_DIR,
       rule_dir: "",
     })
+    expect(draft.runtime).toEqual({ start_node_id: "planner", popo_entry: createDefaultPopoEntry() })
     expect(draft.graph.terminal_nodes).toEqual({})
     expect(draft.graph.route_nodes).toEqual({})
     expect(draft.graph.common_nodes).toEqual({})
@@ -218,6 +219,17 @@ describe("blueprint draft model", () => {
     expect(document.graph.common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 1 })
     expect(restored.graph.common_nodes.gate).toEqual({ node_id: "gate", kind: "branch" })
     expect(toRuntimeGraphDraft(restored).common_nodes?.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 1 })
+  })
+
+  test("preserves the configured BlueprintSession start node in documents", () => {
+    const draft = createDefaultBlueprintDraft()
+    draft.runtime.start_node_id = "coder"
+
+    const document = toBlueprintDocument(draft)
+    const restored = fromBlueprintDocument(document)
+
+    expect(document.runtime?.start_node_id).toBe("coder")
+    expect(restored.runtime.start_node_id).toBe("coder")
   })
 
   test("adds Prompt nodes and enforces fixed Agent prompt data input", () => {
@@ -615,6 +627,7 @@ describe("blueprint draft model", () => {
       unrestricted_commands: false,
       disable_sandbox: false,
       framework_message_tools: true,
+      blueprint_monitor_tools: false,
     })
   })
 
@@ -712,6 +725,7 @@ describe("blueprint draft model", () => {
         unrestricted_commands: false,
         disable_sandbox: false,
         framework_message_tools: true,
+        blueprint_monitor_tools: false,
       },
     })
     draft = addNode(draft, {
@@ -811,57 +825,4 @@ describe("blueprint draft model", () => {
     expect(CLI_KIND_OPTIONS).toEqual(["codex"])
   })
 
-  test("creates an empty start plan unless start nodes are explicit", () => {
-    const plan = createBlueprintStartPlan(createDefaultBlueprintDraft())
-
-    expect(plan.common_config).toMatchObject({
-      python_path: DEFAULT_PYTHON_PATH,
-      project_workdir: ".",
-    })
-    expect(plan.agent_descriptions).toMatchObject({
-      planner: "Break down the user goal and dispatch implementation work.",
-      coder: "Implement the requested changes.",
-      review: "Review implementation output and identify required fixes.",
-      summary: "Summarize the run and prepare final records.",
-    })
-    expect(plan.start_nodes).toEqual([])
-    expect(plan.tasks).toEqual({})
-    expect(plan.run_policy).toEqual({ allow_parallel: true, source: "blueprint-ui-derived" })
-  })
-
-  test("creates start plan tasks from explicit start nodes and user task text", () => {
-    let draft = createDefaultBlueprintDraft()
-    draft = addAgentNode(draft, { node_id: "research" })
-    const plan = createBlueprintStartPlan(draft, {
-      startNodes: ["planner", "coder", "planner", "missing", "research"],
-      taskText: "Build the requested feature.",
-    })
-
-    expect(plan.user_goal).toBe("Build the requested feature.")
-    expect(plan.start_nodes).toEqual(["planner", "coder", "research"])
-    expect(Object.keys(plan.tasks)).toEqual(["planner", "coder", "research"])
-    expect(plan.tasks.planner.goal).toBe("Build the requested feature.")
-  })
-
-  test("uses agent prompt as description while keeping run prompt out of start plans", () => {
-    const draft = updateAgentNode(createDefaultBlueprintDraft(), "planner", {
-      prompt: "Plan the work and delegate clearly.",
-      run_prompt: "Never expose this per-run instruction in the start plan.",
-    })
-
-    const plan = createBlueprintStartPlan(draft, { startNodes: ["planner"] })
-
-    expect(plan.agent_descriptions.planner).toBe("Plan the work and delegate clearly.")
-    expect(plan.tasks.planner.goal).toBe("Plan the work and delegate clearly.")
-    expect(JSON.stringify(plan)).not.toContain("Never expose this per-run instruction")
-  })
-
-  test("start plan has no tasks when no start terminal reaches an agent", () => {
-    const draft = createDefaultBlueprintDraft()
-    draft.graph.edges = []
-
-    const plan = createBlueprintStartPlan(draft)
-    expect(plan.start_nodes).toEqual([])
-    expect(plan.tasks).toEqual({})
-  })
 })

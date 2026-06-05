@@ -144,6 +144,7 @@ class RunMCPTokenStore:
         *,
         agent_node_id: str,
         agent_id: str,
+        allowed_tools: Optional[Sequence[str]] = None,
         ttl_sec: float = 24 * 60 * 60,
     ) -> MCPTokenScope:
         with self._lock:
@@ -158,7 +159,7 @@ class RunMCPTokenStore:
                 agent_node_id=agent_node_id,
                 agent_id=agent_id,
                 workspace_rpc_token=None,
-                allowed_tools=ORDINARY_MESSAGE_TOOL_NAMES,
+                allowed_tools=[str(item) for item in (allowed_tools or ORDINARY_MESSAGE_TOOL_NAMES)],
                 expires_at=float(self.now()) + float(ttl_sec),
             )
             self._scopes_by_token[token] = scope
@@ -615,9 +616,13 @@ class RunMCPRuntimeHandle:
             access_policy = getattr(node, "access_policy", {}) or {}
             if isinstance(access_policy, dict) and access_policy.get("framework_message_tools") is False:
                 return {}
+            allowed_tools = list(ORDINARY_MESSAGE_TOOL_NAMES)
+            if isinstance(access_policy, dict) and access_policy.get("blueprint_monitor_tools") is True:
+                allowed_tools.extend(ORDINARY_MONITOR_TOOL_NAMES)
             scope = self.token_store.create_message_scope(
                 agent_node_id=node_id,
                 agent_id=agent_id,
+                allowed_tools=allowed_tools,
             )
             return _mcp_private_context(
                 server_kind="ordinary",
@@ -989,6 +994,66 @@ class RunMCPRuntimeHandle:
                 test_results=test_results,
                 metadata=metadata,
             )
+
+        @mcp.tool()
+        def blueprint_current_status(recent_events_limit: int = 20) -> Dict[str, Any]:
+            _require_scope("ordinary", "blueprint_current_status")
+            limit = max(0, min(int(recent_events_limit), 100))
+            return {
+                "ok": True,
+                "runId": self.run_id,
+                "status": self.runtime.status_snapshot(graph=self.graph, recent_events_limit=limit),
+            }
+
+        @mcp.tool()
+        def blueprint_current_events(limit: int = 20) -> Dict[str, Any]:
+            _require_scope("ordinary", "blueprint_current_events")
+            count = max(0, min(int(limit), 100))
+            status = self.runtime.status_snapshot(graph=self.graph, recent_events_limit=count)
+            return {
+                "ok": True,
+                "runId": self.run_id,
+                "limit": count,
+                "events": status.get("recent_events", []),
+            }
+
+        @mcp.tool()
+        def blueprint_current_agent_info(node_id: Optional[str] = None) -> Dict[str, Any]:
+            scope = _require_scope("ordinary", "blueprint_current_agent_info")
+            target_node_id = str(node_id or scope.agent_node_id or "").strip()
+            if not target_node_id:
+                return {"ok": False, "runId": self.run_id, "error": "node_id is required"}
+            status = self.runtime.status_snapshot(graph=self.graph, recent_events_limit=20)
+            return {
+                "ok": True,
+                "runId": self.run_id,
+                "nodeId": target_node_id,
+                "agent": status.get("agents", {}).get(target_node_id),
+                "queue": status.get("queues", {}).get("by_agent", {}).get(target_node_id, []),
+                "streamEvents": self.runtime.agent_stream_events_after(node_id=target_node_id),
+            }
+
+        @mcp.tool()
+        def blueprint_current_run_diff() -> Dict[str, Any]:
+            _require_scope("ordinary", "blueprint_current_run_diff")
+            try:
+                diff = self.manager.blueprint_run_diff(self.workspace_run).to_dict()
+            except Exception as exc:
+                diff = {
+                    "summary": {
+                        "total": 0,
+                        "accepted": 0,
+                        "conflict": 0,
+                        "rejected": 0,
+                        "pending": 0,
+                        "failed": 0,
+                    },
+                    "changesets": [],
+                    "error": str(exc),
+                }
+            diff["ok"] = True
+            diff["runId"] = self.run_id
+            return diff
 
     def _register_control_tools(self, mcp: Any) -> None:
         @mcp.tool()
@@ -1876,9 +1941,17 @@ ORDINARY_MESSAGE_TOOL_NAMES = [
     "join_contribute",
 ]
 
+ORDINARY_MONITOR_TOOL_NAMES = [
+    "blueprint_current_status",
+    "blueprint_current_events",
+    "blueprint_current_agent_info",
+    "blueprint_current_run_diff",
+]
+
 ORDINARY_TOOL_NAMES = [
     *ORDINARY_WORKSPACE_TOOL_NAMES,
     *ORDINARY_MESSAGE_TOOL_NAMES,
+    *ORDINARY_MONITOR_TOOL_NAMES,
 ]
 
 DEFAULT_CONTROL_PERMISSIONS = ["ask", "start", "status", "end", "utterances"]

@@ -62,12 +62,10 @@ same plugin-first workflow.
 `/<project>/blueprint-window/<blueprint>` route and injects a local-only token so
 the existing `BlueprintSidePanel` can call the plugin `/api/blueprint` bridge.
 
-Blueprint runs are a two-step flow in v1:
-
-1. Generate and validate a start plan with `blueprint_plan_create` or
-   `blueprint.plan.create`.
-2. Start only after user/UI confirmation by passing that confirmed plan to
-   `blueprint_start`.
+Blueprint runs now start through BlueprintSession messages. The blueprint
+document must save exactly one `runtime.start_node_id`; Workbench and POPO
+messages are delivered to that start node, while Codex MCP tools remain focused
+on inspection, monitoring, diffs, and ending active runs.
 
 The plugin also exposes direct CRUD tools:
 

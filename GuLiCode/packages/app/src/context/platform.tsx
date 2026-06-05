@@ -29,6 +29,7 @@ export type BlueprintDocument = {
   id: string
   name: string
   graph: Record<string, unknown>
+  runtime?: Record<string, unknown>
   ui: Record<string, unknown>
 }
 
@@ -43,6 +44,25 @@ export type BlueprintValidationResult = {
   ok: boolean
   errors: string[]
   warnings: string[]
+}
+
+export type BlueprintSessionSummary = {
+  sessionKey: string
+  projectDir: string
+  blueprintId: string
+  blueprintName?: string
+  blueprintStructureId?: string
+  source?: string
+  popoUserId?: string
+  popoSessionId?: string
+  popoGroupId?: string
+  status?: string
+  activeRunId?: string
+  lastRunId?: string
+  startNodeId?: string
+  messageCount?: number
+  createdAt?: number
+  lastTouchedAt?: number
 }
 
 export type BlueprintRunEndAction = "complete" | "cancel" | "fail" | "pause"
@@ -187,30 +207,45 @@ export type Platform = {
   /** Validate one project blueprint document against runtime graph rules (desktop only) */
   validateBlueprint?(projectDir: string, blueprintId: string, document?: BlueprintDocument): Promise<BlueprintValidationResult>
 
-  /** Generate and validate a start plan without starting a run (desktop only) */
-  createBlueprintStartPlan?(
+  /** List blueprint sessions, with running sessions first (desktop only) */
+  listBlueprintSessions?(projectDir?: string, blueprintId?: string): Promise<BlueprintSessionSummary[]>
+
+  /** Soft-delete an idle blueprint session (desktop only) */
+  deleteBlueprintSession?(sessionKey: string): Promise<Record<string, unknown>>
+
+  /** Send one message into a blueprint session and start/queue work at the configured start node. */
+  sendBlueprintSessionMessage?(
     projectDir: string,
     blueprintId: string,
-    input: { task: string; startNodeIds?: string[]; planOverrides?: Record<string, unknown> },
+    message: string,
+    input?: {
+      source?: string
+      popoUserId?: string
+      popoSessionId?: string
+      popoGroupId?: string
+      sessionKey?: string
+    },
   ): Promise<Record<string, unknown>>
 
-  /** Validate a generated or edited start plan without starting a run (desktop only) */
-  validateBlueprintStartPlan?(
+  /** Manually start one idle blueprint run slot. */
+  startBlueprintSlot?(projectDir: string, blueprintId: string): Promise<Record<string, unknown>>
+
+  /** Send one message into an existing blueprint run slot. */
+  sendBlueprintSlotMessage?(
     projectDir: string,
-    blueprintId: string,
-    plan: Record<string, unknown>,
+    message: string,
+    input?: {
+      source?: string
+      blueprintId?: string
+      runId?: string
+      sourceIdentity?: Record<string, unknown>
+      sessionIdentity?: Record<string, unknown>
+      sessionKey?: string
+    },
   ): Promise<Record<string, unknown>>
 
   /** List live blueprint runs owned by the desktop runtime service (desktop only) */
   listBlueprintRuns?(projectDir?: string, blueprintId?: string): Promise<Record<string, unknown>[]>
-
-  /** Reserved runtime API for the next status UI pass (desktop only) */
-  startBlueprintRun?(
-    projectDir: string,
-    blueprintId: string,
-    plan: Record<string, unknown>,
-    executionMode?: "status" | "live",
-  ): Promise<Record<string, unknown>>
 
   /** Reserved runtime API for the next status UI pass (desktop only) */
   blueprintRunStatus?(runId: string): Promise<Record<string, unknown>>

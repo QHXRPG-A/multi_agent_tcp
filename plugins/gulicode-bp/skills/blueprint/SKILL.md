@@ -1,16 +1,16 @@
 ---
 name: gulicode-bp:blueprint
-description: Use the GuLiCode Blueprint plugin to open a local blueprint workbench, inspect or run project blueprints, query GraphRuntime status/events/diffs, and queue messages to live blueprint AgentNodes through Codex MCP tools.
+description: Use the GuLiCode Blueprint plugin to open a local blueprint workbench, inspect project blueprints, query GraphRuntime status/events/diffs, and queue messages to live blueprint AgentNodes through Codex MCP tools.
 ---
 
 # GuLiCode Blueprint Plugin
 
 Use this skill when the user asks for GuLiCode blueprint work, GraphRuntime
-runs, multi-agent blueprint scheduling, blueprint diffs/events, or the local
-Blueprint web workbench. Treat the `gulicode-bp` plugin as the default
-development and debug entrypoint; do not start the full GuLiCode Electron
-desktop unless the user explicitly asks for desktop-shell, IPC, packaging, or
-taskbar behavior.
+runs, multi-agent blueprint scheduling, blueprint diffs/events, POPO-triggered
+Blueprint execution, or the local Blueprint web workbench. Treat the
+`gulicode-bp` plugin as the default development and debug entrypoint. For now,
+do not start or expand GuLiCode Electron desktop, `/mobile`, `/console`, or
+hosted/server product surfaces unless the user explicitly asks for them.
 
 ## Default Invocation
 
@@ -54,22 +54,21 @@ wait for a second "open blueprint" message.
   `.multi_agent_workspace/scripts/gulicode_blueprint.py` shim. Treat that shim
   as the script-author-facing API; do not direct users to internal runtime
   source unless they are debugging framework internals.
-- The default debug stack also keeps the GuLiCode app dev server available for
-  `/mobile` and `/console`, but the Electron desktop shell is a secondary
-  explicit workflow.
+- Current focus is the plugin and POPO invocation chain. GuLiCode desktop,
+  `/mobile`, `/console`, and hosted/server product work are temporarily
+  compatibility-only unless explicitly requested.
 
 ## Common Flow
 
 1. Call `blueprint_list` with an absolute `projectDir`.
 2. Use `blueprint_create`, `blueprint_open`, `blueprint_save`,
    `blueprint_validate`, or `blueprint_delete` for normal CRUD.
-3. For a run, call `blueprint_plan_create` with the user task and selected
-   `startNodeIds`, then call `blueprint_plan_validate` if the plan was edited.
-4. Show the start plan to the user and wait for confirmation.
-5. Call `blueprint_start` only with the confirmed plan.
-6. Poll `blueprint_status`, `blueprint_recent_events`, and `blueprint_run_diff`
+3. Keep Codex desktop control split into two explicit actions: set the saved
+   start AgentNode, then execute a caller-provided plan against that saved
+   start node. Slot start/message remains a Workbench/POPO internal path.
+4. Poll `blueprint_status`, `blueprint_recent_events`, and `blueprint_run_diff`
    while the run is active.
-7. Call `blueprint_end` with `complete`, `cancel`, `fail`, or `pause` when the
+5. Call `blueprint_end` with `complete`, `cancel`, `fail`, or `pause` when the
    run should close.
 
 Use `blueprint_request` only when a specific command is not covered by a
@@ -77,11 +76,10 @@ convenience tool.
 
 ## Debug Startup
 
-From the repo root, `.\start-gulicode-debug.cmd` and
-`.\start-gulicode-bp-plugin.cmd` start the plugin-first stack:
+From the repo root, prefer `.\start-gulicode-bp-plugin.cmd` for plugin-focused
+debugging:
 
 - refresh the personal `gulicode-bp` plugin mirror
 - serve the local Blueprint workbench
-- start or reuse the Collaboration Server
-- start or reuse the GuLiCode app dev server for `/mobile` and `/console`
-- skip the GuLiCode Electron desktop shell
+- skip GuLiCode Electron desktop, `/mobile`, `/console`, and broader server
+  workflows unless explicitly requested

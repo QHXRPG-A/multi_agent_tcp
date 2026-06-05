@@ -63,6 +63,7 @@ DEFAULT_AGENT_ACCESS_POLICY = {
     "unrestricted_commands": True,
     "disable_sandbox": True,
     "framework_message_tools": True,
+    "blueprint_monitor_tools": False,
 }
 DEFAULT_WORKER_AGENT_ACCESS_POLICY = {
     "direct_project_io": False,
@@ -70,6 +71,7 @@ DEFAULT_WORKER_AGENT_ACCESS_POLICY = {
     "unrestricted_commands": False,
     "disable_sandbox": False,
     "framework_message_tools": True,
+    "blueprint_monitor_tools": False,
 }
 _VALID_AGENT_RUNTIME_STATES = {
     "created",

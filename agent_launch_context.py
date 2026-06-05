@@ -915,6 +915,7 @@ def materialize_full_agent_context(
         "outside_project_io": bool(access_policy.get("outside_project_io", True)),
         "unrestricted_commands": bool(access_policy.get("unrestricted_commands", True)),
         "disable_sandbox": bool(access_policy.get("disable_sandbox", True)),
+        "blueprint_monitor_tools": bool(access_policy.get("blueprint_monitor_tools", False)),
         "workspace_tools": False,
     }
     if mcp_context is not None:

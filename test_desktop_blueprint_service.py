@@ -119,6 +119,61 @@ def _document(project_dir: Path | None = None) -> dict:
     }
 
 
+def _popo_runtime(start_node_id: str = "planner", robot_app_key: str = "robot-1") -> dict:
+    return {
+        "start_node_id": start_node_id,
+        "popo_entry": {
+            "enabled": True,
+            "robot_app_key": robot_app_key,
+            "robot_name": "Robot",
+            "robot_app_secret": "secret",
+            "callback_token": "token",
+            "aes_key": "0123456789abcdef0123456789abcdef",
+        },
+    }
+
+
+def _register_fake_slot(
+    service: DesktopBlueprintService,
+    project: Path,
+    document: dict,
+    *,
+    run_id: str = "run-slot-1",
+    robot_app_key: str = "robot-1",
+    slot_status: str = "idle",
+) -> DesktopBlueprintRun:
+    graph_dict = dict(document["graph"])
+    graph = desktop_blueprint_service_module.graph_definition_from_dict(graph_dict)
+    structure_id = desktop_blueprint_service_module.canonical_blueprint_structure_id(graph_dict)
+    pool_key = desktop_blueprint_service_module.blueprint_slot_pool_key(
+        project_dir=project,
+        source="popo",
+        source_binding=robot_app_key,
+        blueprint_structure_id=structure_id,
+    )
+    run = DesktopBlueprintRun(
+        run_id=run_id,
+        project_dir=project.resolve(),
+        blueprint_id=str(document["id"]),
+        document=document,
+        graph=graph,
+        runtime=None,
+        control=None,
+        execution_mode="live",
+        created_at=1.0,
+        updated_at=1.0,
+        start_node_id=document["runtime"]["start_node_id"],
+        slot_status=slot_status,
+        slot_pool_key=pool_key,
+        blueprint_structure_id=structure_id,
+        robot_app_key=robot_app_key,
+        slot_started_at=1.0,
+        slot_last_touched_at=1.0,
+    )
+    service._runs[run_id] = run
+    return run
+
+
 def _plan() -> dict:
     return {
         "user_goal": "Ship the plan.",
@@ -135,6 +190,346 @@ def _plan() -> dict:
         },
         "run_policy": {},
     }
+
+
+def test_blueprint_runtime_set_start_agent_saves_without_starting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["graph"]["agent_nodes"]["review"] = {
+        "node_id": "review",
+        "agent_id": "agent-review",
+        "prompt": "Review.",
+    }
+    document["runtime"] = {"start_node_id": "planner"}
+    service.save_blueprint(project, document)
+    start_called = False
+
+    def fake_start(*args, **kwargs):
+        nonlocal start_called
+        start_called = True
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "start_blueprint_run", fake_start)
+
+    result = service.handle_request(
+        {
+            "command": "blueprint.runtime.setStartAgent",
+            "args": {"projectDir": str(project), "blueprintId": "default", "startNodeId": "review"},
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["startNodeId"] == "review"
+    assert service.open_blueprint(project, "default")["runtime"]["start_node_id"] == "review"
+    assert start_called is False
+
+
+def test_blueprint_runtime_execute_plan_dispatches_saved_start_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = {"start_node_id": "planner"}
+    service.save_blueprint(project, document)
+    captured: dict[str, object] = {}
+
+    def fake_start(project_dir, blueprint_id, plan_data, *, execution_mode="status", session_key="", start_node_id=""):
+        captured.update(
+            {
+                "project_dir": project_dir,
+                "blueprint_id": blueprint_id,
+                "plan": plan_data,
+                "execution_mode": execution_mode,
+                "session_key": session_key,
+                "start_node_id": start_node_id,
+            }
+        )
+        return {"ok": True, "runId": "run-execute", "status": {"run": {"status": "running"}}}
+
+    monkeypatch.setattr(service, "start_blueprint_run", fake_start)
+
+    result = service.handle_request(
+        {
+            "command": "blueprint.runtime.executePlan",
+            "args": {"projectDir": str(project), "blueprintId": "default", "plan": _plan(), "executionMode": "live"},
+        }
+    )
+
+    assert result["runId"] == "run-execute"
+    assert captured["execution_mode"] == "live"
+    assert captured["start_node_id"] == "planner"
+    assert captured["plan"]["start_nodes"] == ["planner"]
+    assert captured["plan"]["run_policy"]["requires_confirmation"] is False
+
+
+def test_blueprint_runtime_execute_plan_rejects_other_start_node(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = {"start_node_id": "planner"}
+    service.save_blueprint(project, document)
+    plan = _plan()
+    plan["start_nodes"] = ["other"]
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.execute_blueprint_plan(project, "default", plan, execution_mode="live")
+
+    assert exc.value.code == "BLUEPRINT_PLAN_START_NODE_MISMATCH"
+
+
+def test_blueprint_session_message_persists_context_and_uses_stable_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = {"start_node_id": "planner"}
+    service.save_blueprint(project, document)
+    starts: list[dict] = []
+
+    def fake_start(project_dir, blueprint_id, plan_data, *, execution_mode="status", session_key="", start_node_id=""):
+        starts.append(
+            {
+                "project_dir": project_dir,
+                "blueprint_id": blueprint_id,
+                "plan": plan_data,
+                "execution_mode": execution_mode,
+                "session_key": session_key,
+                "start_node_id": start_node_id,
+            }
+        )
+        return {"ok": True, "runId": f"run-{len(starts)}", "status": {"run": {"status": "running"}}}
+
+    monkeypatch.setattr(service, "start_blueprint_run", fake_start)
+
+    first = service.message_blueprint_session(
+        project,
+        "default",
+        "第一条消息",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+        popo_group_id="g1",
+    )
+    second = service.message_blueprint_session(
+        project,
+        "default",
+        "第二条消息",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+        popo_group_id="g1",
+    )
+
+    assert first["sessionKey"] == second["sessionKey"]
+    assert starts[0]["execution_mode"] == "live"
+    assert starts[0]["start_node_id"] == "planner"
+    assert starts[0]["plan"]["start_nodes"] == ["planner"]
+    assert "第一条消息" in starts[0]["plan"]["tasks"]["planner"]["goal"]
+    assert "第二条消息" in starts[1]["plan"]["tasks"]["planner"]["goal"]
+    session_path = service.blueprint_sessions_dir() / first["sessionKey"] / "session.json"
+    transcript_path = service.blueprint_sessions_dir() / first["sessionKey"] / "transcript.jsonl"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    transcript = transcript_path.read_text(encoding="utf-8")
+    assert session["messageCount"] == 2
+    assert session["activeRunId"] == "run-2"
+    assert "第一条消息" in transcript
+    assert "第二条消息" in transcript
+
+
+def test_blueprint_session_message_requires_configured_start_node(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    service.save_blueprint(project, _document(project))
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.message_blueprint_session(project, "default", "start", source="popo", popo_user_id="u1")
+
+    assert exc.value.code == "BLUEPRINT_START_NODE_REQUIRED"
+
+
+def test_blueprint_session_message_queues_when_session_is_already_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = {"start_node_id": "planner"}
+    service.save_blueprint(project, document)
+    queued: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(service, "_active_run_for_session", lambda session_key: SimpleNamespace(run_id="run-active"))
+
+    def fake_queue(run_id, node_id, text, *, mode="default"):
+        queued.append((run_id, node_id, text))
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "queue_agent_message", fake_queue)
+
+    result = service.message_blueprint_session(
+        project,
+        "default",
+        "继续处理",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+
+    assert result["queued"] is True
+    assert result["runId"] == "run-active"
+    assert queued == [("run-active", "planner", "继续处理")]
+
+
+def test_blueprint_session_message_enforces_three_active_run_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = {"start_node_id": "planner"}
+    service.save_blueprint(project, document)
+
+    monkeypatch.setattr(service, "_active_blueprint_session_run_count", lambda: 3)
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.message_blueprint_session(project, "default", "start", source="popo", popo_user_id="u1")
+
+    assert exc.value.code == "BLUEPRINT_SESSION_LIMIT_REACHED"
+
+
+def test_blueprint_session_message_persists_context_and_uses_stable_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    queued: list[tuple[str, str, str]] = []
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+
+    def fake_queue(run_id, node_id, text, *, mode="default"):
+        queued.append((run_id, node_id, text))
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "queue_agent_message", fake_queue)
+
+    first = service.message_blueprint_slot(
+        project,
+        "first message",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1", "popoGroupId": "g1"},
+    )
+    second = service.message_blueprint_slot(
+        project,
+        "second message",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1", "popoGroupId": "g1"},
+    )
+
+    assert first["sessionKey"] == second["sessionKey"]
+    assert first["runId"] == "run-slot-1"
+    assert second["runId"] == "run-slot-1"
+    assert queued[0][:2] == ("run-slot-1", "planner")
+    assert "first message" in queued[0][2]
+    assert "second message" in queued[1][2]
+    session_path = service.blueprint_sessions_dir() / first["sessionKey"] / "session.json"
+    transcript_path = service.blueprint_sessions_dir() / first["sessionKey"] / "transcript.jsonl"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    transcript = transcript_path.read_text(encoding="utf-8")
+    assert session["messageCount"] == 2
+    assert session["activeRunId"] == "run-slot-1"
+    assert "first message" in transcript
+    assert "second message" in transcript
+
+
+def test_blueprint_session_message_requires_configured_start_node(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime(start_node_id="")
+    service.save_blueprint(project, document)
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.message_blueprint_slot(
+            project,
+            "start",
+            source="popo",
+            source_identity={"robotAppKey": "robot-1"},
+            session_identity={"popoUserId": "u1"},
+        )
+
+    assert exc.value.code == "BLUEPRINT_START_NODE_REQUIRED"
+
+
+def test_blueprint_session_message_queues_when_session_is_already_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+    queued: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+
+    def fake_queue(run_id, node_id, text, *, mode="default"):
+        queued.append((run_id, node_id, text))
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "queue_agent_message", fake_queue)
+
+    first = service.message_blueprint_slot(
+        project,
+        "start task",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1"},
+    )
+    second = service.message_blueprint_slot(
+        project,
+        "continue task",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1"},
+    )
+
+    assert second["queued"] is True
+    assert second["runId"] == first["runId"] == "run-slot-1"
+    assert queued[-1][0:2] == ("run-slot-1", "planner")
+    assert "continue task" in queued[-1][2]
+
+
+def test_blueprint_session_message_enforces_three_active_run_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+
+    monkeypatch.setattr(service, "_active_blueprint_session_run_count", lambda: 3)
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.start_blueprint_slot(project, "default")
+
+    assert exc.value.code == "BLUEPRINT_SESSION_LIMIT_REACHED"
 
 
 def test_blueprint_service_creates_and_soft_deletes_blueprint(tmp_path: Path) -> None:
@@ -1609,7 +2004,7 @@ def test_gulicode_bp_mcp_persistent_workbench_process_keeps_refreshable_url(
         state.close()
 
 
-def test_gulicode_bp_mcp_removes_workbench_planning_inbox_and_keeps_direct_control_tools() -> None:
+def test_gulicode_bp_mcp_removes_planning_and_start_tools_but_keeps_session_commands() -> None:
     module = _load_gulicode_bp_mcp_module()
     source = (Path(__file__).resolve().parent / "plugins" / "gulicode-bp" / "mcp" / "gulicode_bp_mcp.py").read_text(
         encoding="utf-8"
@@ -1620,9 +2015,16 @@ def test_gulicode_bp_mcp_removes_workbench_planning_inbox_and_keeps_direct_contr
         '"blueprint.planning.submit"',
         '"blueprint.planning.status"',
         '"blueprint.planning.cancel"',
+        '"blueprint.plan.create"',
+        '"blueprint.plan.validate"',
+        '"blueprint.start"',
+        '"blueprint.sessions.message"',
         "blueprint_take_planning_request",
         "blueprint_complete_planning_request",
         "blueprint_fail_planning_request",
+        "def blueprint_plan_create",
+        "def blueprint_plan_validate",
+        "def blueprint_start(",
         "service.takePlanningRequest",
         "service.completePlanningRequest",
         "service.failPlanningRequest",
@@ -1630,12 +2032,15 @@ def test_gulicode_bp_mcp_removes_workbench_planning_inbox_and_keeps_direct_contr
     for text in removed:
         assert text not in source
     for text in [
-        '"blueprint.plan.create"',
-        '"blueprint.plan.validate"',
-        '"blueprint.start"',
-        "def blueprint_plan_create",
-        "def blueprint_plan_validate",
-        "def blueprint_start",
+        '"blueprint.sessions.list"',
+        '"blueprint.sessions.delete"',
+        '"blueprint.runtime.setStartAgent"',
+        '"blueprint.runtime.executePlan"',
+        "def blueprint_set_start_agent",
+        "def blueprint_execute_plan",
+        "def blueprint_list_runs",
+        "def blueprint_status",
+        "def blueprint_recent_events",
     ]:
         assert text in source
 

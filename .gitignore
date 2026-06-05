@@ -5,6 +5,7 @@ vendor/dulwich/
 logs/
 sessions/
 skill_list/
+.artifacts/
 .multi_agent_workspace/
 build/
 plugins/*/.runtime/

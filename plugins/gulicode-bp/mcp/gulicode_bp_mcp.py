@@ -135,10 +135,11 @@ ALLOWED_COMMANDS = {
     "blueprint.pickFile",
     "blueprint.relocateProjectWorkdir",
     "blueprint.validate",
-    "blueprint.plan.create",
-    "blueprint.plan.validate",
+    "blueprint.runtime.setStartAgent",
+    "blueprint.runtime.executePlan",
+    "blueprint.sessions.list",
+    "blueprint.sessions.delete",
     "blueprint.listRuns",
-    "blueprint.start",
     "blueprint.status",
     "blueprint.runDiff",
     "blueprint.changesetDiff",
@@ -161,7 +162,9 @@ WRITE_COMMANDS = {
     "blueprint.startResidentService",
     "blueprint.stopResidentService",
     "blueprint.relocateProjectWorkdir",
-    "blueprint.start",
+    "blueprint.runtime.setStartAgent",
+    "blueprint.runtime.executePlan",
+    "blueprint.sessions.delete",
     "blueprint.startResidentService",
     "blueprint.stopResidentService",
     "blueprint.rollbackChangesets",
@@ -171,11 +174,17 @@ WRITE_COMMANDS = {
 }
 
 CONTROL_COMMANDS = {
-    "blueprint.start",
+    "blueprint.runtime.executePlan",
     "blueprint.rollbackChangesets",
     "blueprint.restoreRollback",
     "blueprint.end",
     "blueprint.queueAgentMessage",
+}
+
+INTERNAL_COMMANDS = {
+    "blueprint.slots.start",
+    "blueprint.slots.message",
+    "blueprint.popo.config",
 }
 
 
@@ -626,7 +635,10 @@ class WorkbenchServer:
                     if command == "blueprint.agentStreamToken" and not args.get("baseUrl"):
                         args = dict(args)
                         args["baseUrl"] = owner.url
-                    response = owner.request_fn(command, args)
+                    if command in INTERNAL_COMMANDS:
+                        response = owner.service.handle_request({"command": command, "args": args})
+                    else:
+                        response = owner.request_fn(command, args)
                     self._write_json(response)
                 except BlueprintServiceError as exc:
                     response: dict[str, Any] = {"ok": False, "code": exc.code, "error": str(exc)}
@@ -1244,6 +1256,8 @@ class SingletonServiceServer:
             return {**self.state.stop_workbench(), "servicePid": os.getpid(), "singleton": True}
         if command == "service.status":
             return {"ok": True, "service": self._service_info()}
+        if request_kind == "internal" and command in INTERNAL_COMMANDS:
+            return self.state.service.handle_request({"command": command, "args": args or {}})
         return self.state.request(command, args, thread_id=thread_id)
 
     def start(self) -> None:
@@ -1546,36 +1560,38 @@ def blueprint_validate(
 
 
 @mcp.tool()
-def blueprint_plan_create(
+def blueprint_set_start_agent(
     projectDir: str,
-    task: str,
+    startNodeId: str,
     blueprintId: str = DEFAULT_BLUEPRINT_ID,
-    startNodeIds: Optional[list[str]] = None,
-    planOverrides: Optional[dict[str, Any]] = None,
+    ctx: Context = None,
 ) -> dict[str, Any]:
-    """Generate and validate a start plan for a blueprint without starting it."""
-    args: dict[str, Any] = {
-        "projectDir": projectDir,
-        "blueprintId": blueprintId,
-        "task": task,
-    }
-    if startNodeIds is not None:
-        args["startNodeIds"] = startNodeIds
-    if planOverrides is not None:
-        args["planOverrides"] = planOverrides
-    return state.request("blueprint.plan.create", args)
+    """Set the saved start AgentNode for one blueprint without starting a run."""
+    return state.request(
+        "blueprint.runtime.setStartAgent",
+        {"projectDir": projectDir, "blueprintId": blueprintId, "startNodeId": startNodeId},
+        thread_id=_current_planning_thread_id(ctx),
+    )
 
 
 @mcp.tool()
-def blueprint_plan_validate(
+def blueprint_execute_plan(
     projectDir: str,
     plan: dict[str, Any],
     blueprintId: str = DEFAULT_BLUEPRINT_ID,
+    executionMode: str = "live",
+    ctx: Context = None,
 ) -> dict[str, Any]:
-    """Validate a confirmed start plan for a blueprint."""
+    """Execute a caller-specified start plan by dispatching it to the saved start AgentNode."""
     return state.request(
-        "blueprint.plan.validate",
-        {"projectDir": projectDir, "blueprintId": blueprintId, "plan": plan},
+        "blueprint.runtime.executePlan",
+        {
+            "projectDir": projectDir,
+            "blueprintId": blueprintId,
+            "plan": plan,
+            "executionMode": executionMode,
+        },
+        thread_id=_current_planning_thread_id(ctx),
     )
 
 
@@ -1591,27 +1607,6 @@ def blueprint_list_runs(
     if blueprintId:
         args["blueprintId"] = blueprintId
     return state.request("blueprint.listRuns", args)
-
-
-@mcp.tool()
-def blueprint_start(
-    projectDir: str,
-    plan: dict[str, Any],
-    blueprintId: str = DEFAULT_BLUEPRINT_ID,
-    executionMode: str = "live",
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Start a blueprint run."""
-    return state.request(
-        "blueprint.start",
-        {
-            "projectDir": projectDir,
-            "blueprintId": blueprintId,
-            "plan": plan,
-            "executionMode": executionMode,
-        },
-        thread_id=_current_planning_thread_id(ctx),
-    )
 
 
 @mcp.tool()

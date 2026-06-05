@@ -1275,33 +1275,11 @@ export default function Page() {
   }
 
   const approveBlueprintPlanningPlan = async () => {
-    if (!blueprintPlanning.sessionId || !platform.startBlueprintRun || !platform.markBlueprintPlanningPlanStarted) return
-    const plan = blueprintPlanning.pendingPlan?.plan
-    if (!plan || blueprintPlanning.pendingPlan?.validation?.ok !== true) return
-    setBlueprintPlanning("approving", true)
-    try {
-      const startPlan = cloneBlueprintPlanningPayload(plan)
-      const started = cloneBlueprintPlanningPayload(
-        await platform.startBlueprintRun(
-          sdk.directory,
-          blueprintPlanning.contextBlueprintId || blueprintPlanning.blueprintId || DEFAULT_BLUEPRINT_ID,
-          startPlan,
-          "live",
-        ),
-      )
-      const runId = typeof started.runId === "string" ? started.runId : ""
-      if (!runId) throw new Error("Blueprint start did not return a runId")
-      const snapshot = await platform.markBlueprintPlanningPlanStarted(blueprintPlanning.sessionId, runId, started)
-      applyBlueprintPlanningSnapshot(snapshot)
-    } catch (err) {
-      showToast({
-        variant: "error",
-        title: language.t("common.requestFailed"),
-        description: formatServerError(err, language.t),
-      })
-    } finally {
-      setBlueprintPlanning("approving", false)
-    }
+    showToast({
+      variant: "error",
+      title: language.t("common.requestFailed"),
+      description: "Blueprint plan approval has been retired. Send a message through a BlueprintSession instead.",
+    })
   }
 
   const rejectBlueprintPlanningPlan = async () => {

@@ -12,10 +12,11 @@ description: >-
 # multi_agent_tcp Project Skill
 
 Use this skill when working on the `multi_agent_tcp` repository, especially the
-`gulicode-bp` Codex plugin, Blueprint web workbench, blueprint runtime,
-plugin-controlled start plans, multi-agent communication, workspace isolation, MCP
-workspace tools, GuLiCode mobile/console debug surfaces, and CLI worker
-adapters.
+`gulicode-bp` Codex plugin, Blueprint web workbench, POPO-triggered Blueprint
+execution, blueprint runtime, plugin-controlled start plans, multi-agent
+communication, workspace isolation, MCP workspace tools, and CLI worker
+adapters. Temporarily treat GuLiCode desktop, mobile, console, and hosted/server
+surfaces as out of scope unless the user explicitly asks for them.
 
 This file is intentionally short so Codex can discover the skill reliably.
 Detailed context lives in the files listed below. Load only the relevant files
@@ -28,7 +29,7 @@ The active product direction is:
 ```text
 gulicode-bp Codex plugin
   -> local Blueprint web workbench
-  -> GuLiCode app dev surfaces: /mobile and /console
+  -> POPO callback and Blueprint run-slot message entry
   -> GraphRuntimeControlPlane
   -> GraphRuntime
   -> AgentNode queues, outgoing batches, joins, workspace state, events
@@ -41,16 +42,14 @@ Interpretation rules:
 - Treat `gulicode-bp` as the default user-facing development/debug entrypoint.
 - Treat the Blueprint web workbench as a plugin-served surface backed by the
   existing GuLiCode app build and Python runtime service.
-- Keep `/mobile` and `/console` in the default debug stack through the app dev
-  server.
-- Treat GuLiCode desktop/Electron as a secondary compatibility target. Start it
-  only when the user asks for desktop shell, IPC, packaging, taskbar, or
-  desktop-window behavior.
+- Focus current implementation on the plugin and POPO invocation chain.
+- Do not include `/mobile`, `/console`, GuLiCode desktop/Electron, or hosted
+  server product work in the default scope. Use those paths only when the user
+  explicitly asks for that surface.
 - Treat `GraphRuntimeControlPlane` and `GraphRuntime` as the framework-owned
   execution center.
-- Treat start plan generation and validation as a `gulicode-bp` plugin
-  responsibility: create/validate a plan first, show it for confirmation, then
-  call `blueprint_start` with the confirmed plan.
+- Treat Codex desktop control as two explicit actions: set the saved start
+  AgentNode, then execute a caller-provided plan against that saved start node.
 - Treat low-level TCP workers as a backend adapter path, not the product
   architecture center.
 - Prefer `CLIWorkerBackend` in new writing. Mention `CodeMakerCluster` only as a
@@ -93,11 +92,58 @@ Read these first based on the task:
   `environment_setup.md`
 - Current active priorities:
   `tasks/current_goals.md`
-- Plugin-first debug start workflow for Blueprint workbench + Collaboration
-  Server + mock mobile + server console:
+- Historical plugin-first debug startup workflow:
   `knowledge_base/debug_start.md`
 
 ## Recent Handoff
+
+For the latest Blueprint sessions, run slots, POPO entry, Codex start-agent
+setting, and MCP boundary work from 2026-06-05:
+
+- Runtime/backend session storage, run-slot assignment, POPO singleton-service
+  routing, Codex desktop `setStartAgent` / `executePlan`, run-scoped monitor
+  tools, public/internal MCP boundaries, Workbench internal slot bridge fix, and
+  automated test results:
+  `archive/runtime-backend/blueprint_sessions_slots_popo_mcp_2026-06-05.md`
+- Workbench sessions dropdown, Blueprint run-slot panel, single AgentNode start
+  selector, POPO entry inspector fields, monitor-tools toggle, platform bridge
+  methods, browser smoke, and UI test results:
+  `archive/frontend/blueprint_sessions_slots_popo_entry_ui_2026-06-05.md`
+
+Use those files when the user reports:
+
+- Blueprint sessions are unclear, missing from the toolbar, not scrolling, or
+  cannot be deleted correctly
+- "Blueprint run slot" start/message UI returns `UNKNOWN_COMMAND` or does not
+  show POPO entry errors
+- `runtime.start_node_id` is not saved, the start node selector is empty, or a
+  plan starts from a node other than the saved AgentNode
+- POPO robot app key/config binding, session routing, or slot load balancing is
+  behaving unexpectedly
+- Codex desktop should set the start Agent separately from executing a specified
+  plan
+- public MCP tools should expose `blueprint_set_start_agent` /
+  `blueprint_execute_plan` but not `blueprint.slots.*`
+- full AgentNode Blueprint monitor tools need run-scoped status/events/diff
+  access without cross-run mutation
+
+For the latest Blueprint resident services panel pagination/search/collapse
+work from 2026-06-05:
+
+- Resident services panel local search, fixed five-item pagination, header
+  collapse/expand, dedicated refresh action, no-match empty-state fix, i18n, and
+  browser smoke:
+  `archive/frontend/blueprint_resident_services_panel_search_pagination_collapse_2026-06-05.md`
+
+Use that file when the user reports:
+
+- the resident services panel should show only five services per page
+- resident service search, no-match copy, or page clamping behaves incorrectly
+- the resident services panel header should collapse/expand instead of looking
+  like a close button
+- pagination buttons or localized resident service labels are missing
+- a packaged Workbench still shows the old resident services panel after plugin
+  rebuild/restart
 
 For the latest Blueprint Prompt editor and popout chrome polish from
 2026-06-03:

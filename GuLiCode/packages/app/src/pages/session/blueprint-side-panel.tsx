@@ -34,7 +34,6 @@ import {
   DEFAULT_BLUEPRINT_ID,
   DEFAULT_BLUEPRINT_NAME,
   compileScriptNodesFromCatalog,
-  createBlueprintStartPlan,
   createDefaultBlueprintDraft,
   defaultCommandForCliKind,
   defaultModelForCliKind,
@@ -44,7 +43,6 @@ import {
   fanEdgeGroup,
   jsonText,
   nodeKind,
-  hasTickSourceNode,
   parseJsonObject,
   parseScopeText,
   parseStringRecord,
@@ -71,6 +69,7 @@ import {
   type BlueprintDraft,
   type BlueprintEdge,
   type BlueprintNodeLayout,
+  type BlueprintPopoEntry,
   type BlueprintPromptNode,
   type BlueprintRouteNode,
   type BlueprintScriptCompileResult,
@@ -85,6 +84,7 @@ import {
   type BlueprintEditorCandidate,
   type BlueprintRelocateConflictPolicy,
   type BlueprintRunEndAction,
+  type BlueprintSessionSummary,
   type BlueprintSummary,
 } from "@/context/platform"
 
@@ -121,6 +121,7 @@ const BLUEPRINT_FLOAT_DRAG_THRESHOLD = 8
 const RIGHT_CLICK_PAN_THRESHOLD = 5
 const NODE_SEARCH_CARD_WIDTH = 320
 const NODE_SEARCH_CARD_MAX_HEIGHT = 360
+const RESIDENT_SERVICE_PAGE_SIZE = 5
 
 type BlueprintCanvasPortShape = "circle" | "triangle"
 
@@ -399,6 +400,12 @@ type BlueprintRuntimeState = {
   action?: string
   error?: string
   lastUpdatedAt?: number
+}
+
+type BlueprintSessionState = {
+  sessions: BlueprintSessionSummary[]
+  loading: boolean
+  error?: string
 }
 
 export type BlueprintDiffFile = {
@@ -991,10 +998,14 @@ export function BlueprintSidePanel(props: {
     events: [],
     loading: false,
   })
+  const [blueprintSessions, setBlueprintSessions] = createSignal<BlueprintSessionState>({
+    sessions: [],
+    loading: false,
+  })
   const [blueprintDiffOpen, setBlueprintDiffOpen] = createSignal(false)
   const [blueprintDiffSelectedChangesetId, setBlueprintDiffSelectedChangesetId] = createSignal<string>()
   const [blueprintDiff, setBlueprintDiff] = createStore<BlueprintDiffState>(emptyBlueprintDiffState())
-  const [runtimeStartNodeIds, setRuntimeStartNodeIds] = createSignal<string[]>([])
+  const runtimeStartNodeId = () => draft.runtime?.start_node_id?.trim() ?? ""
   const [hoveredEdgeGroupId, setHoveredEdgeGroupId] = createSignal<string>()
   const [agentPanel, setAgentPanel] = createStore<AgentPanelState>({
     panels: {},
@@ -1484,10 +1495,10 @@ export function BlueprintSidePanel(props: {
     previousAcceptedDiffSignature = undefined
     syncedAcceptedDiffSignature = undefined
     setRuntime({ runs: [], events: [], loading: false })
+    setBlueprintSessions({ sessions: [], loading: false })
     setBlueprintDiffOpen(false)
     setBlueprintDiffSelectedChangesetId(undefined)
     setBlueprintDiff(reconcile(emptyBlueprintDiffState()))
-    setRuntimeStartNodeIds([])
     setAgentPanel("panels", reconcile({}))
     setAgentPanel("streamEvents", reconcile({}))
     setAgentPanel("streamCursor", 0)
@@ -2181,8 +2192,13 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
+    if (!draft.runtime) setDraft("runtime", { start_node_id: "" })
+  })
+
+  createEffect(() => {
     const available = new Set(runtimeStartNodeOptions().map((option) => option.id))
-    setRuntimeStartNodeIds((current) => current.filter((nodeId) => available.has(nodeId)))
+    const selected = runtimeStartNodeId()
+    if (selected && !available.has(selected)) setDraft("runtime", "start_node_id", "")
   })
 
   createEffect(() => {
@@ -2191,6 +2207,7 @@ export function BlueprintSidePanel(props: {
     draft.config.project_workdir
     draft.config.skill_dir
     draft.config.rule_dir
+    draft.runtime?.start_node_id
     JSON.stringify(draft.graph)
     JSON.stringify(draft.layout)
     JSON.stringify(draft.selection)
@@ -2336,6 +2353,28 @@ export function BlueprintSidePanel(props: {
     }
     syncRuns()
     const interval = setInterval(syncRuns, 2000)
+    onCleanup(() => {
+      cancelled = true
+      clearInterval(interval)
+    })
+  })
+
+  createEffect(() => {
+    if (!persistence().loaded || !platform.listBlueprintSessions) return
+    let cancelled = false
+    const syncSessions = () => {
+      void platform
+        .listBlueprintSessions?.(projectDirectory, currentBlueprintId())
+        .then((sessions) => {
+          if (!cancelled) setBlueprintSessions({ sessions, loading: false, error: undefined })
+        })
+        .catch((error) => {
+          if (!cancelled) setBlueprintSessions((current) => ({ ...current, loading: false, error: readableError(error) }))
+        })
+    }
+    setBlueprintSessions((current) => ({ ...current, loading: true, error: undefined }))
+    syncSessions()
+    const interval = setInterval(syncSessions, 2000)
     onCleanup(() => {
       cancelled = true
       clearInterval(interval)
@@ -2499,6 +2538,28 @@ export function BlueprintSidePanel(props: {
         loading: false,
         error: readableError(error),
       }))
+    }
+  }
+
+  async function refreshBlueprintSessions(opts: { quiet?: boolean } = {}) {
+    if (!platform.listBlueprintSessions) return
+    if (!opts.quiet) setBlueprintSessions((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      const sessions = await platform.listBlueprintSessions(projectDirectory, currentBlueprintId())
+      setBlueprintSessions({ sessions, loading: false, error: undefined })
+    } catch (error) {
+      setBlueprintSessions((current) => ({ ...current, loading: false, error: readableError(error) }))
+    }
+  }
+
+  async function deleteBlueprintSession(sessionKey: string) {
+    if (!platform.deleteBlueprintSession) return
+    setBlueprintSessions((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      await platform.deleteBlueprintSession(sessionKey)
+      await refreshBlueprintSessions({ quiet: true })
+    } catch (error) {
+      setBlueprintSessions((current) => ({ ...current, loading: false, error: readableError(error) }))
     }
   }
 
@@ -2757,16 +2818,13 @@ export function BlueprintSidePanel(props: {
     window.addEventListener("pointercancel", end)
   }
 
-  function toggleRuntimeStartNode(nodeId: string) {
-    setRuntimeStartNodeIds((current) => {
-      if (current.includes(nodeId)) return current.filter((id) => id !== nodeId)
-      return [...current, nodeId]
-    })
+  function selectRuntimeStartNode(nodeId: string) {
+    setDraft("runtime", "start_node_id", nodeId)
   }
 
   async function startBlueprintRunDirect() {
-    const startNodes = runtimeStartNodeIds().slice()
-    if (!startNodes.length && !hasTickSourceNode(draft)) {
+    const startNodeId = runtimeStartNodeId()
+    if (!startNodeId) {
       setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.startNodeRequired" as never) }))
       openRuntimePlanningPanel()
       return
@@ -2775,7 +2833,7 @@ export function BlueprintSidePanel(props: {
       setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.busy" as never) }))
       return
     }
-    if (!platform.saveBlueprint || !platform.startBlueprintRun) {
+    if (!platform.saveBlueprint || !platform.startBlueprintSlot) {
       setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
       return
     }
@@ -2787,8 +2845,7 @@ export function BlueprintSidePanel(props: {
       dialog.show(() => <BlueprintConfigRequiredDialog issues={configIssues} />)
       return
     }
-    const plan = createBlueprintStartPlan(startDraft, { startNodes })
-    if (!plan.start_nodes.length && !hasTickSourceNode(startDraft)) {
+    if (!startDraft.runtime?.start_node_id?.trim()) {
       setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.startNodeRequired" as never) }))
       return
     }
@@ -2804,7 +2861,7 @@ export function BlueprintSidePanel(props: {
       await platform.configureBlueprintRuntime?.(startDraft.config.python_path)
       await persistProjectDraft(startDraft)
       setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
-      const started = await platform.startBlueprintRun(projectDirectory, currentBlueprintId(), plan, "live")
+      const started = await platform.startBlueprintSlot(projectDirectory, currentBlueprintId())
       const status = asRecord(started.status)
       const recentEvents = arrayOfRecords(status?.recent_events)
       const runId = stringValue(started.runId) ?? stringValue(asRecord(started.run)?.runId) ?? stringValue(asRecord(status?.run)?.runId)
@@ -2822,10 +2879,55 @@ export function BlueprintSidePanel(props: {
         lastUpdatedAt: Date.now(),
       }))
       scheduleOpenTestAgentPanelPersists()
+      void refreshBlueprintSessions({ quiet: true })
       if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
     } catch (error) {
       const message = readableError(error)
       setPersistence((current) => ({ ...current, saving: false, error: message }))
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
+    }
+  }
+
+  async function submitBlueprintSlotMessage(message: string) {
+    const text = message.trim()
+    if (!text) return
+    const runId = runtime().runId
+    if (!runId) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.noRun" as never) }))
+      return
+    }
+    if (!platform.sendBlueprintSlotMessage) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
+      return
+    }
+    setPanelMode("runtime")
+    setRuntime((current) => ({ ...current, loading: true, action: "message", error: undefined }))
+    try {
+      const sent = await platform.sendBlueprintSlotMessage(projectDirectory, text, {
+        source: "ui",
+        blueprintId: currentBlueprintId(),
+        runId,
+        sourceIdentity: { uiSessionId: currentBlueprintId() },
+      })
+      const status = asRecord(sent.status)
+      const recentEvents = arrayOfRecords(status?.recent_events)
+      const nextRunId = stringValue(sent.runId) ?? stringValue(asRecord(sent.run)?.runId) ?? stringValue(asRecord(status?.run)?.runId) ?? runId
+      syncAgentPanelUserMessagesFromRuntimeEvents(recentEvents)
+      setRuntime((current) => ({
+        ...current,
+        runId: nextRunId,
+        runs: mergeRuntimeRunsWithStatus(current.runs, sent),
+        status: status || current.status,
+        events: recentEvents.length ? recentEvents : current.events,
+        loading: false,
+        action: undefined,
+        error: undefined,
+        lastUpdatedAt: Date.now(),
+      }))
+      void refreshBlueprintSessions({ quiet: true })
+      void refreshBlueprintRuntime(nextRunId, { quiet: true })
+    } catch (error) {
+      const message = readableError(error)
       setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
     }
   }
@@ -4053,6 +4155,14 @@ export function BlueprintSidePanel(props: {
             onSelect={(blueprintId) => void selectProjectBlueprint(blueprintId)}
             onCreate={openCreateBlueprintDialog}
           />
+          <BlueprintSessionSelect
+            sessions={blueprintSessions().sessions}
+            loading={blueprintSessions().loading}
+            error={blueprintSessions().error}
+            disabled={!platform.listBlueprintSessions || persistence().loading || blueprintPicker().loading}
+            onRefresh={() => void refreshBlueprintSessions()}
+            onDelete={(sessionKey) => void deleteBlueprintSession(sessionKey)}
+          />
           <DropdownMenu
             open={scriptEditorMenuOpen()}
             onOpenChange={(open) => {
@@ -4661,7 +4771,7 @@ export function BlueprintSidePanel(props: {
                 <BlueprintRuntimePanel
                   state={runtime()}
                   startNodeOptions={runtimeStartNodeOptions()}
-                  selectedStartNodeIds={runtimeStartNodeIds()}
+                  selectedStartNodeId={runtimeStartNodeId()}
                   startDisabled={runtimeBusy() || projectWorkdirRelocating() || !persistence().loaded}
                   directRunDisabled={
                     runtimeBusy() ||
@@ -4670,12 +4780,18 @@ export function BlueprintSidePanel(props: {
                     blueprintPicker().loading ||
                     !persistence().loaded ||
                     !platform.saveBlueprint ||
-                    !platform.createBlueprintStartPlan ||
-                    !platform.startBlueprintRun ||
-                    (runtimeStartNodeOptions().length > 0 && runtimeStartNodeIds().length === 0)
+                    !platform.startBlueprintSlot ||
+                    !runtimeStartNodeId()
                   }
-                  onStartNodeToggle={toggleRuntimeStartNode}
+                  slotMessageDisabled={
+                    runtime().loading ||
+                    !runtime().runId ||
+                    !platform.sendBlueprintSlotMessage ||
+                    isTerminalRuntimeStatus(runtimeStatus(runtime().status))
+                  }
+                  onStartNodeSelect={selectRuntimeStartNode}
                   onDirectRun={() => void startBlueprintRunDirect()}
+                  onSlotMessage={(message) => void submitBlueprintSlotMessage(message)}
                   onRefresh={() => void refreshBlueprintRuntime()}
                   onEnd={(action) => void endBlueprintRuntime(action)}
                   workspacePanelArea={workspacePanelArea()}
@@ -5007,6 +5123,121 @@ function BlueprintDocumentSelect(props: {
   )
 }
 
+function BlueprintSessionSelect(props: {
+  sessions: BlueprintSessionSummary[]
+  loading: boolean
+  error?: string
+  disabled: boolean
+  onRefresh: () => void
+  onDelete: (sessionKey: string) => void
+}) {
+  const language = useLanguage()
+  const runningCount = () => props.sessions.filter((session) => blueprintSessionRunning(session)).length
+  const label = () =>
+    props.loading
+      ? language.t("common.loading")
+      : language.t("blueprint.sessions.button" as never, { count: runningCount() } as never)
+
+  return (
+    <DropdownMenu placement="bottom-start">
+      <DropdownMenu.Trigger
+        data-blueprint-session-select
+        as={Button}
+        size="small"
+        variant="ghost"
+        icon="status"
+        class="h-7 max-w-[180px] px-2"
+        disabled={props.disabled}
+        title={language.t("blueprint.sessions.title" as never)}
+      >
+        <span class="min-w-0 truncate">{label()}</span>
+        <Icon size="small" name="chevron-down" class="shrink-0 text-icon-weak" />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          data-blueprint-session-dropdown
+          class="mt-1 w-80 border-[rgba(103,232,249,0.26)] bg-[#101a28] text-[#f8fdff] shadow-[0_18px_48px_rgba(0,0,0,0.42)]"
+          style={BLUEPRINT_THEME}
+        >
+          <div class="flex items-center justify-between gap-2 px-2 py-2">
+            <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.sessions.title" as never)}</div>
+            <IconButton
+              icon="reset"
+              variant="ghost"
+              size="small"
+              class="h-6 w-6"
+              disabled={props.loading}
+              aria-label={language.t("blueprint.sessions.refresh" as never)}
+              onClick={(event) => {
+                event.stopPropagation()
+                props.onRefresh()
+              }}
+            />
+          </div>
+          <Show when={props.error}>
+            {(error) => <div class="mx-2 mb-2 rounded-sm bg-[rgba(248,113,113,0.12)] px-2 py-1 text-11-regular text-[#fecaca]">{error()}</div>}
+          </Show>
+          <div data-blueprint-session-list class="max-h-[464px] overflow-y-auto px-2 pb-2">
+            <Show
+              when={props.sessions.length > 0}
+              fallback={<div class="px-2 py-4 text-center text-12-regular text-[#95afc4]">{language.t("blueprint.sessions.empty" as never)}</div>}
+            >
+              <For each={props.sessions}>
+                {(session) => {
+                  const running = () => blueprintSessionRunning(session)
+                  const touchedAt = () => blueprintSessionTime(session.lastTouchedAt)
+                  return (
+                    <div
+                      data-blueprint-session-card
+                      data-running={running()}
+                      class="mb-2 grid aspect-[4/1] min-h-[72px] grid-cols-[1fr_auto] gap-2 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#071019] p-2 last:mb-0"
+                    >
+                      <div class="min-w-0">
+                        <div class="truncate font-mono text-11-medium text-[#67e8f9]">{session.sessionKey}</div>
+                        <div class="mt-1 truncate text-12-medium text-[#f8fdff]">
+                          {session.blueprintName || session.blueprintId || language.t("blueprint.sessions.unknownBlueprint" as never)}
+                        </div>
+                        <div class="mt-1 truncate text-10-regular text-[#95afc4]">
+                          {running() ? language.t("blueprint.sessions.running" as never) : session.status || "idle"}
+                          <Show when={touchedAt()}>
+                            {(value) => <> · {formatRuntimeTime(value())}</>}
+                          </Show>
+                        </div>
+                      </div>
+                      <Tooltip
+                        placement="left"
+                        value={
+                          running()
+                            ? language.t("blueprint.sessions.deleteRunning" as never)
+                            : language.t("blueprint.sessions.delete" as never)
+                        }
+                      >
+                        <IconButton
+                          data-blueprint-session-delete
+                          icon="close-small"
+                          variant="ghost"
+                          size="small"
+                          class="h-8 w-8 self-start"
+                          disabled={running()}
+                          aria-label={language.t("blueprint.sessions.delete" as never)}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            if (!running()) props.onDelete(session.sessionKey)
+                          }}
+                        />
+                      </Tooltip>
+                    </div>
+                  )
+                }}
+              </For>
+            </Show>
+          </div>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu>
+  )
+}
+
 function BlueprintCreateDialog(props: {
   existingIds: string[]
   onCreate: (name: string) => void | Promise<void>
@@ -5182,8 +5413,45 @@ function ResidentServicesPanel(props: {
   onOpenConsole: (service: BlueprintResidentServiceItem) => void
 }) {
   const language = useLanguage()
+  const [residentServiceSearchQuery, setResidentServiceSearchQuery] = createSignal("")
+  const [residentServicePage, setResidentServicePage] = createSignal(1)
+  const [residentServiceCollapsed, setResidentServiceCollapsed] = createSignal(false)
   const services = () => props.state.services
+  const normalizedResidentServiceSearch = () => residentServiceSearchQuery().trim().toLowerCase()
+  const filteredResidentServices = createMemo(() => {
+    const query = normalizedResidentServiceSearch()
+    if (!query) return services()
+    return services().filter((service) =>
+      [service.service_name, service.title, service.description].some((value) => value.toLowerCase().includes(query)),
+    )
+  })
+  const totalResidentServicePages = createMemo(() =>
+    Math.max(1, Math.ceil(filteredResidentServices().length / RESIDENT_SERVICE_PAGE_SIZE)),
+  )
+  const pagedResidentServices = createMemo(() => {
+    const page = clamp(residentServicePage(), 1, totalResidentServicePages())
+    const start = (page - 1) * RESIDENT_SERVICE_PAGE_SIZE
+    return filteredResidentServices().slice(start, start + RESIDENT_SERVICE_PAGE_SIZE)
+  })
+  const residentServiceEmptyMessage = () =>
+    normalizedResidentServiceSearch()
+      ? language.t("blueprint.resident.noMatches" as never)
+      : props.state.loading
+        ? language.t("common.loading")
+        : language.t("blueprint.resident.empty" as never)
   const serviceRunning = (service: BlueprintResidentServiceItem) => service.status === "running"
+  const setResidentServicePageClamped = (page: number) => setResidentServicePage(clamp(page, 1, totalResidentServicePages()))
+  createEffect(
+    on(
+      residentServiceSearchQuery,
+      () => setResidentServicePage(1),
+      { defer: true },
+    ),
+  )
+  createEffect(() => {
+    const total = totalResidentServicePages()
+    setResidentServicePage((page) => clamp(page, 1, total))
+  })
 
   return (
     <div
@@ -5192,98 +5460,188 @@ function ResidentServicesPanel(props: {
       onPointerDown={(event) => event.stopPropagation()}
     >
       <div class="flex min-w-0 items-center justify-between gap-2 px-1">
-        <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.resident.panelTitle" as never)}</div>
+        <button
+          data-blueprint-resident-toggle
+          type="button"
+          class="flex min-w-0 flex-1 items-center gap-2 text-left"
+          aria-expanded={!residentServiceCollapsed()}
+          aria-label={language.t((residentServiceCollapsed() ? "blueprint.resident.expand" : "blueprint.resident.collapse") as never)}
+          onClick={() => setResidentServiceCollapsed((collapsed) => !collapsed)}
+        >
+          <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.resident.panelTitle" as never)}</div>
+        </button>
         <Tooltip value={language.t("blueprint.resident.refresh" as never)} placement="left">
           <IconButton
-            icon="close"
+            icon="reset"
             variant="ghost"
             size="small"
             class="h-6 w-6"
             disabled={props.state.loading}
             aria-label={language.t("blueprint.resident.refresh" as never)}
-            onClick={() => props.onRefresh()}
+            onClick={(event) => {
+              event.stopPropagation()
+              props.onRefresh()
+            }}
+          />
+        </Tooltip>
+        <Tooltip
+          value={language.t((residentServiceCollapsed() ? "blueprint.resident.expand" : "blueprint.resident.collapse") as never)}
+          placement="left"
+        >
+          <IconButton
+            icon="chevron-down"
+            variant="ghost"
+            size="small"
+            class="h-6 w-6"
+            classList={{ "rotate-180": !residentServiceCollapsed() }}
+            aria-expanded={!residentServiceCollapsed()}
+            aria-label={language.t((residentServiceCollapsed() ? "blueprint.resident.expand" : "blueprint.resident.collapse") as never)}
+            onClick={(event) => {
+              event.stopPropagation()
+              setResidentServiceCollapsed((collapsed) => !collapsed)
+            }}
           />
         </Tooltip>
       </div>
-      <Show when={props.state.error}>
-        {(error) => (
-          <div class="rounded-sm border border-[#ef4444]/30 bg-[#450a0a]/40 px-2 py-1 text-11-regular text-[#fecaca]">
-            {error()}
-          </div>
-        )}
-      </Show>
-      <div class="flex max-h-[260px] min-h-[96px] flex-col gap-2 overflow-y-auto">
-        <Show
-          when={services().length > 0}
-          fallback={
-            <div class="flex min-h-[88px] items-center justify-center rounded border border-dashed border-[rgba(103,232,249,0.18)] px-3 text-center text-12-regular text-[#95afc4]">
-              {props.state.loading ? language.t("common.loading") : language.t("blueprint.resident.empty" as never)}
-            </div>
-          }
-        >
-          <For each={services()}>
-            {(service) => (
-              <ContextMenu>
-                <ContextMenu.Trigger class="contents">
-                  <div
-                    data-blueprint-resident-service
-                    data-status={service.status}
-                    role="button"
-                    tabIndex={0}
-                    class="grid min-h-[72px] grid-cols-[1fr_auto] gap-2 rounded border border-[rgba(103,232,249,0.22)] bg-[#101a28]/88 p-2 text-left hover:border-[rgba(103,232,249,0.54)]"
-                    onDblClick={(event) => {
-                      event.stopPropagation()
-                      props.onOpenInEditor(service)
-                    }}
-                  >
-                    <div class="min-w-0">
-                      <div class="truncate text-12-medium text-[#f8fdff]">{service.title || service.service_name}</div>
-                      <div class="mt-1 line-clamp-2 text-11-regular leading-4 text-[#95afc4]">
-                        {service.description || language.t("blueprint.resident.noDescription" as never)}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      class="h-7 shrink-0 rounded-sm border px-2 text-10-medium uppercase"
-                      classList={{
-                        "border-[#22c55e]/40 bg-[#052e16]/70 text-[#bbf7d0]": serviceRunning(service),
-                        "border-[#64748b]/40 bg-[#020617]/70 text-[#cbd5e1]": !serviceRunning(service),
-                      }}
-                      onPointerDown={(event) => event.stopPropagation()}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        props.onOpenConsole(service)
-                      }}
-                    >
-                      {service.status}
-                    </button>
-                  </div>
-                </ContextMenu.Trigger>
-                <ContextMenu.Portal>
-                  <ContextMenu.Content>
-                    <ContextMenu.Item onSelect={() => (serviceRunning(service) ? props.onStop(service) : props.onStart(service))}>
-                      <Icon size="small" name={serviceRunning(service) ? "reset" : "status"} />
-                      <ContextMenu.ItemLabel>
-                        {language.t((serviceRunning(service) ? "blueprint.resident.stop" : "blueprint.resident.start") as never)}
-                      </ContextMenu.ItemLabel>
-                    </ContextMenu.Item>
-                  </ContextMenu.Content>
-                </ContextMenu.Portal>
-              </ContextMenu>
+      <Show when={!residentServiceCollapsed()}>
+        <div class="flex flex-col gap-2">
+          <input
+            data-blueprint-resident-search
+            type="search"
+            class="h-8 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#020817]/82 px-2 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(103,232,249,0.56)]"
+            value={residentServiceSearchQuery()}
+            placeholder={language.t("blueprint.resident.searchPlaceholder" as never)}
+            onInput={(event) => setResidentServiceSearchQuery(event.currentTarget.value)}
+          />
+          <Show when={props.state.error}>
+            {(error) => (
+              <div class="rounded-sm border border-[#ef4444]/30 bg-[#450a0a]/40 px-2 py-1 text-11-regular text-[#fecaca]">
+                {error()}
+              </div>
             )}
-          </For>
-        </Show>
-      </div>
-      <Button
-        data-blueprint-resident-create
-        size="small"
-        variant="secondary"
-        icon="plus-small"
-        class="h-8 justify-center border border-[rgba(103,232,249,0.26)] bg-[#071019]/88"
-        onClick={props.onCreate}
-      >
-        {language.t("blueprint.resident.add" as never)}
-      </Button>
+          </Show>
+          <div class="flex max-h-[392px] min-h-[96px] flex-col gap-2 overflow-y-auto">
+            <Show
+              when={pagedResidentServices().length > 0}
+              fallback={
+                <div class="flex min-h-[88px] items-center justify-center rounded border border-dashed border-[rgba(103,232,249,0.18)] px-3 text-center text-12-regular text-[#95afc4]">
+                  {residentServiceEmptyMessage()}
+                </div>
+              }
+            >
+              <For each={pagedResidentServices()}>
+                {(service) => (
+                  <ContextMenu>
+                    <ContextMenu.Trigger class="contents">
+                      <div
+                        data-blueprint-resident-service
+                        data-status={service.status}
+                        role="button"
+                        tabIndex={0}
+                        class="grid min-h-[72px] grid-cols-[1fr_auto] gap-2 rounded border border-[rgba(103,232,249,0.22)] bg-[#101a28]/88 p-2 text-left hover:border-[rgba(103,232,249,0.54)]"
+                        onDblClick={(event) => {
+                          event.stopPropagation()
+                          props.onOpenInEditor(service)
+                        }}
+                      >
+                        <div class="min-w-0">
+                          <div class="truncate text-12-medium text-[#f8fdff]">{service.title || service.service_name}</div>
+                          <div class="mt-1 line-clamp-2 text-11-regular leading-4 text-[#95afc4]">
+                            {service.description || language.t("blueprint.resident.noDescription" as never)}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          class="h-7 shrink-0 rounded-sm border px-2 text-10-medium uppercase"
+                          classList={{
+                            "border-[#22c55e]/40 bg-[#052e16]/70 text-[#bbf7d0]": serviceRunning(service),
+                            "border-[#64748b]/40 bg-[#020617]/70 text-[#cbd5e1]": !serviceRunning(service),
+                          }}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            props.onOpenConsole(service)
+                          }}
+                        >
+                          {service.status}
+                        </button>
+                      </div>
+                    </ContextMenu.Trigger>
+                    <ContextMenu.Portal>
+                      <ContextMenu.Content>
+                        <ContextMenu.Item onSelect={() => (serviceRunning(service) ? props.onStop(service) : props.onStart(service))}>
+                          <Icon size="small" name={serviceRunning(service) ? "reset" : "status"} />
+                          <ContextMenu.ItemLabel>
+                            {language.t((serviceRunning(service) ? "blueprint.resident.stop" : "blueprint.resident.start") as never)}
+                          </ContextMenu.ItemLabel>
+                        </ContextMenu.Item>
+                      </ContextMenu.Content>
+                    </ContextMenu.Portal>
+                  </ContextMenu>
+                )}
+              </For>
+            </Show>
+          </div>
+          <div data-blueprint-resident-pagination class="grid grid-cols-[repeat(2,32px)_1fr_repeat(2,32px)] items-center gap-1">
+            <button
+              data-blueprint-resident-page-first
+              type="button"
+              class="h-7 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#020817]/76 text-11-medium text-[#d7f7ff] disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={residentServicePage() <= 1}
+              aria-label={language.t("blueprint.resident.firstPage" as never)}
+              onClick={() => setResidentServicePageClamped(1)}
+            >
+              {"<<"}
+            </button>
+            <button
+              data-blueprint-resident-page-prev
+              type="button"
+              class="h-7 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#020817]/76 text-11-medium text-[#d7f7ff] disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={residentServicePage() <= 1}
+              aria-label={language.t("blueprint.resident.previousPage" as never)}
+              onClick={() => setResidentServicePageClamped(residentServicePage() - 1)}
+            >
+              {"<"}
+            </button>
+            <div class="min-w-0 text-center text-11-regular text-[#95afc4]">
+              {language.t("blueprint.resident.pageStatus" as never, {
+                page: residentServicePage(),
+                total: totalResidentServicePages(),
+              } as never)}
+            </div>
+            <button
+              data-blueprint-resident-page-next
+              type="button"
+              class="h-7 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#020817]/76 text-11-medium text-[#d7f7ff] disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={residentServicePage() >= totalResidentServicePages()}
+              aria-label={language.t("blueprint.resident.nextPage" as never)}
+              onClick={() => setResidentServicePageClamped(residentServicePage() + 1)}
+            >
+              {">"}
+            </button>
+            <button
+              data-blueprint-resident-page-last
+              type="button"
+              class="h-7 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#020817]/76 text-11-medium text-[#d7f7ff] disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={residentServicePage() >= totalResidentServicePages()}
+              aria-label={language.t("blueprint.resident.lastPage" as never)}
+              onClick={() => setResidentServicePageClamped(totalResidentServicePages())}
+            >
+              {">>"}
+            </button>
+          </div>
+          <Button
+            data-blueprint-resident-create
+            size="small"
+            variant="secondary"
+            icon="plus-small"
+            class="h-8 justify-center border border-[rgba(103,232,249,0.26)] bg-[#071019]/88"
+            onClick={props.onCreate}
+          >
+            {language.t("blueprint.resident.add" as never)}
+          </Button>
+        </div>
+      </Show>
     </div>
   )
 }
@@ -5425,11 +5783,13 @@ function BlueprintProgressOverlay(props: {
 function BlueprintRuntimePanel(props: {
   state: BlueprintRuntimeState
   startNodeOptions: BlueprintRuntimeStartNodeOption[]
-  selectedStartNodeIds: string[]
+  selectedStartNodeId: string
   startDisabled: boolean
   directRunDisabled: boolean
-  onStartNodeToggle: (nodeId: string) => void
+  slotMessageDisabled: boolean
+  onStartNodeSelect: (nodeId: string) => void
   onDirectRun: () => void
+  onSlotMessage: (message: string) => void
   onRefresh: () => void
   onEnd: (action: BlueprintRunEndAction) => void
   workspacePanelArea?: WorkspacePanelArea
@@ -5462,6 +5822,7 @@ function BlueprintRuntimePanel(props: {
   const [draggedRuntimePanel, setDraggedRuntimePanel] = createSignal<RuntimePanelId>()
   const [runtimePanelDrag, setRuntimePanelDrag] = createSignal<RuntimePanelDragState>()
   const [runtimeEventsPanelHeight, setRuntimeEventsPanelHeight] = createSignal(240)
+  const [slotMessage, setSlotMessage] = createSignal("")
   let runtimePanelListRef: HTMLDivElement | undefined
 
   const moveRuntimePanelAtPointer = (dragging: RuntimePanelId, clientY: number) => {
@@ -5536,6 +5897,13 @@ function BlueprintRuntimePanel(props: {
     })
   })
 
+  const submitSlotMessage = () => {
+    const text = slotMessage().trim()
+    if (!text || props.slotMessageDisabled) return
+    props.onSlotMessage(text)
+    setSlotMessage("")
+  }
+
   const runtimePanelShellProps = (id: RuntimePanelId) => ({
     id,
     order: runtimePanelOrder().indexOf(id),
@@ -5571,9 +5939,9 @@ function BlueprintRuntimePanel(props: {
           <RuntimeSection title={language.t("blueprint.runtime.planning" as never)}>
             <RuntimeStartNodeSelect
               options={props.startNodeOptions}
-              selectedIds={props.selectedStartNodeIds}
+              selectedId={props.selectedStartNodeId}
               disabled={props.startDisabled}
-              onToggle={props.onStartNodeToggle}
+              onSelect={props.onStartNodeSelect}
             />
             <div class="flex justify-end gap-2">
               <Button
@@ -5586,6 +5954,35 @@ function BlueprintRuntimePanel(props: {
               >
                 {language.t("blueprint.runtime.directRun" as never)}
               </Button>
+            </div>
+            <div class="flex min-w-0 flex-col gap-2">
+              <textarea
+                data-blueprint-runtime-slot-message
+                rows={3}
+                value={slotMessage()}
+                disabled={props.slotMessageDisabled}
+                placeholder={language.t("blueprint.runtime.slotMessagePlaceholder" as never)}
+                class="min-h-16 w-full resize-y rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#06101a] px-2 py-1.5 text-12-regular text-[#f8fdff] outline-none transition-colors placeholder:text-[#5b7386] focus:border-[#67e8f9] disabled:cursor-not-allowed disabled:opacity-55"
+                onInput={(event) => setSlotMessage(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                    event.preventDefault()
+                    submitSlotMessage()
+                  }
+                }}
+              />
+              <div class="flex justify-end">
+                <Button
+                  data-blueprint-runtime-slot-message-submit
+                  size="small"
+                  variant="secondary"
+                  class="h-8 px-3"
+                  disabled={props.slotMessageDisabled || !slotMessage().trim()}
+                  onClick={submitSlotMessage}
+                >
+                  {language.t("blueprint.runtime.slotMessageSubmit" as never)}
+                </Button>
+              </div>
             </div>
           </RuntimeSection>
           </RuntimePanelShell>
@@ -5857,22 +6254,20 @@ function reorderRuntimePanels(order: RuntimePanelId[], source: RuntimePanelId, t
 
 function RuntimeStartNodeSelect(props: {
   options: BlueprintRuntimeStartNodeOption[]
-  selectedIds: string[]
+  selectedId: string
   disabled: boolean
-  onToggle: (nodeId: string) => void
+  onSelect: (nodeId: string) => void
 }) {
   const language = useLanguage()
-  const selected = () => new Set(props.selectedIds)
-  const selectedOptions = () => props.options.filter((option) => selected().has(option.id))
+  const selectedOption = () => props.options.find((option) => option.id === props.selectedId)
   const label = () => {
-    if (props.selectedIds.length === 0) return language.t("blueprint.runtime.startNodesTopAgent" as never)
-    if (props.selectedIds.length === 1) return selectedOptions()[0]?.label ?? props.selectedIds[0]
-    return language.t("blueprint.runtime.startNodesSelected" as never, { count: props.selectedIds.length } as never)
+    if (!props.selectedId) return language.t("blueprint.runtime.startNodeRequired" as never)
+    return selectedOption()?.label ?? props.selectedId
   }
 
   return (
     <div class="flex min-w-0 flex-col gap-2">
-      <div class="text-11-medium text-[#f8fdff]">{language.t("blueprint.runtime.startNodes" as never)}</div>
+      <div class="text-11-medium text-[#f8fdff]">{language.t("blueprint.runtime.startNode" as never)}</div>
       <DropdownMenu placement="bottom-start">
         <DropdownMenu.Trigger
           data-blueprint-runtime-start-node-select
@@ -5884,7 +6279,7 @@ function RuntimeStartNodeSelect(props: {
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content
-            class="max-h-64 w-72 overflow-y-auto border-[rgba(103,232,249,0.26)] bg-[#101a28] text-[#f8fdff] shadow-[0_18px_48px_rgba(0,0,0,0.42)] [&_[data-slot=dropdown-menu-checkbox-item]]:items-start"
+            class="max-h-64 w-72 overflow-y-auto border-[rgba(103,232,249,0.26)] bg-[#101a28] text-[#f8fdff] shadow-[0_18px_48px_rgba(0,0,0,0.42)]"
             style={BLUEPRINT_THEME}
           >
             <Show
@@ -5893,42 +6288,34 @@ function RuntimeStartNodeSelect(props: {
             >
               <For each={props.options}>
                 {(option) => (
-                  <DropdownMenu.CheckboxItem
-                    checked={selected().has(option.id)}
-                    onChange={() => props.onToggle(option.id)}
+                  <DropdownMenu.Item
+                    onSelect={() => props.onSelect(option.id)}
                     class="gap-2"
                   >
-                    <DropdownMenu.ItemIndicator>
-                      <Icon name="check-small" size="small" class="mt-0.5 text-[#67e8f9]" />
-                    </DropdownMenu.ItemIndicator>
+                    <Icon name={props.selectedId === option.id ? "check-small" : "blueprint"} size="small" class="mt-0.5 text-[#67e8f9]" />
                     <div class="min-w-0">
                       <DropdownMenu.ItemLabel class="truncate text-12-medium">{option.label}</DropdownMenu.ItemLabel>
                       <DropdownMenu.ItemDescription class="line-clamp-2 text-11-regular text-[#95afc4]">
                         {option.description}
                       </DropdownMenu.ItemDescription>
                     </div>
-                  </DropdownMenu.CheckboxItem>
+                  </DropdownMenu.Item>
                 )}
               </For>
             </Show>
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
       </DropdownMenu>
-      <Show when={selectedOptions().length > 0}>
-        <div class="flex flex-wrap gap-1.5">
-          <For each={selectedOptions()}>
-            {(option) => (
-              <button
-                type="button"
-                disabled={props.disabled}
-                class="max-w-full rounded-sm border border-[rgba(103,232,249,0.24)] bg-[rgba(103,232,249,0.08)] px-2 py-1 text-10-medium text-[#d7f7ff] disabled:cursor-not-allowed disabled:opacity-55"
-                onClick={() => props.onToggle(option.id)}
-                title={option.label}
-              >
-                <span class="inline-block max-w-48 truncate align-bottom">{option.label}</span>
-              </button>
-            )}
-          </For>
+      <Show when={selectedOption()}>
+        {(option) => (
+          <div class="rounded-sm border border-[rgba(103,232,249,0.24)] bg-[rgba(103,232,249,0.08)] px-2 py-1 text-10-medium text-[#d7f7ff]">
+            <span class="inline-block max-w-full truncate align-bottom">{option().label}</span>
+          </div>
+        )}
+      </Show>
+      <Show when={!props.selectedId}>
+        <div class="rounded-sm border border-[#f59e0b]/30 bg-[#451a03]/32 px-2 py-1 text-11-regular text-[#fde68a]">
+          {language.t("blueprint.runtime.startNodeRequired" as never)}
         </div>
       </Show>
     </div>
@@ -7179,6 +7566,10 @@ export function BlueprintInspector(props: {
     })
   }
 
+  const updatePopoEntry = <K extends keyof BlueprintPopoEntry>(field: K, value: BlueprintPopoEntry[K]) => {
+    props.setStore("runtime", "popo_entry", field, value as never)
+  }
+
   const updateAgentCliKind = (value: string) => {
     const cliKind = value as BlueprintCliKind
     const model = props.modelCatalog.cliKind === cliKind && props.modelCatalog.models.length
@@ -7344,6 +7735,49 @@ export function BlueprintInspector(props: {
                 checked={!!props.selectedAgent?.external}
                 onChange={(checked) => updateAgentField("external", checked)}
               />
+              <Show
+                when={(props.selectedNodeId ?? "") === (props.draft.runtime?.start_node_id ?? "")}
+                fallback={
+                  <ReadonlyInspectorField
+                    label={language.t("blueprint.field.popoEntry" as never)}
+                    value={language.t("blueprint.popoEntry.startNodeOnly" as never)}
+                    multiline
+                  />
+                }
+              >
+                <div class="flex flex-col gap-2 border-t border-[rgba(103,232,249,0.14)] pt-3">
+                  <CheckboxField
+                    label={language.t("blueprint.field.popoEntryEnabled" as never)}
+                    checked={props.draft.runtime?.popo_entry?.enabled === true}
+                    onChange={(checked) => updatePopoEntry("enabled", checked)}
+                  />
+                  <InspectorTextField
+                    label={language.t("blueprint.field.popoRobotAppKey" as never)}
+                    value={props.draft.runtime?.popo_entry?.robot_app_key ?? ""}
+                    onChange={(value) => updatePopoEntry("robot_app_key", value)}
+                  />
+                  <InspectorTextField
+                    label={language.t("blueprint.field.popoRobotName" as never)}
+                    value={props.draft.runtime?.popo_entry?.robot_name ?? ""}
+                    onChange={(value) => updatePopoEntry("robot_name", value)}
+                  />
+                  <InspectorTextField
+                    label={language.t("blueprint.field.popoRobotAppSecret" as never)}
+                    value={props.draft.runtime?.popo_entry?.robot_app_secret ?? ""}
+                    onChange={(value) => updatePopoEntry("robot_app_secret", value)}
+                  />
+                  <InspectorTextField
+                    label={language.t("blueprint.field.popoCallbackToken" as never)}
+                    value={props.draft.runtime?.popo_entry?.callback_token ?? ""}
+                    onChange={(value) => updatePopoEntry("callback_token", value)}
+                  />
+                  <InspectorTextField
+                    label={language.t("blueprint.field.popoAesKey" as never)}
+                    value={props.draft.runtime?.popo_entry?.aes_key ?? ""}
+                    onChange={(value) => updatePopoEntry("aes_key", value)}
+                  />
+                </div>
+              </Show>
               <Show when={props.selectedAgent?.node_type === "agent"}>
                 <div class="flex flex-col gap-2 border-t border-[rgba(103,232,249,0.14)] pt-3">
                   <CheckboxField
@@ -7375,6 +7809,11 @@ export function BlueprintInspector(props: {
                     label={language.t("blueprint.field.frameworkMessageTools" as never)}
                     checked={props.selectedAgent?.access_policy.framework_message_tools !== false}
                     onChange={(checked) => updateAgentAccessPolicy("framework_message_tools", checked)}
+                  />
+                  <CheckboxField
+                    label={language.t("blueprint.field.blueprintMonitorTools" as never)}
+                    checked={props.selectedAgent?.access_policy.blueprint_monitor_tools === true}
+                    onChange={(checked) => updateAgentAccessPolicy("blueprint_monitor_tools", checked)}
                   />
                 </div>
               </Show>
@@ -8440,6 +8879,16 @@ function numberValue(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value)
   return 0
+}
+
+function blueprintSessionRunning(session: BlueprintSessionSummary) {
+  return Boolean(session.activeRunId) || session.status === "running"
+}
+
+function blueprintSessionTime(value: unknown): number | undefined {
+  const numeric = numberValue(value)
+  if (!numeric) return undefined
+  return numeric < 10_000_000_000 ? numeric * 1000 : numeric
 }
 
 function normalizeScriptCatalogNodeFromJson(text: string): BlueprintScriptCatalogNode | undefined {

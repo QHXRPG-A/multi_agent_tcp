@@ -67,26 +67,12 @@ try:
     start_node = start_nodes[0]
 
     listed = gulicode_bp_mcp.blueprint_list(str(project))
-    plan_created = gulicode_bp_mcp.blueprint_plan_create(
-        str(project),
-        "Verify installed plugin standalone MCP control path.",
-        "standalone-smoke",
-        [start_node],
+    opened = gulicode_bp_mcp.blueprint_open(str(project), "standalone-smoke")
+    validated = gulicode_bp_mcp.blueprint_validate(str(project), "standalone-smoke")
+    sessions = gulicode_bp_mcp.state.request(
+        "blueprint.sessions.list",
+        {"projectDir": str(project), "blueprintId": "standalone-smoke"},
     )
-    plan_validated = gulicode_bp_mcp.blueprint_plan_validate(
-        str(project),
-        plan_created["plan"],
-        "standalone-smoke",
-    )
-    started = gulicode_bp_mcp.blueprint_start(
-        str(project),
-        plan_created["plan"],
-        "standalone-smoke",
-        "status",
-    )
-    run_id = started["runId"]
-    status = gulicode_bp_mcp.blueprint_status(run_id)
-    ended = gulicode_bp_mcp.blueprint_end(run_id, "cancel", "standalone smoke complete")
 
     output = {
         "ok": True,
@@ -94,18 +80,14 @@ try:
         "projectDir": str(project.resolve()),
         "listedIds": [item.get("id") for item in listed.get("blueprints", [])],
         "startNodeIds": [start_node],
-        "planValidationOk": plan_created.get("validation", {}).get("ok"),
-        "validateOk": plan_validated.get("validation", {}).get("ok"),
-        "runId": run_id,
-        "status": status.get("status", {}).get("run", {}).get("status"),
-        "endedStatus": ended.get("status", {}).get("run", {}).get("status"),
+        "openedId": opened.get("document", {}).get("id"),
+        "validateOk": validated.get("ok"),
+        "sessionCount": len(sessions.get("sessions", [])),
     }
     if "standalone-smoke" not in output["listedIds"]:
         raise RuntimeError("created blueprint was not listed")
-    if not output["planValidationOk"] or not output["validateOk"]:
-        raise RuntimeError("standalone start plan validation failed")
-    if output["status"] != "running" or output["endedStatus"] != "cancelled":
-        raise RuntimeError("standalone status-mode run did not start and end correctly")
+    if output["openedId"] != "standalone-smoke" or not output["validateOk"]:
+        raise RuntimeError("standalone blueprint CRUD validation failed")
     print(json.dumps(output, ensure_ascii=False, indent=2))
 finally:
     gulicode_bp_mcp.state.close()

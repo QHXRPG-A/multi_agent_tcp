@@ -191,20 +191,36 @@ const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkben
     }),
   validateBlueprint: async (projectDir: string, blueprintId: string, document) =>
     blueprintRequest(config, "blueprint.validate", { projectDir, blueprintId, document }),
-  createBlueprintStartPlan: async (projectDir: string, blueprintId: string, input) =>
-    blueprintRequest(config, "blueprint.plan.create", {
+  listBlueprintSessions: async (projectDir?: string, blueprintId?: string) =>
+    (await blueprintRequest(config, "blueprint.sessions.list", { projectDir, blueprintId })).sessions ?? [],
+  deleteBlueprintSession: async (sessionKey: string) =>
+    blueprintRequest(config, "blueprint.sessions.delete", { sessionKey }),
+  sendBlueprintSessionMessage: async (projectDir: string, blueprintId: string, message: string, input) =>
+    blueprintRequest(config, "blueprint.sessions.message", {
       projectDir,
       blueprintId,
-      task: input.task,
-      startNodeIds: input.startNodeIds,
-      planOverrides: input.planOverrides,
+      message,
+      source: input?.source,
+      popoUserId: input?.popoUserId,
+      popoSessionId: input?.popoSessionId,
+      popoGroupId: input?.popoGroupId,
+      sessionKey: input?.sessionKey,
     }),
-  validateBlueprintStartPlan: async (projectDir: string, blueprintId: string, plan) =>
-    blueprintRequest(config, "blueprint.plan.validate", { projectDir, blueprintId, plan }),
+  startBlueprintSlot: async (projectDir: string, blueprintId: string) =>
+    blueprintRequest(config, "blueprint.slots.start", { projectDir, blueprintId }),
+  sendBlueprintSlotMessage: async (projectDir: string, message: string, input) =>
+    blueprintRequest(config, "blueprint.slots.message", {
+      projectDir,
+      message,
+      source: input?.source,
+      blueprintId: input?.blueprintId,
+      runId: input?.runId,
+      sourceIdentity: input?.sourceIdentity,
+      sessionIdentity: input?.sessionIdentity,
+      sessionKey: input?.sessionKey,
+    }),
   listBlueprintRuns: async (projectDir?: string, blueprintId?: string) =>
     (await blueprintRequest(config, "blueprint.listRuns", { projectDir, blueprintId })).runs ?? [],
-  startBlueprintRun: async (projectDir: string, blueprintId: string, plan, executionMode) =>
-    blueprintRequest(config, "blueprint.start", { projectDir, blueprintId, plan, executionMode }),
   blueprintRunStatus: async (runId: string) => blueprintRequest(config, "blueprint.status", { runId }),
   blueprintRunDiff: async (runId: string) => blueprintRequest(config, "blueprint.runDiff", { runId }),
   blueprintChangesetDiff: async (runId: string, changesetId: string) =>

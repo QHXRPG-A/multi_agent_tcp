@@ -41,6 +41,7 @@ export type BlueprintAgentAccessPolicy = {
   unrestricted_commands: boolean
   disable_sandbox: boolean
   framework_message_tools: boolean
+  blueprint_monitor_tools: boolean
 }
 
 export type BlueprintConfig = {
@@ -48,6 +49,15 @@ export type BlueprintConfig = {
   project_workdir: string
   skill_dir: string
   rule_dir: string
+}
+
+export type BlueprintPopoEntry = {
+  enabled: boolean
+  robot_app_key: string
+  robot_name: string
+  robot_app_secret: string
+  callback_token: string
+  aes_key: string
 }
 
 export type BlueprintConfigField = keyof BlueprintConfig
@@ -190,6 +200,10 @@ export type BlueprintInspectable =
 export type BlueprintDraft = {
   schema_version: 1
   config: BlueprintConfig
+  runtime: {
+    start_node_id: string
+    popo_entry: BlueprintPopoEntry
+  }
   graph: {
     agent_nodes: Record<string, BlueprintAgentNode>
     route_nodes: Record<string, BlueprintRouteNode>
@@ -228,6 +242,12 @@ export type BlueprintDocument = {
   id: string
   name: string
   graph: RuntimeGraphDraft
+  runtime?: {
+    start_node_id?: string
+    startNodeId?: string
+    popo_entry?: Partial<BlueprintPopoEntry>
+    popoEntry?: Partial<BlueprintPopoEntry>
+  }
   ui: {
     config: BlueprintConfig
     nodes: Record<string, BlueprintNodeLayout>
@@ -235,34 +255,6 @@ export type BlueprintDocument = {
     selection?: BlueprintSelection
     inspector?: BlueprintInspectable
   }
-}
-
-export type BlueprintStartPlan = {
-  common_config: BlueprintConfig
-  user_goal: string
-  agent_descriptions: Record<string, string>
-  start_nodes: string[]
-  tasks: Record<
-    string,
-    {
-      goal: string
-      context_refs: string[]
-      expected_output: string
-      acceptance: string
-      downstream_collaboration?: string
-      metadata?: Record<string, unknown>
-    }
-  >
-  run_policy: {
-    allow_parallel: boolean
-    source: "blueprint-ui-derived"
-  }
-}
-
-export type BlueprintStartPlanInput = {
-  startNodes?: string[]
-  userGoal?: string
-  taskText?: string
 }
 
 const DEFAULT_VIEWPORT: BlueprintViewport = {
@@ -289,6 +281,7 @@ export const DEFAULT_AGENT_ACCESS_POLICY: BlueprintAgentAccessPolicy = {
   unrestricted_commands: true,
   disable_sandbox: true,
   framework_message_tools: true,
+  blueprint_monitor_tools: false,
 }
 
 export const DEFAULT_WORKER_AGENT_ACCESS_POLICY: BlueprintAgentAccessPolicy = {
@@ -297,6 +290,7 @@ export const DEFAULT_WORKER_AGENT_ACCESS_POLICY: BlueprintAgentAccessPolicy = {
   unrestricted_commands: false,
   disable_sandbox: false,
   framework_message_tools: true,
+  blueprint_monitor_tools: false,
 }
 
 export function defaultCommandForCliKind(cliKind: string) {
@@ -313,6 +307,17 @@ export function createDefaultBlueprintConfig(projectWorkdir = DEFAULT_PROJECT_WO
     project_workdir: projectWorkdir || DEFAULT_PROJECT_WORKDIR,
     skill_dir: DEFAULT_SKILL_DIR,
     rule_dir: DEFAULT_RULE_DIR,
+  }
+}
+
+export function createDefaultPopoEntry(): BlueprintPopoEntry {
+  return {
+    enabled: false,
+    robot_app_key: "",
+    robot_name: "",
+    robot_app_secret: "",
+    callback_token: "",
+    aes_key: "",
   }
 }
 
@@ -338,6 +343,10 @@ export function createDefaultBlueprintDraft(projectWorkdir = DEFAULT_PROJECT_WOR
   return {
     schema_version: 1,
     config: createDefaultBlueprintConfig(projectWorkdir),
+    runtime: {
+      start_node_id: "planner",
+      popo_entry: createDefaultPopoEntry(),
+    },
     graph: {
       terminal_nodes: {},
       route_nodes: {},
@@ -393,6 +402,10 @@ export function cloneBlueprintDraft(draft: BlueprintDraft): BlueprintDraft {
   return {
     schema_version: 1,
     config: normalizeBlueprintConfig(draft.config),
+    runtime: {
+      start_node_id: draft.runtime?.start_node_id?.trim() ?? "",
+      popo_entry: normalizePopoEntry(draft.runtime?.popo_entry),
+    },
     graph: {
       terminal_nodes: { ...draft.graph.terminal_nodes },
       route_nodes: Object.fromEntries(
@@ -431,6 +444,10 @@ export function toBlueprintDocument(
     id,
     name,
     graph: toRuntimeGraphDraft(draft),
+    runtime: {
+      start_node_id: draft.runtime?.start_node_id?.trim() ?? "",
+      popo_entry: normalizePopoEntry(draft.runtime?.popo_entry),
+    },
     ui: {
       config: normalizeBlueprintConfig(draft.config),
       nodes: visibleLayoutNodes(draft),
@@ -448,9 +465,14 @@ export function fromBlueprintDocument(
   const fallback = createDefaultBlueprintDraft(projectWorkdir)
   const graph = (document.graph ?? fallback.graph) as RuntimeGraphDraft
   const ui = (document.ui ?? {}) as Partial<BlueprintDocument["ui"]>
+  const runtime = (document.runtime ?? {}) as NonNullable<BlueprintDocument["runtime"]>
   return cloneBlueprintDraft({
     schema_version: 1,
     config: normalizeBlueprintConfig(ui.config ?? fallback.config),
+    runtime: {
+      start_node_id: String(runtime.start_node_id ?? runtime.startNodeId ?? fallback.runtime.start_node_id ?? "").trim(),
+      popo_entry: normalizePopoEntry(runtime.popo_entry ?? runtime.popoEntry ?? fallback.runtime.popo_entry),
+    },
     graph: {
       terminal_nodes: { ...(graph.terminal_nodes ?? fallback.graph.terminal_nodes) },
       route_nodes: Object.fromEntries(
@@ -1212,60 +1234,6 @@ export function toRuntimeGraphDraft(draft: BlueprintDraft): RuntimeGraphDraft {
   }
 }
 
-export function createBlueprintStartPlan(draft: BlueprintDraft, input: BlueprintStartPlanInput = {}): BlueprintStartPlan {
-  const common_config = normalizeBlueprintConfig(draft.config)
-  const agentNodes = Object.entries(draft.graph.agent_nodes)
-  const startNodes = normalizeStartNodes(input.startNodes, draft)
-  const userGoal = input.userGoal?.trim() || input.taskText?.trim() || "Run the current GuLiCode blueprint."
-  const agent_descriptions = Object.fromEntries(
-    agentNodes.map(([id, node]) => [id, node.prompt.trim() || `AgentNode ${id}`]),
-  )
-  const tasks = Object.fromEntries(
-    startNodes.map((nodeId) => {
-      const node = draft.graph.agent_nodes[nodeId]
-      const goal = input.taskText?.trim() || node?.prompt.trim() || `Run AgentNode ${nodeId}.`
-      return [
-        nodeId,
-        {
-          goal,
-          context_refs: [],
-          expected_output: `Complete the assigned work for AgentNode ${nodeId} and report the result through the framework runtime.`,
-          acceptance: `AgentNode ${nodeId} has a clear result recorded in runtime status, reports, artifacts, or queued downstream work.`,
-          metadata: {
-            source: "blueprint-ui-derived",
-            node_id: nodeId,
-          },
-        },
-      ]
-    }),
-  )
-
-  return {
-    common_config,
-    user_goal: userGoal,
-    agent_descriptions,
-    start_nodes: startNodes,
-    tasks,
-    run_policy: {
-      allow_parallel: true,
-      source: "blueprint-ui-derived",
-    },
-  }
-}
-
-function normalizeStartNodes(startNodes: string[] | undefined, draft: BlueprintDraft): string[] {
-  const agentIds = new Set(Object.keys(draft.graph.agent_nodes))
-  const result: string[] = []
-  const added = new Set<string>()
-  for (const rawNodeId of startNodes ?? []) {
-    const nodeId = String(rawNodeId).trim()
-    if (!nodeId || !agentIds.has(nodeId) || added.has(nodeId)) continue
-    result.push(nodeId)
-    added.add(nodeId)
-  }
-  return result
-}
-
 function visibleNodeIdSet(draft: BlueprintDraft) {
   return new Set([
     ...Object.keys(draft.graph.route_nodes ?? {}),
@@ -1365,6 +1333,19 @@ function normalizeAgentAccessPolicy(
     unrestricted_commands: Boolean(raw.unrestricted_commands ?? defaults.unrestricted_commands),
     disable_sandbox: Boolean(raw.disable_sandbox ?? defaults.disable_sandbox),
     framework_message_tools: Boolean(raw.framework_message_tools ?? defaults.framework_message_tools),
+    blueprint_monitor_tools: Boolean(raw.blueprint_monitor_tools ?? defaults.blueprint_monitor_tools),
+  }
+}
+
+function normalizePopoEntry(value?: Partial<BlueprintPopoEntry>): BlueprintPopoEntry {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {}
+  return {
+    enabled: Boolean(raw.enabled),
+    robot_app_key: String(raw.robot_app_key ?? "").trim(),
+    robot_name: String(raw.robot_name ?? "").trim(),
+    robot_app_secret: String(raw.robot_app_secret ?? "").trim(),
+    callback_token: String(raw.callback_token ?? "").trim(),
+    aes_key: String(raw.aes_key ?? "").trim(),
   }
 }
 

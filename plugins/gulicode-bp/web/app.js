@@ -22,34 +22,15 @@ function setResult(value) {
   $("last-result").textContent = typeof value === "string" ? value : pretty(value)
 }
 
-function defaultPlanForDocument(documentValue = state.document) {
+function defaultMessageForDocument(documentValue = state.document) {
   const agents = documentValue?.graph?.agent_nodes || {}
   const nodeIds = Object.keys(agents)
-  const startNodes = Array.isArray(documentValue?.graph?.start_nodes) && documentValue.graph.start_nodes.length
-    ? documentValue.graph.start_nodes
-    : nodeIds
-  const tasks = {}
-  const descriptions = {}
-  for (const nodeId of nodeIds) {
-    const agent = agents[nodeId] || {}
-    descriptions[nodeId] = agent.description || agent.prompt || `Agent ${nodeId}`
-    tasks[nodeId] = {
-      goal: agent.prompt || `Run ${nodeId}.`,
-      expected_output: "A concise result.",
-      acceptance: "The task is complete.",
-    }
-  }
-  return {
-    user_goal: "Run the selected blueprint.",
-    agent_descriptions: descriptions,
-    start_nodes: startNodes,
-    tasks,
-    run_policy: {},
-  }
+  const startNode = documentValue?.runtime?.start_node_id || nodeIds[0] || ""
+  return `Run the selected blueprint.${startNode ? `\nStart node: ${startNode}` : ""}`
 }
 
 function setDefaultPlan(documentValue = state.document) {
-  $("plan-editor").value = pretty(defaultPlanForDocument(documentValue))
+  $("plan-editor").value = defaultMessageForDocument(documentValue)
 }
 
 function activeProjectDir() {
@@ -183,9 +164,9 @@ async function listRuns() {
 async function startRun(executionMode) {
   const projectDir = activeProjectDir()
   const blueprintId = activeBlueprintId()
-  const plan = JSON.parse($("plan-editor").value || "{}")
-  const result = await runAction("Starting run", () =>
-    api("blueprint.start", { projectDir, blueprintId, plan, executionMode }),
+  const message = $("plan-editor").value.trim() || "Run the selected blueprint."
+  const result = await runAction("Starting session run", () =>
+    api("blueprint.sessions.message", { projectDir, blueprintId, message, source: "web" }),
   )
   state.runId = result.runId || result.run_id || result.id || ""
   if (state.runId) $("run-id").value = state.runId

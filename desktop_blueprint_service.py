@@ -67,6 +67,17 @@ PLANNING_STATUS_SOURCE_COMMANDS = {
 TERMINAL_RUN_STATUSES = {"completed", "cancelled", "failed"}
 LIVE_START_RESULT_WAIT_SECONDS = 5.0
 LIVE_RUNTIME_CALL_STARTING_TIMEOUT_SECONDS = 2.0
+MAX_ACTIVE_BLUEPRINT_SESSION_RUNS = 3
+BLUEPRINT_SESSION_CONTEXT_RECENT_LIMIT = 20
+BLUEPRINT_SESSION_CONTEXT_CHAR_LIMIT = 12_000
+BLUEPRINT_SESSION_SCHEMA_VERSION = 1
+POPO_ENTRY_REQUIRED_FIELDS = (
+    "robot_app_key",
+    "robot_name",
+    "robot_app_secret",
+    "callback_token",
+    "aes_key",
+)
 
 
 def validate_desktop_blueprint_graph(graph: Any, *, project_dir: Optional[Path] = None) -> None:
@@ -549,6 +560,16 @@ class DesktopBlueprintRun:
     backend: Any = None
     mcp: Any = None
     diagnostics_dir: Optional[Path] = None
+    session_key: str = ""
+    start_node_id: str = ""
+    slot_status: str = ""
+    slot_pool_key: str = ""
+    blueprint_structure_id: str = ""
+    robot_app_key: str = ""
+    source_bindings: Dict[str, Any] = field(default_factory=dict)
+    bound_session_key: str = ""
+    slot_started_at: float = 0.0
+    slot_last_touched_at: float = 0.0
     live_start_future: Optional[Future[Any]] = field(default=None, repr=False)
     live_start_result: Optional[Dict[str, Any]] = field(default=None, repr=False)
     live_start_error: str = ""
@@ -564,6 +585,19 @@ class DesktopBlueprintRun:
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
         }
+        if self.session_key:
+            data["sessionKey"] = self.session_key
+        if self.start_node_id:
+            data["startNodeId"] = self.start_node_id
+        if self.slot_status:
+            data["slotStatus"] = self.slot_status
+            data["slotPoolKey"] = self.slot_pool_key
+            data["blueprintStructureId"] = self.blueprint_structure_id
+            data["robotAppKey"] = self.robot_app_key
+            data["sourceBindings"] = dict(self.source_bindings)
+            data["boundSessionKey"] = self.bound_session_key
+            data["slotStartedAt"] = self.slot_started_at or self.created_at
+            data["slotLastTouchedAt"] = self.slot_last_touched_at or self.updated_at
         if self.diagnostics_dir is not None:
             data["diagnostics"] = {
                 "path": str(self.diagnostics_dir),
@@ -893,6 +927,83 @@ class DesktopBlueprintService:
                     str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
                 )
             return self.validate_blueprint(document, project_dir=project_dir)
+        if command == "blueprint.runtime.setStartAgent":
+            project_dir = request_project_dir(args)
+            return self.set_blueprint_start_agent(
+                project_dir,
+                str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
+                str(args.get("startNodeId") or args.get("start_node_id") or "").strip(),
+            )
+        if command == "blueprint.runtime.executePlan":
+            project_dir = request_project_dir(args)
+            return self.execute_blueprint_plan(
+                project_dir,
+                str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
+                args.get("plan"),
+                execution_mode=str(args.get("executionMode", "live")),
+            )
+        if command == "blueprint.sessions.list":
+            project_dir = args.get("projectDir")
+            blueprint_id = args.get("blueprintId")
+            return {
+                "ok": True,
+                "sessions": self.list_blueprint_sessions(
+                    Path(project_dir) if isinstance(project_dir, str) and project_dir.strip() else None,
+                    str(blueprint_id) if blueprint_id is not None else None,
+                ),
+            }
+        if command == "blueprint.sessions.delete":
+            return self.delete_blueprint_session(str(args.get("sessionKey", "")).strip())
+        if command == "blueprint.sessions.message":
+            project_dir = request_project_dir(args)
+            return self.message_blueprint_slot(
+                project_dir,
+                str(args.get("message", "")),
+                source=str(args.get("source", "ui")),
+                blueprint_id=str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
+                source_identity={
+                    "robotAppKey": str(args.get("popoRobotAppKey", "") or ""),
+                },
+                session_identity={
+                    "popoUserId": str(args.get("popoUserId", "") or ""),
+                    "popoSessionId": str(args.get("popoSessionId", "") or ""),
+                    "popoGroupId": str(args.get("popoGroupId", "") or ""),
+                },
+                session_key=str(args.get("sessionKey", "") or "").strip() or None,
+            )
+        if command == "blueprint.slots.start":
+            project_dir = request_project_dir(args)
+            return self.start_blueprint_slot(
+                project_dir,
+                str(args.get("blueprintId", DEFAULT_BLUEPRINT_ID)),
+            )
+        if command == "blueprint.slots.message":
+            project_dir = request_project_dir(args)
+            source_identity = args.get("sourceIdentity")
+            session_identity = args.get("sessionIdentity")
+            return self.message_blueprint_slot(
+                project_dir,
+                str(args.get("message", "")),
+                source=str(args.get("source", "ui")),
+                blueprint_id=(str(args.get("blueprintId")) if args.get("blueprintId") is not None else None),
+                run_id=(str(args.get("runId")) if args.get("runId") is not None else None),
+                source_identity=source_identity if isinstance(source_identity, dict) else {},
+                session_identity=session_identity if isinstance(session_identity, dict) else {},
+                session_key=str(args.get("sessionKey", "") or "").strip() or None,
+            )
+        if command == "blueprint.popo.config":
+            project_dir = request_project_dir(args)
+            robot_app_key = str(args.get("robotAppKey", "") or args.get("robot_app_key", "") or "").strip()
+            binding = self._find_popo_blueprint_binding(project_dir, robot_app_key)
+            return {
+                "ok": True,
+                "robotAppKey": robot_app_key,
+                "blueprintId": binding["blueprintId"],
+                "blueprintName": binding["blueprintName"],
+                "blueprintStructureId": binding["blueprintStructureId"],
+                "startNodeId": binding["startNodeId"],
+                "popoEntry": binding["popoEntry"],
+            }
         if command == "blueprint.plan.create":
             project_dir = request_project_dir(args)
             return self.create_blueprint_start_plan(
@@ -1173,6 +1284,109 @@ class DesktopBlueprintService:
             "validation": result["validation"],
         }
 
+    def set_blueprint_start_agent(
+        self,
+        project_dir: Path,
+        blueprint_id: str,
+        start_node_id: str,
+    ) -> Dict[str, Any]:
+        start_id = str(start_node_id or "").strip()
+        if not start_id:
+            raise BlueprintServiceError("BAD_REQUEST", "startNodeId must be a non-empty string")
+        document = self.open_blueprint(project_dir, blueprint_id)
+        graph_dict = dict(document.get("graph") or {})
+        try:
+            graph = graph_definition_from_dict(graph_dict)
+            validate_desktop_blueprint_graph(graph, project_dir=validate_project_dir(project_dir))
+        except Exception as exc:
+            raise BlueprintServiceError(
+                "INVALID_BLUEPRINT_GRAPH",
+                str(exc),
+                details={"blueprintId": str(document["id"])},
+            ) from exc
+        if start_id not in graph.agent_nodes:
+            raise BlueprintServiceError(
+                "BLUEPRINT_START_NODE_REQUIRED",
+                "startNodeId must reference exactly one AgentNode",
+                details={"blueprintId": str(document["id"]), "validStartNodes": sorted(graph.agent_nodes)},
+            )
+        runtime = dict(document.get("runtime") or {})
+        runtime["start_node_id"] = start_id
+        runtime["popo_entry"] = normalize_popo_entry(runtime.get("popo_entry") or runtime.get("popoEntry"))
+        document["runtime"] = runtime
+        saved = self.save_blueprint(project_dir, document)
+        return {
+            "ok": True,
+            "blueprintId": str(saved["id"]),
+            "startNodeId": start_id,
+            "validStartNodes": sorted(graph.agent_nodes),
+            "document": saved,
+        }
+
+    def execute_blueprint_plan(
+        self,
+        project_dir: Path,
+        blueprint_id: str,
+        plan_data: Any,
+        *,
+        execution_mode: str = "live",
+    ) -> Dict[str, Any]:
+        document = self.open_blueprint(project_dir, blueprint_id)
+        graph_dict = dict(document.get("graph") or {})
+        try:
+            graph = graph_definition_from_dict(graph_dict)
+            validate_desktop_blueprint_graph(graph, project_dir=validate_project_dir(project_dir))
+        except Exception as exc:
+            raise BlueprintServiceError(
+                "INVALID_BLUEPRINT_GRAPH",
+                str(exc),
+                details={"blueprintId": str(document["id"])},
+            ) from exc
+        start_node_id = document_start_node_id(document)
+        if not start_node_id or start_node_id not in graph.agent_nodes:
+            raise BlueprintServiceError(
+                "BLUEPRINT_START_NODE_REQUIRED",
+                "blueprint runtime.start_node_id must be set to exactly one AgentNode before executing a plan",
+                details={"blueprintId": str(document["id"]), "validStartNodes": sorted(graph.agent_nodes)},
+            )
+        plan = normalize_plan_payload(plan_data)
+        start_nodes = coerce_string_list(plan.get("start_nodes"), "plan.start_nodes")
+        if not start_nodes:
+            plan["start_nodes"] = [start_node_id]
+            start_nodes = [start_node_id]
+        if start_nodes != [start_node_id]:
+            raise BlueprintServiceError(
+                "BLUEPRINT_PLAN_START_NODE_MISMATCH",
+                "plan.start_nodes must contain only the saved runtime.start_node_id",
+                details={"startNodeId": start_node_id, "planStartNodes": start_nodes},
+            )
+        tasks = plan.get("tasks")
+        if not isinstance(tasks, dict) or start_node_id not in tasks:
+            raise BlueprintServiceError(
+                "BAD_START_PLAN",
+                "plan.tasks must include the saved runtime.start_node_id task",
+                details={"startNodeId": start_node_id},
+            )
+        run_policy = dict(plan.get("run_policy") or {})
+        run_policy["requires_confirmation"] = False
+        run_policy["source"] = str(run_policy.get("source") or "codex-desktop-execute-plan")
+        plan["run_policy"] = run_policy
+        result = self._validate_blueprint_start_plan_data(graph, plan)
+        validation = result["validation"]
+        if not validation.get("ok"):
+            raise BlueprintServiceError(
+                "START_PLAN_INVALID",
+                "start plan failed validation",
+                details={"validation": validation, "blueprintId": str(document["id"])},
+            )
+        return self.start_blueprint_run(
+            project_dir,
+            str(document["id"]),
+            result["plan"],
+            execution_mode=execution_mode,
+            start_node_id=start_node_id,
+        )
+
     def _blueprint_graph_for_plan(self, project_dir: Path, blueprint_id: str) -> Any:
         document = self.open_blueprint(project_dir, blueprint_id)
         document = document_with_common_config_paths(document)
@@ -1292,6 +1506,835 @@ class DesktopBlueprintService:
             errors.append(str(exc))
         return {"ok": not errors, "errors": errors, "warnings": warnings}
 
+    def blueprint_sessions_dir(self) -> Path:
+        return self.resident_service_data_dir() / "blueprint_sessions"
+
+    def _blueprint_session_dir(self, session_key: str) -> Path:
+        return self.blueprint_sessions_dir() / blueprint_session_key_path_component(session_key)
+
+    def _blueprint_session_path(self, session_key: str) -> Path:
+        return self._blueprint_session_dir(session_key) / "session.json"
+
+    def _blueprint_session_transcript_path(self, session_key: str) -> Path:
+        return self._blueprint_session_dir(session_key) / "transcript.jsonl"
+
+    def _load_blueprint_session(self, session_key: str) -> Optional[Dict[str, Any]]:
+        path = self._blueprint_session_path(session_key)
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _save_blueprint_session(self, session: Dict[str, Any]) -> None:
+        session_key = blueprint_session_key_path_component(str(session.get("sessionKey", "")))
+        directory = self._blueprint_session_dir(session_key)
+        directory.mkdir(parents=True, exist_ok=True)
+        payload = dict(session)
+        payload["schemaVersion"] = BLUEPRINT_SESSION_SCHEMA_VERSION
+        self._atomic_write_json(directory / "session.json", payload)
+
+    def _append_blueprint_session_event(self, session_key: str, event: Dict[str, Any]) -> None:
+        directory = self._blueprint_session_dir(session_key)
+        directory.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp": _iso_time(float(self.now())),
+            **event,
+        }
+        with (directory / "transcript.jsonl").open("a", encoding="utf-8") as file:
+            file.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+
+    def _read_blueprint_session_events(self, session_key: str, *, limit: int = BLUEPRINT_SESSION_CONTEXT_RECENT_LIMIT) -> list[Dict[str, Any]]:
+        path = self._blueprint_session_transcript_path(session_key)
+        if not path.is_file():
+            return []
+        rows: list[Dict[str, Any]] = []
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return []
+        for line in reversed(lines):
+            if len(rows) >= limit:
+                break
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "") not in {"user_message", "queued_message"}:
+                continue
+            rows.append(item)
+        rows.reverse()
+        return rows
+
+    def _atomic_write_json(self, path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        temp.replace(path)
+
+    def _run_is_active(self, run: DesktopBlueprintRun) -> bool:
+        try:
+            status = self._runtime_call(run, lambda: run.runtime.status_snapshot()["run"])
+        except Exception:
+            return True
+        return str(status.get("status") or "").strip() not in TERMINAL_RUN_STATUSES
+
+    def _active_run_for_session(self, session_key: str) -> Optional[DesktopBlueprintRun]:
+        normalized_key = blueprint_session_key_path_component(session_key)
+        with self._lock:
+            runs = [run for run in self._runs.values() if run.session_key == normalized_key]
+        for run in runs:
+            if self._run_is_active(run):
+                return run
+            self._mark_blueprint_session_run_ended(run)
+        return None
+
+    def _active_blueprint_session_run_count(self) -> int:
+        with self._lock:
+            runs = list(self._runs.values())
+        count = 0
+        for run in runs:
+            if self._run_is_active(run):
+                count += 1
+            else:
+                self._mark_blueprint_session_run_ended(run)
+        return count
+
+    def _mark_blueprint_session_run_ended(self, run: DesktopBlueprintRun) -> None:
+        if not run.session_key:
+            return
+        session = self._load_blueprint_session(run.session_key)
+        if not session:
+            return
+        if str(session.get("activeRunId") or "") != run.run_id:
+            return
+        now = float(self.now())
+        session["activeRunId"] = ""
+        session["lastRunId"] = run.run_id
+        session["status"] = "idle"
+        session["lastTouchedAt"] = now
+        self._save_blueprint_session(session)
+        self._append_blueprint_session_event(
+            run.session_key,
+            {
+                "type": "run_ended",
+                "runId": run.run_id,
+                "blueprintId": run.blueprint_id,
+            },
+        )
+
+    def _build_blueprint_session_context(self, session: Dict[str, Any], current_message: str) -> str:
+        lines: list[str] = []
+        summary = str(session.get("contextSummary") or "").strip()
+        if summary:
+            lines.append("[BlueprintSession Summary]")
+            lines.append(summary)
+            lines.append("")
+        events = self._read_blueprint_session_events(str(session.get("sessionKey") or ""))
+        if events:
+            lines.append("[Recent BlueprintSession Messages]")
+            for event in events:
+                role = "Queued POPO user" if str(event.get("type") or "") == "queued_message" else "POPO user"
+                text = str(event.get("message") or "").strip()
+                if text:
+                    lines.append(f"{role}: {text}")
+            lines.append("")
+        lines.append("[Current POPO Message]")
+        lines.append(str(current_message).strip())
+        context = "\n".join(lines).strip()
+        if len(context) <= BLUEPRINT_SESSION_CONTEXT_CHAR_LIMIT:
+            return context
+        return context[-BLUEPRINT_SESSION_CONTEXT_CHAR_LIMIT:]
+
+    def list_blueprint_sessions(
+        self,
+        project_dir: Optional[Path] = None,
+        blueprint_id: Optional[str] = None,
+    ) -> list[Dict[str, Any]]:
+        resolved_project = validate_project_dir(project_dir) if project_dir is not None else None
+        normalized_blueprint_id = validate_blueprint_id(blueprint_id) if blueprint_id else None
+        directory = self.blueprint_sessions_dir()
+        if not directory.exists():
+            return []
+        sessions: list[Dict[str, Any]] = []
+        for session_path in sorted(directory.glob("bps_*/session.json")):
+            try:
+                session = json.loads(session_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(session, dict) or session.get("deleted"):
+                continue
+            if resolved_project is not None and str(session.get("projectDir") or "") != str(resolved_project):
+                continue
+            if normalized_blueprint_id and str(session.get("blueprintId") or "") != normalized_blueprint_id:
+                continue
+            active_run_id = str(session.get("activeRunId") or "")
+            if active_run_id:
+                with self._lock:
+                    run = self._runs.get(active_run_id)
+                if run is None:
+                    session["activeRunId"] = ""
+                    session["status"] = "idle"
+                    session["lastRunId"] = active_run_id
+                    session["lastTouchedAt"] = float(self.now())
+                    self._save_blueprint_session(session)
+                elif not self._run_is_active(run):
+                    self._mark_blueprint_session_run_ended(run)
+                    session = self._load_blueprint_session(str(session.get("sessionKey") or "")) or session
+            sessions.append(dict(session))
+        return sorted(
+            sessions,
+            key=lambda item: (
+                0 if item.get("activeRunId") else 1,
+                -float(item.get("lastTouchedAt") or item.get("createdAt") or 0),
+            ),
+        )
+
+    def delete_blueprint_session(self, session_key: str) -> Dict[str, Any]:
+        normalized_key = blueprint_session_key_path_component(session_key)
+        active = self._active_run_for_session(normalized_key)
+        if active is not None:
+            raise BlueprintServiceError(
+                "BLUEPRINT_SESSION_RUNNING",
+                "running blueprint sessions cannot be deleted",
+                details={"sessionKey": normalized_key, "runId": active.run_id},
+            )
+        session = self._load_blueprint_session(normalized_key)
+        if not session:
+            raise BlueprintServiceError("BLUEPRINT_SESSION_NOT_FOUND", "blueprint session was not found", status=404)
+        session["deleted"] = True
+        session["status"] = "deleted"
+        session["lastTouchedAt"] = float(self.now())
+        self._save_blueprint_session(session)
+        self._append_blueprint_session_event(normalized_key, {"type": "session_deleted"})
+        return {"ok": True, "sessionKey": normalized_key, "deleted": True}
+
+    def _blueprint_slot_preflight(self, project_dir: Path, blueprint_id: str) -> Dict[str, Any]:
+        document = self.open_blueprint(project_dir, blueprint_id)
+        config_issues = blueprint_common_config_issues(document)
+        if config_issues:
+            raise BlueprintServiceError(
+                "BLUEPRINT_CONFIG_REQUIRED",
+                "required blueprint common config paths must be set before start",
+                details={"blueprintId": str(document["id"]), "issues": config_issues},
+            )
+        document = document_with_common_config_paths(document)
+        start_node_id = document_start_node_id(document)
+        graph_dict = dict(document["graph"])
+        graph = graph_definition_from_dict(graph_dict)
+        validate_desktop_blueprint_graph(graph, project_dir=validate_project_dir(project_dir))
+        if not start_node_id or start_node_id not in graph.agent_nodes:
+            raise BlueprintServiceError(
+                "BLUEPRINT_START_NODE_REQUIRED",
+                "blueprint runtime.start_node_id must reference exactly one AgentNode before start",
+                details={"blueprintId": str(document["id"]), "validStartNodes": sorted(graph.agent_nodes)},
+            )
+        popo_entry = require_complete_popo_entry(document)
+        structure_id = canonical_blueprint_structure_id(graph_dict)
+        return {
+            "document": document,
+            "graph": graph,
+            "graphDict": graph_dict,
+            "startNodeId": start_node_id,
+            "popoEntry": popo_entry,
+            "blueprintStructureId": structure_id,
+        }
+
+    def _ensure_robot_structure_unique_for_slot(
+        self,
+        *,
+        project_dir: Path,
+        robot_app_key: str,
+        blueprint_structure_id: str,
+        blueprint_id: str,
+    ) -> None:
+        robot_key = str(robot_app_key or "").strip()
+        if not robot_key:
+            return
+        conflicts = []
+        with self._lock:
+            runs = list(self._runs.values())
+        for run in runs:
+            if run.project_dir != validate_project_dir(project_dir):
+                continue
+            if not run.slot_status or not self._run_is_active(run):
+                continue
+            if str(run.robot_app_key or "") != robot_key:
+                continue
+            if str(run.blueprint_structure_id or "") != str(blueprint_structure_id):
+                conflicts.append(run.summary())
+        if conflicts:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_ROBOT_STRUCTURE_CONFLICT",
+                "one POPO robot can only be bound to one blueprint structure",
+                details={
+                    "robotAppKey": robot_key,
+                    "blueprintId": blueprint_id,
+                    "blueprintStructureId": blueprint_structure_id,
+                    "conflicts": conflicts,
+                },
+            )
+
+    def start_blueprint_slot(
+        self,
+        project_dir: Path,
+        blueprint_id: str = DEFAULT_BLUEPRINT_ID,
+    ) -> Dict[str, Any]:
+        preflight = self._blueprint_slot_preflight(project_dir, blueprint_id)
+        document = preflight["document"]
+        graph = preflight["graph"]
+        start_node_id = str(preflight["startNodeId"])
+        structure_id = str(preflight["blueprintStructureId"])
+        popo_entry = dict(preflight["popoEntry"])
+        robot_app_key = str(popo_entry.get("robot_app_key") or "")
+        self._ensure_robot_structure_unique_for_slot(
+            project_dir=project_dir,
+            robot_app_key=robot_app_key,
+            blueprint_structure_id=structure_id,
+            blueprint_id=str(document["id"]),
+        )
+        if self._active_blueprint_session_run_count() >= MAX_ACTIVE_BLUEPRINT_SESSION_RUNS:
+            raise BlueprintServiceError(
+                "BLUEPRINT_SESSION_LIMIT_REACHED",
+                "当前蓝图运行已满，最多同时运行三个蓝图运行槽",
+                details={"maxActiveRuns": MAX_ACTIVE_BLUEPRINT_SESSION_RUNS},
+            )
+
+        with self._lock:
+            run_id = self._generate_run_id_locked()
+        backend, runtime, control, mcp, diagnostics_dir = self._async_loop.run(
+            self._prepare_live_runtime(run_id, validate_project_dir(project_dir), document, graph)
+        )
+        now = float(self.now())
+        pool_key = blueprint_slot_pool_key(
+            project_dir=project_dir,
+            source="popo",
+            source_binding=robot_app_key,
+            blueprint_structure_id=structure_id,
+        )
+        with self._lock:
+            run = DesktopBlueprintRun(
+                run_id=run_id,
+                project_dir=validate_project_dir(project_dir),
+                blueprint_id=str(document["id"]),
+                document=document,
+                graph=graph,
+                runtime=runtime,
+                control=control,
+                execution_mode="live",
+                created_at=now,
+                updated_at=now,
+                backend=backend,
+                mcp=mcp,
+                diagnostics_dir=diagnostics_dir,
+                start_node_id=start_node_id,
+                slot_status="idle",
+                slot_pool_key=pool_key,
+                blueprint_structure_id=structure_id,
+                robot_app_key=robot_app_key,
+                source_bindings={
+                    "popo": {
+                        "robotAppKey": robot_app_key,
+                        "robotName": str(popo_entry.get("robot_name") or ""),
+                    },
+                    "ui": {"blueprintId": str(document["id"])},
+                },
+                slot_started_at=now,
+                slot_last_touched_at=now,
+            )
+            self._attach_stream_notification(run)
+            self._runs[run.run_id] = run
+        start_future = self._async_loop.submit(self._complete_live_slot_start(run))
+        with self._lock:
+            run.live_start_future = start_future
+        try:
+            started = start_future.result(timeout=LIVE_START_RESULT_WAIT_SECONDS)
+        except FutureTimeoutError:
+            started = {
+                "ok": True,
+                "pending": True,
+                "validation": {"ok": True, "errors": [], "warnings": []},
+                "queued_messages": [],
+                "start_manifest": {},
+            }
+            self._append_blueprint_diagnostics_event(run, "blueprint_slot_start_pending")
+        except Exception as exc:
+            with self._lock:
+                self._runs.pop(run.run_id, None)
+                run.live_start_error = str(exc)
+            try:
+                self._async_loop.run(self._close_live_run(run), timeout=10)
+            except Exception:
+                pass
+            raise BlueprintServiceError(
+                "LIVE_AGENT_START_FAILED",
+                "failed to start live blueprint slot Agents",
+                details={"error": str(exc), "blueprintId": str(document["id"])},
+            ) from exc
+        status = self._runtime_status_snapshot_or_starting(run, graph=graph)
+        return {
+            "ok": True,
+            "startPending": bool(started.get("pending")),
+            "runId": run.run_id,
+            "run": run.summary(),
+            "validation": started.get("validation"),
+            "queuedMessages": [],
+            "startManifest": started.get("start_manifest", {}),
+            "status": status,
+        }
+
+    def _find_popo_blueprint_binding(self, project_dir: Path, robot_app_key: str) -> Dict[str, Any]:
+        robot_key = str(robot_app_key or "").strip()
+        if not robot_key:
+            raise BlueprintServiceError("BLUEPRINT_POPO_ROBOT_REQUIRED", "robotAppKey is required for POPO messages")
+        bindings: list[Dict[str, Any]] = []
+        for summary in self.list_blueprints(project_dir):
+            blueprint_id = str(summary.get("id") or "").strip()
+            if not blueprint_id:
+                continue
+            try:
+                document = self.open_blueprint(project_dir, blueprint_id)
+                entry = document_popo_entry(document)
+            except BlueprintServiceError:
+                continue
+            if not entry.get("enabled") or str(entry.get("robot_app_key") or "") != robot_key:
+                continue
+            missing = popo_entry_missing_fields(entry)
+            if missing:
+                raise BlueprintServiceError(
+                    "BLUEPRINT_POPO_ENTRY_REQUIRED",
+                    "blueprint runtime.popo_entry is incomplete for this robot",
+                    details={"blueprintId": blueprint_id, "missing": missing},
+                )
+            graph_dict = dict(document.get("graph") or {})
+            graph = graph_definition_from_dict(graph_dict)
+            validate_desktop_blueprint_graph(graph, project_dir=validate_project_dir(project_dir))
+            start_node_id = document_start_node_id(document)
+            if not start_node_id or start_node_id not in graph.agent_nodes:
+                raise BlueprintServiceError(
+                    "BLUEPRINT_START_NODE_REQUIRED",
+                    "blueprint runtime.start_node_id must reference exactly one AgentNode before start",
+                    details={"blueprintId": blueprint_id, "validStartNodes": sorted(graph.agent_nodes)},
+                )
+            bindings.append(
+                {
+                    "document": document,
+                    "blueprintId": blueprint_id,
+                    "blueprintName": str(document.get("name") or blueprint_id),
+                    "blueprintStructureId": canonical_blueprint_structure_id(graph_dict),
+                    "startNodeId": start_node_id,
+                    "popoEntry": entry,
+                }
+            )
+        if not bindings:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_ROBOT_NOT_BOUND",
+                "no blueprint slot pool is bound to this POPO robot",
+                details={"robotAppKey": robot_key},
+                status=404,
+            )
+        structures = {str(item["blueprintStructureId"]) for item in bindings}
+        if len(structures) > 1:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_ROBOT_STRUCTURE_CONFLICT",
+                "one POPO robot can only be bound to one blueprint structure",
+                details={
+                    "robotAppKey": robot_key,
+                    "blueprintStructureIds": sorted(structures),
+                    "blueprintIds": sorted(str(item["blueprintId"]) for item in bindings),
+                },
+            )
+        return bindings[0]
+
+    def _slot_runs_for_pool(self, project_dir: Path, pool_key: str) -> list[DesktopBlueprintRun]:
+        resolved_project = validate_project_dir(project_dir)
+        with self._lock:
+            runs = list(self._runs.values())
+        active: list[DesktopBlueprintRun] = []
+        for run in runs:
+            if run.project_dir != resolved_project or str(run.slot_pool_key or "") != str(pool_key):
+                continue
+            if not run.slot_status:
+                continue
+            if self._run_is_active(run):
+                active.append(run)
+            else:
+                self._mark_blueprint_session_run_ended(run)
+        return active
+
+    def _choose_idle_slot(self, project_dir: Path, pool_key: str) -> Optional[DesktopBlueprintRun]:
+        idle = [
+            run
+            for run in self._slot_runs_for_pool(project_dir, pool_key)
+            if str(run.slot_status or "") == "idle" and not str(run.bound_session_key or "")
+        ]
+        if not idle:
+            return None
+        return sorted(
+            idle,
+            key=lambda run: (
+                float(run.slot_last_touched_at or run.updated_at or run.created_at),
+                float(run.slot_started_at or run.created_at),
+                run.run_id,
+            ),
+        )[0]
+
+    def _choose_idle_ui_slot(
+        self,
+        *,
+        project_dir: Path,
+        blueprint_id: str,
+        blueprint_structure_id: str,
+    ) -> Optional[DesktopBlueprintRun]:
+        resolved_project = validate_project_dir(project_dir)
+        with self._lock:
+            runs = list(self._runs.values())
+        idle: list[DesktopBlueprintRun] = []
+        for run in runs:
+            if run.project_dir != resolved_project:
+                continue
+            if run.blueprint_id != str(blueprint_id):
+                continue
+            if str(run.blueprint_structure_id or "") != str(blueprint_structure_id):
+                continue
+            if not run.slot_status:
+                continue
+            if not self._run_is_active(run):
+                self._mark_blueprint_session_run_ended(run)
+                continue
+            if str(run.slot_status or "") == "idle" and not str(run.bound_session_key or ""):
+                idle.append(run)
+        if not idle:
+            return None
+        return sorted(
+            idle,
+            key=lambda run: (
+                float(run.slot_last_touched_at or run.updated_at or run.created_at),
+                float(run.slot_started_at or run.created_at),
+                run.run_id,
+            ),
+        )[0]
+
+    def _queue_slot_session_message(
+        self,
+        run: DesktopBlueprintRun,
+        session: Dict[str, Any],
+        text: str,
+        *,
+        source: str,
+        session_key: str,
+    ) -> Dict[str, Any]:
+        start_node_id = str(run.start_node_id or document_start_node_id(run.document))
+        task_text = self._build_blueprint_session_context(session, text)
+        queued = self.queue_agent_message(run.run_id, start_node_id, task_text, mode="top")
+        now = float(self.now())
+        with self._lock:
+            run.slot_status = "assigned"
+            run.bound_session_key = session_key
+            run.session_key = session_key
+            run.slot_last_touched_at = now
+            run.updated_at = now
+        session["status"] = "running"
+        session["activeRunId"] = run.run_id
+        session["lastRunId"] = run.run_id
+        session["assignedBlueprintId"] = run.blueprint_id
+        session["startNodeId"] = start_node_id
+        session["lastTouchedAt"] = now
+        self._save_blueprint_session(session)
+        self._append_blueprint_session_event(
+            session_key,
+            {
+                "type": "queued_message",
+                "source": source,
+                "message": text,
+                "runId": run.run_id,
+                "startNodeId": start_node_id,
+            },
+        )
+        return queued
+
+    def message_blueprint_slot(
+        self,
+        project_dir: Path,
+        message: str,
+        *,
+        source: str = "ui",
+        blueprint_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        source_identity: Optional[Dict[str, Any]] = None,
+        session_identity: Optional[Dict[str, Any]] = None,
+        session_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        text = str(message or "").strip()
+        if not text:
+            raise BlueprintServiceError("BAD_REQUEST", "message must be a non-empty string")
+        normalized_source = str(source or "ui").strip().lower() or "ui"
+        source_identity = dict(source_identity or {})
+        session_identity = dict(session_identity or {})
+        popo_user_id = str(session_identity.get("popoUserId") or session_identity.get("sourceUserId") or "").strip()
+        popo_session_id = str(session_identity.get("popoSessionId") or session_identity.get("sourceSessionId") or "").strip()
+        popo_group_id = str(session_identity.get("popoGroupId") or session_identity.get("sourceGroupId") or "").strip()
+        robot_app_key = str(source_identity.get("robotAppKey") or source_identity.get("robot_app_key") or "").strip()
+        target_run: Optional[DesktopBlueprintRun] = None
+        pool_key = ""
+        structure_id = ""
+        assigned_blueprint_id = ""
+        blueprint_name = ""
+        start_node_id = ""
+        slot_lookup = "pool"
+        if run_id:
+            with self._lock:
+                target_run = self._get_run(str(run_id))
+            if not target_run.slot_status:
+                raise BlueprintServiceError("BLUEPRINT_SLOT_REQUIRED", "target run is not a blueprint slot")
+            pool_key = target_run.slot_pool_key
+            structure_id = target_run.blueprint_structure_id
+            assigned_blueprint_id = target_run.blueprint_id
+            blueprint_name = str(target_run.document.get("name") or target_run.blueprint_id)
+            start_node_id = target_run.start_node_id
+            robot_app_key = target_run.robot_app_key
+        elif normalized_source == "popo":
+            binding = self._find_popo_blueprint_binding(project_dir, robot_app_key)
+            structure_id = str(binding["blueprintStructureId"])
+            assigned_blueprint_id = str(binding["blueprintId"])
+            blueprint_name = str(binding["blueprintName"])
+            start_node_id = str(binding["startNodeId"])
+            pool_key = blueprint_slot_pool_key(
+                project_dir=project_dir,
+                source="popo",
+                source_binding=robot_app_key,
+                blueprint_structure_id=structure_id,
+            )
+        else:
+            selected_blueprint_id = str(blueprint_id or DEFAULT_BLUEPRINT_ID)
+            preflight = self._blueprint_slot_preflight(project_dir, selected_blueprint_id)
+            document = preflight["document"]
+            structure_id = str(preflight["blueprintStructureId"])
+            assigned_blueprint_id = str(document["id"])
+            blueprint_name = str(document.get("name") or assigned_blueprint_id)
+            start_node_id = str(preflight["startNodeId"])
+            slot_lookup = "ui"
+            pool_key = blueprint_slot_pool_key(
+                project_dir=project_dir,
+                source="ui",
+                source_binding=assigned_blueprint_id,
+                blueprint_structure_id=structure_id,
+            )
+        normalized_key = (
+            blueprint_session_key_path_component(session_key)
+            if session_key
+            else blueprint_session_key_for_pool(
+                pool_key=pool_key,
+                source=normalized_source,
+                popo_user_id=popo_user_id or str(source_identity.get("uiUserId") or ""),
+                popo_session_id=popo_session_id or str(source_identity.get("uiSessionId") or ""),
+                popo_group_id=popo_group_id,
+            )
+        )
+        now = float(self.now())
+        session = self._load_blueprint_session(normalized_key) or {
+            "sessionKey": normalized_key,
+            "projectDir": str(validate_project_dir(project_dir)),
+            "poolKey": pool_key,
+            "robotAppKey": robot_app_key,
+            "blueprintId": assigned_blueprint_id,
+            "assignedBlueprintId": "",
+            "blueprintName": blueprint_name,
+            "blueprintStructureId": structure_id,
+            "source": normalized_source,
+            "popoUserId": str(popo_user_id or ""),
+            "popoSessionId": str(popo_session_id or ""),
+            "popoGroupId": str(popo_group_id or ""),
+            "status": "idle",
+            "activeRunId": "",
+            "lastRunId": "",
+            "contextSummary": "",
+            "messageCount": 0,
+            "createdAt": now,
+            "lastTouchedAt": now,
+            "deleted": False,
+        }
+        session.update(
+            {
+                "projectDir": str(validate_project_dir(project_dir)),
+                "poolKey": str(session.get("poolKey") or pool_key),
+                "robotAppKey": str(session.get("robotAppKey") or robot_app_key),
+                "blueprintId": str(session.get("blueprintId") or assigned_blueprint_id),
+                "blueprintName": str(session.get("blueprintName") or blueprint_name),
+                "blueprintStructureId": structure_id,
+                "source": normalized_source,
+                "popoUserId": str(popo_user_id or session.get("popoUserId") or ""),
+                "popoSessionId": str(popo_session_id or session.get("popoSessionId") or ""),
+                "popoGroupId": str(popo_group_id or session.get("popoGroupId") or ""),
+                "startNodeId": start_node_id,
+                "deleted": False,
+                "lastTouchedAt": now,
+                "messageCount": int(session.get("messageCount") or 0) + 1,
+            }
+        )
+        self._save_blueprint_session(session)
+        self._append_blueprint_session_event(
+            normalized_key,
+            {
+                "type": "user_message",
+                "source": normalized_source,
+                "message": text,
+                "startNodeId": start_node_id,
+            },
+        )
+
+        active_run = self._active_run_for_session(normalized_key)
+        if active_run is not None:
+            queued = self._queue_slot_session_message(
+                active_run,
+                session,
+                text,
+                source=normalized_source,
+                session_key=normalized_key,
+            )
+            return {
+                "ok": True,
+                "queued": True,
+                "session": session,
+                "sessionKey": normalized_key,
+                "runId": active_run.run_id,
+                "queue": queued,
+            }
+
+        if target_run is None:
+            if slot_lookup == "ui":
+                target_run = self._choose_idle_ui_slot(
+                    project_dir=project_dir,
+                    blueprint_id=assigned_blueprint_id,
+                    blueprint_structure_id=structure_id,
+                )
+            else:
+                target_run = self._choose_idle_slot(project_dir, pool_key)
+        if target_run is None:
+            active_pool = self._slot_runs_for_pool(project_dir, pool_key)
+            code = "BLUEPRINT_SLOT_BUSY" if active_pool else "BLUEPRINT_SLOT_NOT_FOUND"
+            raise BlueprintServiceError(
+                code,
+                (
+                    "the matching blueprint slot pool has no idle slots"
+                    if active_pool
+                    else "no manually started blueprint slot is available for this message"
+                ),
+                details={"poolKey": pool_key, "source": normalized_source, "robotAppKey": robot_app_key},
+            )
+        if str(target_run.slot_status or "") != "idle" and str(target_run.bound_session_key or "") != normalized_key:
+            raise BlueprintServiceError(
+                "BLUEPRINT_SLOT_BUSY",
+                "the selected blueprint slot is already assigned to another session",
+                details={"runId": target_run.run_id, "sessionKey": target_run.bound_session_key},
+            )
+        queued = self._queue_slot_session_message(
+            target_run,
+            session,
+            text,
+            source=normalized_source,
+            session_key=normalized_key,
+        )
+        self._append_blueprint_session_event(
+            normalized_key,
+            {
+                "type": "slot_assigned",
+                "runId": target_run.run_id,
+                "startNodeId": start_node_id,
+            },
+        )
+        return {
+            "ok": True,
+            "queued": True,
+            "session": session,
+            "sessionKey": normalized_key,
+            "runId": target_run.run_id,
+            "run": target_run.summary(),
+            "queue": queued,
+            "status": self._runtime_status_snapshot_or_starting(target_run, graph=target_run.graph),
+        }
+
+    def message_blueprint_session(
+        self,
+        project_dir: Path,
+        blueprint_id: str,
+        message: str,
+        *,
+        source: str = "ui",
+        popo_user_id: str = "",
+        popo_session_id: str = "",
+        popo_group_id: str = "",
+        session_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.message_blueprint_slot(
+            project_dir,
+            message,
+            source=source,
+            blueprint_id=blueprint_id,
+            source_identity={},
+            session_identity={
+                "popoUserId": popo_user_id,
+                "popoSessionId": popo_session_id,
+                "popoGroupId": popo_group_id,
+            },
+            session_key=session_key,
+        )
+        """
+
+        if self._active_blueprint_session_run_count() >= MAX_ACTIVE_BLUEPRINT_SESSION_RUNS:
+            raise BlueprintServiceError(
+                "BLUEPRINT_SESSION_LIMIT_REACHED",
+                "当前蓝图运行已满，最多同时运行三个蓝图会话",
+                details={"maxActiveRuns": MAX_ACTIVE_BLUEPRINT_SESSION_RUNS},
+            )
+
+        task_text = self._build_blueprint_session_context(session, text)
+        plan_data = default_start_plan_for_graph(graph, task_text, [start_node_id])
+        plan_data["run_policy"] = {
+            **dict(plan_data.get("run_policy") or {}),
+            "requires_confirmation": False,
+            "source": "blueprint-session",
+        }
+        for task in dict(plan_data.get("tasks") or {}).values():
+            if isinstance(task, dict):
+                metadata = dict(task.get("metadata") or {})
+                metadata.update({"source": "blueprint-session", "sessionKey": normalized_key})
+                task["metadata"] = metadata
+        started = self.start_blueprint_run(
+            project_dir,
+            str(document["id"]),
+            plan_data,
+            execution_mode="live",
+            session_key=normalized_key,
+            start_node_id=start_node_id,
+        )
+        run_id = str(started.get("runId") or "")
+        session["status"] = "running"
+        session["activeRunId"] = run_id
+        session["lastRunId"] = run_id
+        session["lastTouchedAt"] = float(self.now())
+        self._save_blueprint_session(session)
+        self._append_blueprint_session_event(
+            normalized_key,
+            {
+                "type": "run_started",
+                "runId": run_id,
+                "startNodeId": start_node_id,
+            },
+        )
+        return {
+            "ok": True,
+            "queued": False,
+            "session": session,
+            "sessionKey": normalized_key,
+            **started,
+        }
+        """
+
     def list_blueprint_runs(
         self,
         project_dir: Optional[Path] = None,
@@ -1318,6 +2361,8 @@ class DesktopBlueprintService:
                 summary["status"] = status["status"]
                 summary["finalStatus"] = status.get("final_status")
                 summary["endedAt"] = status.get("ended_at")
+                if str(status.get("status") or "") in TERMINAL_RUN_STATUSES:
+                    self._mark_blueprint_session_run_ended(run)
             except FutureTimeoutError:
                 summary["status"] = "starting"
                 summary["startPending"] = True
@@ -1331,6 +2376,8 @@ class DesktopBlueprintService:
         plan_data: Any = None,
         *,
         execution_mode: str = "status",
+        session_key: str = "",
+        start_node_id: str = "",
     ) -> Dict[str, Any]:
         execution_mode = str(execution_mode).strip().lower() or "status"
         if execution_mode not in {"status", "live"}:
@@ -1386,7 +2433,12 @@ class DesktopBlueprintService:
                 },
             )
 
-        active_run = self._active_run_for_blueprint(validate_project_dir(project_dir), str(document["id"]))
+        normalized_session_key = blueprint_session_key_path_component(session_key) if session_key else ""
+        active_run = (
+            self._active_run_for_session(normalized_session_key)
+            if normalized_session_key
+            else self._active_run_for_blueprint(validate_project_dir(project_dir), str(document["id"]))
+        )
         if active_run is not None:
             with self._lock:
                 active_run.updated_at = float(self.now())
@@ -1407,6 +2459,12 @@ class DesktopBlueprintService:
                 "startManifest": {},
                 "status": status,
             }
+        if normalized_session_key and self._active_blueprint_session_run_count() >= MAX_ACTIVE_BLUEPRINT_SESSION_RUNS:
+            raise BlueprintServiceError(
+                "BLUEPRINT_SESSION_LIMIT_REACHED",
+                "当前蓝图运行已满，最多同时运行三个蓝图会话",
+                details={"maxActiveRuns": MAX_ACTIVE_BLUEPRINT_SESSION_RUNS},
+            )
 
         with self._lock:
             run_id = self._generate_run_id_locked()
@@ -1462,6 +2520,8 @@ class DesktopBlueprintService:
                 backend=backend,
                 mcp=mcp,
                 diagnostics_dir=diagnostics_dir,
+                session_key=normalized_session_key,
+                start_node_id=str(start_node_id or "").strip(),
             )
             self._attach_stream_notification(run)
             self._runs[run.run_id] = run
@@ -1538,6 +2598,9 @@ class DesktopBlueprintService:
             run = self._get_run(run_id)
             run.updated_at = float(self.now())
             status = self._runtime_status_snapshot_or_starting(run, graph=run.graph)
+            run_status = status.get("run") if isinstance(status, dict) and isinstance(status.get("run"), dict) else {}
+            if str(run_status.get("status") or "") in TERMINAL_RUN_STATUSES:
+                self._mark_blueprint_session_run_ended(run)
             try:
                 explanation = self._runtime_call(
                     run,
@@ -1914,6 +2977,48 @@ class DesktopBlueprintService:
                 run.stream_condition.notify_all()
             raise
 
+    async def _complete_live_slot_start(self, run: DesktopBlueprintRun) -> Dict[str, Any]:
+        try:
+            run.runtime.configure_completion_tracking(run.graph)
+            await run.runtime.prestart_agents(list(run.graph.agent_nodes.values()))
+            run.runtime.start_tick_loop()
+            run.live_start_result = {
+                "ok": True,
+                "validation": {"ok": True, "errors": [], "warnings": []},
+                "queued_messages": [],
+                "start_manifest": {},
+            }
+            run.updated_at = float(self.now())
+            status = run.runtime.status_snapshot(graph=run.graph)
+            self._append_blueprint_diagnostics_event(
+                run,
+                "blueprint_slot_started",
+                status=_compact_runtime_status(status),
+                queuedMessageCount=0,
+            )
+            with run.stream_condition:
+                run.stream_condition.notify_all()
+            return dict(run.live_start_result)
+        except Exception as exc:
+            run.live_start_error = str(exc)
+            run.updated_at = float(self.now())
+            try:
+                run.runtime.end_run(
+                    "fail",
+                    reason=f"live blueprint slot start failed: {exc}",
+                    archive=False,
+                )
+            except Exception:
+                pass
+            self._append_blueprint_diagnostics_event(
+                run,
+                "blueprint_slot_start_failed",
+                error=str(exc),
+            )
+            with run.stream_condition:
+                run.stream_condition.notify_all()
+            raise
+
     def end_blueprint_run(
         self,
         run_id: str,
@@ -1962,6 +3067,9 @@ class DesktopBlueprintService:
             }
             if already_ended:
                 response["alreadyEnded"] = True
+            run_status_after_end = status.get("run") if isinstance(status, dict) and isinstance(status.get("run"), dict) else {}
+            if str(run_status_after_end.get("status") or "") in TERMINAL_RUN_STATUSES:
+                self._mark_blueprint_session_run_ended(run)
         if run.execution_mode == "live" and not already_ended:
             self._async_loop.run(self._close_live_run(run))
         with run.stream_condition:
@@ -3705,6 +4813,135 @@ def blueprint_path(project_dir: Path, blueprint_id: str) -> Path:
     return blueprint_dir(project_dir) / f"{validate_blueprint_id(blueprint_id)}.json"
 
 
+def blueprint_session_key_path_component(session_key: str) -> str:
+    value = str(session_key or "").strip()
+    if not re.fullmatch(r"bps_[0-9a-f]{24}", value):
+        raise BlueprintServiceError("INVALID_BLUEPRINT_SESSION", "sessionKey must match bps_[0-9a-f]{24}")
+    return value
+
+
+def canonical_blueprint_structure_id(graph: Dict[str, Any]) -> str:
+    if not isinstance(graph, dict):
+        raise BlueprintServiceError("INVALID_DOCUMENT", "blueprint document graph must be a JSON object")
+    structure = {
+        "terminal_nodes": graph.get("terminal_nodes") or {},
+        "agent_nodes": graph.get("agent_nodes") or {},
+        "route_nodes": graph.get("route_nodes") or {},
+        "common_nodes": graph.get("common_nodes") or {},
+        "script_nodes": graph.get("script_nodes") or {},
+        "prompt_nodes": graph.get("prompt_nodes") or {},
+        "edges": graph.get("edges") or [],
+    }
+    raw = json.dumps(structure, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def normalize_popo_entry(value: Any = None) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    return {
+        "enabled": bool(value.get("enabled", False)),
+        "robot_app_key": str(value.get("robot_app_key") or value.get("robotAppKey") or "").strip(),
+        "robot_name": str(value.get("robot_name") or value.get("robotName") or "").strip(),
+        "robot_app_secret": str(value.get("robot_app_secret") or value.get("robotAppSecret") or "").strip(),
+        "callback_token": str(value.get("callback_token") or value.get("callbackToken") or "").strip(),
+        "aes_key": str(value.get("aes_key") or value.get("aesKey") or "").strip(),
+    }
+
+
+def document_popo_entry(document: Dict[str, Any]) -> Dict[str, Any]:
+    runtime = document.get("runtime", {})
+    if not isinstance(runtime, dict):
+        runtime = {}
+    return normalize_popo_entry(runtime.get("popo_entry") or runtime.get("popoEntry"))
+
+
+def popo_entry_missing_fields(entry: Dict[str, Any]) -> list[str]:
+    return [field for field in POPO_ENTRY_REQUIRED_FIELDS if not str(entry.get(field) or "").strip()]
+
+
+def require_complete_popo_entry(document: Dict[str, Any]) -> Dict[str, Any]:
+    entry = document_popo_entry(document)
+    missing = popo_entry_missing_fields(entry)
+    if not entry.get("enabled") or missing:
+        raise BlueprintServiceError(
+            "BLUEPRINT_POPO_ENTRY_REQUIRED",
+            "blueprint runtime.popo_entry must be enabled and complete before starting a blueprint slot",
+            details={
+                "blueprintId": str(document.get("id") or ""),
+                "missing": ["enabled"] if not entry.get("enabled") else missing,
+            },
+        )
+    return entry
+
+
+def blueprint_slot_pool_key(
+    *,
+    project_dir: Path,
+    source: str,
+    source_binding: str,
+    blueprint_structure_id: str,
+) -> str:
+    parts = [
+        str(validate_project_dir(project_dir)).casefold(),
+        str(source or "ui").strip().lower(),
+        str(source_binding or "").strip(),
+        str(blueprint_structure_id or "").strip(),
+    ]
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:24]
+
+
+def blueprint_session_key_for_pool(
+    *,
+    pool_key: str,
+    source: str,
+    popo_user_id: str = "",
+    popo_session_id: str = "",
+    popo_group_id: str = "",
+) -> str:
+    parts = [
+        str(pool_key or "").strip(),
+        str(source or "ui").strip().lower(),
+        str(popo_user_id or "").strip(),
+        str(popo_session_id or "").strip(),
+        str(popo_group_id or "").strip(),
+    ]
+    raw = "\x1f".join(parts)
+    return "bps_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def blueprint_session_key(
+    *,
+    project_dir: Path,
+    blueprint_id: str,
+    blueprint_structure_id: str,
+    source: str,
+    popo_user_id: str = "",
+    popo_session_id: str = "",
+    popo_group_id: str = "",
+) -> str:
+    pool_key = blueprint_slot_pool_key(
+        project_dir=project_dir,
+        source=source,
+        source_binding=validate_blueprint_id(blueprint_id),
+        blueprint_structure_id=blueprint_structure_id,
+    )
+    return blueprint_session_key_for_pool(
+        pool_key=pool_key,
+        source=source,
+        popo_user_id=popo_user_id,
+        popo_session_id=popo_session_id,
+        popo_group_id=popo_group_id,
+    )
+
+
+def document_start_node_id(document: Dict[str, Any]) -> str:
+    runtime = document.get("runtime", {})
+    if not isinstance(runtime, dict):
+        return ""
+    return str(runtime.get("start_node_id") or runtime.get("startNodeId") or "").strip()
+
+
 def normalize_document(data: Dict[str, Any], *, fallback_id: Optional[str] = None) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise BlueprintServiceError("INVALID_DOCUMENT", "blueprint document must be a JSON object")
@@ -3715,15 +4952,26 @@ def normalize_document(data: Dict[str, Any], *, fallback_id: Optional[str] = Non
     ui = data.get("ui", {})
     if not isinstance(ui, dict):
         raise BlueprintServiceError("INVALID_DOCUMENT", "blueprint document ui must be a JSON object")
+    runtime = data.get("runtime", {})
+    if runtime is None:
+        runtime = {}
+    if not isinstance(runtime, dict):
+        raise BlueprintServiceError("INVALID_DOCUMENT", "blueprint document runtime must be a JSON object")
+    start_node_id = str(runtime.get("start_node_id") or runtime.get("startNodeId") or "").strip()
     schema_version = int(data.get("schema_version", 1))
     if schema_version != 1:
         raise BlueprintServiceError("INVALID_DOCUMENT", "unsupported blueprint document schema_version")
+    popo_entry = normalize_popo_entry(runtime.get("popo_entry") or runtime.get("popoEntry"))
     return {
         "schema_version": 1,
         "id": blueprint_id,
         "name": str(data.get("name") or DEFAULT_BLUEPRINT_NAME),
         "graph": graph,
         "ui": ui,
+        "runtime": {
+            "start_node_id": start_node_id,
+            "popo_entry": popo_entry,
+        },
     }
 
 
@@ -3790,6 +5038,10 @@ def default_blueprint_document(project_dir: Path, blueprint_id: str, name: str) 
             },
             "viewport": {"x": 0, "y": 0, "zoom": 1},
         },
+        "runtime": {
+            "start_node_id": "planner",
+            "popo_entry": normalize_popo_entry(),
+        },
     }
 
 
@@ -3804,6 +5056,21 @@ def coerce_string_list(value: Any, field_name: str) -> list[str]:
     if not isinstance(value, list):
         raise BlueprintServiceError("BAD_REQUEST", f"{field_name} must be a list")
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def normalize_plan_payload(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise BlueprintServiceError("BAD_START_PLAN", "plan must be a complete start plan JSON object")
+    plan = dict(value)
+    aliases = {
+        "agentDescriptions": "agent_descriptions",
+        "startNodes": "start_nodes",
+        "runPolicy": "run_policy",
+    }
+    for source_key, target_key in aliases.items():
+        if source_key in plan and target_key not in plan:
+            plan[target_key] = plan.pop(source_key)
+    return plan
 
 
 def start_plan_validation_context(graph: Any) -> Dict[str, Any]:
