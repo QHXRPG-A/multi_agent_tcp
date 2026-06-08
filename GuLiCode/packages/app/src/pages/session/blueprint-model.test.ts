@@ -8,9 +8,12 @@ import {
   addRouteNode,
   addScriptNode,
   addTestAgentNode,
+  agentRingConfigKey,
+  agentRingsForDraft,
   canConnectPorts,
   CLI_KIND_OPTIONS,
   compileScriptNodesFromCatalog,
+  createEdge,
   createDefaultBlueprintDraft,
   fromBlueprintDocument,
   DEFAULT_PYTHON_PATH,
@@ -46,10 +49,12 @@ describe("blueprint draft model", () => {
     expect(draft.graph.route_nodes).toEqual({})
     expect(draft.graph.common_nodes).toEqual({})
     expect(draft.graph.prompt_nodes).toEqual({})
+    expect(draft.graph.agent_ring_max_circulations).toEqual({})
+    expect(draft.graph.agent_ring_context_refresh_periods).toEqual({})
     expect(Object.keys(draft.graph.agent_nodes)).toEqual(["planner", "coder", "review", "summary"])
     expect(draft.graph.agent_nodes.planner).toMatchObject({
       node_id: "planner",
-      node_type: "worker_agent",
+      node_type: "agent",
       cli_kind: "codex",
       model: "gpt-5.4",
       cwd: ".",
@@ -61,10 +66,10 @@ describe("blueprint draft model", () => {
       external: false,
       skill_selection: { mode: "none" },
       access_policy: {
-        direct_project_io: false,
-        outside_project_io: false,
-        unrestricted_commands: false,
-        disable_sandbox: false,
+        direct_project_io: true,
+        outside_project_io: true,
+        unrestricted_commands: true,
+        disable_sandbox: true,
         framework_message_tools: true,
       },
     })
@@ -230,6 +235,67 @@ describe("blueprint draft model", () => {
 
     expect(document.runtime?.start_node_id).toBe("coder")
     expect(restored.runtime.start_node_id).toBe("coder")
+  })
+
+  test("detects script-transparent agent rings and preserves ring settings", () => {
+    const draft = createDefaultBlueprintDraft()
+    draft.graph.agent_nodes = {
+      a: { ...draft.graph.agent_nodes.planner, node_id: "a", agent_id: "agent-a", node_type: "agent" },
+      b: { ...draft.graph.agent_nodes.coder, node_id: "b", agent_id: "agent-b", node_type: "worker_agent" },
+      c: { ...draft.graph.agent_nodes.review, node_id: "c", agent_id: "agent-c", node_type: "worker_agent" },
+    }
+    draft.graph.script_nodes = {
+      transform: {
+        node_id: "transform",
+        script_id: "ring:transform",
+        module_path: "ring.py",
+        function_name: "transform",
+        title: "Transform",
+        description: "",
+        inputs: [{ name: "in", type: "Any" }],
+        outputs: [{ name: "out", type: "Any" }],
+        collapsed: true,
+      },
+    }
+    draft.graph.route_nodes = {}
+    draft.graph.common_nodes = {}
+    draft.graph.prompt_nodes = {}
+    draft.graph.edges = [
+      createEdge("a", "b"),
+      createEdge("b", "a"),
+      createEdge("b", "transform"),
+      createEdge("transform", "c"),
+      createEdge("c", "a"),
+      createEdge("a", "c", "data"),
+    ]
+    draft.graph.agent_ring_max_circulations = { "1": 0, "ring-a-b-c": 4 }
+    draft.graph.agent_ring_context_refresh_periods = { ring1: 3, "ring-a-b-c": 2 }
+
+    const rings = agentRingsForDraft(draft)
+
+    expect(rings.map((ring) => [ring.ring_id, ring.topology_id, ring.ordered_node_ids])).toEqual([
+      ["ring1", "ring-a-b", ["a", "b"]],
+      ["ring2", "ring-a-b-c", ["a", "b", "c"]],
+    ])
+    expect(rings[0]?.max_circulations).toBe(0)
+    expect(rings[0]?.context_refresh_period).toBe(3)
+    expect(rings[1]?.max_circulations).toBe(4)
+    expect(rings[1]?.context_refresh_period).toBe(2)
+    expect(agentRingConfigKey(rings[1]!)).toBe("ring-a-b-c")
+    expect(rings[1]?.visual_edge_ids).toEqual([
+      "a:out->b:in:exec",
+      "b:out->transform:in:exec",
+      "transform:out->c:in:exec",
+      "c:out->a:in:exec",
+    ])
+
+    const document = toBlueprintDocument(draft)
+    const restored = fromBlueprintDocument(document)
+    const runtime = toRuntimeGraphDraft(restored)
+    expect(document.graph.agent_ring_max_circulations).toEqual({ "1": 0, "ring-a-b-c": 4 })
+    expect(document.graph.agent_ring_context_refresh_periods).toEqual({ ring1: 3, "ring-a-b-c": 2 })
+    expect(runtime.agent_ring_max_circulations).toEqual({ "1": 0, "ring-a-b-c": 4 })
+    expect(runtime.agent_ring_context_refresh_periods).toEqual({ ring1: 3, "ring-a-b-c": 2 })
   })
 
   test("adds Prompt nodes and enforces fixed Agent prompt data input", () => {
@@ -572,7 +638,11 @@ describe("blueprint draft model", () => {
     expect(graph.agent_nodes.planner.rule_paths).toEqual(["F:\\rules\\agent.md", "F:\\rules\\review.yaml"])
     expect(graph.agent_nodes.planner.run_prompt).toBe("Always inspect the current checkout before editing.")
     expect(graph.agent_nodes.planner.read_scope).toEqual(["docs/**", "README.md", "notes/**"])
-    expect(graph.agent_nodes.planner.adapter_options).toEqual({ sandbox: "workspace-write" })
+    expect(graph.agent_nodes.planner.adapter_options).toEqual({
+      dangerous_access: true,
+      extra_args: ["--dangerously-bypass-approvals-and-sandbox"],
+      sandbox: "danger-full-access",
+    })
     expect(graph.agent_nodes.planner.extra_env).toEqual({ GULI: "1" })
     expect(graph.route_nodes.fanout).toEqual({
       node_id: "fanout",
@@ -774,7 +844,12 @@ describe("blueprint draft model", () => {
     expect(restored.config).toEqual(draft.config)
     expect(restored.graph.common_nodes.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 9 })
     expect(restored.graph.agent_nodes.planner.run_prompt).toBe("Use the saved per-run prompt once.")
-    expect(restored.graph.agent_nodes.planner.adapter_options).toEqual({ temperature: 0.2, retry: true })
+    expect(restored.graph.agent_nodes.planner.adapter_options).toEqual({
+      dangerous_access: false,
+      retry: true,
+      sandbox: "workspace-write",
+      temperature: 0.2,
+    })
     expect(restored.layout.viewport).toEqual({ x: 33, y: -12, zoom: 1.25 })
     expect(restored.selection).toEqual({ type: "node", id: "clock" })
     expect(restored.inspector).toEqual({ type: "node", id: "planner" })

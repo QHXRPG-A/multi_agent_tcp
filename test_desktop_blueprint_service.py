@@ -105,6 +105,7 @@ def _document(project_dir: Path | None = None) -> dict:
             "agent_nodes": {
                 "planner": {
                     "node_id": "planner",
+                    "node_type": "agent",
                     "agent_id": "agent-planner",
                     "prompt": "Plan.",
                 }
@@ -199,6 +200,7 @@ def test_blueprint_runtime_set_start_agent_saves_without_starting(tmp_path: Path
     document = _document(project)
     document["graph"]["agent_nodes"]["review"] = {
         "node_id": "review",
+        "node_type": "agent",
         "agent_id": "agent-review",
         "prompt": "Review.",
     }
@@ -224,6 +226,72 @@ def test_blueprint_runtime_set_start_agent_saves_without_starting(tmp_path: Path
     assert result["startNodeId"] == "review"
     assert service.open_blueprint(project, "default")["runtime"]["start_node_id"] == "review"
     assert start_called is False
+
+
+def test_blueprint_runtime_set_start_agent_rejects_worker_node(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document()
+    document["graph"]["agent_nodes"]["worker"] = {
+        "node_id": "worker",
+        "node_type": "worker_agent",
+        "agent_id": "agent-worker",
+        "prompt": "Worker.",
+    }
+    document["runtime"] = {"start_node_id": "planner"}
+    service.save_blueprint(project, document)
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.handle_request(
+            {
+                "command": "blueprint.runtime.setStartAgent",
+                "args": {"projectDir": str(project), "blueprintId": "default", "startNodeId": "worker"},
+            }
+        )
+
+    assert exc.value.code == "BLUEPRINT_START_NODE_REQUIRED"
+    assert exc.value.details["validStartNodes"] == ["planner"]
+    assert service.open_blueprint(project, "default")["runtime"]["start_node_id"] == "planner"
+    invalid = service.open_blueprint(project, "default")
+    invalid["runtime"]["start_node_id"] = "worker"
+    validation = service.validate_blueprint(invalid)
+    assert validation["ok"] is False
+    assert "full Agent node" in validation["errors"][0]
+
+
+def test_blueprint_service_validation_allows_bounded_agent_ring_graph(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = {"start_node_id": "planner"}
+    document["graph"]["agent_nodes"] = {
+        "planner": {
+            "node_id": "planner",
+            "node_type": "agent",
+            "agent_id": "agent-planner",
+            "prompt": "Planner.",
+        },
+        "worker": {
+            "node_id": "worker",
+            "node_type": "worker_agent",
+            "agent_id": "agent-worker",
+            "prompt": "Worker.",
+        },
+    }
+    document["graph"]["edges"] = [
+        {"from": "planner", "to": "worker", "edge_type": "exec"},
+        {"from": "worker", "to": "planner", "edge_type": "exec"},
+    ]
+    document["graph"]["agent_ring_max_circulations"] = {"ring-planner-worker": 1}
+    document["graph"]["agent_ring_context_refresh_periods"] = {"ring-planner-worker": 1}
+
+    assert service.validate_blueprint(document, project_dir=project) == {
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
 
 
 def test_blueprint_runtime_execute_plan_dispatches_saved_start_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4666,7 +4734,6 @@ def test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow(
         "timeout_sec": 420.0,
         "disable_features": ["shell_snapshot"],
         "config_overrides": _codex_real_flow_config_overrides(),
-        "extra_args": ["--full-auto"],
     }
     document = _document(project)
     document["graph"]["agent_nodes"] = {
@@ -4854,6 +4921,164 @@ def test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow(
         commands = "\n".join(_stream_raw_commands(status))
         assert "multi_agent_tcp.workspace_api" not in commands
         assert reviewer_marker in json.dumps(status["agent_stream_events"], ensure_ascii=False)
+        passed = True
+    finally:
+        service.close()
+        if (
+            passed
+            and cleanup_project is not None
+            and os.environ.get("MULTI_AGENT_TCP_KEEP_REAL_CODEX_MCP") != "1"
+        ):
+            shutil.rmtree(cleanup_project, ignore_errors=True)
+
+
+def test_real_codex_live_blueprint_agent_ring_limits_and_refresh_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    if os.environ.get("MULTI_AGENT_TCP_RUN_REAL_CODEX_MCP") != "1":
+        pytest.skip("set MULTI_AGENT_TCP_RUN_REAL_CODEX_MCP=1 to run the external Codex MCP ring smoke")
+    codex = shutil.which("codex")
+    if codex is None:
+        pytest.skip("codex CLI is not installed on PATH")
+
+    project, cleanup_project = _real_codex_mcp_project_root(tmp_path)
+    project.mkdir(parents=True, exist_ok=True)
+    source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    codex_home = tmp_path / "codex-home-ring"
+    for name in CODEX_RUNTIME_STATE_FILES:
+        src = source_codex_home / name
+        if src.is_file():
+            dst = codex_home / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    run_id = "run-real-mcp-ring"
+    codex_options = {
+        "model": "gpt-5.5",
+        "timeout_sec": 360.0,
+        "disable_features": ["shell_snapshot"],
+        "config_overrides": _codex_real_flow_config_overrides(),
+    }
+    document = _document(project)
+    document["graph"]["agent_nodes"] = {
+        "planner": {
+            "node_id": "planner",
+            "node_type": "agent",
+            "agent_id": "agent-ring-planner",
+            "prompt": "Start and close the real Codex ring smoke.",
+            "cli_kind": "codex",
+            "model": "gpt-5.5",
+            "command": codex,
+            "timeout_sec": 360.0,
+            "adapter_options": codex_options,
+        },
+        "reviewer": {
+            "node_id": "reviewer",
+            "node_type": "worker_agent",
+            "agent_id": "agent-ring-reviewer",
+            "prompt": "Return the real Codex ring smoke to planner.",
+            "cli_kind": "codex",
+            "model": "gpt-5.5",
+            "command": codex,
+            "timeout_sec": 360.0,
+            "adapter_options": codex_options,
+        },
+    }
+    document["graph"]["edges"] = [
+        {"from": "planner", "to": "reviewer", "edge_type": "exec"},
+        {"from": "reviewer", "to": "planner", "edge_type": "exec"},
+    ]
+    document["graph"]["agent_ring_max_circulations"] = {"ring-planner-reviewer": 1}
+    document["graph"]["agent_ring_context_refresh_periods"] = {"ring-planner-reviewer": 1}
+    document["runtime"] = {"start_node_id": "planner"}
+    document["ui"]["config"] = {
+        "python_path": sys.executable,
+        "project_workdir": str(project),
+        "skill_dir": "",
+        "rule_dir": "",
+    }
+    planner_goal = (
+        "This is a real Codex live blueprint agent ring smoke. Use the MCP "
+        "tools exposed by framework_ordinary; do not use shell commands.\n\n"
+        "Call `mcp__framework_ordinary__agent_dispatch` exactly once to target "
+        "`reviewer` with body JSON containing this prompt:\n"
+        "`Inspect your framework_context.ring_context and confirm it contains "
+        "ring1. Then call mcp__framework_ordinary__agent_dispatch exactly once "
+        "to target planner with body JSON prompt REAL_RING_CLOSE_DONE. Do not "
+        "dispatch anywhere else. Your final answer must include "
+        "REAL_RING_REVIEWER_DISPATCHED.`\n\n"
+        "Your final answer must include REAL_RING_PLANNER_DISPATCHED."
+    )
+    plan = {
+        "user_goal": "Verify real Codex ring limit and context refresh behavior.",
+        "agent_descriptions": {
+            "planner": "Dispatches to reviewer once.",
+            "reviewer": "Dispatches back to planner once.",
+        },
+        "start_nodes": ["planner"],
+        "tasks": {
+            "planner": {
+                "goal": planner_goal,
+                "expected_output": "A single closed ring circulation.",
+                "acceptance": "Ring context refreshes once and the ring is exhausted.",
+            },
+        },
+        "run_policy": {},
+    }
+
+    service = DesktopBlueprintService()
+    monkeypatch.setattr(service, "_generate_run_id_locked", lambda: run_id)
+    passed = False
+    try:
+        service.save_blueprint(project, document)
+        started = service.handle_request(
+            {
+                "command": "blueprint.start",
+                "args": {
+                    "projectDir": str(project),
+                    "blueprintId": "default",
+                    "plan": plan,
+                    "executionMode": "live",
+                },
+            }
+        )
+        assert started["ok"] is True
+        status = _wait_for_live_run_idle(service, run_id, timeout_sec=420.0)
+
+        pending = status["queues"]["pending_messages"]
+        assert pending
+        assert all(item["status"] == "completed" for item in pending.values()), status
+        ring_status = status["agent_rings"]["rings"]["ring1"]
+        assert ring_status["topology_id"] == "ring-planner-reviewer"
+        assert ring_status["max_circulations"] == 1
+        assert ring_status["context_refresh_period"] == 1
+        assert ring_status["completed_circulations"] == 1
+        assert ring_status["context_generation"] == 1
+        assert ring_status["remaining_circulations"] == 0
+
+        events = service.recent_blueprint_events(run_id, limit=100)["events"]
+        event_types = [event["event_type"] for event in events]
+        assert "AgentRingContextRefreshed" in event_types
+        assert "AgentRingCirculationExhausted" in event_types
+        advanced = [
+            event
+            for event in events
+            if event["event_type"] == "AgentRingCirculationAdvanced"
+        ]
+        assert advanced
+        assert "ring1" in advanced[-1]["payload"]["refreshed_ring_ids"]
+        assert "ring1" in advanced[-1]["payload"]["exhausted_ring_ids"]
+
+        desktop_run = service._runs[run_id]
+        workspace_run = desktop_run.runtime.private_context_run
+        assert workspace_run is not None
+        mcp_tools = [
+            item["tool_name"]
+            for item in _workspace_manifest_entries(workspace_run, MCP_TOOL_AUDIT_EVENT)
+        ]
+        assert mcp_tools.count("agent_dispatch") >= 2
         passed = True
     finally:
         service.close()

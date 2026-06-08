@@ -228,6 +228,14 @@ def graph_definition_from_dict(data: Dict[str, Any]) -> GraphDefinition:
         ring_limits_raw = {}
     if not isinstance(ring_limits_raw, dict):
         raise ValueError("agent_ring_max_circulations must be an object")
+    ring_refresh_periods_raw = data.get(
+        "agent_ring_context_refresh_periods",
+        data.get("ring_context_refresh_periods", {}),
+    )
+    if ring_refresh_periods_raw is None:
+        ring_refresh_periods_raw = {}
+    if not isinstance(ring_refresh_periods_raw, dict):
+        raise ValueError("agent_ring_context_refresh_periods must be an object")
 
     graph = GraphDefinition(
         agent_nodes=agent_nodes,
@@ -240,6 +248,10 @@ def graph_definition_from_dict(data: Dict[str, Any]) -> GraphDefinition:
         agent_ring_max_circulations={
             str(key): int(value)
             for key, value in ring_limits_raw.items()
+        },
+        agent_ring_context_refresh_periods={
+            str(key): int(value)
+            for key, value in ring_refresh_periods_raw.items()
         },
     )
     graph.validate_port_types()
@@ -302,6 +314,7 @@ def ordinary_agent_framework_context(
     *,
     batch: Any = None,
     runtime: Optional[GraphRuntime] = None,
+    route_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the stable framework tool context injected into ordinary agents."""
 
@@ -329,10 +342,14 @@ def ordinary_agent_framework_context(
         ring_counts = runtime.agent_ring_circulation_counts_for(node_id)
         if ring_counts:
             organization["agent"]["ring_circulation_counts"] = dict(ring_counts)
+        ring_context = runtime.agent_ring_context_state_for(node_id)
+        if ring_context["rings"]:
+            organization["agent"]["ring_context"] = ring_context
     required_targets = list(batch.required_target_node_ids) if batch is not None else []
     remaining_targets = list(batch.remaining_targets) if batch is not None else []
     message_envelope: Dict[str, Any] = {
         "outgoing_batch_id": batch.batch_id if batch is not None else None,
+        "route_id": batch.route_id if batch is not None else route_id,
         "required_outgoing_targets": required_targets,
         "required_script_calls": _required_script_calls_for_envelope(batch),
     }
@@ -356,6 +373,9 @@ def ordinary_agent_framework_context(
         ring_counts = runtime.agent_ring_circulation_counts_for(node_id)
         if ring_counts:
             context["ring_circulation_counts"] = dict(ring_counts)
+        ring_context = runtime.agent_ring_context_state_for(node_id)
+        if ring_context["rings"]:
+            context["ring_context"] = ring_context
         resident_services = _resident_services_summary(runtime)
         context["resident_services"] = resident_services
         organization["resident_services"] = resident_services
@@ -628,6 +648,11 @@ class GraphRuntimeControlPlane:
                     str(args["source_node_id"]),
                     [str(item) for item in args.get("required_target_node_ids", [])],
                     batch_id=args.get("batch_id"),
+                    route_id=(
+                        str(args["route_id"])
+                        if args.get("route_id") is not None
+                        else None
+                    ),
                 )
             )
 
@@ -718,6 +743,7 @@ class GraphRuntimeControlPlane:
             return validation.to_dict()
         queued = []
         organization = scoped_organization_view(self.graph)
+        route_id = f"route-{secrets.token_hex(6)}"
         self.runtime.configure_completion_tracking(self.graph)
         if prestart_all_agents:
             await self.runtime.prestart_agents(list(self.graph.agent_nodes.values()))
@@ -731,6 +757,7 @@ class GraphRuntimeControlPlane:
                     self.graph,
                     node_id,
                     required_target_node_ids=downstream,
+                    route_id=route_id,
                 )
             pending = self.runtime.queue_agent_message(
                 node,
@@ -748,9 +775,11 @@ class GraphRuntimeControlPlane:
                         node_id,
                         batch=batch,
                         runtime=self.runtime,
+                        route_id=route_id,
                     ),
                 ),
                 source_agent_id=self.top_agent.agent_id,
+                route_id=route_id,
             )
             queued.append(pending.to_dict())
         start_manifest = self.runtime.record_start_manifest(
@@ -803,12 +832,14 @@ class GraphRuntimeControlPlane:
         target_node_ids: Sequence[str],
         *,
         batch_id: Optional[str] = None,
+        route_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         batch = await self.runtime.create_outgoing_batch_from_graph(
             self.graph,
             source_node_id,
             required_target_node_ids=target_node_ids or None,
             batch_id=batch_id,
+            route_id=route_id,
         )
         return GraphControlResponse(True, {"batch": batch.to_dict()}).to_dict()
 
@@ -1087,22 +1118,29 @@ class GraphRuntimeControlPlane:
                 continue
 
             downstream_batch = None
+            fan_in_target = self.runtime.target_uses_live_fan_in(self.graph, target_node_id)
             downstream = self.runtime.active_framework_connections(self.graph, target_node_id)
-            if downstream:
+            if downstream and not fan_in_target:
                 downstream_batch = await self.runtime.create_outgoing_batch_from_graph(
                     self.graph,
                     target_node_id,
                     required_target_node_ids=downstream,
+                    route_id=batch.route_id,
                 )
-            body = inject_framework_context(
-                self._script_delivery_body(batch, target_node_id, path),
-                ordinary_agent_framework_context(
-                    self.graph,
-                    target_node_id,
-                    batch=downstream_batch,
-                    runtime=self.runtime,
-                ),
-            )
+            raw_body = self._script_delivery_body(batch, target_node_id, path)
+            if fan_in_target:
+                body = raw_body
+            else:
+                body = inject_framework_context(
+                    raw_body,
+                    ordinary_agent_framework_context(
+                        self.graph,
+                        target_node_id,
+                        batch=downstream_batch,
+                        runtime=self.runtime,
+                        route_id=batch.route_id,
+                    ),
+                )
             staged = self.runtime.stage_outgoing_message(
                 batch.batch_id,
                 self.graph.agent_nodes[target_node_id],
@@ -1249,6 +1287,7 @@ class GraphRuntimeControlPlane:
             raise ValueError(
                 f"target {target_node_id!r} requires blueprint_script_call before downstream delivery"
             )
+        fan_in_target = self.runtime.target_uses_live_fan_in(self.graph, target_node_id)
         downstream_batch = None
         ring_record: Dict[str, Any] = {"recorded": False, "consumed_ring_ids": []}
         if not is_no_op and target_is_agent:
@@ -1258,7 +1297,7 @@ class GraphRuntimeControlPlane:
             )
         downstream = (
             []
-            if is_no_op or not target_is_agent
+            if is_no_op or not target_is_agent or fan_in_target
             else self.runtime.active_framework_connections(self.graph, target_node_id)
         )
         if downstream:
@@ -1266,16 +1305,18 @@ class GraphRuntimeControlPlane:
                 self.graph,
                 target_node_id,
                 required_target_node_ids=downstream,
+                route_id=batch.route_id,
             )
 
         if target_is_agent:
-            staged_body = body if is_no_op else inject_framework_context(
+            staged_body = body if is_no_op or fan_in_target else inject_framework_context(
                 body,
                 ordinary_agent_framework_context(
                     self.graph,
                     target_node_id,
                     batch=downstream_batch,
                     runtime=self.runtime,
+                    route_id=batch.route_id,
                 ),
             )
             staged = self.runtime.stage_outgoing_message(

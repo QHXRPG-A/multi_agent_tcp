@@ -32,6 +32,7 @@ from multi_agent_tcp import (
     MultiModalEnvelope,
     PromptNode,
     RouteNode,
+    ScriptNode,
     TopAgentStartPlan,
     WorkspaceManifest,
     WorkerConfig,
@@ -41,6 +42,7 @@ from multi_agent_tcp import (
     extract_codex_final_text,
     graph_definition_from_dict,
     normalize_envelope,
+    ordinary_agent_framework_context,
 )
 
 from multi_agent_tcp.skill_space import SkillSpace, SuperAgentProfile
@@ -607,6 +609,155 @@ async def test_graph_runtime_enforces_independent_overlapping_ring_circulations(
             "a",
             required_target_node_ids=["b"],
         )
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_refreshes_ring_context_on_configured_period() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "a": AgentNode.from_dict({"node_id": "a"}),
+            "b": AgentNode.from_dict({"node_id": "b"}),
+        },
+        edges=[
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "a", edge_type="exec"),
+        ],
+        agent_ring_max_circulations={"ring-a-b": 2},
+        agent_ring_context_refresh_periods={"ring-a-b": 2},
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    await runtime.prestart_agents(list(graph.agent_nodes.values()))
+
+    first_out = await runtime.create_outgoing_batch_from_graph(
+        graph,
+        "a",
+        required_target_node_ids=["b"],
+        batch_id="a-to-b-1",
+    )
+    runtime.stage_outgoing_message(first_out.batch_id, graph.agent_nodes["b"], {"prompt": "first"})
+    first_close = await runtime.create_outgoing_batch_from_graph(
+        graph,
+        "b",
+        required_target_node_ids=["a"],
+        batch_id="b-to-a-1",
+    )
+    runtime.stage_outgoing_message(first_close.batch_id, graph.agent_nodes["a"], {"prompt": "close first"})
+
+    first_status = runtime.agent_ring_status(graph)["rings"]["ring1"]
+    assert first_status["completed_circulations"] == 1
+    assert first_status["context_generation"] == 0
+    assert first_status["remaining_circulations"] == 1
+    assert [
+        event.event_type
+        for event in runtime.events
+        if event.event_type == "AgentRingContextRefreshed"
+    ] == []
+
+    second_out = await runtime.create_outgoing_batch_from_graph(
+        graph,
+        "a",
+        required_target_node_ids=["b"],
+        batch_id="a-to-b-2",
+    )
+    runtime.stage_outgoing_message(second_out.batch_id, graph.agent_nodes["b"], {"prompt": "second"})
+    second_close = await runtime.create_outgoing_batch_from_graph(
+        graph,
+        "b",
+        required_target_node_ids=["a"],
+        batch_id="b-to-a-2",
+    )
+    runtime.stage_outgoing_message(second_close.batch_id, graph.agent_nodes["a"], {"prompt": "close second"})
+
+    second_status = runtime.agent_ring_status(graph)["rings"]["ring1"]
+    assert second_status["completed_circulations"] == 2
+    assert second_status["context_generation"] == 1
+    assert second_status["last_context_refresh_circulation"] == 2
+    assert second_status["remaining_circulations"] == 0
+    refreshed = [
+        event
+        for event in runtime.events
+        if event.event_type == "AgentRingContextRefreshed"
+    ]
+    assert len(refreshed) == 1
+    assert refreshed[0].payload["ring_id"] == "ring1"
+    assert refreshed[0].payload["context_generation"] == 1
+
+    context_a = ordinary_agent_framework_context(graph, "a", runtime=runtime)
+    context_b = ordinary_agent_framework_context(graph, "b", runtime=runtime)
+    assert context_a["ring_context"]["generations_by_ring"] == {"ring1": 1}
+    assert context_b["ring_context"]["generations_by_ring"] == {"ring1": 1}
+    assert context_a["ring_context"]["remaining_circulations_by_ring"] == {"ring1": 0}
+    assert context_a["organization"]["agent"]["ring_context"]["rings"]["ring1"][
+        "context_refresh_period"
+    ] == 2
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_overlapping_rings_refresh_independently() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "a": AgentNode.from_dict({"node_id": "a"}),
+            "b": AgentNode.from_dict({"node_id": "b"}),
+            "c": AgentNode.from_dict({"node_id": "c"}),
+        },
+        edges=[
+            GraphEdge("a", "b", edge_type="exec"),
+            GraphEdge("b", "a", edge_type="exec"),
+            GraphEdge("b", "c", edge_type="exec"),
+            GraphEdge("c", "a", edge_type="exec"),
+        ],
+        agent_ring_max_circulations={"ring1": 1, "ring2": 2},
+        agent_ring_context_refresh_periods={"ring1": 1, "ring2": 2},
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    await runtime.prestart_agents(list(graph.agent_nodes.values()))
+
+    a_to_b = await runtime.create_outgoing_batch_from_graph(
+        graph,
+        "a",
+        required_target_node_ids=["b"],
+        batch_id="overlap-a-b-1",
+    )
+    runtime.stage_outgoing_message(a_to_b.batch_id, graph.agent_nodes["b"], {"prompt": "a b"})
+    b_to_a = await runtime.create_outgoing_batch_from_graph(
+        graph,
+        "b",
+        required_target_node_ids=["a"],
+        batch_id="overlap-b-a",
+    )
+    runtime.stage_outgoing_message(b_to_a.batch_id, graph.agent_nodes["a"], {"prompt": "b a"})
+
+    status = runtime.agent_ring_status(graph)["rings"]
+    assert status["ring1"]["context_generation"] == 1
+    assert status["ring2"]["context_generation"] == 0
+
+    for index in (1, 2):
+        a_to_b = await runtime.create_outgoing_batch_from_graph(
+            graph,
+            "a",
+            required_target_node_ids=["b"],
+            batch_id=f"overlap-a-b-big-{index}",
+        )
+        runtime.stage_outgoing_message(a_to_b.batch_id, graph.agent_nodes["b"], {"prompt": "a b big"})
+        b_to_c = await runtime.create_outgoing_batch_from_graph(
+            graph,
+            "b",
+            required_target_node_ids=["c"],
+            batch_id=f"overlap-b-c-{index}",
+        )
+        runtime.stage_outgoing_message(b_to_c.batch_id, graph.agent_nodes["c"], {"prompt": "b c"})
+        c_to_a = await runtime.create_outgoing_batch_from_graph(
+            graph,
+            "c",
+            required_target_node_ids=["a"],
+            batch_id=f"overlap-c-a-{index}",
+        )
+        runtime.stage_outgoing_message(c_to_a.batch_id, graph.agent_nodes["a"], {"prompt": "c a"})
+
+    status = runtime.agent_ring_status(graph)["rings"]
+    assert status["ring1"]["context_generation"] == 1
+    assert status["ring2"]["context_generation"] == 1
+    assert status["ring2"]["completed_circulations"] == 2
 
 
 @pytest.mark.asyncio
@@ -3707,6 +3858,50 @@ def test_graph_definition_detects_cycles() -> None:
 
     with pytest.raises(ValueError):
         graph.validate_dag()
+
+
+def test_graph_definition_validate_agent_ring_graph_allows_bounded_agent_cycles() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "planner": AgentNode(node_id="planner", node_type="agent"),
+            "reviewer": AgentNode(node_id="reviewer", node_type="worker_agent"),
+        },
+        script_nodes={
+            "handoff": ScriptNode(
+                node_id="handoff",
+                script_id="handoff",
+                module_path="handoff.py",
+                function_name="handoff",
+            ),
+        },
+        edges=[
+            GraphEdge("planner", "handoff", edge_type="exec"),
+            GraphEdge("handoff", "reviewer", edge_type="exec"),
+            GraphEdge("reviewer", "planner", edge_type="exec"),
+        ],
+        agent_ring_max_circulations={"ring-planner-reviewer": 1},
+    )
+
+    graph.validate_agent_ring_graph()
+    assert graph.agent_rings()[0].ordered_node_ids == ["planner", "reviewer"]
+
+
+def test_graph_definition_validate_agent_ring_graph_rejects_non_agent_cycles() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "planner": AgentNode(node_id="planner", node_type="agent"),
+        },
+        route_nodes={
+            "route": RouteNode(node_id="route", route_kind="sequence"),
+        },
+        edges=[
+            GraphEdge("planner", "route", edge_type="exec"),
+            GraphEdge("route", "planner", edge_type="exec"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="graph contains a cycle"):
+        graph.validate_agent_ring_graph()
 
 
 def test_graph_definition_validate_runnable_requires_start_to_end_path() -> None:

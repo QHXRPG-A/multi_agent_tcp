@@ -29,6 +29,8 @@ import {
   addEdge,
   addNode,
   addScriptNode,
+  agentRingConfigKey,
+  agentRingsForDraft,
   canConnectPorts,
   CLI_KIND_OPTIONS,
   DEFAULT_BLUEPRINT_ID,
@@ -60,6 +62,7 @@ import {
   updateScriptNode,
   validateBlueprintConfigForStart,
   type BlueprintAddNodeKind,
+  type BlueprintAgentRing,
   type BlueprintAgentNode,
   type BlueprintCliKind,
   type BlueprintConfig,
@@ -102,6 +105,10 @@ const PROMPT_EDITOR_DEFAULT_WIDTH = 440
 const PROMPT_EDITOR_DEFAULT_HEIGHT = 300
 const PROMPT_EDITOR_MIN_WIDTH = 300
 const PROMPT_EDITOR_MIN_HEIGHT = 180
+const RING_PANEL_DEFAULT_WIDTH = 460
+const RING_PANEL_DEFAULT_HEIGHT = 360
+const RING_PANEL_MIN_WIDTH = 340
+const RING_PANEL_MIN_HEIGHT = 220
 const SCRIPT_NODE_BLUE_CLIP_PATH = "polygon(0 0, 42% 0, 55% 30%, 47% 30%, 60% 58%, 52% 58%, 64% 100%, 0 100%)"
 const SCRIPT_NODE_SPLIT_LINE_POINTS = "42,0 55,30 47,30 60,58 52,58 64,100"
 const TERMINAL_WIDTH = 92
@@ -794,6 +801,24 @@ type DragState =
       startWidth: number
       startHeight: number
     }
+  | {
+      type: "ring-panel-move"
+      startClientX: number
+      startClientY: number
+      startX: number
+      startY: number
+      width: number
+      height: number
+    }
+  | {
+      type: "ring-panel-resize"
+      startClientX: number
+      startClientY: number
+      startX: number
+      startY: number
+      startWidth: number
+      startHeight: number
+    }
 
 type ConnectionState = {
   source: string
@@ -817,6 +842,15 @@ type PromptEditorState = {
   y: number
   width: number
   height: number
+}
+
+type RingPanelState = {
+  x: number
+  y: number
+  width: number
+  height: number
+  view: "list" | "detail"
+  selectedRingKey?: string
 }
 
 type ScriptEditorPreferences = {
@@ -944,6 +978,10 @@ export function BlueprintSidePanel(props: {
   const [nodeSearchQuery, setNodeSearchQuery] = createSignal("")
   const [promptEditor, setPromptEditor] = createSignal<PromptEditorState>()
   const [promptEditorElement, setPromptEditorElement] = createSignal<HTMLDivElement>()
+  const [ringPanel, setRingPanel] = createSignal<RingPanelState>()
+  const [ringPanelElement, setRingPanelElement] = createSignal<HTMLDivElement>()
+  const [hoveredAgentRingNodeId, setHoveredAgentRingNodeId] = createSignal<string>()
+  const [hoveredRingKey, setHoveredRingKey] = createSignal<string>()
   const [scriptEditorMenuOpen, setScriptEditorMenuOpen] = createSignal(false)
   const [globalConfigOpen, setGlobalConfigOpen] = createSignal(false)
   const [catalogRefreshVersion, setCatalogRefreshVersion] = createSignal(0)
@@ -1073,6 +1111,27 @@ export function BlueprintSidePanel(props: {
     const element = promptEditorElement()
     if (!editor || !element || typeof ResizeObserver === "undefined") return
     const resizeObserver = new ResizeObserver(() => syncPromptEditorSize(editor.nodeId, element))
+    resizeObserver.observe(element)
+    onCleanup(() => resizeObserver.disconnect())
+  })
+
+  createEffect(() => {
+    if (!draft.graph.agent_ring_max_circulations) setDraft("graph", "agent_ring_max_circulations", {})
+    if (!draft.graph.agent_ring_context_refresh_periods) setDraft("graph", "agent_ring_context_refresh_periods", {})
+  })
+
+  createEffect(() => {
+    const panel = ringPanel()
+    if (!panel?.selectedRingKey) return
+    if (agentRings().some((ring) => agentRingConfigKey(ring) === panel.selectedRingKey)) return
+    setRingPanel((current) => current && { ...current, view: "list", selectedRingKey: undefined })
+  })
+
+  createEffect(() => {
+    const panel = ringPanel()
+    const element = ringPanelElement()
+    if (!panel || !element || typeof ResizeObserver === "undefined") return
+    const resizeObserver = new ResizeObserver(() => syncRingPanelSize(element))
     resizeObserver.observe(element)
     onCleanup(() => resizeObserver.disconnect())
   })
@@ -1260,11 +1319,53 @@ export function BlueprintSidePanel(props: {
     }
     return groups
   })
+  const agentRings = createMemo(() => agentRingsForDraft(draft))
   const incomingNodeIds = createMemo(() => new Set(visibleEdges().map((edge) => edge.to)))
   const outgoingNodeIds = createMemo(() => new Set(visibleEdges().map((edge) => edge.from)))
   const runtimeRunActive = createMemo(() => {
     const status = runtimeStatus(runtime().status)
     return status === "running" && !isTerminalRuntimeStatus(status)
+  })
+  const runtimeRingStatus = createMemo<Record<string, Record<string, unknown>>>(() => {
+    const rings = asRecord(asRecord(asRecord(runtime().status)?.agent_rings)?.rings)
+    const records: Record<string, Record<string, unknown>> = {}
+    for (const ring of agentRings()) {
+      const key = agentRingConfigKey(ring)
+      const runtimeRing = asRecord(rings?.[ring.ring_id]) ?? asRecord(rings?.[key])
+      if (runtimeRing) records[key] = runtimeRing
+    }
+    return records
+  })
+  const highlightedRingKeys = createMemo(() => {
+    const keys = new Set<string>()
+    const hoveredNodeId = hoveredAgentRingNodeId()
+    const panel = ringPanel()
+    const hoveredKey = hoveredRingKey()
+    for (const ring of agentRings()) {
+      const key = agentRingConfigKey(ring)
+      if (hoveredNodeId && ring.ordered_node_ids.includes(hoveredNodeId)) keys.add(key)
+      if (hoveredKey === key) keys.add(key)
+      if (panel?.view === "detail" && panel.selectedRingKey === key) keys.add(key)
+    }
+    return keys
+  })
+  const highlightedRingEdgeIds = createMemo(() => {
+    const ringKeys = highlightedRingKeys()
+    const edgeIds = new Set<string>()
+    for (const ring of agentRings()) {
+      if (!ringKeys.has(agentRingConfigKey(ring))) continue
+      for (const edgeIdValue of ring.visual_edge_ids) edgeIds.add(edgeIdValue)
+    }
+    return edgeIds
+  })
+  const highlightedRingNodeIds = createMemo(() => {
+    const ringKeys = highlightedRingKeys()
+    const nodeIds = new Set<string>()
+    for (const ring of agentRings()) {
+      if (!ringKeys.has(agentRingConfigKey(ring))) continue
+      for (const nodeId of ring.ordered_node_ids) nodeIds.add(nodeId)
+    }
+    return nodeIds
   })
   const runtimeRunRecord = createMemo(() => asRecord(asRecord(runtime().status)?.run))
   const runtimeSummaryReady = createMemo(() => runtimeRunRecord()?.ready_for_top_agent_summary === true)
@@ -1403,14 +1504,16 @@ export function BlueprintSidePanel(props: {
     rule_dir: draft.config?.rule_dir ?? "",
   }))
   const runtimeStartNodeOptions = createMemo<BlueprintRuntimeStartNodeOption[]>(() =>
-    Object.entries(draft.graph.agent_nodes).map(([id, node]) => {
-      const agentName = node.agent_id?.trim()
-      return {
-        id,
-        label: agentName ? `${agentName} (${id})` : id,
-        description: node.prompt?.trim() || id,
-      }
-    }),
+    Object.entries(draft.graph.agent_nodes)
+      .filter(([, node]) => node.node_type === "agent")
+      .map(([id, node]) => {
+        const agentName = node.agent_id?.trim()
+        return {
+          id,
+          label: agentName ? `${agentName} (${id})` : id,
+          description: node.prompt?.trim() || id,
+        }
+      }),
   )
   const runtimeBusy = createMemo(
     () => runtime().loading || (!!runtime().runId && !isTerminalRuntimeStatus(runtimeStatus(runtime().status))),
@@ -3805,6 +3908,158 @@ export function BlueprintSidePanel(props: {
       overflow: "hidden",
     }) as JSX.CSSProperties
 
+  const openRingPanel = () => {
+    setRingPanel((current) => {
+      if (current) return current
+      const rect = canvasRef?.getBoundingClientRect()
+      const canvasWidth = rect?.width ?? 960
+      return {
+        ...clampRingPanelFrame({
+          width: RING_PANEL_DEFAULT_WIDTH,
+          height: RING_PANEL_DEFAULT_HEIGHT,
+          x: Math.max(16, canvasWidth - RING_PANEL_DEFAULT_WIDTH - 24),
+          y: 56,
+        }),
+        view: "list",
+      }
+    })
+  }
+
+  const clampRingPanelFrame = (frame: { x: number; y: number; width: number; height: number }) => {
+    const rect = canvasRef?.getBoundingClientRect()
+    const canvasWidth = rect?.width ?? 960
+    const canvasHeight = rect?.height ?? 640
+    const width = clamp(frame.width, RING_PANEL_MIN_WIDTH, Math.max(RING_PANEL_MIN_WIDTH, canvasWidth - 16))
+    const height = clamp(frame.height, RING_PANEL_MIN_HEIGHT, Math.max(RING_PANEL_MIN_HEIGHT, canvasHeight - 16))
+    return {
+      width,
+      height,
+      x: clamp(frame.x, 8, Math.max(8, canvasWidth - width - 8)),
+      y: clamp(frame.y, 8, Math.max(8, canvasHeight - height - 8)),
+    }
+  }
+
+  const updateRingPanelFrame = (frame: { x: number; y: number; width: number; height: number }) => {
+    const next = clampRingPanelFrame(frame)
+    setRingPanel((current) => current && { ...current, ...next })
+  }
+
+  const syncRingPanelSize = (element: HTMLDivElement) => {
+    const rect = element.getBoundingClientRect()
+    setRingPanel((current) => {
+      if (!current) return current
+      const next = clampRingPanelFrame({
+        x: current.x,
+        y: current.y,
+        width: rect.width,
+        height: rect.height,
+      })
+      if (Math.abs(current.width - next.width) < 1 && Math.abs(current.height - next.height) < 1) return current
+      return { ...current, ...next }
+    })
+  }
+
+  const handleRingPanelMovePointerDown = (event: PointerEvent, panel: RingPanelState) => {
+    if (event.button !== 0) return
+    const target = event.target as HTMLElement | null
+    if (target?.closest("button,input,textarea,select")) return
+    event.preventDefault()
+    event.stopPropagation()
+    cancelAgentPanelLongPress()
+    setConnection(undefined)
+    const element = ringPanelElement()
+    const rect = element?.getBoundingClientRect()
+    const canvasRect = canvasRef?.getBoundingClientRect()
+    const frame =
+      rect && canvasRect
+        ? {
+            x: rect.left - canvasRect.left,
+            y: rect.top - canvasRect.top,
+            width: rect.width,
+            height: rect.height,
+          }
+        : {
+            x: panel.x,
+            y: panel.y,
+            width: panel.width,
+            height: panel.height,
+          }
+    const clampedFrame = clampRingPanelFrame(frame)
+    updateRingPanelFrame(clampedFrame)
+    setDrag({
+      type: "ring-panel-move",
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: clampedFrame.x,
+      startY: clampedFrame.y,
+      width: clampedFrame.width,
+      height: clampedFrame.height,
+    })
+  }
+
+  const handleRingPanelResizePointerDown = (event: PointerEvent, panel: RingPanelState) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    cancelAgentPanelLongPress()
+    setConnection(undefined)
+    const element = ringPanelElement()
+    const rect = element?.getBoundingClientRect()
+    const canvasRect = canvasRef?.getBoundingClientRect()
+    const frame =
+      rect && canvasRect
+        ? {
+            x: rect.left - canvasRect.left,
+            y: rect.top - canvasRect.top,
+            width: rect.width,
+            height: rect.height,
+          }
+        : {
+            x: panel.x,
+            y: panel.y,
+            width: panel.width,
+            height: panel.height,
+          }
+    const clampedFrame = clampRingPanelFrame(frame)
+    updateRingPanelFrame(clampedFrame)
+    setDrag({
+      type: "ring-panel-resize",
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: clampedFrame.x,
+      startY: clampedFrame.y,
+      startWidth: clampedFrame.width,
+      startHeight: clampedFrame.height,
+    })
+  }
+
+  const ringPanelStyle = (panel: RingPanelState) =>
+    ({
+      left: `${panel.x}px`,
+      top: `${panel.y}px`,
+      width: `${panel.width}px`,
+      height: `${panel.height}px`,
+      "min-width": `${RING_PANEL_MIN_WIDTH}px`,
+      "min-height": `${RING_PANEL_MIN_HEIGHT}px`,
+      overflow: "hidden",
+    }) as JSX.CSSProperties
+
+  const openRingDetail = (ring: BlueprintAgentRing) => {
+    const key = agentRingConfigKey(ring)
+    setRingPanel((current) => current && { ...current, view: "detail", selectedRingKey: key })
+    setHoveredRingKey(key)
+  }
+
+  const updateRingMaxCirculations = (ringKey: string, value: number) => {
+    if (runtimeRunActive()) return
+    setDraft("graph", "agent_ring_max_circulations", ringKey, Math.max(0, Math.trunc(value)))
+  }
+
+  const updateRingContextRefreshPeriod = (ringKey: string, value: number) => {
+    if (runtimeRunActive()) return
+    setDraft("graph", "agent_ring_context_refresh_periods", ringKey, Math.max(1, Math.trunc(value)))
+  }
+
   const handleWindowDragOver = (event: DragEvent) => {
     if (!isAddNodeDrag(event.dataTransfer)) return
     if (!clientInsideCanvas(event.clientX, event.clientY)) return
@@ -4002,6 +4257,26 @@ export function BlueprintSidePanel(props: {
       return
     }
 
+    if (current.type === "ring-panel-move") {
+      updateRingPanelFrame({
+        x: current.startX + event.clientX - current.startClientX,
+        y: current.startY + event.clientY - current.startClientY,
+        width: current.width,
+        height: current.height,
+      })
+      return
+    }
+
+    if (current.type === "ring-panel-resize") {
+      updateRingPanelFrame({
+        x: current.startX,
+        y: current.startY,
+        width: current.startWidth + event.clientX - current.startClientX,
+        height: current.startHeight + event.clientY - current.startClientY,
+      })
+      return
+    }
+
     if (!draft.layout.nodes[current.id]) return
     const snapped = snapPosition({
       x: current.startX + (event.clientX - current.startClientX) / current.zoom,
@@ -4052,11 +4327,21 @@ export function BlueprintSidePanel(props: {
       setPromptEditor(undefined)
       return
     }
+    if (event.key === "Escape" && ringPanel()) {
+      event.preventDefault()
+      setRingPanel(undefined)
+      setHoveredRingKey(undefined)
+      return
+    }
+    if (event.key.toLowerCase() === "r" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (isEditableEventTarget(event.target)) return
+      event.preventDefault()
+      openRingPanel()
+      return
+    }
     if (event.key !== "Delete" && event.key !== "Backspace") return
     if (!draft.selection) return
-    const target = event.target as HTMLElement | null
-    const tagName = target?.tagName.toLowerCase()
-    if (target?.isContentEditable || tagName === "input" || tagName === "textarea" || tagName === "select") return
+    if (isEditableEventTarget(event.target)) return
     event.preventDefault()
     deleteCurrent()
   }
@@ -4434,8 +4719,9 @@ export function BlueprintSidePanel(props: {
                   const selected = () =>
                     draft.selection?.type === "edge" && group.edges.some((edge) => edge.id === draft.selection?.id)
                   const flowing = () => group.edges.some((edge) => runtimeEdgeFlowIds().has(edge.id))
+                  const ringHighlighted = () => group.edges.some((edge) => highlightedRingEdgeIds().has(edge.id))
                   const hovered = () => hoveredEdgeGroupId() === group.id
-                  const active = () => selected() || hovered() || flowing()
+                  const active = () => selected() || hovered() || flowing() || ringHighlighted()
                   const strokeColor = () => (active() ? "var(--blueprint-edge-active)" : "var(--blueprint-edge)")
                   const marker = () => (active() ? "url(#blueprint-arrow-active)" : "url(#blueprint-arrow)")
                   return (
@@ -4547,6 +4833,7 @@ export function BlueprintSidePanel(props: {
                   selected={draft.selection?.type === "node" && draft.selection.id === item.id}
                   inspecting={draft.inspector?.type === "node" && draft.inspector.id === item.id}
                   connecting={connection()?.source === item.id}
+                  ringHighlighted={highlightedRingNodeIds().has(item.id)}
                   runtimeVisualState={runtimeNodeVisualState(runtimeNodeVisualStates(), item.id)}
                   hasIncomingEdge={incomingNodeIds().has(item.id)}
                   hasOutgoingEdge={outgoingNodeIds().has(item.id)}
@@ -4554,6 +4841,12 @@ export function BlueprintSidePanel(props: {
                   agentPanelProgress={agentPanelPress()?.nodeId === item.id ? (agentPanelPress()?.progress ?? 0) : 0}
                   layout={draft.layout.nodes[item.id]}
                   onPointerDown={(event) => handleNodePointerDown(event, item)}
+                  onPointerEnter={() => {
+                    if (item.type === "agent") setHoveredAgentRingNodeId(item.id)
+                  }}
+                  onPointerLeave={() => {
+                    if (item.type === "agent") setHoveredAgentRingNodeId((current) => (current === item.id ? undefined : current))
+                  }}
                   onDoubleClick={() => {
                     if (item.type === "script") {
                       void openScriptNodeInEditor(item.node)
@@ -4630,6 +4923,29 @@ export function BlueprintSidePanel(props: {
                   </div>
                 )}
               </Show>
+            )}
+          </Show>
+          <Show when={ringPanel()}>
+            {(panel) => (
+              <BlueprintRingPanel
+                setRef={setRingPanelElement}
+                panel={panel()}
+                rings={agentRings()}
+                runtimeRings={runtimeRingStatus()}
+                runtimeActive={runtimeRunActive()}
+                style={ringPanelStyle(panel())}
+                onClose={() => {
+                  setRingPanel(undefined)
+                  setHoveredRingKey(undefined)
+                }}
+                onBack={() => setRingPanel((current) => current && { ...current, view: "list", selectedRingKey: undefined })}
+                onMovePointerDown={(event) => handleRingPanelMovePointerDown(event, panel())}
+                onResizePointerDown={(event) => handleRingPanelResizePointerDown(event, panel())}
+                onOpenDetail={openRingDetail}
+                onHoverRing={(ringKey) => setHoveredRingKey(ringKey)}
+                onMaxCirculationsChange={updateRingMaxCirculations}
+                onContextRefreshPeriodChange={updateRingContextRefreshPeriod}
+              />
             )}
           </Show>
           <Show when={nodeSearch()}>
@@ -6929,6 +7245,208 @@ function AgentPanelDisplayEventRow(props: {
   )
 }
 
+function BlueprintRingPanel(props: {
+  setRef: (element: HTMLDivElement) => void
+  panel: RingPanelState
+  rings: BlueprintAgentRing[]
+  runtimeRings: Record<string, Record<string, unknown>>
+  runtimeActive: boolean
+  style: JSX.CSSProperties
+  onClose: () => void
+  onBack: () => void
+  onMovePointerDown: (event: PointerEvent) => void
+  onResizePointerDown: (event: PointerEvent) => void
+  onOpenDetail: (ring: BlueprintAgentRing) => void
+  onHoverRing: (ringKey: string | undefined) => void
+  onMaxCirculationsChange: (ringKey: string, value: number) => void
+  onContextRefreshPeriodChange: (ringKey: string, value: number) => void
+}) {
+  const language = useLanguage()
+  const selectedRing = createMemo(() => {
+    const selectedKey = props.panel.selectedRingKey
+    return props.rings.find((ring) => agentRingConfigKey(ring) === selectedKey) ?? props.rings[0]
+  })
+  const runtimeRecord = (ring: BlueprintAgentRing) => props.runtimeRings[agentRingConfigKey(ring)] ?? {}
+  const runtimeNumber = (ring: BlueprintAgentRing, field: string, fallback: number) => {
+    const record = runtimeRecord(ring)
+    return record[field] === undefined ? fallback : numberValue(record[field])
+  }
+  const ringPath = (ring: BlueprintAgentRing) =>
+    [...ring.ordered_node_ids, ring.ordered_node_ids[0]].filter(Boolean).join(" -> ")
+  const ringKey = (ring: BlueprintAgentRing) => agentRingConfigKey(ring)
+
+  return (
+    <div
+      ref={props.setRef}
+      data-blueprint-ring-panel
+      class="absolute z-50 box-border flex flex-col rounded-md border border-[rgba(103,232,249,0.52)] bg-[#071019]/98 shadow-[0_18px_48px_rgba(0,0,0,0.55)] backdrop-blur"
+      style={props.style}
+      onPointerDown={(event) => event.stopPropagation()}
+      onDblClick={(event) => event.stopPropagation()}
+    >
+      <div
+        data-blueprint-ring-panel-header
+        class="flex h-10 shrink-0 cursor-move select-none items-center gap-2 border-b border-[rgba(103,232,249,0.18)] px-3"
+        onPointerDown={props.onMovePointerDown}
+      >
+        <Show when={props.panel.view === "detail"}>
+          <IconButton
+            icon="chevron-left"
+            variant="ghost"
+            class="h-7 w-7 shrink-0 text-[#b8cede] hover:text-[#f8fdff]"
+            aria-label={language.t("blueprint.ring.back" as never)}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={props.onBack}
+          />
+        </Show>
+        <Icon size="small" name="blueprint" class="shrink-0 text-[var(--blueprint-edge-active)]" />
+        <div class="min-w-0 truncate text-13-medium text-[#f8fdff]">
+          {props.panel.view === "detail" ? language.t("blueprint.ring.settings" as never) : language.t("blueprint.ring.title" as never)}
+        </div>
+        <div class="ml-auto shrink-0 text-11-regular text-[#8fb3c8]">
+          {props.rings.length}
+        </div>
+        <IconButton
+          icon="close"
+          variant="ghost"
+          class="h-7 w-7 shrink-0 text-[#b8cede] hover:text-[#f8fdff]"
+          aria-label={language.t("common.close")}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={props.onClose}
+        />
+      </div>
+      <div class="min-h-0 flex-1 overflow-auto p-3">
+        <Show
+          when={props.panel.view === "detail" && selectedRing()}
+          fallback={
+            <Show
+              when={props.rings.length > 0}
+              fallback={
+                <div class="flex h-full items-center justify-center rounded-md border border-dashed border-[rgba(103,232,249,0.22)] px-4 text-center text-12-regular text-[#8fb3c8]">
+                  {language.t("blueprint.ring.empty" as never)}
+                </div>
+              }
+            >
+              <div class="flex flex-col gap-2">
+                <For each={props.rings}>
+                  {(ring) => (
+                    <button
+                      type="button"
+                      data-blueprint-ring-card
+                      data-blueprint-ring-id={ring.ring_id}
+                      data-blueprint-ring-key={ringKey(ring)}
+                      class="w-full rounded-md border border-[rgba(103,232,249,0.22)] bg-[#0b1522]/92 p-3 text-left transition hover:border-[rgba(103,232,249,0.62)] hover:bg-[#0d1b2a]"
+                      onDblClick={() => props.onOpenDetail(ring)}
+                      onPointerEnter={() => props.onHoverRing(ringKey(ring))}
+                      onPointerLeave={() => props.onHoverRing(undefined)}
+                    >
+                      <div class="flex min-w-0 items-center gap-2">
+                        <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{ring.ring_id}</div>
+                        <div class="shrink-0 rounded-sm border border-[rgba(103,232,249,0.22)] px-1.5 text-10-medium text-[#9bdff1]">
+                          {ring.ordered_node_ids.length} {language.t("blueprint.ring.agents" as never)}
+                        </div>
+                      </div>
+                      <div class="mt-2 truncate text-11-regular text-[#9fb6c8]">{ringPath(ring)}</div>
+                      <div class="mt-2 grid grid-cols-2 gap-2 text-11-regular text-[#b8cede]">
+                        <div>
+                          {language.t("blueprint.ring.maxCirculations" as never)}: {ring.max_circulations}
+                        </div>
+                        <div>
+                          {language.t("blueprint.ring.contextRefreshPeriod" as never)}: {ring.context_refresh_period}
+                        </div>
+                        <div>
+                          {language.t("blueprint.ring.remaining" as never)}:{" "}
+                          {runtimeNumber(ring, "remaining_circulations", ring.max_circulations)}
+                        </div>
+                        <div>
+                          {language.t("blueprint.ring.generation" as never)}:{" "}
+                          {runtimeNumber(ring, "context_generation", 0)}
+                        </div>
+                      </div>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
+          }
+        >
+          {(ring) => {
+            const key = () => ringKey(ring())
+            return (
+              <div
+                data-blueprint-ring-settings
+                data-blueprint-ring-id={ring().ring_id}
+                data-blueprint-ring-key={key()}
+                class="flex min-h-full flex-col gap-3"
+                onPointerEnter={() => props.onHoverRing(key())}
+                onPointerLeave={() => props.onHoverRing(undefined)}
+              >
+                <div class="rounded-md border border-[rgba(103,232,249,0.18)] bg-[#0b1522]/82 p-3">
+                  <div class="text-13-medium text-[#f8fdff]">{ring().ring_id}</div>
+                  <div class="mt-1 break-all text-11-regular text-[#9fb6c8]">{key()}</div>
+                  <div class="mt-2 text-12-regular text-[#b8cede]">{ringPath(ring())}</div>
+                </div>
+                <Show when={props.runtimeActive}>
+                  <div class="rounded-md border border-[rgba(251,191,36,0.3)] bg-[rgba(251,191,36,0.08)] px-3 py-2 text-12-regular text-[#fde68a]">
+                    {language.t("blueprint.ring.runningReadOnly" as never)}
+                  </div>
+                </Show>
+                <label class="flex flex-col gap-1 text-12-regular text-[#b8cede]">
+                  <span>{language.t("blueprint.ring.maxCirculations" as never)}</span>
+                  <input
+                    data-blueprint-ring-max-circulations
+                    type="number"
+                    min="0"
+                    class="h-9 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#020817] px-2 text-13-regular text-[#f8fdff] outline-none disabled:opacity-60"
+                    value={ring().max_circulations}
+                    disabled={props.runtimeActive}
+                    onInput={(event) => props.onMaxCirculationsChange(key(), Number(event.currentTarget.value))}
+                  />
+                </label>
+                <label class="flex flex-col gap-1 text-12-regular text-[#b8cede]">
+                  <span>{language.t("blueprint.ring.contextRefreshPeriod" as never)}</span>
+                  <input
+                    data-blueprint-ring-context-refresh-period
+                    type="number"
+                    min="1"
+                    class="h-9 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#020817] px-2 text-13-regular text-[#f8fdff] outline-none disabled:opacity-60"
+                    value={ring().context_refresh_period}
+                    disabled={props.runtimeActive}
+                    onInput={(event) => props.onContextRefreshPeriodChange(key(), Number(event.currentTarget.value))}
+                  />
+                </label>
+                <div class="mt-auto grid grid-cols-2 gap-2 rounded-md border border-[rgba(103,232,249,0.18)] bg-[#020817]/78 p-3 text-11-regular text-[#b8cede]">
+                  <div>
+                    {language.t("blueprint.ring.completed" as never)}:{" "}
+                    {runtimeNumber(ring(), "completed_circulations", 0)}
+                  </div>
+                  <div>
+                    {language.t("blueprint.ring.remaining" as never)}:{" "}
+                    {runtimeNumber(ring(), "remaining_circulations", ring().max_circulations)}
+                  </div>
+                  <div>
+                    {language.t("blueprint.ring.generation" as never)}:{" "}
+                    {runtimeNumber(ring(), "context_generation", 0)}
+                  </div>
+                  <div>
+                    {language.t("blueprint.ring.lastRefresh" as never)}:{" "}
+                    {runtimeNumber(ring(), "last_context_refresh_circulation", 0)}
+                  </div>
+                </div>
+              </div>
+            )
+          }}
+        </Show>
+      </div>
+      <div
+        data-blueprint-ring-panel-resize
+        class="absolute bottom-0 right-0 h-4 w-4 cursor-nwse-resize rounded-br-md border-b-2 border-r-2 border-[rgba(103,232,249,0.72)] bg-[linear-gradient(135deg,transparent_0%,transparent_45%,rgba(103,232,249,0.18)_46%,rgba(103,232,249,0.18)_100%)]"
+        onPointerDown={props.onResizePointerDown}
+      />
+    </div>
+  )
+}
+
 function BlueprintNodeView(props: {
   item: NodeItem
   title: string
@@ -6936,6 +7454,7 @@ function BlueprintNodeView(props: {
   selected: boolean
   inspecting: boolean
   connecting: boolean
+  ringHighlighted?: boolean
   runtimeVisualState: RuntimeNodeVisualState
   hasIncomingEdge: boolean
   hasOutgoingEdge: boolean
@@ -6943,6 +7462,8 @@ function BlueprintNodeView(props: {
   agentPanelProgress: number
   layout?: BlueprintNodeLayout
   onPointerDown: (event: PointerEvent) => void
+  onPointerEnter?: () => void
+  onPointerLeave?: () => void
   onDoubleClick: () => void
   onDelete: () => void
   onEdit: () => void
@@ -6977,6 +7498,11 @@ function BlueprintNodeView(props: {
   const showInput = () => supportsInput() && (props.hasIncomingEdge || props.isConnectTargetVisible || interactive() || expandedScript() || expandedAgent())
   const showOutput = () => supportsOutput() && (props.hasOutgoingEdge || interactive() || expandedScript() || expandedAgent())
   const agentPanelProgress = () => clamp(props.agentPanelProgress, 0, 1)
+  const boxShadow = () => {
+    const base = runtimeNodeBoxShadow(props.runtimeVisualState)
+    if (!props.ringHighlighted) return base
+    return `${base}, 0 0 0 3px rgba(251, 191, 36, 0.66), 0 0 28px rgba(251, 191, 36, 0.38)`
+  }
   const handlePromptDoubleClick = (event: MouseEvent) => {
     event.preventDefault()
     event.stopPropagation()
@@ -7081,11 +7607,17 @@ function BlueprintNodeView(props: {
             background: nodeTone().background,
             "border-color": nodeTone().border,
             "border-width": props.selected ? "2px" : "1px",
-            "box-shadow": runtimeNodeBoxShadow(props.runtimeVisualState),
+            "box-shadow": boxShadow(),
           }}
           onPointerDown={props.onPointerDown}
-          onPointerEnter={() => setHovering(true)}
-          onPointerLeave={() => setHovering(false)}
+          onPointerEnter={() => {
+            setHovering(true)
+            props.onPointerEnter?.()
+          }}
+          onPointerLeave={() => {
+            setHovering(false)
+            props.onPointerLeave?.()
+          }}
           onDblClick={(event) => {
             event.stopPropagation()
             props.onDoubleClick()
@@ -8861,6 +9393,12 @@ function readableError(error: unknown) {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
+}
+
+function isEditableEventTarget(target: EventTarget | null) {
+  const element = target instanceof HTMLElement ? target : null
+  const tagName = element?.tagName.toLowerCase()
+  return !!element?.isContentEditable || tagName === "input" || tagName === "textarea" || tagName === "select"
 }
 
 function recordEntries(value: Record<string, unknown> | undefined): Array<[string, Record<string, unknown>]> {

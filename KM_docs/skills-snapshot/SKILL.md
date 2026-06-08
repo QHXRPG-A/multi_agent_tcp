@@ -127,6 +127,25 @@ Use those files when the user reports:
 - full AgentNode Blueprint monitor tools need run-scoped status/events/diff
   access without cross-run mutation
 
+For the latest Blueprint resident service and Script Function Node boundary
+notes, plus a real AgentNode `xltool` resident-service write smoke from
+2026-06-08:
+
+- Script Function Node project scope, resident service global plugin runtime
+  scope, service `description` ownership, synchronous
+  `blueprint_service_call` return behavior, `xltool` service shape, live Excel
+  write smoke result, and known service-result/Windows archive follow-ups:
+  `archive/runtime-backend/blueprint_resident_services_script_nodes_xltool_smoke_2026-06-08.md`
+
+Use that file when the user reports:
+
+- an AgentNode cannot discover or call a resident service
+- resident service `description` text is unclear or stale
+- `blueprint_service_call` timing/result behavior is ambiguous
+- Script Function Nodes and resident services are being conflated
+- `xltool` resident-service Excel writes need a known-good smoke reference
+- a successful Blueprint run is marked failed during Windows archive/close
+
 For the latest Blueprint resident services panel pagination/search/collapse
 work from 2026-06-05:
 

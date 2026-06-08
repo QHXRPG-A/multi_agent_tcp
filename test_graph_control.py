@@ -20,6 +20,7 @@ from multi_agent_tcp import (
     graph_definition_from_dict,
     load_top_agent_profile,
     scoped_organization_view,
+    ScriptNode,
     TopAgentStartPlan,
 )
 from multi_agent_tcp.__main__ import main
@@ -98,6 +99,26 @@ def test_graph_definition_json_and_scoped_organization_view() -> None:
     assert scoped["agent"]["upstream_agents"] == ["planner"]
     assert scoped["agent"]["downstream_agents"] == ["reviewer"]
     assert scoped["graph"]["agent_nodes"] == ["coder"]
+
+
+def test_graph_definition_json_loads_agent_ring_refresh_periods() -> None:
+    graph = graph_definition_from_dict(
+        {
+            "agent_nodes": {"a": {}, "b": {}},
+            "edges": [
+                {"from": "a", "to": "b", "edge_type": "exec"},
+                {"from": "b", "to": "a", "edge_type": "exec"},
+            ],
+            "agent_ring_max_circulations": {"ring-a-b": 2},
+            "agent_ring_context_refresh_periods": {"ring-a-b": 3},
+        }
+    )
+
+    ring = graph.agent_rings()[0]
+    assert ring.topology_id == "ring-a-b"
+    assert ring.max_circulations == 2
+    assert ring.context_refresh_period == 3
+    assert ring.to_dict()["context_refresh_period"] == 3
 
 
 def test_graph_definition_json_loads_prompt_nodes_and_validates_prompt_edges() -> None:
@@ -446,6 +467,329 @@ def test_control_plane_dispatches_agent_message_to_branch_common_node() -> None:
     assert snapshot["queues"]["by_agent"].get("no", []) == []
     event_types = [event["event_type"] for event in snapshot["recent_events"]]
     assert "BranchNodeCompleted" in event_types
+
+
+def test_control_plane_live_fan_in_waits_for_all_message_inputs() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "left": AgentNode(node_id="left", agent_id="left"),
+            "right": AgentNode(node_id="right", agent_id="right"),
+            "joiner": AgentNode(node_id="joiner", agent_id="joiner"),
+        },
+        edges=[
+            GraphEdge("left", "joiner", edge_type="exec"),
+            GraphEdge("right", "joiner", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph)
+
+    left_batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "left",
+                "required_target_node_ids": ["joiner"],
+                "batch_id": "left-batch",
+                "route_id": "route-join",
+            },
+        }
+    )["batch"]
+    left_dispatch = control.handle_request(
+        {
+            "command": "agent.dispatch",
+            "args": {
+                "source_node_id": "left",
+                "target_node_id": "joiner",
+                "batch_id": left_batch["batch_id"],
+                "body": {"prompt": "left result"},
+            },
+        }
+    )
+
+    assert left_dispatch["ok"] is True
+    assert runtime.agent_message_queues.get("joiner", []) == []
+    assert left_dispatch["dispatch"]["fan_in"]["status"] == "waiting"
+    assert left_dispatch["dispatch"]["fan_in"]["missing_inputs"] == [
+        {
+            "source_node_id": "right",
+            "source_output_port": "out",
+            "target_input_port": "in",
+            "edge_type": "exec",
+        }
+    ]
+
+    right_batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "right",
+                "required_target_node_ids": ["joiner"],
+                "batch_id": "right-batch",
+                "route_id": "route-join",
+            },
+        }
+    )["batch"]
+    right_dispatch = control.handle_request(
+        {
+            "command": "agent.dispatch",
+            "args": {
+                "source_node_id": "right",
+                "target_node_id": "joiner",
+                "batch_id": right_batch["batch_id"],
+                "body": {"prompt": "right result"},
+            },
+        }
+    )
+
+    assert right_dispatch["dispatch"]["fan_in"]["status"] == "ready"
+    queued = runtime.agent_message_queues["joiner"]
+    assert len(queued) == 1
+    body = queued[0].body
+    assert body["type"] == "fan_in_aggregate"
+    assert body["aggregate"]["route_id"] == "route-join"
+    assert body["context"]["framework_context"]["message_envelope"]["route_id"] == "route-join"
+    assert [item["source_node_id"] for item in body["aggregate"]["contributions"]] == ["left", "right"]
+    assert body["aggregate"]["inputs"]["in"] == [
+        {"prompt": "left result"},
+        {"prompt": "right result"},
+    ]
+
+
+def test_control_plane_branch_true_fan_in_gates_agent_and_false_skips() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "other": AgentNode(node_id="other", agent_id="other"),
+            "joiner": AgentNode(node_id="joiner", agent_id="joiner"),
+        },
+        common_nodes={"gate": CommonNode(node_id="gate", kind="branch")},
+        edges=[
+            GraphEdge("other", "joiner", edge_type="exec"),
+            GraphEdge("gate", "joiner", output_port="true", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph)
+
+    other_batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "other",
+                "required_target_node_ids": ["joiner"],
+                "batch_id": "other-batch",
+                "route_id": "route-branch",
+            },
+        }
+    )["batch"]
+    control.handle_request(
+        {
+            "command": "agent.dispatch",
+            "args": {
+                "source_node_id": "other",
+                "target_node_id": "joiner",
+                "batch_id": other_batch["batch_id"],
+                "body": {"prompt": "other ready"},
+            },
+        }
+    )
+    assert runtime.agent_message_queues.get("joiner", []) == []
+
+    runtime.queue_common_node_message(
+        "gate",
+        {"condition": False, "prompt": "branch false"},
+        route_id="route-branch",
+    )
+    asyncio.run(runtime.tick())
+    assert runtime.agent_message_queues.get("joiner", []) == []
+    gate = runtime.fan_in_gates["route-branch::joiner"]
+    assert gate.status == "skipped"
+
+    graph_true = GraphDefinition(
+        agent_nodes={
+            "other": AgentNode(node_id="other", agent_id="other"),
+            "joiner": AgentNode(node_id="joiner", agent_id="joiner"),
+        },
+        common_nodes={"gate": CommonNode(node_id="gate", kind="branch")},
+        edges=[
+            GraphEdge("other", "joiner", edge_type="exec"),
+            GraphEdge("gate", "joiner", output_port="true", edge_type="exec"),
+        ],
+    )
+    cluster_true = _FakeCluster()
+    runtime_true = GraphRuntime(cluster_true)
+    control_true = GraphRuntimeControlPlane(runtime_true, graph_true)
+    other_batch_true = control_true.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "other",
+                "required_target_node_ids": ["joiner"],
+                "batch_id": "other-batch-true",
+                "route_id": "route-branch-true",
+            },
+        }
+    )["batch"]
+    control_true.handle_request(
+        {
+            "command": "agent.dispatch",
+            "args": {
+                "source_node_id": "other",
+                "target_node_id": "joiner",
+                "batch_id": other_batch_true["batch_id"],
+                "body": {"prompt": "other ready"},
+            },
+        }
+    )
+    runtime_true.queue_common_node_message(
+        "gate",
+        {"condition": True, "prompt": "branch true"},
+        route_id="route-branch-true",
+    )
+    asyncio.run(runtime_true.tick())
+    assert len(cluster_true.sent) == 1
+    body = cluster_true.sent[0][1]
+    assert body["type"] == "fan_in_aggregate"
+    assert [item["source_node_id"] for item in body["aggregate"]["contributions"]] == [
+        "other",
+        "gate",
+    ]
+
+
+def test_runtime_live_fan_in_wraps_message_and_value_inputs() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "source": AgentNode(node_id="source", agent_id="source"),
+            "joiner": AgentNode(node_id="joiner", agent_id="joiner"),
+        },
+        script_nodes={
+            "score_script": ScriptNode(
+                node_id="score_script",
+                script_id="score_script",
+                module_path="score.py",
+                function_name="score",
+                outputs=[{"name": "score", "type": "int"}],
+            ),
+        },
+        edges=[
+            GraphEdge("source", "joiner", edge_type="exec"),
+            GraphEdge("score_script", "joiner", output_port="score", input_port="score", edge_type="data"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph)
+
+    batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "source",
+                "required_target_node_ids": ["joiner"],
+                "batch_id": "source-batch",
+                "route_id": "route-mixed",
+            },
+        }
+    )["batch"]
+    control.handle_request(
+        {
+            "command": "agent.dispatch",
+            "args": {
+                "source_node_id": "source",
+                "target_node_id": "joiner",
+                "batch_id": batch["batch_id"],
+                "body": {"prompt": "message input"},
+            },
+        }
+    )
+    assert runtime.agent_message_queues.get("joiner", []) == []
+
+    value_result = runtime.offer_fan_in_contribution(
+        graph,
+        "joiner",
+        source_node_id="score_script",
+        source_output_port="score",
+        target_input_port="score",
+        edge_type="data",
+        kind="value",
+        value=42,
+        route_id="route-mixed",
+    )
+
+    assert value_result["status"] == "ready"
+    queued = runtime.agent_message_queues["joiner"]
+    assert len(queued) == 1
+    body = queued[0].body
+    assert body["type"] == "fan_in_aggregate"
+    assert body["context"]["framework_context"]["message_envelope"]["route_id"] == "route-mixed"
+    assert body["aggregate"]["inputs"]["score"] == 42
+    assert body["aggregate"]["inputs"]["in"] == {"prompt": "message input"}
+    value_contribution = [
+        item for item in body["aggregate"]["contributions"]
+        if item["kind"] == "value"
+    ][0]
+    assert value_contribution["value_type"] == "int"
+    assert value_contribution["value"] == 42
+
+
+def test_runtime_branch_condition_accepts_only_strict_bool_value() -> None:
+    graph = GraphDefinition(
+        agent_nodes={
+            "yes": AgentNode(node_id="yes", agent_id="yes"),
+            "no": AgentNode(node_id="no", agent_id="no"),
+        },
+        script_nodes={
+            "flag_script": ScriptNode(
+                node_id="flag_script",
+                script_id="flag_script",
+                module_path="flag.py",
+                function_name="flag",
+                outputs=[{"name": "flag", "type": "bool"}],
+            ),
+        },
+        common_nodes={"gate": CommonNode(node_id="gate", kind="branch")},
+        edges=[
+            GraphEdge("flag_script", "gate", output_port="flag", input_port="condition", edge_type="data"),
+            GraphEdge("gate", "yes", output_port="true", edge_type="exec"),
+            GraphEdge("gate", "no", output_port="false", edge_type="exec"),
+        ],
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    runtime.configure_common_nodes(graph)
+
+    result = runtime.offer_fan_in_contribution(
+        graph,
+        "gate",
+        source_node_id="flag_script",
+        source_output_port="flag",
+        target_input_port="condition",
+        edge_type="data",
+        kind="value",
+        value=True,
+        route_id="route-bool",
+    )
+    assert result["status"] == "direct"
+    asyncio.run(runtime.tick())
+    assert [message.body["condition"] for message in runtime.agent_message_queues["yes"]] == [True]
+    assert runtime.agent_message_queues.get("no", []) == []
+
+    runtime_bad = GraphRuntime(_FakeCluster())
+    runtime_bad.configure_common_nodes(graph)
+    runtime_bad.offer_fan_in_contribution(
+        graph,
+        "gate",
+        source_node_id="flag_script",
+        source_output_port="flag",
+        target_input_port="condition",
+        edge_type="data",
+        kind="value",
+        value="true",
+        route_id="route-string",
+    )
+    asyncio.run(runtime_bad.tick())
+    snapshot = runtime_bad.status_snapshot(graph=graph)
+    assert runtime_bad.agent_message_queues.get("yes", []) == []
+    assert runtime_bad.agent_message_queues.get("no", []) == []
+    assert snapshot["recent_events"][-1]["event_type"] == "BranchNodeFailed"
 
 
 def test_organization_and_validate_start_cli(tmp_path: Path, capsys: Any) -> None:

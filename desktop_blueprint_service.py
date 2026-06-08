@@ -81,7 +81,7 @@ POPO_ENTRY_REQUIRED_FIELDS = (
 
 
 def validate_desktop_blueprint_graph(graph: Any, *, project_dir: Optional[Path] = None) -> None:
-    graph.validate_dag()
+    graph.validate_agent_ring_graph()
     if not graph.agent_nodes:
         raise ValueError("blueprint graph requires at least one AgentNode")
     if project_dir is not None and getattr(graph, "script_nodes", None):
@@ -1307,8 +1307,15 @@ class DesktopBlueprintService:
         if start_id not in graph.agent_nodes:
             raise BlueprintServiceError(
                 "BLUEPRINT_START_NODE_REQUIRED",
-                "startNodeId must reference exactly one AgentNode",
-                details={"blueprintId": str(document["id"]), "validStartNodes": sorted(graph.agent_nodes)},
+                "startNodeId must reference exactly one full Agent node",
+                details={"blueprintId": str(document["id"]), "validStartNodes": blueprint_runtime_start_node_ids(graph)},
+            )
+        valid_start_nodes = set(blueprint_runtime_start_node_ids(graph))
+        if start_id not in valid_start_nodes:
+            raise BlueprintServiceError(
+                "BLUEPRINT_START_NODE_REQUIRED",
+                "startNodeId must reference exactly one full Agent node",
+                details={"blueprintId": str(document["id"]), "validStartNodes": sorted(valid_start_nodes)},
             )
         runtime = dict(document.get("runtime") or {})
         runtime["start_node_id"] = start_id
@@ -1319,7 +1326,7 @@ class DesktopBlueprintService:
             "ok": True,
             "blueprintId": str(saved["id"]),
             "startNodeId": start_id,
-            "validStartNodes": sorted(graph.agent_nodes),
+            "validStartNodes": blueprint_runtime_start_node_ids(graph),
             "document": saved,
         }
 
@@ -1343,11 +1350,12 @@ class DesktopBlueprintService:
                 details={"blueprintId": str(document["id"])},
             ) from exc
         start_node_id = document_start_node_id(document)
-        if not start_node_id or start_node_id not in graph.agent_nodes:
+        valid_start_nodes = set(blueprint_runtime_start_node_ids(graph))
+        if not start_node_id or start_node_id not in graph.agent_nodes or start_node_id not in valid_start_nodes:
             raise BlueprintServiceError(
                 "BLUEPRINT_START_NODE_REQUIRED",
-                "blueprint runtime.start_node_id must be set to exactly one AgentNode before executing a plan",
-                details={"blueprintId": str(document["id"]), "validStartNodes": sorted(graph.agent_nodes)},
+                "blueprint runtime.start_node_id must be set to exactly one full Agent node before executing a plan",
+                details={"blueprintId": str(document["id"]), "validStartNodes": sorted(valid_start_nodes)},
             )
         plan = normalize_plan_payload(plan_data)
         start_nodes = coerce_string_list(plan.get("start_nodes"), "plan.start_nodes")
@@ -1410,6 +1418,19 @@ class DesktopBlueprintService:
             raise BlueprintServiceError("BAD_START_PLAN", str(exc)) from exc
         validation = GuLiCodeTopAgentProfile().validate_start_plan(graph, plan).to_dict()
         validation.update(start_plan_validation_context(graph))
+        invalid_runtime_starts = [
+            node_id
+            for node_id in plan.start_nodes
+            if node_id not in set(blueprint_runtime_start_node_ids(graph))
+        ]
+        if invalid_runtime_starts:
+            validation["ok"] = False
+            errors = list(validation.get("errors") or [])
+            errors.append(
+                "start_nodes contains nodes that are not valid Blueprint runtime start Agent ids: "
+                + ", ".join(invalid_runtime_starts)
+            )
+            validation["errors"] = errors
         return {"plan": plan.to_dict(), "validation": validation}
 
     def _unique_blueprint_id(self, project_dir: Path, seed: str) -> str:
@@ -1502,6 +1523,11 @@ class DesktopBlueprintService:
             normalized = normalize_document(document)
             graph = graph_definition_from_dict(dict(normalized["graph"]))
             validate_desktop_blueprint_graph(graph, project_dir=project_dir)
+            start_node_id = document_start_node_id(normalized)
+            if start_node_id and start_node_id not in set(blueprint_runtime_start_node_ids(graph)):
+                errors.append(
+                    "blueprint runtime.start_node_id must reference exactly one full Agent node"
+                )
         except Exception as exc:
             errors.append(str(exc))
         return {"ok": not errors, "errors": errors, "warnings": warnings}
@@ -1727,11 +1753,12 @@ class DesktopBlueprintService:
         graph_dict = dict(document["graph"])
         graph = graph_definition_from_dict(graph_dict)
         validate_desktop_blueprint_graph(graph, project_dir=validate_project_dir(project_dir))
-        if not start_node_id or start_node_id not in graph.agent_nodes:
+        valid_start_nodes = set(blueprint_runtime_start_node_ids(graph))
+        if not start_node_id or start_node_id not in graph.agent_nodes or start_node_id not in valid_start_nodes:
             raise BlueprintServiceError(
                 "BLUEPRINT_START_NODE_REQUIRED",
-                "blueprint runtime.start_node_id must reference exactly one AgentNode before start",
-                details={"blueprintId": str(document["id"]), "validStartNodes": sorted(graph.agent_nodes)},
+                "blueprint runtime.start_node_id must reference exactly one full Agent node before start",
+                details={"blueprintId": str(document["id"]), "validStartNodes": sorted(valid_start_nodes)},
             )
         popo_entry = require_complete_popo_entry(document)
         structure_id = canonical_blueprint_structure_id(graph_dict)
@@ -1914,11 +1941,12 @@ class DesktopBlueprintService:
             graph = graph_definition_from_dict(graph_dict)
             validate_desktop_blueprint_graph(graph, project_dir=validate_project_dir(project_dir))
             start_node_id = document_start_node_id(document)
-            if not start_node_id or start_node_id not in graph.agent_nodes:
+            valid_start_nodes = set(blueprint_runtime_start_node_ids(graph))
+            if not start_node_id or start_node_id not in graph.agent_nodes or start_node_id not in valid_start_nodes:
                 raise BlueprintServiceError(
                     "BLUEPRINT_START_NODE_REQUIRED",
-                    "blueprint runtime.start_node_id must reference exactly one AgentNode before start",
-                    details={"blueprintId": blueprint_id, "validStartNodes": sorted(graph.agent_nodes)},
+                    "blueprint runtime.start_node_id must reference exactly one full Agent node before start",
+                    details={"blueprintId": blueprint_id, "validStartNodes": sorted(valid_start_nodes)},
                 )
             bindings.append(
                 {
@@ -2423,6 +2451,19 @@ class DesktopBlueprintService:
             ) from exc
         preflight_validation = GuLiCodeTopAgentProfile().validate_start_plan(graph, plan).to_dict()
         preflight_validation.update(start_plan_validation_context(graph))
+        invalid_runtime_starts = [
+            node_id
+            for node_id in plan.start_nodes
+            if node_id not in set(blueprint_runtime_start_node_ids(graph))
+        ]
+        if invalid_runtime_starts:
+            preflight_validation["ok"] = False
+            errors = list(preflight_validation.get("errors") or [])
+            errors.append(
+                "start_nodes contains nodes that are not valid Blueprint runtime start Agent ids: "
+                + ", ".join(invalid_runtime_starts)
+            )
+            preflight_validation["errors"] = errors
         if not preflight_validation.get("ok"):
             raise BlueprintServiceError(
                 "START_PLAN_INVALID",
@@ -3725,6 +3766,20 @@ class DesktopBlueprintService:
         try:
             plan = TopAgentStartPlan.from_dict(dict(plan_data or {}))
             validation = session.control.top_agent.validate_start_plan(session.graph, plan).to_dict()
+            validation.update(start_plan_validation_context(session.graph))
+            invalid_runtime_starts = [
+                node_id
+                for node_id in plan.start_nodes
+                if node_id not in set(blueprint_runtime_start_node_ids(session.graph))
+            ]
+            if invalid_runtime_starts:
+                validation["ok"] = False
+                errors = list(validation.get("errors") or [])
+                errors.append(
+                    "start_nodes contains nodes that are not valid Blueprint runtime start Agent ids: "
+                    + ", ".join(invalid_runtime_starts)
+                )
+                validation["errors"] = errors
         except Exception as exc:
             validation = {
                 "ok": False,
@@ -4989,7 +5044,7 @@ def default_blueprint_document(project_dir: Path, blueprint_id: str, name: str) 
             "agent_nodes": {
                 "planner": {
                     "node_id": "planner",
-                    "node_type": "worker_agent",
+                    "node_type": "agent",
                     "agent_id": "agent-planner",
                     "prompt": "Break down the user goal and dispatch implementation work.",
                     "write_scope": ["shared/reports/planning/**"],
@@ -5073,10 +5128,18 @@ def normalize_plan_payload(value: Any) -> Dict[str, Any]:
     return plan
 
 
+def blueprint_runtime_start_node_ids(graph: Any) -> list[str]:
+    return sorted(
+        str(node_id)
+        for node_id, node in getattr(graph, "agent_nodes", {}).items()
+        if str(getattr(node, "node_type", "worker_agent")) == "agent"
+    )
+
+
 def start_plan_validation_context(graph: Any) -> Dict[str, Any]:
     return {
         "required_start_groups": graph.required_start_groups(),
-        "valid_start_nodes": sorted(graph.agent_nodes),
+        "valid_start_nodes": blueprint_runtime_start_node_ids(graph),
         "tick_source_allowed": graph.has_tick_source(),
     }
 

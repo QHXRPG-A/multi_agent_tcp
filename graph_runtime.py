@@ -1326,6 +1326,7 @@ class PendingAgentMessage:
     body: Any
     source_node_id: Optional[str] = None
     source_agent_id: Optional[str] = None
+    route_id: Optional[str] = None
     timeout_sec: Optional[float] = None
     queue_mode: str = "default"
     created_at: float = field(default_factory=time.monotonic)
@@ -1349,6 +1350,8 @@ class PendingAgentMessage:
             data["source_node_id"] = self.source_node_id
         if self.source_agent_id is not None:
             data["source_agent_id"] = self.source_agent_id
+        if self.route_id is not None:
+            data["route_id"] = self.route_id
         if self.timeout_sec is not None:
             data["timeout_sec"] = self.timeout_sec
         if self.dispatched_at is not None:
@@ -1395,6 +1398,7 @@ class OutgoingMessageBatch:
     source_agent_id: str
     required_target_node_ids: List[str]
     required_target_agent_ids: List[str]
+    route_id: str = field(default_factory=lambda: f"route-{uuid.uuid4().hex[:12]}")
     created_at: float = field(default_factory=time.monotonic)
     status: str = "staging"
     staged_messages: Dict[str, StagedOutgoingMessage] = field(default_factory=dict)
@@ -1427,6 +1431,7 @@ class OutgoingMessageBatch:
             "batch_id": self.batch_id,
             "source_node_id": self.source_node_id,
             "source_agent_id": self.source_agent_id,
+            "route_id": self.route_id,
             "required_target_node_ids": list(self.required_target_node_ids),
             "required_target_agent_ids": list(self.required_target_agent_ids),
             "remaining_targets": self.remaining_targets,
@@ -1464,6 +1469,172 @@ class OutgoingMessageBatch:
         }
 
 
+@dataclass(frozen=True)
+class FanInInputKey:
+    """One required live fan-in input edge for a target node."""
+
+    source_node_id: str
+    source_output_port: str = DEFAULT_OUTPUT_PORT
+    target_input_port: str = "in"
+    edge_type: str = "exec"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_node_id", str(self.source_node_id).strip())
+        object.__setattr__(
+            self,
+            "source_output_port",
+            str(self.source_output_port or DEFAULT_OUTPUT_PORT).strip() or DEFAULT_OUTPUT_PORT,
+        )
+        object.__setattr__(
+            self,
+            "target_input_port",
+            str(self.target_input_port or "in").strip() or "in",
+        )
+        object.__setattr__(
+            self,
+            "edge_type",
+            str(self.edge_type or "exec").strip().lower() or "exec",
+        )
+        if not self.source_node_id:
+            raise ValueError("FanInInputKey.source_node_id must be non-empty")
+
+    @property
+    def key(self) -> str:
+        return (
+            f"{self.source_node_id}|{self.source_output_port}|"
+            f"{self.target_input_port}|{self.edge_type}"
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "source_node_id": self.source_node_id,
+            "source_output_port": self.source_output_port,
+            "target_input_port": self.target_input_port,
+            "edge_type": self.edge_type,
+        }
+
+
+@dataclass
+class FanInContribution:
+    """One delivered/skipped/failed live fan-in contribution."""
+
+    source_node_id: str
+    source_output_port: str = DEFAULT_OUTPUT_PORT
+    target_input_port: str = "in"
+    edge_type: str = "exec"
+    kind: str = "message"
+    status: str = "delivered"
+    body: Any = None
+    value: Any = None
+    value_type: Optional[str] = None
+    source_agent_id: Optional[str] = None
+    reason: Optional[str] = None
+    error: Optional[str] = None
+    contributed_at: float = field(default_factory=time.monotonic)
+    overwrite_count: int = 0
+
+    def __post_init__(self) -> None:
+        self.source_node_id = str(self.source_node_id).strip()
+        self.source_output_port = str(self.source_output_port or DEFAULT_OUTPUT_PORT).strip() or DEFAULT_OUTPUT_PORT
+        self.target_input_port = str(self.target_input_port or "in").strip() or "in"
+        self.edge_type = str(self.edge_type or "exec").strip().lower() or "exec"
+        self.kind = str(self.kind or "message").strip().lower()
+        self.status = str(self.status or "delivered").strip().lower()
+        if self.kind not in {"message", "value"}:
+            raise ValueError("fan-in contribution kind must be message or value")
+        if self.status not in {"delivered", "skipped", "failed"}:
+            raise ValueError("fan-in contribution status must be delivered, skipped, or failed")
+
+    @property
+    def key(self) -> str:
+        return FanInInputKey(
+            self.source_node_id,
+            self.source_output_port,
+            self.target_input_port,
+            self.edge_type,
+        ).key
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "source_node_id": self.source_node_id,
+            "source_output_port": self.source_output_port,
+            "target_input_port": self.target_input_port,
+            "kind": self.kind,
+            "status": self.status,
+        }
+        if self.kind == "message":
+            data["body"] = self.body
+        else:
+            data["value_type"] = self.value_type
+            data["value"] = self.value
+        if self.edge_type != "exec":
+            data["edge_type"] = self.edge_type
+        if self.source_agent_id is not None:
+            data["source_agent_id"] = self.source_agent_id
+        if self.reason is not None:
+            data["reason"] = self.reason
+        if self.error is not None:
+            data["error"] = self.error
+        if self.overwrite_count:
+            data["overwrite_count"] = self.overwrite_count
+        return data
+
+
+@dataclass
+class LiveFanInGate:
+    """Live fan-in state for one route_id + target_node_id."""
+
+    route_id: str
+    target_node_id: str
+    required_inputs: List[FanInInputKey]
+    created_at: float = field(default_factory=time.monotonic)
+    updated_at: float = field(default_factory=time.monotonic)
+    status: str = "waiting"
+    contributions: Dict[str, FanInContribution] = field(default_factory=dict)
+    aggregate_message_id: Optional[str] = None
+    completed_at: Optional[float] = None
+    final_reason: Optional[str] = None
+    error: Optional[str] = None
+
+    @property
+    def gate_id(self) -> str:
+        return f"{self.route_id}::{self.target_node_id}"
+
+    @property
+    def missing_inputs(self) -> List[FanInInputKey]:
+        return [
+            item
+            for item in self.required_inputs
+            if item.key not in self.contributions
+        ]
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "gate_id": self.gate_id,
+            "route_id": self.route_id,
+            "target_node_id": self.target_node_id,
+            "status": self.status,
+            "required_inputs": [item.to_dict() for item in self.required_inputs],
+            "missing_inputs": [item.to_dict() for item in self.missing_inputs],
+            "contributions": [
+                self.contributions[item.key].to_dict()
+                for item in self.required_inputs
+                if item.key in self.contributions
+            ],
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+        if self.aggregate_message_id is not None:
+            data["aggregate_message_id"] = self.aggregate_message_id
+        if self.completed_at is not None:
+            data["completed_at"] = self.completed_at
+        if self.final_reason is not None:
+            data["final_reason"] = self.final_reason
+        if self.error is not None:
+            data["error"] = self.error
+        return data
+
+
 def _safe_script_call_record(record: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(record)
     if isinstance(result.get("arguments"), dict):
@@ -1485,6 +1656,7 @@ class PendingCommonNodeMessage:
     body: Any
     source_node_id: Optional[str] = None
     source_agent_id: Optional[str] = None
+    route_id: Optional[str] = None
     status: str = "queued"
     queued_at: float = field(default_factory=time.monotonic)
     dispatched_at: Optional[float] = None
@@ -1503,6 +1675,8 @@ class PendingCommonNodeMessage:
             data["source_node_id"] = self.source_node_id
         if self.source_agent_id is not None:
             data["source_agent_id"] = self.source_agent_id
+        if self.route_id is not None:
+            data["route_id"] = self.route_id
         if self.dispatched_at is not None:
             data["dispatched_at"] = self.dispatched_at
         if self.completed_at is not None:
@@ -1519,6 +1693,7 @@ class AgentRing:
     ring_id: str
     ordered_node_ids: List[str]
     max_circulations: int = 1
+    context_refresh_period: int = 1
     topology_id: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -1537,6 +1712,9 @@ class AgentRing:
         self.max_circulations = int(self.max_circulations)
         if self.max_circulations < 0:
             raise ValueError("AgentRing.max_circulations must be non-negative")
+        self.context_refresh_period = int(self.context_refresh_period)
+        if self.context_refresh_period < 1:
+            raise ValueError("AgentRing.context_refresh_period must be positive")
         if self.topology_id is not None:
             self.topology_id = str(self.topology_id).strip() or None
 
@@ -1568,6 +1746,7 @@ class AgentRing:
                 "to": self.closing_edge[1],
             },
             "max_circulations": self.max_circulations,
+            "context_refresh_period": self.context_refresh_period,
         }
         if self.topology_id is not None:
             data["topology_id"] = self.topology_id
@@ -1875,8 +2054,12 @@ class GraphRuntime:
         self._utterances_by_task: Dict[str, List[str]] = {}
         self._message_journal: List[RuntimeMessageRecord] = []
         self._outgoing_batches: Dict[str, OutgoingMessageBatch] = {}
+        self._fan_in_gates: Dict[str, LiveFanInGate] = {}
         self._agent_rings: Dict[str, AgentRing] = {}
         self._agent_ring_circulation_counts: Dict[str, Dict[str, int]] = {}
+        self._agent_ring_completed_circulations: Dict[str, int] = {}
+        self._agent_ring_context_generations: Dict[str, int] = {}
+        self._agent_ring_last_context_refresh_circulation: Dict[str, int] = {}
         self._join_barriers: Dict[str, JoinBarrier] = {}
         self._join_target_nodes: Dict[str, AgentNode] = {}
         self._dispatch_tasks: Dict[str, asyncio.Task[None]] = {}
@@ -2012,6 +2195,10 @@ class GraphRuntime:
     @property
     def outgoing_batches(self) -> Dict[str, OutgoingMessageBatch]:
         return dict(self._outgoing_batches)
+
+    @property
+    def fan_in_gates(self) -> Dict[str, LiveFanInGate]:
+        return dict(self._fan_in_gates)
 
     @property
     def join_barriers(self) -> Dict[str, JoinBarrier]:
@@ -2562,10 +2749,11 @@ class GraphRuntime:
         )
         dispatching = bool(self._dispatch_tasks)
         waiting_batches = any(batch.status == "staging" for batch in self._outgoing_batches.values())
+        waiting_fan_in = any(gate.status == "waiting" for gate in self._fan_in_gates.values())
         waiting_joins = any(barrier.status == "waiting" for barrier in self._join_barriers.values())
         running_jobs = any(job.status in {"queued", "running"} for job in self._jobs.values())
         conflicts = bool(self._workspace_state_snapshot().get("conflicts", []))
-        return queued or dispatching or waiting_batches or waiting_joins or running_jobs or conflicts
+        return queued or dispatching or waiting_batches or waiting_fan_in or waiting_joins or running_jobs or conflicts
 
     def _all_completion_agents_terminal(self) -> bool:
         node_ids = self._completion_node_ids()
@@ -2686,6 +2874,19 @@ class GraphRuntime:
                     output_port,
                     pending.body,
                     source_agent_id=pending.source_agent_id,
+                    route_id=pending.route_id,
+                    status="delivered",
+                )
+                skipped_port = "false" if output_port == "true" else "true"
+                await self._emit_common_node_output(
+                    graph,
+                    node_id,
+                    skipped_port,
+                    pending.body,
+                    source_agent_id=pending.source_agent_id,
+                    route_id=pending.route_id,
+                    status="skipped",
+                    reason=f"branch selected {output_port}",
                 )
                 pending.status = "completed"
                 self._emit(
@@ -2726,11 +2927,677 @@ class GraphRuntime:
 
     @staticmethod
     def _branch_condition_from_body(body: Any) -> bool:
+        if isinstance(body, dict) and body.get("type") == "fan_in_aggregate":
+            aggregate = body.get("aggregate")
+            if not isinstance(aggregate, dict):
+                raise ValueError("Branch fan-in aggregate must contain aggregate object")
+            inputs = aggregate.get("inputs")
+            candidates: List[Any] = []
+            if isinstance(inputs, dict) and "condition" in inputs:
+                candidates.append(inputs["condition"])
+            contributions = aggregate.get("contributions")
+            if not candidates and isinstance(contributions, list):
+                for item in contributions:
+                    if not isinstance(item, dict):
+                        continue
+                    if str(item.get("target_input_port") or "") != "condition":
+                        continue
+                    if item.get("kind") == "value":
+                        candidates.append(item.get("value"))
+                    elif item.get("kind") == "message":
+                        candidate_body = item.get("body")
+                        if type(candidate_body) is bool:
+                            candidates.append(candidate_body)
+                        elif isinstance(candidate_body, dict) and "condition" in candidate_body:
+                            candidates.append(candidate_body.get("condition"))
+            bool_candidates = [candidate for candidate in candidates if type(candidate) is bool]
+            if len(bool_candidates) == 1 and len(candidates) == 1:
+                return bool(bool_candidates[0])
+            raise ValueError("Branch node requires exactly one strict boolean condition from fan-in")
         if type(body) is bool:
             return body
         if isinstance(body, dict) and type(body.get("condition")) is bool:
             return bool(body["condition"])
         raise ValueError("Branch node requires a strict boolean condition")
+
+    @staticmethod
+    def _normalize_route_id(route_id: Optional[str] = None) -> str:
+        normalized = str(route_id or "").strip()
+        return normalized or f"route-{uuid.uuid4().hex[:12]}"
+
+    @staticmethod
+    def _fan_in_gate_id(route_id: str, target_node_id: str) -> str:
+        return f"{route_id}::{target_node_id}"
+
+    @staticmethod
+    def _value_type(value: Any) -> str:
+        if type(value) is bool:
+            return "bool"
+        if type(value) is int:
+            return "int"
+        if type(value) is float:
+            return "float"
+        if isinstance(value, str):
+            return "str"
+        if value is None:
+            return "null"
+        return "json"
+
+    @staticmethod
+    def _edge_fan_in_key(edge: "GraphEdge") -> FanInInputKey:
+        return FanInInputKey(
+            edge.source,
+            edge.output_port or DEFAULT_OUTPUT_PORT,
+            edge.input_port or "in",
+            edge.edge_type or "exec",
+        )
+
+    def _fan_in_required_inputs(
+        self,
+        graph: "GraphDefinition",
+        target_node_id: str,
+    ) -> List[FanInInputKey]:
+        required: List[FanInInputKey] = []
+        seen: set[str] = set()
+        for edge in graph.edges:
+            if edge.target != target_node_id:
+                continue
+            edge_type = edge.edge_type or "exec"
+            if edge_type not in {"exec", "data"}:
+                continue
+            if edge_type == "data" and edge.source in graph.prompt_nodes:
+                continue
+            key = self._edge_fan_in_key(edge)
+            if key.key in seen:
+                continue
+            seen.add(key.key)
+            required.append(key)
+        return required
+
+    def target_uses_live_fan_in(
+        self,
+        graph: "GraphDefinition",
+        target_node_id: str,
+    ) -> bool:
+        return len(self._fan_in_required_inputs(graph, target_node_id)) > 1
+
+    def _find_required_fan_in_key(
+        self,
+        gate: LiveFanInGate,
+        *,
+        source_node_id: str,
+        source_output_port: Optional[str],
+        target_input_port: Optional[str],
+        edge_type: Optional[str],
+    ) -> FanInInputKey:
+        normalized = FanInInputKey(
+            source_node_id,
+            source_output_port or DEFAULT_OUTPUT_PORT,
+            target_input_port or "in",
+            edge_type or "exec",
+        )
+        for item in gate.required_inputs:
+            if item.key == normalized.key:
+                return item
+        matches = [
+            item
+            for item in gate.required_inputs
+            if item.source_node_id == normalized.source_node_id
+            and item.source_output_port == normalized.source_output_port
+            and item.edge_type == normalized.edge_type
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return normalized
+
+    def _fan_in_summary(
+        self,
+        gate: LiveFanInGate,
+        *,
+        queued_message_ids: Optional[Sequence[str]] = None,
+        contribution: Optional[FanInContribution] = None,
+    ) -> Dict[str, Any]:
+        data = {
+            "gate_id": gate.gate_id,
+            "route_id": gate.route_id,
+            "target_node_id": gate.target_node_id,
+            "status": gate.status,
+            "missing_inputs": [item.to_dict() for item in gate.missing_inputs],
+            "queued_message_ids": list(queued_message_ids or []),
+        }
+        if contribution is not None:
+            data["contribution"] = contribution.to_dict()
+        if gate.final_reason is not None:
+            data["reason"] = gate.final_reason
+        if gate.error is not None:
+            data["error"] = gate.error
+        return data
+
+    def _build_fan_in_aggregate(self, gate: LiveFanInGate) -> Dict[str, Any]:
+        contributions: List[Dict[str, Any]] = []
+        inputs: Dict[str, Any] = {}
+        value_ports: set[str] = set()
+        for item in gate.required_inputs:
+            contribution = gate.contributions.get(item.key)
+            if contribution is None:
+                continue
+            contribution_dict = contribution.to_dict()
+            contributions.append(contribution_dict)
+            if contribution.status != "delivered":
+                continue
+            port = contribution.target_input_port
+            if contribution.kind == "value":
+                if port in value_ports:
+                    raise ValueError(
+                        f"fan-in target input port {port!r} received multiple value contributions"
+                    )
+                value_ports.add(port)
+                if port in inputs:
+                    raise ValueError(
+                        f"fan-in target input port {port!r} received conflicting message and value"
+                    )
+                inputs[port] = contribution.value
+            else:
+                if port not in inputs:
+                    inputs[port] = contribution.body
+                elif isinstance(inputs[port], list):
+                    inputs[port].append(contribution.body)
+                else:
+                    inputs[port] = [inputs[port], contribution.body]
+        return {
+            "type": "fan_in_aggregate",
+            "prompt": f"Process fan-in aggregate for {gate.target_node_id}.",
+            "aggregate": {
+                "route_id": gate.route_id,
+                "target_node_id": gate.target_node_id,
+                "contributions": contributions,
+                "inputs": inputs,
+            },
+        }
+
+    def _create_outgoing_batch_from_graph_sync(
+        self,
+        graph: "GraphDefinition",
+        source_node_id: str,
+        *,
+        required_target_node_ids: Optional[Sequence[str]] = None,
+        batch_id: Optional[str] = None,
+        route_id: Optional[str] = None,
+    ) -> OutgoingMessageBatch:
+        source_node_id = str(source_node_id).strip()
+        if source_node_id not in graph.agent_nodes:
+            raise KeyError(f"unknown source AgentNode: {source_node_id}")
+        self.configure_agent_rings(graph)
+        self.configure_common_nodes(graph)
+        allowed_target_ids = self.active_framework_connections(graph, source_node_id)
+        required_ids = (
+            list(allowed_target_ids)
+            if required_target_node_ids is None
+            else [str(node_id) for node_id in required_target_node_ids]
+        )
+        if not required_ids:
+            raise ValueError("required_targets must not be empty")
+        graph_node_ids = graph._node_ids()
+        missing = [node_id for node_id in required_ids if node_id not in graph_node_ids]
+        if missing:
+            raise KeyError(f"unknown target node(s): {', '.join(missing)}")
+        disallowed = [node_id for node_id in required_ids if node_id not in allowed_target_ids]
+        if disallowed:
+            raise ValueError(
+                f"target node(s) not reachable from {source_node_id!r}: "
+                + ", ".join(disallowed)
+            )
+        source_inst = self._instances.get(source_node_id)
+        source_agent_id = (
+            source_inst.agent_id
+            if source_inst is not None
+            else graph.agent_nodes[source_node_id].runtime_agent_id
+        )
+        target_agent_ids: List[str] = []
+        target_node_kinds: Dict[str, str] = {}
+        seen_targets: set[str] = set()
+        for target_id in required_ids:
+            if target_id in seen_targets:
+                raise ValueError(f"duplicate required target: {target_id}")
+            seen_targets.add(target_id)
+            if target_id in graph.agent_nodes:
+                inst = self._instances.get(target_id)
+                target_agent_ids.append(
+                    inst.agent_id
+                    if inst is not None
+                    else graph.agent_nodes[target_id].runtime_agent_id
+                )
+                target_node_kinds[target_id] = "agent"
+            elif target_id in graph.common_nodes:
+                target_agent_ids.append(target_id)
+                target_node_kinds[target_id] = f"common:{graph.common_nodes[target_id].kind}"
+            else:
+                target_agent_ids.append(target_id)
+                target_node_kinds[target_id] = "node"
+        script_paths_by_target = {
+            target_id: self.graph_script_path(graph, source_node_id, target_id)
+            for target_id in required_ids
+            if target_id in graph.agent_nodes
+        }
+        batch = OutgoingMessageBatch(
+            batch_id=batch_id or f"out-{uuid.uuid4().hex[:12]}",
+            source_node_id=source_node_id,
+            source_agent_id=source_agent_id,
+            route_id=self._normalize_route_id(route_id),
+            required_target_node_ids=list(required_ids),
+            required_target_agent_ids=target_agent_ids,
+            ring_ids_by_target={
+                target_id: self._ring_ids_for_edge(source_node_id, target_id)
+                for target_id in required_ids
+                if target_id in graph.agent_nodes
+            },
+            closing_ring_ids_by_target={
+                target_id: self._closing_ring_ids_for_edge(source_node_id, target_id)
+                for target_id in required_ids
+                if target_id in graph.agent_nodes
+            },
+            script_paths_by_target=script_paths_by_target,
+            script_calls=self.script_calls_from_paths(graph, script_paths_by_target),
+            target_node_kinds_by_target=target_node_kinds,
+        )
+        self._outgoing_batches[batch.batch_id] = batch
+        self._emit(
+            GraphEvent(
+                "AgentOutgoingBatchCreated",
+                node_id=source_node_id,
+                agent_id=source_agent_id,
+                status=batch.status,
+                payload=batch.to_dict(),
+            )
+        )
+        return batch
+
+    def _queue_fan_in_ready_target(
+        self,
+        graph: "GraphDefinition",
+        gate: LiveFanInGate,
+        body: Any,
+    ) -> List[str]:
+        target_node_id = gate.target_node_id
+        downstream_batch = None
+        if target_node_id in graph.agent_nodes:
+            downstream = self.active_framework_connections(graph, target_node_id)
+            if downstream:
+                downstream_batch = self._create_outgoing_batch_from_graph_sync(
+                    graph,
+                    target_node_id,
+                    required_target_node_ids=downstream,
+                    route_id=gate.route_id,
+                )
+            queued_body = self._body_with_agent_framework_context_sync(
+                graph,
+                target_node_id,
+                body,
+                downstream_batch,
+                route_id=gate.route_id,
+            )
+            first_source = next(iter(gate.contributions.values()), None)
+            pending = self.queue_agent_message(
+                graph.agent_nodes[target_node_id],
+                queued_body,
+                source_node_id="fan_in",
+                source_agent_id=first_source.source_agent_id if first_source is not None else None,
+                route_id=gate.route_id,
+            )
+            gate.aggregate_message_id = pending.message_id
+            return [pending.message_id]
+        if target_node_id in graph.common_nodes:
+            first_source = next(iter(gate.contributions.values()), None)
+            pending = self.queue_common_node_message(
+                target_node_id,
+                body,
+                source_node_id="fan_in",
+                source_agent_id=first_source.source_agent_id if first_source is not None else None,
+                route_id=gate.route_id,
+            )
+            gate.aggregate_message_id = pending.message_id
+            return [pending.message_id]
+        raise KeyError(f"unknown fan-in target node: {target_node_id}")
+
+    def _body_with_agent_framework_context_sync(
+        self,
+        graph: "GraphDefinition",
+        target_node_id: str,
+        body: Any,
+        downstream_batch: Optional[OutgoingMessageBatch],
+        *,
+        route_id: Optional[str] = None,
+    ) -> Any:
+        try:
+            from .graph_control import inject_framework_context, ordinary_agent_framework_context
+
+            return inject_framework_context(
+                body,
+                ordinary_agent_framework_context(
+                    graph,
+                    target_node_id,
+                    batch=downstream_batch,
+                    runtime=self,
+                    route_id=route_id,
+                ),
+            )
+        except Exception:
+            log.exception("failed to inject framework context for fan-in aggregate")
+            return body
+
+    def _direct_deliver_fan_in_contribution(
+        self,
+        graph: "GraphDefinition",
+        target_node_id: str,
+        *,
+        source_node_id: str,
+        source_agent_id: Optional[str],
+        route_id: str,
+        kind: str,
+        status: str,
+        body: Any,
+        value: Any,
+        target_input_port: str,
+    ) -> Dict[str, Any]:
+        if status != "delivered":
+            return {
+                "gate_id": None,
+                "route_id": route_id,
+                "target_node_id": target_node_id,
+                "status": status,
+                "missing_inputs": [],
+                "queued_message_ids": [],
+            }
+        if kind == "value":
+            body = {target_input_port: value}
+        queued_ids: List[str] = []
+        if target_node_id in graph.agent_nodes:
+            if not self._body_has_framework_context_for_target(body, target_node_id):
+                downstream_batch = None
+                downstream = self.active_framework_connections(graph, target_node_id)
+                if downstream:
+                    downstream_batch = self._create_outgoing_batch_from_graph_sync(
+                        graph,
+                        target_node_id,
+                        required_target_node_ids=downstream,
+                        route_id=route_id,
+                    )
+                body = self._body_with_agent_framework_context_sync(
+                    graph,
+                    target_node_id,
+                    body,
+                    downstream_batch,
+                    route_id=route_id,
+                )
+            pending = self.queue_agent_message(
+                graph.agent_nodes[target_node_id],
+                body,
+                source_node_id=source_node_id,
+                source_agent_id=source_agent_id,
+                route_id=route_id,
+            )
+            queued_ids.append(pending.message_id)
+        elif target_node_id in graph.common_nodes:
+            pending = self.queue_common_node_message(
+                target_node_id,
+                body,
+                source_node_id=source_node_id,
+                source_agent_id=source_agent_id,
+                route_id=route_id,
+            )
+            queued_ids.append(pending.message_id)
+        else:
+            raise KeyError(f"unknown target node: {target_node_id}")
+        return {
+            "gate_id": None,
+            "route_id": route_id,
+            "target_node_id": target_node_id,
+            "status": "direct",
+            "missing_inputs": [],
+            "queued_message_ids": queued_ids,
+        }
+
+    @staticmethod
+    def _body_has_framework_context_for_target(body: Any, target_node_id: str) -> bool:
+        if not isinstance(body, dict):
+            return False
+        context = body.get("context")
+        if not isinstance(context, dict):
+            return False
+        framework_context = context.get("framework_context")
+        if not isinstance(framework_context, dict):
+            return False
+        return str(framework_context.get("agent_node_id") or "") == str(target_node_id)
+
+    def _propagate_fan_in_skip(
+        self,
+        graph: "GraphDefinition",
+        source_node_id: str,
+        route_id: str,
+        *,
+        reason: str,
+        seen: Optional[set[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        seen = seen or set()
+        if source_node_id in seen:
+            return []
+        seen.add(source_node_id)
+        results: List[Dict[str, Any]] = []
+        for edge in graph.edges:
+            if edge.source != source_node_id or not edge.is_exec_edge:
+                continue
+            result = self.offer_fan_in_contribution(
+                graph,
+                edge.target,
+                source_node_id=source_node_id,
+                source_output_port=edge.output_port or DEFAULT_OUTPUT_PORT,
+                target_input_port=edge.input_port or "in",
+                edge_type=edge.edge_type or "exec",
+                kind="message",
+                status="skipped",
+                route_id=route_id,
+                reason=reason,
+            )
+            results.append(result)
+            if result.get("status") == "skipped":
+                results.extend(
+                    self._propagate_fan_in_skip(
+                        graph,
+                        edge.target,
+                        route_id,
+                        reason=reason,
+                        seen=seen,
+                    )
+                )
+        return results
+
+    def offer_fan_in_contribution(
+        self,
+        graph: "GraphDefinition",
+        target_node_id: str,
+        *,
+        source_node_id: str,
+        source_output_port: Optional[str] = None,
+        target_input_port: Optional[str] = None,
+        edge_type: Optional[str] = None,
+        kind: str = "message",
+        status: str = "delivered",
+        body: Any = None,
+        value: Any = None,
+        source_agent_id: Optional[str] = None,
+        route_id: Optional[str] = None,
+        reason: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        self.configure_common_nodes(graph)
+        target_node_id = str(target_node_id).strip()
+        route = self._normalize_route_id(route_id)
+        required_inputs = self._fan_in_required_inputs(graph, target_node_id)
+        direct_target_input_port = str(target_input_port or "in").strip() or "in"
+        normalized_kind = str(kind or "message").strip().lower()
+        normalized_status = str(status or "delivered").strip().lower()
+        if len(required_inputs) <= 1:
+            return self._direct_deliver_fan_in_contribution(
+                graph,
+                target_node_id,
+                source_node_id=str(source_node_id).strip(),
+                source_agent_id=source_agent_id,
+                route_id=route,
+                kind=normalized_kind,
+                status=normalized_status,
+                body=body,
+                value=value,
+                target_input_port=direct_target_input_port,
+            )
+
+        gate_id = self._fan_in_gate_id(route, target_node_id)
+        gate = self._fan_in_gates.get(gate_id)
+        if gate is None:
+            gate = LiveFanInGate(
+                route_id=route,
+                target_node_id=target_node_id,
+                required_inputs=required_inputs,
+            )
+            self._fan_in_gates[gate_id] = gate
+            self._emit(
+                GraphEvent(
+                    "LiveFanInGateCreated",
+                    node_id=target_node_id,
+                    status=gate.status,
+                    payload=gate.to_dict(),
+                )
+            )
+
+        required_key = self._find_required_fan_in_key(
+            gate,
+            source_node_id=str(source_node_id).strip(),
+            source_output_port=source_output_port,
+            target_input_port=target_input_port,
+            edge_type=edge_type,
+        )
+        contribution = FanInContribution(
+            source_node_id=required_key.source_node_id,
+            source_output_port=required_key.source_output_port,
+            target_input_port=required_key.target_input_port,
+            edge_type=required_key.edge_type,
+            kind=normalized_kind,
+            status=normalized_status,
+            body=body,
+            value=value,
+            value_type=self._value_type(value) if normalized_kind == "value" else None,
+            source_agent_id=source_agent_id,
+            reason=reason,
+            error=error,
+        )
+        previous = gate.contributions.get(required_key.key)
+        if previous is not None:
+            contribution.overwrite_count = previous.overwrite_count + 1
+        gate.contributions[required_key.key] = contribution
+        gate.updated_at = time.monotonic()
+
+        delivered_value_ports: Dict[str, str] = {}
+        for item in gate.contributions.values():
+            if item.status != "delivered" or item.kind != "value":
+                continue
+            existing_source = delivered_value_ports.get(item.target_input_port)
+            if existing_source is not None and existing_source != item.key:
+                gate.status = "failed"
+                gate.error = (
+                    f"target input port {item.target_input_port!r} received multiple value contributions"
+                )
+                gate.completed_at = time.monotonic()
+                self._emit(
+                    GraphEvent(
+                        "LiveFanInGateFailed",
+                        node_id=target_node_id,
+                        status=gate.status,
+                        payload=gate.to_dict(),
+                    )
+                )
+                return self._fan_in_summary(gate, contribution=contribution)
+            delivered_value_ports[item.target_input_port] = item.key
+
+        if any(item.status == "failed" for item in gate.contributions.values()):
+            gate.status = "failed"
+            gate.error = error or "fan-in contribution failed"
+            gate.completed_at = time.monotonic()
+            self._emit(
+                GraphEvent(
+                    "LiveFanInGateFailed",
+                    node_id=target_node_id,
+                    status=gate.status,
+                    payload=gate.to_dict(),
+                )
+            )
+            return self._fan_in_summary(gate, contribution=contribution)
+
+        if any(
+            item.status == "skipped"
+            for item in gate.contributions.values()
+            if item.edge_type == "exec" or item.kind == "message"
+        ):
+            gate.status = "skipped"
+            gate.final_reason = reason or "required fan-in message input skipped"
+            gate.completed_at = time.monotonic()
+            self._emit(
+                GraphEvent(
+                    "LiveFanInGateSkipped",
+                    node_id=target_node_id,
+                    status=gate.status,
+                    payload=gate.to_dict(),
+                )
+            )
+            self._propagate_fan_in_skip(
+                graph,
+                target_node_id,
+                route,
+                reason=gate.final_reason,
+            )
+            return self._fan_in_summary(gate, contribution=contribution)
+
+        if gate.missing_inputs:
+            gate.status = "waiting"
+            self._emit(
+                GraphEvent(
+                    "LiveFanInContributionCollected",
+                    node_id=target_node_id,
+                    status=gate.status,
+                    payload=gate.to_dict(),
+                )
+            )
+            return self._fan_in_summary(gate, contribution=contribution)
+
+        try:
+            aggregate = self._build_fan_in_aggregate(gate)
+        except Exception as exc:
+            gate.status = "failed"
+            gate.error = str(exc)
+            gate.completed_at = time.monotonic()
+            self._emit(
+                GraphEvent(
+                    "LiveFanInGateFailed",
+                    node_id=target_node_id,
+                    status=gate.status,
+                    payload=gate.to_dict(),
+                )
+            )
+            return self._fan_in_summary(gate, contribution=contribution)
+        gate.status = "ready"
+        gate.completed_at = time.monotonic()
+        queued_ids = self._queue_fan_in_ready_target(graph, gate, aggregate)
+        self._emit(
+            GraphEvent(
+                "LiveFanInGateReady",
+                node_id=target_node_id,
+                status=gate.status,
+                payload=gate.to_dict(),
+            )
+        )
+        return self._fan_in_summary(
+            gate,
+            queued_message_ids=queued_ids,
+            contribution=contribution,
+        )
 
     async def _emit_common_node_output(
         self,
@@ -2741,6 +3608,9 @@ class GraphRuntime:
         *,
         source_agent_id: Optional[str] = None,
         tick_source_node_id: Optional[str] = None,
+        route_id: Optional[str] = None,
+        status: str = "delivered",
+        reason: Optional[str] = None,
     ) -> List[str]:
         # ``common_node_id`` is the framework node that emits the output.
         emit_source = str(common_node_id)
@@ -2775,35 +3645,37 @@ class GraphRuntime:
                         )
                     )
                     continue
-                downstream = self.active_framework_connections(graph, target_id)
-                downstream_batch = None
-                if downstream:
-                    downstream_batch = await self.create_outgoing_batch_from_graph(
-                        graph,
-                        target_id,
-                        required_target_node_ids=downstream,
-                    )
-                queued_body = await self._body_with_agent_framework_context(
+                contribution = self.offer_fan_in_contribution(
                     graph,
                     target_id,
-                    body,
-                    downstream_batch,
-                )
-                pending = self.queue_agent_message(
-                    graph.agent_nodes[target_id],
-                    queued_body,
                     source_node_id=emit_source,
+                    source_output_port=output_port,
+                    target_input_port="in",
+                    edge_type="exec",
+                    kind="message",
+                    status=status,
+                    body=body,
                     source_agent_id=source_agent_id,
+                    route_id=route_id,
+                    reason=reason,
                 )
-                queued_ids.append(pending.message_id)
+                queued_ids.extend(str(item) for item in contribution.get("queued_message_ids", []))
             elif target_id in graph.common_nodes:
-                pending = self.queue_common_node_message(
+                contribution = self.offer_fan_in_contribution(
+                    graph,
                     target_id,
-                    body,
                     source_node_id=emit_source,
+                    source_output_port=output_port,
+                    target_input_port="in",
+                    edge_type="exec",
+                    kind="message",
+                    status=status,
+                    body=body,
                     source_agent_id=source_agent_id,
+                    route_id=route_id,
+                    reason=reason,
                 )
-                queued_ids.append(pending.message_id)
+                queued_ids.extend(str(item) for item in contribution.get("queued_message_ids", []))
             else:
                 self._emit(
                     GraphEvent(
@@ -2826,6 +3698,7 @@ class GraphRuntime:
                     "output_port": output_port,
                     "target_node_ids": list(targets),
                     "queued_message_ids": list(queued_ids),
+                    "status": status,
                 },
             )
         )
@@ -2837,6 +3710,8 @@ class GraphRuntime:
         target_node_id: str,
         body: Any,
         downstream_batch: Optional[OutgoingMessageBatch],
+        *,
+        route_id: Optional[str] = None,
     ) -> Any:
         try:
             from .graph_control import inject_framework_context, ordinary_agent_framework_context
@@ -2848,6 +3723,7 @@ class GraphRuntime:
                     target_node_id,
                     batch=downstream_batch,
                     runtime=self,
+                    route_id=route_id,
                 ),
             )
         except Exception:
@@ -3632,6 +4508,10 @@ class GraphRuntime:
             batch_id: batch.to_dict()
             for batch_id, batch in self._outgoing_batches.items()
         }
+        fan_in_state = {
+            gate_id: gate.to_dict()
+            for gate_id, gate in self._fan_in_gates.items()
+        }
         join_state = {
             join_id: barrier.to_dict()
             for join_id, barrier in self._join_barriers.items()
@@ -3666,6 +4546,7 @@ class GraphRuntime:
                 "dispatching_message_ids": list(self._dispatch_tasks),
             },
             "outgoing_batches": outgoing_state,
+            "fan_in_gates": fan_in_state,
             "agent_rings": self.agent_ring_status(graph),
             "joins": join_state,
             "jobs": jobs_state,
@@ -4274,6 +5155,9 @@ class GraphRuntime:
         for ring in rings:
             existing = self._agent_rings.get(ring.ring_id)
             self._agent_rings[ring.ring_id] = ring
+            self._agent_ring_completed_circulations.setdefault(ring.ring_id, 0)
+            self._agent_ring_context_generations.setdefault(ring.ring_id, 0)
+            self._agent_ring_last_context_refresh_circulation.setdefault(ring.ring_id, 0)
             for node_id in ring.ordered_node_ids:
                 counts = self._agent_ring_circulation_counts.setdefault(node_id, {})
                 if ring.ring_id not in counts:
@@ -4288,10 +5172,80 @@ class GraphRuntime:
                     counts.pop(ring_id, None)
             if not counts:
                 self._agent_ring_circulation_counts.pop(node_id, None)
+        for ring_id in list(self._agent_ring_completed_circulations):
+            if ring_id not in current_ids:
+                self._agent_ring_completed_circulations.pop(ring_id, None)
+                self._agent_ring_context_generations.pop(ring_id, None)
+                self._agent_ring_last_context_refresh_circulation.pop(ring_id, None)
         return rings
 
     def agent_ring_circulation_counts_for(self, node_id: str) -> Dict[str, int]:
         return dict(self._agent_ring_circulation_counts.get(node_id, {}))
+
+    def _agent_ring_status_dict(
+        self,
+        ring_id: str,
+        ring: AgentRing,
+        *,
+        remaining_circulations: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        remaining = (
+            self._remaining_for_ring(ring_id)
+            if remaining_circulations is None
+            else remaining_circulations
+        )
+        data = ring.to_dict(remaining_circulations=remaining)
+        data.update(
+            {
+                "completed_circulations": self._agent_ring_completed_circulations.get(
+                    ring_id,
+                    0,
+                ),
+                "context_generation": self._agent_ring_context_generations.get(
+                    ring_id,
+                    0,
+                ),
+                "last_context_refresh_circulation": self._agent_ring_last_context_refresh_circulation.get(
+                    ring_id,
+                    0,
+                ),
+            }
+        )
+        return data
+
+    def agent_ring_context_state_for(self, node_id: str) -> Dict[str, Any]:
+        """Return ring refresh state visible to one ring participant."""
+
+        rings: Dict[str, Dict[str, Any]] = {}
+        generations_by_ring: Dict[str, int] = {}
+        refresh_periods_by_ring: Dict[str, int] = {}
+        completed_circulations_by_ring: Dict[str, int] = {}
+        remaining_circulations_by_ring: Dict[str, int] = {}
+        last_refresh_circulations_by_ring: Dict[str, int] = {}
+        for ring_id, ring in sorted(self._agent_rings.items()):
+            if node_id not in ring.ordered_node_ids:
+                continue
+            ring_state = self._agent_ring_status_dict(ring_id, ring)
+            rings[ring_id] = ring_state
+            generations_by_ring[ring_id] = int(ring_state["context_generation"])
+            refresh_periods_by_ring[ring_id] = int(ring.context_refresh_period)
+            completed_circulations_by_ring[ring_id] = int(
+                ring_state["completed_circulations"]
+            )
+            remaining_circulations_by_ring[ring_id] = int(
+                ring_state["remaining_circulations"]
+            )
+            last_refresh_circulations_by_ring[ring_id] = int(
+                ring_state["last_context_refresh_circulation"]
+            )
+        return {
+            "rings": rings,
+            "generations_by_ring": generations_by_ring,
+            "refresh_periods_by_ring": refresh_periods_by_ring,
+            "completed_circulations_by_ring": completed_circulations_by_ring,
+            "remaining_circulations_by_ring": remaining_circulations_by_ring,
+            "last_refresh_circulations_by_ring": last_refresh_circulations_by_ring,
+        }
 
     def agent_ring_status(self, graph: Optional["GraphDefinition"] = None) -> Dict[str, Any]:
         if graph is not None:
@@ -4310,7 +5264,9 @@ class GraphRuntime:
             )
         return {
             "rings": {
-                ring_id: ring.to_dict(
+                ring_id: self._agent_ring_status_dict(
+                    ring_id,
+                    ring,
                     remaining_circulations=remaining_by_ring.get(
                         ring_id,
                         ring.max_circulations,
@@ -4418,7 +5374,11 @@ class GraphRuntime:
                 f"target {target_node_id!r} is not required for batch {batch_id}"
             )
         if target_node_id in batch.ring_recorded_target_node_ids:
-            return {"recorded": False, "consumed_ring_ids": []}
+            return {
+                "recorded": False,
+                "consumed_ring_ids": [],
+                "refreshed_ring_ids": [],
+            }
 
         ring_ids = list(batch.ring_ids_by_target.get(target_node_id, []))
         if ring_ids and not any(self._remaining_for_ring(ring_id) > 0 for ring_id in ring_ids):
@@ -4429,6 +5389,7 @@ class GraphRuntime:
 
         consumed_ring_ids: List[str] = []
         exhausted_ring_ids: List[str] = []
+        refreshed_ring_ids: List[str] = []
         for ring_id in batch.closing_ring_ids_by_target.get(target_node_id, []):
             remaining = self._remaining_for_ring(ring_id)
             if remaining <= 0:
@@ -4437,6 +5398,14 @@ class GraphRuntime:
             next_remaining = max(remaining - 1, 0)
             for node_id in ring.ordered_node_ids:
                 self._agent_ring_circulation_counts.setdefault(node_id, {})[ring_id] = next_remaining
+            completed = self._agent_ring_completed_circulations.get(ring_id, 0) + 1
+            self._agent_ring_completed_circulations[ring_id] = completed
+            if completed % ring.context_refresh_period == 0:
+                self._agent_ring_context_generations[ring_id] = (
+                    self._agent_ring_context_generations.get(ring_id, 0) + 1
+                )
+                self._agent_ring_last_context_refresh_circulation[ring_id] = completed
+                refreshed_ring_ids.append(ring_id)
             consumed_ring_ids.append(ring_id)
             if next_remaining == 0:
                 exhausted_ring_ids.append(ring_id)
@@ -4449,7 +5418,12 @@ class GraphRuntime:
                 "target_node_id": target_node_id,
                 "consumed_ring_ids": list(consumed_ring_ids),
                 "exhausted_ring_ids": list(exhausted_ring_ids),
+                "refreshed_ring_ids": list(refreshed_ring_ids),
                 "counts_by_agent": self.agent_ring_status()["counts_by_agent"],
+                "ring_context_generations": {
+                    ring_id: self._agent_ring_context_generations.get(ring_id, 0)
+                    for ring_id in consumed_ring_ids
+                },
             }
             self._emit(
                 GraphEvent(
@@ -4460,6 +5434,34 @@ class GraphRuntime:
                     payload=payload,
                 )
             )
+            for ring_id in refreshed_ring_ids:
+                ring = self._agent_rings[ring_id]
+                self._emit(
+                    GraphEvent(
+                        "AgentRingContextRefreshed",
+                        node_id=batch.source_node_id,
+                        agent_id=batch.source_agent_id,
+                        status="refreshed",
+                        payload={
+                            "batch_id": batch.batch_id,
+                            "ring_id": ring_id,
+                            "context_generation": self._agent_ring_context_generations.get(
+                                ring_id,
+                                0,
+                            ),
+                            "completed_circulations": self._agent_ring_completed_circulations.get(
+                                ring_id,
+                                0,
+                            ),
+                            "context_refresh_period": ring.context_refresh_period,
+                            "edge": {
+                                "from": batch.source_node_id,
+                                "to": target_node_id,
+                            },
+                            "ordered_node_ids": list(ring.ordered_node_ids),
+                        },
+                    )
+                )
             for ring_id in exhausted_ring_ids:
                 self._emit(
                     GraphEvent(
@@ -4485,6 +5487,7 @@ class GraphRuntime:
             "ring_ids": ring_ids,
             "consumed_ring_ids": consumed_ring_ids,
             "exhausted_ring_ids": exhausted_ring_ids,
+            "refreshed_ring_ids": refreshed_ring_ids,
         }
 
     async def create_outgoing_batch(
@@ -4572,6 +5575,7 @@ class GraphRuntime:
         *,
         required_target_node_ids: Optional[Sequence[str]] = None,
         batch_id: Optional[str] = None,
+        route_id: Optional[str] = None,
     ) -> OutgoingMessageBatch:
         """Create an outgoing batch using graph-derived agent connections."""
         if source_node_id not in graph.agent_nodes:
@@ -4624,6 +5628,7 @@ class GraphRuntime:
             batch_id=batch_id or f"out-{uuid.uuid4().hex[:12]}",
             source_node_id=source_node_id,
             source_agent_id=source_inst.agent_id,
+            route_id=self._normalize_route_id(route_id),
             required_target_node_ids=list(required_ids),
             required_target_agent_ids=target_agent_ids,
             ring_ids_by_target={
@@ -4821,10 +5826,12 @@ class GraphRuntime:
                 "ring_record": dict(ring_record),
             },
         )
+        dispatch_result: Optional[Dict[str, Any]] = None
         if ready:
             dispatched = self.dispatch_outgoing_batch(batch.batch_id)
+            dispatch_result = dispatched
             remaining = dispatched["remaining_targets"]
-        return {
+        result = {
             "staged": True,
             "overwritten": overwritten,
             "no_op": is_no_op,
@@ -4833,6 +5840,13 @@ class GraphRuntime:
             "batch_id": batch.batch_id,
             "ring_record": dict(ring_record),
         }
+        if dispatch_result is not None:
+            result["dispatch"] = dict(dispatch_result)
+            fan_in = dispatch_result.get("fan_in")
+            if fan_in is not None:
+                result["fan_in"] = fan_in
+            result["message_ids"] = list(dispatch_result.get("message_ids", []))
+        return result
 
     def dispatch_outgoing_batch(self, batch_id: str) -> Dict[str, Any]:
         """Queue a complete staged batch into downstream agent queues."""
@@ -4848,6 +5862,120 @@ class GraphRuntime:
             )
 
         message_ids: List[str] = []
+        fan_in_results: List[Dict[str, Any]] = []
+        graph = self._common_graph
+        if graph is not None:
+            for target_node_id in batch.required_target_node_ids:
+                staged = batch.staged_messages.get(target_node_id)
+                if staged is None and target_node_id not in batch.no_op_target_node_ids:
+                    continue
+                target_kind = batch.target_node_kinds_by_target.get(
+                    target_node_id,
+                    staged.target_node_kind if staged is not None else "agent",
+                )
+                edge_source_node_id = batch.source_node_id
+                edge_output_port = DEFAULT_OUTPUT_PORT
+                edge_input_port = "in"
+                edge_type = "exec"
+                contribution_kind = "message"
+                contribution_body = staged.body if staged is not None else None
+                contribution_status = (
+                    "skipped"
+                    if target_node_id in batch.no_op_target_node_ids
+                    else "delivered"
+                )
+                contribution_value: Any = None
+                script_path = [str(item) for item in batch.script_paths_by_target.get(target_node_id, [])]
+                if (
+                    isinstance(contribution_body, dict)
+                    and contribution_body.get("type") == "blueprint_script_result"
+                ):
+                    script_node_id = str(contribution_body.get("script_node_id") or "").strip()
+                    if script_node_id:
+                        edge_source_node_id = script_node_id
+                        script_path = [*script_path, script_node_id] if script_node_id not in script_path else script_path
+                elif script_path:
+                    edge_source_node_id = script_path[-1]
+
+                for edge in graph.edges:
+                    if edge.source == edge_source_node_id and edge.target == target_node_id and edge.is_exec_edge:
+                        edge_output_port = edge.output_port or DEFAULT_OUTPUT_PORT
+                        edge_input_port = edge.input_port or "in"
+                        edge_type = edge.edge_type or "exec"
+                        break
+
+                result = self.offer_fan_in_contribution(
+                    graph,
+                    target_node_id,
+                    source_node_id=edge_source_node_id,
+                    source_output_port=edge_output_port,
+                    target_input_port=edge_input_port,
+                    edge_type=edge_type,
+                    kind=contribution_kind,
+                    status=contribution_status,
+                    body=contribution_body,
+                    value=contribution_value,
+                    source_agent_id=batch.source_agent_id,
+                    route_id=batch.route_id,
+                    reason="agent_dispatch_no_op" if contribution_status == "skipped" else None,
+                )
+                fan_in_results.append(result)
+                message_ids.extend(str(item) for item in result.get("queued_message_ids", []))
+
+                if isinstance(contribution_body, dict) and contribution_body.get("type") == "blueprint_script_result":
+                    outputs = contribution_body.get("outputs")
+                    if isinstance(outputs, dict):
+                        script_source = edge_source_node_id
+                        for edge in graph.edges:
+                            if edge.source != script_source or edge.target != target_node_id:
+                                continue
+                            if (edge.edge_type or "exec") != "data":
+                                continue
+                            output_port = edge.output_port or "result"
+                            if output_port not in outputs:
+                                continue
+                            value_result = self.offer_fan_in_contribution(
+                                graph,
+                                target_node_id,
+                                source_node_id=script_source,
+                                source_output_port=output_port,
+                                target_input_port=edge.input_port or output_port,
+                                edge_type="data",
+                                kind="value",
+                                status=contribution_status,
+                                value=outputs.get(output_port),
+                                source_agent_id=batch.source_agent_id,
+                                route_id=batch.route_id,
+                            )
+                            fan_in_results.append(value_result)
+                            message_ids.extend(
+                                str(item)
+                                for item in value_result.get("queued_message_ids", [])
+                            )
+            batch.status = "dispatched"
+            batch.dispatched_message_ids = message_ids
+            self._emit(
+                GraphEvent(
+                    "AgentOutgoingBatchDispatched",
+                    node_id=batch.source_node_id,
+                    agent_id=batch.source_agent_id,
+                    status=batch.status,
+                    payload={**batch.to_dict(), "fan_in": list(fan_in_results)},
+                )
+            )
+            return {
+                "batch_id": batch.batch_id,
+                "status": batch.status,
+                "ready_to_dispatch": True,
+                "remaining_targets": [],
+                "message_ids": list(message_ids),
+                "fan_in": fan_in_results[0] if len(fan_in_results) == 1 else {
+                    "status": "mixed",
+                    "results": list(fan_in_results),
+                },
+                "fan_in_results": list(fan_in_results),
+            }
+
         for target_node_id in batch.required_target_node_ids:
             if target_node_id in batch.no_op_target_node_ids:
                 continue
@@ -4946,6 +6074,7 @@ class GraphRuntime:
         timeout_sec: Optional[float] = None,
         source_node_id: Optional[str] = None,
         source_agent_id: Optional[str] = None,
+        route_id: Optional[str] = None,
         message_id: Optional[str] = None,
         queue_mode: str = "default",
     ) -> PendingAgentMessage:
@@ -4965,6 +6094,7 @@ class GraphRuntime:
             body=body,
             source_node_id=source_node_id,
             source_agent_id=source_agent_id,
+            route_id=str(route_id) if route_id is not None else None,
             timeout_sec=timeout_sec,
             queue_mode=normalized_queue_mode,
         )
@@ -5019,6 +6149,7 @@ class GraphRuntime:
         *,
         source_node_id: Optional[str] = None,
         source_agent_id: Optional[str] = None,
+        route_id: Optional[str] = None,
         message_id: Optional[str] = None,
     ) -> PendingCommonNodeMessage:
         if self._closed:
@@ -5033,6 +6164,7 @@ class GraphRuntime:
             body=body,
             source_node_id=source_node_id,
             source_agent_id=source_agent_id,
+            route_id=str(route_id) if route_id is not None else None,
         )
         queue = self._common_node_message_queues.setdefault(node_id, [])
         queue.append(pending)
@@ -5786,6 +6918,7 @@ class GraphDefinition:
     common_nodes: Dict[str, CommonNode] = field(default_factory=dict)
     edges: List[GraphEdge] = field(default_factory=list)
     agent_ring_max_circulations: Dict[str, int] = field(default_factory=dict)
+    agent_ring_context_refresh_periods: Dict[str, int] = field(default_factory=dict)
 
     def _node_ids(self) -> set[str]:
         agent_ids = set()
@@ -6172,11 +7305,21 @@ class GraphDefinition:
                     ),
                 )
             )
+            context_refresh_period = int(
+                self.agent_ring_context_refresh_periods.get(
+                    topology_id,
+                    self.agent_ring_context_refresh_periods.get(
+                        ring_id,
+                        self.agent_ring_context_refresh_periods.get(str(index), 1),
+                    ),
+                )
+            )
             rings.append(
                 AgentRing(
                     ring_id=ring_id,
                     ordered_node_ids=cycle,
                     max_circulations=max_circulations,
+                    context_refresh_period=context_refresh_period,
                     topology_id=topology_id,
                 )
             )
@@ -6370,6 +7513,77 @@ class GraphDefinition:
                     ready.append(target)
         if visited != len(node_ids):
             raise ValueError("graph contains a cycle; DAG execution requires acyclic edges")
+
+    def validate_agent_ring_graph(self) -> None:
+        """Validate a runnable graph while permitting bounded AgentNode rings."""
+
+        try:
+            self.validate_dag()
+            return
+        except ValueError as exc:
+            if "graph contains a cycle" not in str(exc):
+                raise
+            cycle_error = exc
+
+        rings = self.agent_rings()
+        if not rings:
+            raise cycle_error
+
+        node_ids = self._node_ids()
+        adjacency = self._adjacency(node_ids)
+        index = 0
+        stack: List[str] = []
+        on_stack: set[str] = set()
+        indices: Dict[str, int] = {}
+        lowlinks: Dict[str, int] = {}
+        components: List[List[str]] = []
+
+        def strongconnect(node_id: str) -> None:
+            nonlocal index
+            indices[node_id] = index
+            lowlinks[node_id] = index
+            index += 1
+            stack.append(node_id)
+            on_stack.add(node_id)
+            for target in adjacency.get(node_id, []):
+                if target not in indices:
+                    strongconnect(target)
+                    lowlinks[node_id] = min(lowlinks[node_id], lowlinks[target])
+                elif target in on_stack:
+                    lowlinks[node_id] = min(lowlinks[node_id], indices[target])
+            if lowlinks[node_id] != indices[node_id]:
+                return
+            component: List[str] = []
+            while stack:
+                item = stack.pop()
+                on_stack.remove(item)
+                component.append(item)
+                if item == node_id:
+                    break
+            components.append(component)
+
+        for node_id in node_ids:
+            if node_id not in indices:
+                strongconnect(node_id)
+
+        allowed_cycle_nodes = set(self.agent_nodes) | set(self.script_nodes)
+        for component in components:
+            component_set = set(component)
+            has_self_loop = any(edge.source == edge.target and edge.source in component_set for edge in self.edges)
+            if len(component) == 1 and not has_self_loop:
+                continue
+            if any(node_id not in allowed_cycle_nodes for node_id in component):
+                raise cycle_error
+            agent_members = {node_id for node_id in component if node_id in self.agent_nodes}
+            if len(agent_members) < 2:
+                raise cycle_error
+            covered_agents: set[str] = set()
+            for ring in rings:
+                ring_agents = set(ring.ordered_node_ids)
+                if ring_agents.issubset(agent_members):
+                    covered_agents.update(ring_agents)
+            if not agent_members.issubset(covered_agents):
+                raise cycle_error
 
     def validate_runnable(self) -> None:
         """Validate the stricter visual-blueprint run contract.

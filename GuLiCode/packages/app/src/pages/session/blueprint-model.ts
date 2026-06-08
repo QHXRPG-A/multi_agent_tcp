@@ -166,6 +166,22 @@ export type BlueprintEdge = {
   input_port?: string
 }
 
+export type BlueprintAgentRingEdgePair = {
+  from: string
+  to: string
+}
+
+export type BlueprintAgentRing = {
+  ring_id: string
+  topology_id: string
+  ordered_node_ids: string[]
+  edge_node_pairs: BlueprintAgentRingEdgePair[]
+  closing_edge: BlueprintAgentRingEdgePair
+  max_circulations: number
+  context_refresh_period: number
+  visual_edge_ids: string[]
+}
+
 export type BlueprintNodeLayout = {
   x: number
   y: number
@@ -212,6 +228,8 @@ export type BlueprintDraft = {
     script_nodes: Record<string, BlueprintScriptNode>
     common_nodes: Record<string, BlueprintCommonNode>
     edges: BlueprintEdge[]
+    agent_ring_max_circulations: Record<string, number>
+    agent_ring_context_refresh_periods: Record<string, number>
   }
   layout: {
     nodes: Record<string, BlueprintNodeLayout>
@@ -228,6 +246,8 @@ export type RuntimeGraphDraft = {
   common_nodes?: Record<string, BlueprintCommonNode>
   script_nodes?: Record<string, BlueprintScriptNode>
   prompt_nodes?: Record<string, BlueprintPromptNode>
+  agent_ring_max_circulations?: Record<string, number>
+  agent_ring_context_refresh_periods?: Record<string, number>
   edges: Array<{
     from: string
     to: string
@@ -356,6 +376,7 @@ export function createDefaultBlueprintDraft(projectWorkdir = DEFAULT_PROJECT_WOR
       agent_nodes: {
         planner: agentNode({
           node_id: "planner",
+          node_type: "agent",
           agent_id: "agent-planner",
           prompt: "Break down the user goal and dispatch implementation work.",
           write_scope: ["shared/reports/planning/**"],
@@ -385,6 +406,8 @@ export function createDefaultBlueprintDraft(projectWorkdir = DEFAULT_PROJECT_WOR
         createEdge("coder", "review"),
         createEdge("review", "summary"),
       ],
+      agent_ring_max_circulations: {},
+      agent_ring_context_refresh_periods: {},
     },
     layout: {
       nodes: {
@@ -424,6 +447,8 @@ export function cloneBlueprintDraft(draft: BlueprintDraft): BlueprintDraft {
         Object.entries(draft.graph.agent_nodes).map(([id, node]) => [id, normalizeAgentNode(id, node)]),
       ),
       edges: draft.graph.edges.map((edge) => ({ ...edge })),
+      agent_ring_max_circulations: normalizeRingNumberRecord(draft.graph.agent_ring_max_circulations, 0),
+      agent_ring_context_refresh_periods: normalizeRingNumberRecord(draft.graph.agent_ring_context_refresh_periods, 1),
     },
     layout: {
       nodes: Object.fromEntries(Object.entries(draft.layout.nodes).map(([id, layout]) => [id, { ...layout }])),
@@ -507,6 +532,8 @@ export function fromBlueprintDocument(
         output_port: edge.output_port ?? DEFAULT_OUTPUT_PORT,
         input_port: edge.input_port ?? DEFAULT_INPUT_PORT,
       })),
+      agent_ring_max_circulations: normalizeRingNumberRecord(graph.agent_ring_max_circulations, 0),
+      agent_ring_context_refresh_periods: normalizeRingNumberRecord(graph.agent_ring_context_refresh_periods, 1),
     },
     layout: {
       nodes: Object.fromEntries(
@@ -885,6 +912,128 @@ export function fanEdgeGroup(draft: BlueprintDraft, edge: BlueprintEdge): Bluepr
   return [edge]
 }
 
+type AgentRingConnection = {
+  target: string
+  edgeIds: string[]
+}
+
+export function agentRingConfigKey(ring: Pick<BlueprintAgentRing, "topology_id" | "ring_id">) {
+  return ring.topology_id || ring.ring_id
+}
+
+export function agentRingsForDraft(draft: BlueprintDraft): BlueprintAgentRing[] {
+  const connections = agentConnectionsForRings(draft)
+  const cycles: string[][] = []
+  const seen = new Set<string>()
+  const orderedAgentIds = Object.keys(draft.graph.agent_nodes).sort()
+
+  function visit(start: string, current: string, path: string[]) {
+    for (const connection of connections[current] ?? []) {
+      const target = connection.target
+      if (target === start) {
+        if (path.length >= 2) {
+          const key = path.join("\u0000")
+          if (!seen.has(key)) {
+            seen.add(key)
+            cycles.push([...path])
+          }
+        }
+        continue
+      }
+      if (path.includes(target)) continue
+      if (target < start) continue
+      visit(start, target, [...path, target])
+    }
+  }
+
+  for (const start of orderedAgentIds) {
+    visit(start, start, [start])
+  }
+
+  cycles.sort((left, right) => left.length - right.length || left.join("\u0000").localeCompare(right.join("\u0000")))
+  return cycles.map((cycle, cycleIndex) => {
+    const index = cycleIndex + 1
+    const ringId = `ring${index}`
+    const topologyId = `ring-${cycle.join("-")}`
+    const edgeNodePairs = cycle.map((nodeId, nodeIndex) => ({
+      from: nodeId,
+      to: cycle[(nodeIndex + 1) % cycle.length]!,
+    }))
+    const visualEdgeIds = new Set<string>()
+    for (const pair of edgeNodePairs) {
+      const connection = (connections[pair.from] ?? []).find((item) => item.target === pair.to)
+      for (const edgeIdValue of connection?.edgeIds ?? []) {
+        visualEdgeIds.add(edgeIdValue)
+      }
+    }
+    return {
+      ring_id: ringId,
+      topology_id: topologyId,
+      ordered_node_ids: [...cycle],
+      edge_node_pairs: edgeNodePairs,
+      closing_edge: edgeNodePairs[edgeNodePairs.length - 1]!,
+      max_circulations: configuredRingNumber(draft.graph.agent_ring_max_circulations, topologyId, ringId, index, 1, 0),
+      context_refresh_period: configuredRingNumber(
+        draft.graph.agent_ring_context_refresh_periods,
+        topologyId,
+        ringId,
+        index,
+        1,
+        1,
+      ),
+      visual_edge_ids: [...visualEdgeIds],
+    }
+  })
+}
+
+function agentConnectionsForRings(draft: BlueprintDraft): Record<string, AgentRingConnection[]> {
+  const connections: Record<string, AgentRingConnection[]> = Object.fromEntries(
+    Object.keys(draft.graph.agent_nodes).map((nodeId) => [nodeId, []]),
+  )
+  for (const sourceId of Object.keys(draft.graph.agent_nodes).sort()) {
+    for (const connection of agentTargetsThroughScripts(draft, sourceId)) {
+      if (!connections[sourceId].some((item) => item.target === connection.target)) {
+        connections[sourceId].push(connection)
+      }
+    }
+  }
+  return connections
+}
+
+function agentTargetsThroughScripts(draft: BlueprintDraft, sourceId: string): AgentRingConnection[] {
+  const nodeSet = new Set(nodeIds(draft))
+  const execEdges = draft.graph.edges
+    .filter((edge) => (edge.edge_type || "exec") === "exec" && nodeSet.has(edge.from) && nodeSet.has(edge.to))
+    .sort((left, right) => left.id.localeCompare(right.id))
+  const edgesBySource = new Map<string, BlueprintEdge[]>()
+  for (const edge of execEdges) {
+    const items = edgesBySource.get(edge.from) ?? []
+    items.push(edge)
+    edgesBySource.set(edge.from, items)
+  }
+  const targets: AgentRingConnection[] = []
+  const queue = (edgesBySource.get(sourceId) ?? []).map((edge) => ({
+    nodeId: edge.to,
+    edgeIds: [edge.id],
+  }))
+  const seen = new Set<string>([sourceId])
+  while (queue.length > 0) {
+    const current = queue.shift()
+    if (!current) continue
+    if (seen.has(current.nodeId)) continue
+    seen.add(current.nodeId)
+    if (draft.graph.agent_nodes[current.nodeId]) {
+      targets.push({ target: current.nodeId, edgeIds: current.edgeIds })
+      continue
+    }
+    if (!draft.graph.script_nodes?.[current.nodeId]) continue
+    for (const edge of edgesBySource.get(current.nodeId) ?? []) {
+      queue.push({ nodeId: edge.to, edgeIds: [...current.edgeIds, edge.id] })
+    }
+  }
+  return targets
+}
+
 export function deleteNode(draft: BlueprintDraft, id: string) {
   const next = cloneBlueprintDraft(draft)
   if (!nodeIds(next).includes(id)) return next
@@ -1219,6 +1368,8 @@ export function toRuntimeGraphDraft(draft: BlueprintDraft): RuntimeGraphDraft {
         normalizeAgentNodeForRuntime(id, node, config),
       ]),
     ),
+    agent_ring_max_circulations: normalizeRingNumberRecord(draft.graph.agent_ring_max_circulations, 0),
+    agent_ring_context_refresh_periods: normalizeRingNumberRecord(draft.graph.agent_ring_context_refresh_periods, 1),
     edges: draft.graph.edges
       .filter((edge) => runtimeNodeIds.has(edge.from) && runtimeNodeIds.has(edge.to))
       .map((edge) => {
@@ -1358,6 +1509,28 @@ function normalizeBlueprintConfig(config?: Partial<BlueprintConfig>): BlueprintC
     skill_dir: config?.skill_dir?.trim() ?? DEFAULT_SKILL_DIR,
     rule_dir: config?.rule_dir?.trim() ?? DEFAULT_RULE_DIR,
   }
+}
+
+function normalizeRingNumberRecord(value: unknown, minValue: number): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([key, rawValue]) => [String(key), Math.trunc(Number(rawValue))] as const)
+      .filter(([key, numberValue]) => key.trim() && Number.isFinite(numberValue))
+      .map(([key, numberValue]) => [key, Math.max(minValue, numberValue)]),
+  )
+}
+
+function configuredRingNumber(
+  value: unknown,
+  topologyId: string,
+  ringId: string,
+  index: number,
+  fallback: number,
+  minValue: number,
+) {
+  const record = normalizeRingNumberRecord(value, minValue)
+  return record[topologyId] ?? record[ringId] ?? record[String(index)] ?? fallback
 }
 
 function normalizeAgentNode(id: string, node: LegacyBlueprintAgentNode): BlueprintAgentNode {
