@@ -36,6 +36,7 @@ import {
   DEFAULT_BLUEPRINT_ID,
   DEFAULT_BLUEPRINT_NAME,
   compileScriptNodesFromCatalog,
+  createDefaultPopoEntry,
   createDefaultBlueprintDraft,
   defaultCommandForCliKind,
   defaultModelForCliKind,
@@ -85,9 +86,12 @@ import {
   usePlatform,
   type BlueprintCatalogItem,
   type BlueprintEditorCandidate,
+  type BlueprintPopoRobot,
   type BlueprintRelocateConflictPolicy,
   type BlueprintRunEndAction,
+  type BlueprintSlotSummary,
   type BlueprintSessionSummary,
+  type BlueprintSessionTimelineEvent,
   type BlueprintSummary,
 } from "@/context/platform"
 
@@ -148,7 +152,6 @@ const AGENT_OUTPUT_PORT_DEFINITIONS: BlueprintCanvasPortDefinition[] = [
 const RUNTIME_WORKING_AGENT_STATES = new Set(["dispatching", "running", "waiting_for_reply", "processing_reply"])
 const RUNTIME_FLOW_MESSAGE_STATUSES = new Set(["queued", "dispatching"])
 const BLUEPRINT_RUNTIME_FLOW_DOTS = [0, 1, 2, 3, 4]
-const AUTO_RUNTIME_COMPLETE_REASON = "blueprint UI auto complete after all agents reached terminal task status"
 const BLUEPRINT_FLOW_LOCK_PENDING_GRACE_MS = 10_000
 let projectWorkdirAutoPromptShownThisApp = false
 const BLUEPRINT_THEME = {
@@ -301,6 +304,14 @@ type ResidentServiceState = {
   error?: string
 }
 
+type PopoServiceState = {
+  robots: BlueprintPopoRobot[]
+  status?: Record<string, unknown>
+  loading: boolean
+  savingKey?: string
+  error?: string
+}
+
 type ResidentServiceConsoleState = {
   serviceName: string
   title: string
@@ -339,7 +350,7 @@ export type BlueprintPlanningProgressState = {
   phase?: BlueprintPlanningProgressPhase
 }
 
-type BlueprintProgressPhase = BlueprintPlanningProgressPhase | "summary" | "ending"
+type BlueprintProgressPhase = BlueprintPlanningProgressPhase | "ending"
 type BlueprintFlowLockState = {
   active: boolean
   planningSeen?: boolean
@@ -356,8 +367,6 @@ type BlueprintDocumentPickerState = {
 }
 
 const blueprintFlowLockStore = new Map<string, BlueprintFlowLockState>()
-const blueprintRuntimeManualUnlockKeys = new Set<string>()
-const autoCompletedRuntimeKeys = new Set<string>()
 
 type BlueprintRuntimeStartNodeOption = {
   id: string
@@ -400,6 +409,7 @@ type RuntimePanelDragState = {
 type BlueprintRuntimeState = {
   runId?: string
   runs: Record<string, unknown>[]
+  slot?: BlueprintSlotSummary
   status?: Record<string, unknown>
   explanation?: Record<string, unknown>
   events: Record<string, unknown>[]
@@ -411,6 +421,13 @@ type BlueprintRuntimeState = {
 
 type BlueprintSessionState = {
   sessions: BlueprintSessionSummary[]
+  loading: boolean
+  error?: string
+}
+
+type BlueprintSessionTimelineState = {
+  sessionKey: string
+  events: BlueprintSessionTimelineEvent[]
   loading: boolean
   error?: string
 }
@@ -526,6 +543,7 @@ type AgentPanelUserMessage = {
 
 type AgentPanelTimelineItem =
   | { type: "user"; message: AgentPanelUserMessage; order: number; index: number }
+  | { type: "session"; event: BlueprintSessionTimelineEvent; order: number; index: number }
   | { type: "event"; event: AgentStreamEvent; order: number; index: number }
 
 type AgentPanelToolGroup = {
@@ -984,6 +1002,7 @@ export function BlueprintSidePanel(props: {
   const [hoveredRingKey, setHoveredRingKey] = createSignal<string>()
   const [scriptEditorMenuOpen, setScriptEditorMenuOpen] = createSignal(false)
   const [globalConfigOpen, setGlobalConfigOpen] = createSignal(false)
+  const [blueprintControlOpen, setBlueprintControlOpen] = createSignal(false)
   const [catalogRefreshVersion, setCatalogRefreshVersion] = createSignal(0)
   const [scriptCompiling, setScriptCompiling] = createSignal(false)
   const [configIssues, setConfigIssues] = createSignal<BlueprintConfigValidationIssue[]>([])
@@ -993,9 +1012,7 @@ export function BlueprintSidePanel(props: {
   const [blueprintFlowLock, writeBlueprintFlowLock] = createSignal<BlueprintFlowLockState>(
     blueprintFlowLockStore.get(blueprintFlowLockKey()) ?? { active: false },
   )
-  const [autoCompletingRuntimeKey, setAutoCompletingRuntimeKey] = createSignal<string>()
   const [progressAnchorVersion, setProgressAnchorVersion] = createSignal(0)
-  const [runtimeManualUnlockVersion, setRuntimeManualUnlockVersion] = createSignal(0)
   const [catalog, setCatalog] = createSignal<CatalogState>({
     skillDir: "",
     ruleDir: "",
@@ -1006,6 +1023,10 @@ export function BlueprintSidePanel(props: {
   })
   const [residentServices, setResidentServices] = createSignal<ResidentServiceState>({
     services: [],
+    loading: false,
+  })
+  const [popoService, setPopoService] = createSignal<PopoServiceState>({
+    robots: [],
     loading: false,
   })
   const [residentServiceConsole, setResidentServiceConsole] = createSignal<ResidentServiceConsoleState>()
@@ -1039,6 +1060,30 @@ export function BlueprintSidePanel(props: {
   const [blueprintSessions, setBlueprintSessions] = createSignal<BlueprintSessionState>({
     sessions: [],
     loading: false,
+  })
+  const [blueprintSessionTimeline, setBlueprintSessionTimeline] = createSignal<BlueprintSessionTimelineState>({
+    sessionKey: "",
+    events: [],
+    loading: false,
+  })
+  const [activeBlueprintSessionKey, setActiveBlueprintSessionKey] = createSignal("")
+  const defaultBlueprintSessionKey = createMemo(() => blueprintMainSessionKey(currentBlueprintId()))
+  const currentBlueprintSessionKey = createMemo(() => activeBlueprintSessionKey() || defaultBlueprintSessionKey())
+  const currentBlueprintSession = createMemo(() =>
+    blueprintSessions().sessions.find((session) => session.sessionKey === currentBlueprintSessionKey()),
+  )
+  const blueprintSlotRunCount = createMemo(() => {
+    const slot = runtime().slot
+    return Number(slot?.runningRunCount ?? slot?.runningRunIds?.length ?? slot?.runs?.length ?? 0)
+  })
+  const blueprintSlotMaxSessions = createMemo(() => Number(runtime().slot?.maxActiveSessions ?? 3) || 3)
+  const blueprintSlotCapacityFull = createMemo(() => blueprintSlotRunCount() >= blueprintSlotMaxSessions())
+  let previousDefaultBlueprintSessionKey = ""
+  createEffect(() => {
+    const next = defaultBlueprintSessionKey()
+    if (next === previousDefaultBlueprintSessionKey) return
+    previousDefaultBlueprintSessionKey = next
+    setActiveBlueprintSessionKey(next)
   })
   const [blueprintDiffOpen, setBlueprintDiffOpen] = createSignal(false)
   const [blueprintDiffSelectedChangesetId, setBlueprintDiffSelectedChangesetId] = createSignal<string>()
@@ -1161,16 +1206,6 @@ export function BlueprintSidePanel(props: {
     writeBlueprintFlowLock(blueprintFlowLockStore.get(blueprintFlowLockKey()) ?? { active: false })
   })
 
-  function unlockRuntimeForManualControl(runId: string) {
-    blueprintRuntimeManualUnlockKeys.add(runId)
-    setRuntimeManualUnlockVersion((version) => version + 1)
-  }
-
-  function clearRuntimeManualUnlock(runId: string) {
-    if (!blueprintRuntimeManualUnlockKeys.delete(runId)) return
-    setRuntimeManualUnlockVersion((version) => version + 1)
-  }
-
   function planningProgressActive() {
     return props.blueprintPlanningProgress?.active === true
   }
@@ -1200,21 +1235,6 @@ export function BlueprintSidePanel(props: {
       kind: "tick" as const,
       label: language.t("blueprint.node.tick" as never),
       description: language.t("blueprint.add.tick.description" as never),
-    },
-    {
-      kind: "route-sequence" as const,
-      label: language.t("blueprint.node.route.sequence"),
-      description: language.t("blueprint.add.route.sequence.description"),
-    },
-    {
-      kind: "route-parallel" as const,
-      label: language.t("blueprint.node.route.parallel"),
-      description: language.t("blueprint.add.route.parallel.description"),
-    },
-    {
-      kind: "route-parallel-reduce" as const,
-      label: language.t("blueprint.node.route.parallelReduce"),
-      description: language.t("blueprint.add.route.parallelReduce.description"),
     },
     ...catalog().scriptNodes.map((script) => ({
       kind: "script" as const,
@@ -1367,27 +1387,12 @@ export function BlueprintSidePanel(props: {
     }
     return nodeIds
   })
-  const runtimeRunRecord = createMemo(() => asRecord(asRecord(runtime().status)?.run))
-  const runtimeSummaryReady = createMemo(() => runtimeRunRecord()?.ready_for_top_agent_summary === true)
-  const runtimeSummaryKey = createMemo(() => {
-    const runId = runtime().runId
-    const run = runtimeRunRecord()
-    if (!runId || run?.ready_for_top_agent_summary !== true) return
-    const generation = run.ready_for_top_agent_summary_generation ?? run.summary_generation ?? "latest"
-    return `${runId}:${String(generation)}`
-  })
   const runtimeStarted = createMemo(() => {
     const status = runtimeStatus(runtime().status)
     return !!runtime().runId && status === "running"
   })
-  const runtimeSummaryLockActive = createMemo(() => {
-    runtimeManualUnlockVersion()
-    const runId = runtime().runId
-    const status = runtimeStatus(runtime().status)
-    return runtimeSummaryReady() && !!runId && !!status && !isTerminalRuntimeStatus(status) && !blueprintRuntimeManualUnlockKeys.has(runId)
-  })
   const blueprintFlowLockActive = createMemo(
-    () => blueprintFlowLock().active || runtimeSummaryLockActive() || !!autoCompletingRuntimeKey() || runtime().action === "complete",
+    () => blueprintFlowLock().active || runtime().action === "complete",
   )
   const externalBlueprintProgressPhase = createMemo(() =>
     props.blueprintPlanningProgress?.active ? props.blueprintPlanningProgress.phase : undefined,
@@ -1395,8 +1400,7 @@ export function BlueprintSidePanel(props: {
   const blueprintProgressPhase = createMemo<BlueprintProgressPhase | undefined>(() => {
     if (!blueprintFlowLockActive()) return undefined
     const action = runtime().action
-    if (autoCompletingRuntimeKey() || action === "complete") return "ending"
-    if (runtimeSummaryReady()) return "summary"
+    if (action === "complete") return "ending"
     if (runtimeStarted()) return undefined
     const external = externalBlueprintProgressPhase()
     if (external) return external
@@ -1758,6 +1762,102 @@ export function BlueprintSidePanel(props: {
     }
   }
 
+  const refreshPopoService = async (opts?: { silent?: boolean }) => {
+    if (!platform.blueprintPopoServiceStatus && !platform.listBlueprintPopoRobots) return
+    setPopoService((current) => ({
+      ...current,
+      loading: !opts?.silent && current.robots.length === 0,
+      error: opts?.silent ? current.error : undefined,
+    }))
+    try {
+      const [statusResult, robotResult] = await Promise.allSettled([
+        platform.blueprintPopoServiceStatus?.() ?? Promise.resolve(undefined),
+        platform.listBlueprintPopoRobots?.() ?? Promise.resolve([]),
+      ])
+      const status = statusResult.status === "fulfilled" && statusResult.value ? statusResult.value : undefined
+      const robots =
+        robotResult.status === "fulfilled" && Array.isArray(robotResult.value)
+          ? (robotResult.value.map(normalizePopoRobot).filter(Boolean) as BlueprintPopoRobot[])
+          : []
+      const error =
+        statusResult.status === "rejected"
+          ? readableError(statusResult.reason)
+          : robotResult.status === "rejected"
+            ? readableError(robotResult.reason)
+            : undefined
+      setPopoService((current) => ({
+        ...current,
+        status,
+        robots,
+        loading: false,
+        error,
+      }))
+    } catch (error) {
+      setPopoService((current) => ({ ...current, loading: false, error: readableError(error) }))
+    }
+  }
+
+  const savePopoRobot = async (robot: BlueprintPopoRobot, previousRobotAppKey?: string) => {
+    if (!platform.saveBlueprintPopoRobot) return
+    const savingKey = previousRobotAppKey || robot.robot_app_key || "__new__"
+    setPopoService((current) => ({ ...current, savingKey, error: undefined }))
+    try {
+      const result = await platform.saveBlueprintPopoRobot(robot, previousRobotAppKey)
+      const robots = Array.isArray(result?.robots)
+        ? (result.robots.map(normalizePopoRobot).filter(Boolean) as BlueprintPopoRobot[])
+        : popoService().robots
+      setPopoService((current) => ({ ...current, robots, savingKey: undefined, error: undefined }))
+    } catch (error) {
+      const message = readableError(error)
+      setPopoService((current) => ({ ...current, savingKey: undefined, error: message }))
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.popoService.saveFailed" as never),
+        description: message,
+      })
+    }
+  }
+
+  const deletePopoRobot = async (robotAppKey: string) => {
+    if (!platform.deleteBlueprintPopoRobot) return
+    setPopoService((current) => ({ ...current, savingKey: robotAppKey, error: undefined }))
+    try {
+      const result = await platform.deleteBlueprintPopoRobot(robotAppKey)
+      const robots = Array.isArray(result?.robots)
+        ? (result.robots.map(normalizePopoRobot).filter(Boolean) as BlueprintPopoRobot[])
+        : popoService().robots.filter((item) => item.robot_app_key !== robotAppKey)
+      setPopoService((current) => ({ ...current, robots, savingKey: undefined, error: undefined }))
+    } catch (error) {
+      const message = readableError(error)
+      setPopoService((current) => ({ ...current, savingKey: undefined, error: message }))
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.popoService.deleteFailed" as never),
+        description: message,
+      })
+    }
+  }
+
+  const setPopoRobotEnabled = async (robotAppKey: string, enabled: boolean) => {
+    if (!platform.setBlueprintPopoRobotEnabled) return
+    setPopoService((current) => ({ ...current, savingKey: robotAppKey, error: undefined }))
+    try {
+      const result = await platform.setBlueprintPopoRobotEnabled(robotAppKey, enabled)
+      const robots = Array.isArray(result?.robots)
+        ? (result.robots.map(normalizePopoRobot).filter(Boolean) as BlueprintPopoRobot[])
+        : popoService().robots.map((item) => (item.robot_app_key === robotAppKey ? { ...item, enabled } : item))
+      setPopoService((current) => ({ ...current, robots, savingKey: undefined, error: undefined }))
+    } catch (error) {
+      const message = readableError(error)
+      setPopoService((current) => ({ ...current, savingKey: undefined, error: message }))
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.popoService.toggleFailed" as never),
+        description: message,
+      })
+    }
+  }
+
   const openResidentServiceInEditor = async (service: Pick<BlueprintResidentServiceItem, "module_path">) => {
     if (!service.module_path || !platform.openBlueprintResidentServiceInEditor) return
     try {
@@ -2088,6 +2188,21 @@ export function BlueprintSidePanel(props: {
     ))
   }
 
+  function openDeleteBlueprintDialog(blueprintId: string) {
+    const targetId = blueprintId.trim()
+    if (!targetId || runtimeBusy() || blueprintPicker().loading || persistence().saving) return
+    if (!platform.deleteBlueprint) {
+      setBlueprintPicker((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable" as never) }))
+      return
+    }
+    dialog.show(() => (
+      <BlueprintDeleteDialog
+        blueprintName={blueprintNameForId(targetId)}
+        onDelete={() => deleteProjectBlueprint(targetId)}
+      />
+    ))
+  }
+
   async function selectProjectBlueprint(blueprintId: string) {
     const targetId = blueprintId.trim()
     if (!targetId || targetId === currentBlueprintId() || runtimeBusy() || blueprintPicker().loading || persistence().saving) return
@@ -2156,6 +2271,91 @@ export function BlueprintSidePanel(props: {
       showToast({
         variant: "error",
         title: language.t("blueprint.document.createFailed" as never),
+        description: message,
+      })
+    }
+  }
+
+  async function createDefaultProjectBlueprintAfterDelete() {
+    if (!platform.saveBlueprint) {
+      throw new Error(language.t("blueprint.runtime.unavailable" as never))
+    }
+    const blueprintId = DEFAULT_BLUEPRINT_ID
+    const blueprintName = DEFAULT_BLUEPRINT_NAME
+    const next = createDefaultBlueprintDraft(projectDirectory)
+    next.config = { ...currentConfig() }
+    await platform.saveBlueprint(projectDirectory, toBlueprintDocument(next, blueprintId, blueprintName))
+    resetBlueprintRunState()
+    applyingRemote = true
+    replaceDraft(next)
+    queueMicrotask(() => {
+      applyingRemote = false
+    })
+    setBlueprintPicker({
+      id: blueprintId,
+      name: blueprintName,
+      items: upsertBlueprintItem([], blueprintId, blueprintName),
+      loading: false,
+      error: undefined,
+    })
+    syncWorkbenchBlueprintRoute(blueprintId)
+    setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
+    void refreshProjectBlueprints(blueprintId)
+  }
+
+  async function deleteProjectBlueprint(blueprintId: string) {
+    const targetId = blueprintId.trim()
+    if (!targetId || runtimeBusy() || blueprintPicker().loading || persistence().saving) return
+    const deleteBlueprint = platform.deleteBlueprint
+    if (!deleteBlueprint) {
+      setBlueprintPicker((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable" as never) }))
+      return
+    }
+
+    const previous = blueprintPicker()
+    const previousPersistence = persistence()
+    const deletingCurrent = targetId === currentBlueprintId()
+    const deletedIndex = previous.items.findIndex((item) => item.id === targetId)
+    const nextFromPrevious = deletingCurrent
+      ? previous.items[deletedIndex + 1] ?? previous.items.find((item) => item.id !== targetId)
+      : undefined
+
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+    }
+    setBlueprintPicker((current) => ({ ...current, loading: true, error: undefined }))
+    setPersistence((current) => ({ ...current, saving: !deletingCurrent, error: undefined }))
+
+    try {
+      if (!deletingCurrent && platform.saveBlueprint) {
+        await persistProjectDraft(draft)
+      }
+      await deleteBlueprint(projectDirectory, targetId)
+      const selectedAfterDelete = deletingCurrent ? nextFromPrevious?.id : currentBlueprintId()
+      const items = await refreshProjectBlueprints(selectedAfterDelete)
+
+      if (!deletingCurrent) {
+        setPersistence((current) => ({ ...current, saving: false, source: "project" }))
+        return
+      }
+
+      const target =
+        (nextFromPrevious ? items.find((item) => item.id === nextFromPrevious.id) : undefined) ??
+        items.find((item) => item.id !== targetId) ??
+        items[0]
+      if (target) {
+        await loadProjectBlueprint(target.id, target.name)
+      } else {
+        await createDefaultProjectBlueprintAfterDelete()
+      }
+    } catch (error) {
+      const message = readableError(error)
+      setBlueprintPicker({ ...previous, loading: false, error: message })
+      setPersistence(previousPersistence)
+      showToast({
+        variant: "error",
+        title: language.t("blueprint.document.deleteFailed" as never),
         description: message,
       })
     }
@@ -2295,7 +2495,8 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
-    if (!draft.runtime) setDraft("runtime", { start_node_id: "" })
+    if (!draft.runtime) setDraft("runtime", { start_node_id: "", popo_entry: createDefaultPopoEntry() })
+    else if (!draft.runtime.popo_entry) setDraft("runtime", "popo_entry", createDefaultPopoEntry())
   })
 
   createEffect(() => {
@@ -2381,14 +2582,12 @@ export function BlueprintSidePanel(props: {
     const runId = runtime().runId
     const status = runtimeStatus(runtime().status)
     if (runId && isTerminalRuntimeStatus(status)) {
-      clearRuntimeManualUnlock(runId)
-      setAutoCompletingRuntimeKey(undefined)
       if (lock.active && !externalBlueprintProgressPhase() && runtime().action !== "plan") {
         setBlueprintFlowLock({ active: false })
       }
       return
     }
-    if (runId && status === "running" && !runtimeSummaryReady()) {
+    if (runId && status === "running") {
       if (lock.active) setBlueprintFlowLock({ active: false })
       return
     }
@@ -2428,9 +2627,13 @@ export function BlueprintSidePanel(props: {
     let cancelled = false
     const blueprintId = currentBlueprintId()
     const listBlueprintRuns = platform.listBlueprintRuns
+    const blueprintSlotStatus = platform.blueprintSlotStatus
     const syncRuns = () => {
-      void listBlueprintRuns(projectDirectory, blueprintId)
-        .then((runs) => {
+      void Promise.all([
+        listBlueprintRuns(projectDirectory, blueprintId),
+        blueprintSlotStatus?.(projectDirectory, blueprintId).catch((error) => ({ error: readableError(error) })),
+      ])
+        .then(([runs, slot]) => {
           if (cancelled) return
           const preferredRun = selectPreferredRuntimeRun(runs, untrack(() => runtime().runId))
           const preferredRunId = stringValue(preferredRun?.runId)
@@ -2446,7 +2649,7 @@ export function BlueprintSidePanel(props: {
               (!current.runId || !currentRun || isTerminalRuntimeStatus(currentStatus))
             const nextRunId = shouldSwitch ? preferredRunId : current.runId ?? preferredRunId
             if (nextRunId && nextRunId !== current.runId) refreshRunId = nextRunId
-            return { ...current, runs, runId: nextRunId }
+            return { ...current, runs, slot: normalizeBlueprintSlotSummary(slot), runId: nextRunId }
           })
           if (refreshRunId) void refreshBlueprintRuntime(refreshRunId, { quiet: true })
         })
@@ -2469,7 +2672,14 @@ export function BlueprintSidePanel(props: {
       void platform
         .listBlueprintSessions?.(projectDirectory, currentBlueprintId())
         .then((sessions) => {
-          if (!cancelled) setBlueprintSessions({ sessions, loading: false, error: undefined })
+          if (cancelled) return
+          setBlueprintSessions({ sessions, loading: false, error: undefined })
+          const selected = sessions.find((session) => session.sessionKey === currentBlueprintSessionKey())
+          const runId = selected?.activeRunId
+          if (runId && runId !== runtime().runId) {
+            setRuntime((current) => ({ ...current, runId }))
+            void refreshBlueprintRuntime(runId, { quiet: true })
+          }
         })
         .catch((error) => {
           if (!cancelled) setBlueprintSessions((current) => ({ ...current, loading: false, error: readableError(error) }))
@@ -2478,6 +2688,41 @@ export function BlueprintSidePanel(props: {
     setBlueprintSessions((current) => ({ ...current, loading: true, error: undefined }))
     syncSessions()
     const interval = setInterval(syncSessions, 2000)
+    onCleanup(() => {
+      cancelled = true
+      clearInterval(interval)
+    })
+  })
+
+  createEffect(() => {
+    const sessionKey = currentBlueprintSessionKey()
+    if (!persistence().loaded || !sessionKey || !platform.blueprintSessionTimeline) {
+      setBlueprintSessionTimeline({ sessionKey, events: [], loading: false })
+      return
+    }
+    let cancelled = false
+    const syncTimeline = () => {
+      void platform
+        .blueprintSessionTimeline?.(sessionKey, 500)
+        .then((timeline) => {
+          if (cancelled) return
+          const events = Array.isArray(timeline?.events) ? timeline.events : []
+          setBlueprintSessionTimeline({ sessionKey, events, loading: false, error: undefined })
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setBlueprintSessionTimeline((current) => ({
+              ...current,
+              sessionKey,
+              loading: false,
+              error: readableError(error),
+            }))
+          }
+        })
+    }
+    setBlueprintSessionTimeline((current) => ({ ...current, sessionKey, loading: true, error: undefined }))
+    syncTimeline()
+    const interval = setInterval(syncTimeline, 2000)
     onCleanup(() => {
       cancelled = true
       clearInterval(interval)
@@ -2537,6 +2782,12 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
+    if (!platform.blueprintPopoServiceStatus && !platform.listBlueprintPopoRobots) return
+    if (!blueprintControlOpen()) return
+    void refreshPopoService()
+  })
+
+  createEffect(() => {
     const runId = runtime().runId
     const status = runtimeStatus(runtime().status)
     if (!runId || isTerminalRuntimeStatus(status) || !platform.blueprintAgentStreamToken) return
@@ -2588,28 +2839,6 @@ export function BlueprintSidePanel(props: {
     void refreshBlueprintRuntime(runId, { quiet: true })
   })
 
-  createEffect(() => {
-    if (!blueprintFlowLockActive()) return
-    const runId = runtime().runId
-    const status = runtimeStatus(runtime().status)
-    const key = runtimeSummaryKey()
-    if (!runId || !key || isTerminalRuntimeStatus(status) || !platform.endBlueprintRun) return
-    if (autoCompletedRuntimeKeys.has(key) || autoCompletingRuntimeKey() === key) return
-    autoCompletedRuntimeKeys.add(key)
-    setAutoCompletingRuntimeKey(key)
-    queueMicrotask(async () => {
-      const completed = await endBlueprintRuntime("complete", {
-        auto: true,
-        reason: AUTO_RUNTIME_COMPLETE_REASON,
-      })
-      if (!completed) {
-        unlockRuntimeForManualControl(runId)
-        setBlueprintFlowLock({ active: false })
-      }
-      if (autoCompletingRuntimeKey() === key) setAutoCompletingRuntimeKey(undefined)
-    })
-  })
-
   async function refreshBlueprintRuntime(runId = runtime().runId, opts: { quiet?: boolean } = {}) {
     if (!runId || !platform.blueprintRunStatus) return
     if (!opts.quiet) setRuntime((current) => ({ ...current, loading: true, error: undefined }))
@@ -2655,6 +2884,26 @@ export function BlueprintSidePanel(props: {
     }
   }
 
+  async function refreshBlueprintSlotSummary(opts: { quiet?: boolean } = {}) {
+    if (!platform.blueprintSlotStatus) return
+    if (!opts.quiet) setRuntime((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      const slot = await platform.blueprintSlotStatus(projectDirectory, currentBlueprintId())
+      setRuntime((current) => ({
+        ...current,
+        slot: normalizeBlueprintSlotSummary(slot),
+        loading: opts.quiet ? current.loading : false,
+        error: undefined,
+      }))
+    } catch (error) {
+      setRuntime((current) => ({
+        ...current,
+        loading: opts.quiet ? current.loading : false,
+        error: readableError(error),
+      }))
+    }
+  }
+
   async function deleteBlueprintSession(sessionKey: string) {
     if (!platform.deleteBlueprintSession) return
     setBlueprintSessions((current) => ({ ...current, loading: true, error: undefined }))
@@ -2663,6 +2912,38 @@ export function BlueprintSidePanel(props: {
       await refreshBlueprintSessions({ quiet: true })
     } catch (error) {
       setBlueprintSessions((current) => ({ ...current, loading: false, error: readableError(error) }))
+    }
+  }
+
+  async function terminateCurrentBlueprintSession() {
+    if (!platform.terminateBlueprintSession) return
+    const sessionKey = currentBlueprintSessionKey()
+    if (!sessionKey) return
+    setRuntime((current) => ({ ...current, loading: true, action: "terminate-session", error: undefined }))
+    try {
+      await platform.terminateBlueprintSession(sessionKey, "requested from Blueprint runtime panel")
+      await refreshBlueprintSessions({ quiet: true })
+      await refreshBlueprintSlotSummary({ quiet: true })
+      const runId = runtime().runId
+      if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
+      setRuntime((current) => ({ ...current, loading: false, action: undefined }))
+    } catch (error) {
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: readableError(error) }))
+    }
+  }
+
+  async function terminateCurrentBlueprintSlot() {
+    if (!platform.terminateBlueprintSlot) return
+    setRuntime((current) => ({ ...current, loading: true, action: "terminate-slot", error: undefined }))
+    try {
+      await platform.terminateBlueprintSlot(projectDirectory, currentBlueprintId(), "requested from Blueprint runtime panel")
+      await refreshBlueprintSessions({ quiet: true })
+      await refreshBlueprintSlotSummary({ quiet: true })
+      const runId = runtime().runId
+      if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
+      setRuntime((current) => ({ ...current, loading: false, action: undefined }))
+    } catch (error) {
+      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: readableError(error) }))
     }
   }
 
@@ -2922,6 +3203,11 @@ export function BlueprintSidePanel(props: {
   }
 
   function selectRuntimeStartNode(nodeId: string) {
+    const previousNodeId = runtimeStartNodeId()
+    const previousNode = draft.graph.agent_nodes[previousNodeId]
+    if (previousNodeId && previousNodeId !== nodeId && previousNode?.node_type === "agent" && previousNode.popo_entry?.enabled) {
+      setDraft("graph", "agent_nodes", previousNodeId, "popo_entry", "enabled", false)
+    }
     setDraft("runtime", "start_node_id", nodeId)
   }
 
@@ -2932,8 +3218,12 @@ export function BlueprintSidePanel(props: {
       openRuntimePlanningPanel()
       return
     }
-    if (runtimeBusy()) {
+    if (runtime().loading || persistence().saving) {
       setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.busy" as never) }))
+      return
+    }
+    if (blueprintSlotCapacityFull()) {
+      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.slotCapacityFull" as never) }))
       return
     }
     if (!platform.saveBlueprint || !platform.startBlueprintSlot) {
@@ -2983,6 +3273,7 @@ export function BlueprintSidePanel(props: {
       }))
       scheduleOpenTestAgentPanelPersists()
       void refreshBlueprintSessions({ quiet: true })
+      void refreshBlueprintSlotSummary({ quiet: true })
       if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
     } catch (error) {
       const message = readableError(error)
@@ -2994,11 +3285,7 @@ export function BlueprintSidePanel(props: {
   async function submitBlueprintSlotMessage(message: string) {
     const text = message.trim()
     if (!text) return
-    const runId = runtime().runId
-    if (!runId) {
-      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.noRun" as never) }))
-      return
-    }
+    const runId = currentBlueprintSession()?.activeRunId || ""
     if (!platform.sendBlueprintSlotMessage) {
       setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
       return
@@ -3009,12 +3296,20 @@ export function BlueprintSidePanel(props: {
       const sent = await platform.sendBlueprintSlotMessage(projectDirectory, text, {
         source: "ui",
         blueprintId: currentBlueprintId(),
-        runId,
+        runId: runId || undefined,
         sourceIdentity: { uiSessionId: currentBlueprintId() },
+        sessionKey: currentBlueprintSessionKey(),
       })
       const status = asRecord(sent.status)
       const recentEvents = arrayOfRecords(status?.recent_events)
-      const nextRunId = stringValue(sent.runId) ?? stringValue(asRecord(sent.run)?.runId) ?? stringValue(asRecord(status?.run)?.runId) ?? runId
+      const nextRunId =
+        [
+          stringValue(sent.runId),
+          stringValue(asRecord(sent.run)?.runId),
+          stringValue(asRecord(status?.run)?.runId),
+          runId,
+          runtime().runId,
+        ].find((value) => value && value.trim()) || ""
       syncAgentPanelUserMessagesFromRuntimeEvents(recentEvents)
       setRuntime((current) => ({
         ...current,
@@ -3028,7 +3323,8 @@ export function BlueprintSidePanel(props: {
         lastUpdatedAt: Date.now(),
       }))
       void refreshBlueprintSessions({ quiet: true })
-      void refreshBlueprintRuntime(nextRunId, { quiet: true })
+      void refreshBlueprintSlotSummary({ quiet: true })
+      if (nextRunId) void refreshBlueprintRuntime(nextRunId, { quiet: true })
     } catch (error) {
       const message = readableError(error)
       setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
@@ -4438,16 +4734,35 @@ export function BlueprintSidePanel(props: {
             loading={blueprintPicker().loading}
             disabled={runtimeBusy() || persistence().loading || persistence().saving || projectWorkdirRelocating() || blueprintPicker().loading}
             onSelect={(blueprintId) => void selectProjectBlueprint(blueprintId)}
+            onDelete={openDeleteBlueprintDialog}
             onCreate={openCreateBlueprintDialog}
           />
           <BlueprintSessionSelect
             sessions={blueprintSessions().sessions}
+            selectedSessionKey={currentBlueprintSessionKey()}
             loading={blueprintSessions().loading}
             error={blueprintSessions().error}
             disabled={!platform.listBlueprintSessions || persistence().loading || blueprintPicker().loading}
+            onSelect={(sessionKey) => setActiveBlueprintSessionKey(sessionKey)}
             onRefresh={() => void refreshBlueprintSessions()}
             onDelete={(sessionKey) => void deleteBlueprintSession(sessionKey)}
           />
+          <Tooltip placement="bottom" value={language.t("blueprint.control.open" as never)}>
+            <IconButton
+              data-blueprint-control-toggle
+              icon="blueprint"
+              variant={blueprintControlOpen() ? "secondary" : "ghost"}
+              class="h-7 w-7 shrink-0"
+              aria-label={language.t("blueprint.control.open" as never)}
+              aria-expanded={blueprintControlOpen()}
+              onClick={() => {
+                setNodeSearch(undefined)
+                setScriptEditorMenuOpen(false)
+                setGlobalConfigOpen(false)
+                setBlueprintControlOpen((open) => !open)
+              }}
+            />
+          </Tooltip>
           <DropdownMenu
             open={scriptEditorMenuOpen()}
             onOpenChange={(open) => {
@@ -4664,6 +4979,15 @@ export function BlueprintSidePanel(props: {
           onDragOver={handleCanvasDragOver}
           onDrop={handleCanvasDrop}
         >
+          <BlueprintControlDrawer
+            open={blueprintControlOpen()}
+            state={popoService()}
+            onOpenChange={setBlueprintControlOpen}
+            onRefresh={refreshPopoService}
+            onSaveRobot={savePopoRobot}
+            onDeleteRobot={deletePopoRobot}
+            onToggleRobot={setPopoRobotEnabled}
+          />
           <div class="pointer-events-auto absolute left-3 top-3 z-30">
             <Tooltip placement="right" value={scriptCompileTooltip()}>
               <Button
@@ -4837,6 +5161,12 @@ export function BlueprintSidePanel(props: {
                   runtimeVisualState={runtimeNodeVisualState(runtimeNodeVisualStates(), item.id)}
                   hasIncomingEdge={incomingNodeIds().has(item.id)}
                   hasOutgoingEdge={outgoingNodeIds().has(item.id)}
+                  popoBlueprintAgent={
+                    item.type === "agent" &&
+                    item.id === runtimeStartNodeId() &&
+                    item.node.node_type === "agent" &&
+                    item.node.popo_entry?.enabled === true
+                  }
                   isConnectTargetVisible={!!connection() && connection()?.source !== item.id}
                   agentPanelProgress={agentPanelPress()?.nodeId === item.id ? (agentPanelPress()?.progress ?? 0) : 0}
                   layout={draft.layout.nodes[item.id]}
@@ -4861,6 +5191,7 @@ export function BlueprintSidePanel(props: {
                   onDelete={() => replaceDraft(deleteNode(draft, item.id))}
                   onEdit={() => inspectNode(item.id)}
                   onInfoPanel={() => void openAgentPanel(item.id, false)}
+                  onScriptSettings={() => inspectNode(item.id)}
                   onAgentCollapsedChange={(collapsed) => replaceDraft(updateAgentNode(draft, item.id, { collapsed }))}
                   onPromptTextChange={(text) => {
                     if (item.type === "prompt") replaceDraft(updatePromptNode(draft, item.id, { text }))
@@ -5018,9 +5349,11 @@ export function BlueprintSidePanel(props: {
               </div>
             </div>
           </Show>
-          <div class="pointer-events-auto absolute bottom-4 left-4 z-30">
-            <BlueprintCollaborationAuthPanel defaultUsername="1" />
-          </div>
+          <Show when={!blueprintControlOpen()}>
+            <div class="pointer-events-auto absolute bottom-4 left-4 z-30">
+              <BlueprintCollaborationAuthPanel defaultUsername="1" />
+            </div>
+          </Show>
           <Show when={runtimeRunActive()}>
             <div
               data-blueprint-runtime-frame
@@ -5036,6 +5369,7 @@ export function BlueprintSidePanel(props: {
                 runtimeStatus={runtimeStatus(runtime().status)}
                 testLogActive={agentPanelTestLogActive()}
                 events={agentPanel.streamEvents[panel.nodeId] ?? []}
+                sessionTimelineEvents={blueprintSessionTimeline().events}
                 onClose={() => closeAgentPanel(panel.nodeId)}
                 onPin={() => setAgentPanel("panels", panel.nodeId, "pinned", !panel.pinned)}
                 onMovePointerDown={(event) => handleAgentPanelMovePointerDown(event, panel)}
@@ -5086,11 +5420,14 @@ export function BlueprintSidePanel(props: {
               <Match when={panelMode() === "runtime"}>
                 <BlueprintRuntimePanel
                   state={runtime()}
+                  currentSession={currentBlueprintSession()}
+                  currentSessionKey={currentBlueprintSessionKey()}
                   startNodeOptions={runtimeStartNodeOptions()}
                   selectedStartNodeId={runtimeStartNodeId()}
                   startDisabled={runtimeBusy() || projectWorkdirRelocating() || !persistence().loaded}
                   directRunDisabled={
-                    runtimeBusy() ||
+                    runtime().loading ||
+                    blueprintSlotCapacityFull() ||
                     projectWorkdirRelocating() ||
                     persistence().saving ||
                     blueprintPicker().loading ||
@@ -5101,15 +5438,14 @@ export function BlueprintSidePanel(props: {
                   }
                   slotMessageDisabled={
                     runtime().loading ||
-                    !runtime().runId ||
-                    !platform.sendBlueprintSlotMessage ||
-                    isTerminalRuntimeStatus(runtimeStatus(runtime().status))
+                    !platform.sendBlueprintSlotMessage
                   }
                   onStartNodeSelect={selectRuntimeStartNode}
                   onDirectRun={() => void startBlueprintRunDirect()}
                   onSlotMessage={(message) => void submitBlueprintSlotMessage(message)}
                   onRefresh={() => void refreshBlueprintRuntime()}
-                  onEnd={(action) => void endBlueprintRuntime(action)}
+                  onTerminateSession={() => void terminateCurrentBlueprintSession()}
+                  onTerminateSlot={() => void terminateCurrentBlueprintSlot()}
                   workspacePanelArea={workspacePanelArea()}
                   onWorkspaceAreaOpen={setWorkspacePanelArea}
                   onWorkspaceAreaOpenInExplorer={(area) => void openWorkspaceDirectory(area)}
@@ -5382,6 +5718,7 @@ function BlueprintDocumentSelect(props: {
   loading: boolean
   disabled: boolean
   onSelect: (blueprintId: string) => void
+  onDelete: (blueprintId: string) => void
   onCreate: () => void
 }) {
   const language = useLanguage()
@@ -5413,7 +5750,7 @@ function BlueprintDocumentSelect(props: {
               {(item) => (
                 <DropdownMenu.Item
                   onSelect={() => props.onSelect(item.id)}
-                  class="gap-2"
+                  class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 pr-1"
                 >
                   <Icon
                     size="small"
@@ -5424,6 +5761,27 @@ function BlueprintDocumentSelect(props: {
                     <DropdownMenu.ItemLabel class="truncate">{item.name || item.id}</DropdownMenu.ItemLabel>
                     <DropdownMenu.ItemDescription class="truncate">{item.id}</DropdownMenu.ItemDescription>
                   </div>
+                  <Tooltip placement="left" value={language.t("blueprint.document.delete" as never)}>
+                    <IconButton
+                      data-blueprint-document-delete
+                      icon="trash"
+                      variant="ghost"
+                      size="small"
+                      class="h-7 w-7 shrink-0 text-icon-weak hover:text-icon-diff-delete-base"
+                      disabled={props.disabled || props.loading}
+                      aria-label={language.t("blueprint.document.delete" as never)}
+                      title={language.t("blueprint.document.delete" as never)}
+                      onPointerDown={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                      }}
+                      onClick={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        props.onDelete(item.id)
+                      }}
+                    />
+                  </Tooltip>
                 </DropdownMenu.Item>
               )}
             </For>
@@ -5441,18 +5799,23 @@ function BlueprintDocumentSelect(props: {
 
 function BlueprintSessionSelect(props: {
   sessions: BlueprintSessionSummary[]
+  selectedSessionKey: string
   loading: boolean
   error?: string
   disabled: boolean
+  onSelect: (sessionKey: string) => void
   onRefresh: () => void
   onDelete: (sessionKey: string) => void
 }) {
   const language = useLanguage()
   const runningCount = () => props.sessions.filter((session) => blueprintSessionRunning(session)).length
+  const selectedSession = () => props.sessions.find((session) => session.sessionKey === props.selectedSessionKey)
   const label = () =>
     props.loading
       ? language.t("common.loading")
-      : language.t("blueprint.sessions.button" as never, { count: runningCount() } as never)
+      : selectedSession()?.sessionDisplayName ||
+        selectedSession()?.blueprintName ||
+        language.t("blueprint.sessions.button" as never, { count: runningCount() } as never)
 
   return (
     <DropdownMenu placement="bottom-start">
@@ -5501,22 +5864,41 @@ function BlueprintSessionSelect(props: {
               <For each={props.sessions}>
                 {(session) => {
                   const running = () => blueprintSessionRunning(session)
+                  const selected = () => session.sessionKey === props.selectedSessionKey
                   const touchedAt = () => blueprintSessionTime(session.lastTouchedAt)
+                  const subtitle = () =>
+                    session.sessionDisplayName ||
+                    session.blueprintName ||
+                    session.blueprintId ||
+                    language.t("blueprint.sessions.unknownBlueprint" as never)
                   return (
                     <div
                       data-blueprint-session-card
                       data-running={running()}
-                      class="mb-2 grid aspect-[4/1] min-h-[72px] grid-cols-[1fr_auto] gap-2 rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#071019] p-2 last:mb-0"
+                      data-selected={selected()}
+                      role="button"
+                      tabindex="0"
+                      class="mb-2 grid aspect-[4/1] min-h-[72px] grid-cols-[1fr_auto] gap-2 rounded-sm border bg-[#071019] p-2 text-left outline-none transition-colors last:mb-0 hover:border-[#67e8f9] focus:border-[#67e8f9]"
+                      classList={{
+                        "border-[#67e8f9] shadow-[0_0_0_1px_rgba(103,232,249,0.18)]": selected(),
+                        "border-[rgba(103,232,249,0.22)]": !selected(),
+                      }}
+                      onClick={() => props.onSelect(session.sessionKey)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return
+                        event.preventDefault()
+                        props.onSelect(session.sessionKey)
+                      }}
                     >
                       <div class="min-w-0">
-                        <div class="truncate font-mono text-11-medium text-[#67e8f9]">{session.sessionKey}</div>
+                        <div class="truncate font-mono text-11-medium text-[#67e8f9]" title={session.sessionKey}>{session.sessionKey}</div>
                         <div class="mt-1 truncate text-12-medium text-[#f8fdff]">
-                          {session.blueprintName || session.blueprintId || language.t("blueprint.sessions.unknownBlueprint" as never)}
+                          {subtitle()}
                         </div>
                         <div class="mt-1 truncate text-10-regular text-[#95afc4]">
                           {running() ? language.t("blueprint.sessions.running" as never) : session.status || "idle"}
                           <Show when={touchedAt()}>
-                            {(value) => <> · {formatRuntimeTime(value())}</>}
+                            {(value) => <> - {formatRuntimeTime(value())}</>}
                           </Show>
                         </div>
                       </div>
@@ -5594,6 +5976,43 @@ function BlueprintCreateDialog(props: {
           </Button>
           <Button variant="primary" size="large" disabled={!name().trim()} onClick={submit}>
             {language.t("blueprint.document.create" as never)}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
+function BlueprintDeleteDialog(props: {
+  blueprintName: string
+  onDelete: () => void | Promise<void>
+}) {
+  const language = useLanguage()
+  const dialog = useDialog()
+  const [deleting, setDeleting] = createSignal(false)
+  const submit = async () => {
+    if (deleting()) return
+    setDeleting(true)
+    try {
+      await props.onDelete()
+      dialog.close()
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <Dialog title={language.t("blueprint.document.deleteTitle" as never)} action={<span aria-hidden="true" />} fit>
+      <div data-blueprint-delete-dialog class="flex w-[420px] max-w-[calc(100vw-2rem)] flex-col gap-4 px-6 pb-4">
+        <div class="text-14-regular text-text-strong">
+          {language.t("blueprint.document.deleteConfirm" as never, { name: props.blueprintName } as never)}
+        </div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" size="large" disabled={deleting()} onClick={() => dialog.close()}>
+            {language.t("common.cancel")}
+          </Button>
+          <Button variant="primary" size="large" disabled={deleting()} onClick={() => void submit()}>
+            {language.t("blueprint.document.delete" as never)}
           </Button>
         </div>
       </div>
@@ -5716,6 +6135,391 @@ function BlueprintResidentServiceCreateDialog(props: {
         </div>
       </div>
     </Dialog>
+  )
+}
+
+function BlueprintControlDrawer(props: {
+  open: boolean
+  state: PopoServiceState
+  onOpenChange: (open: boolean) => void
+  onRefresh: (opts?: { silent?: boolean }) => Promise<void> | void
+  onSaveRobot: (robot: BlueprintPopoRobot, previousRobotAppKey?: string) => Promise<void> | void
+  onDeleteRobot: (robotAppKey: string) => Promise<void> | void
+  onToggleRobot: (robotAppKey: string, enabled: boolean) => Promise<void> | void
+}) {
+  const language = useLanguage()
+  const toggleLabel = () => language.t((props.open ? "blueprint.control.close" : "blueprint.control.open") as never)
+
+  return (
+    <>
+      <button
+        data-blueprint-control-handle
+        type="button"
+        class="pointer-events-auto absolute left-0 top-[42%] z-50 flex h-20 w-7 items-center justify-center rounded-r border border-l-0 border-[rgba(103,232,249,0.42)] bg-[#071019]/94 text-[#67e8f9] shadow-[8px_0_20px_rgba(0,0,0,0.28)] transition-transform"
+        classList={{ "translate-x-[380px]": props.open }}
+        aria-label={toggleLabel()}
+        aria-expanded={props.open}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation()
+          props.onOpenChange(!props.open)
+        }}
+      >
+        <Icon
+          size="small"
+          name="chevron-down"
+          class={`transition-transform ${props.open ? "rotate-90" : "-rotate-90"}`}
+        />
+      </button>
+      <aside
+        data-blueprint-control-drawer
+        class="pointer-events-auto absolute inset-y-0 left-0 z-40 flex w-[380px] max-w-[calc(100%-56px)] flex-col border-r border-[rgba(103,232,249,0.32)] bg-[#071019]/96 shadow-[18px_0_54px_rgba(0,0,0,0.42)] backdrop-blur transition-transform"
+        classList={{ "translate-x-0": props.open, "-translate-x-full": !props.open }}
+        aria-hidden={!props.open}
+        onPointerDown={(event) => event.stopPropagation()}
+        onWheel={(event) => event.stopPropagation()}
+        onContextMenu={(event) => event.stopPropagation()}
+      >
+        <div class="flex min-w-0 items-center justify-between gap-2 border-b border-[rgba(103,232,249,0.18)] px-3 py-2">
+          <div class="min-w-0">
+            <div class="truncate text-13-medium text-[#f8fdff]">{language.t("blueprint.control.title" as never)}</div>
+            <div class="truncate text-10-regular text-[#95afc4]">{language.t("blueprint.control.subtitle" as never)}</div>
+          </div>
+          <IconButton
+            icon="close-small"
+            variant="ghost"
+            size="small"
+            class="h-7 w-7 shrink-0"
+            aria-label={language.t("blueprint.control.close" as never)}
+            onClick={() => props.onOpenChange(false)}
+          />
+        </div>
+        <div class="min-h-0 flex-1 overflow-y-auto p-3">
+          <BlueprintPopoServicePanel
+            state={props.state}
+            onRefresh={props.onRefresh}
+            onSaveRobot={props.onSaveRobot}
+            onDeleteRobot={props.onDeleteRobot}
+            onToggleRobot={props.onToggleRobot}
+          />
+        </div>
+        <div class="shrink-0 border-t border-[rgba(103,232,249,0.18)] p-3">
+          <BlueprintCollaborationAuthPanel defaultUsername="1" />
+        </div>
+      </aside>
+    </>
+  )
+}
+
+function BlueprintPopoServicePanel(props: {
+  state: PopoServiceState
+  onRefresh: (opts?: { silent?: boolean }) => Promise<void> | void
+  onSaveRobot: (robot: BlueprintPopoRobot, previousRobotAppKey?: string) => Promise<void> | void
+  onDeleteRobot: (robotAppKey: string) => Promise<void> | void
+  onToggleRobot: (robotAppKey: string, enabled: boolean) => Promise<void> | void
+}) {
+  const language = useLanguage()
+  const [creating, setCreating] = createSignal(false)
+  const [newRobot, setNewRobot] = createSignal<BlueprintPopoRobot>(createBlankPopoRobot())
+  const status = createMemo(() => props.state.status)
+  const statusValue = createMemo(() => popoServiceStatusLabel(status()))
+  const callbackUrlTemplate = createMemo(() => stringValue(status()?.callbackUrlTemplate) ?? "")
+  const legacyCallbackUrl = createMemo(() => stringValue(status()?.legacyCallbackUrl) ?? "")
+  const healthUrl = createMemo(() => stringValue(status()?.healthUrl) ?? "")
+  const resetNewRobot = () => {
+    setNewRobot(createBlankPopoRobot())
+    setCreating(false)
+  }
+
+  return (
+    <section data-blueprint-popo-service-panel class="flex flex-col gap-3">
+      <div class="flex min-w-0 items-center justify-between gap-2">
+        <div class="min-w-0">
+          <div class="truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.popoService.title" as never)}</div>
+          <div class="mt-0.5 line-clamp-2 text-11-regular leading-4 text-[#95afc4]">
+            {language.t("blueprint.popoService.subtitle" as never)}
+          </div>
+        </div>
+        <Tooltip value={language.t("blueprint.popoService.refresh" as never)} placement="left">
+          <IconButton
+            icon="reset"
+            variant="ghost"
+            size="small"
+            class="h-7 w-7 shrink-0"
+            disabled={props.state.loading}
+            aria-label={language.t("blueprint.popoService.refresh" as never)}
+            onClick={() => void props.onRefresh()}
+          />
+        </Tooltip>
+      </div>
+      <div class="rounded-sm border border-[rgba(103,232,249,0.18)] bg-[#020817]/64 px-2 py-2">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-11-regular text-[#95afc4]">{language.t("blueprint.popoService.status" as never)}</span>
+          <span
+            class="rounded-sm border px-2 py-0.5 text-10-medium uppercase"
+            classList={{
+              "border-[#22c55e]/40 bg-[#052e16]/70 text-[#bbf7d0]": statusValue() === "running",
+              "border-[#64748b]/40 bg-[#020617]/70 text-[#cbd5e1]": statusValue() !== "running",
+            }}
+          >
+            {statusValue()}
+          </span>
+        </div>
+        <Show when={callbackUrlTemplate()}>
+          {(value) => (
+            <div class="mt-2 min-w-0">
+              <div class="mb-1 text-10-regular uppercase text-[#7891a8]">{language.t("blueprint.popoService.callbackUrl" as never)}</div>
+              <div class="truncate rounded-sm bg-[#071019] px-2 py-1 font-mono text-10-regular text-[#dbeafe]" title={value()}>
+                {value()}
+              </div>
+            </div>
+          )}
+        </Show>
+        <Show when={legacyCallbackUrl()}>
+          {(value) => (
+            <div class="mt-2 min-w-0">
+              <div class="mb-1 text-10-regular uppercase text-[#7891a8]">{language.t("blueprint.popoService.legacyUrl" as never)}</div>
+              <div class="truncate rounded-sm bg-[#071019] px-2 py-1 font-mono text-10-regular text-[#dbeafe]" title={value()}>
+                {value()}
+              </div>
+            </div>
+          )}
+        </Show>
+        <Show when={healthUrl()}>
+          {(value) => (
+            <div class="mt-2 truncate text-10-regular text-[#7891a8]" title={value()}>
+              {language.t("blueprint.popoService.healthUrl" as never)}: {value()}
+            </div>
+          )}
+        </Show>
+      </div>
+      <Show when={props.state.error}>
+        {(error) => (
+          <div class="rounded-sm border border-[#ef4444]/30 bg-[#450a0a]/40 px-2 py-1.5 text-11-regular text-[#fecaca]">
+            {error()}
+          </div>
+        )}
+      </Show>
+      <div class="flex items-center justify-between gap-2">
+        <div class="text-11-medium uppercase text-[#95afc4]">{language.t("blueprint.popoService.robots" as never)}</div>
+        <Button
+          data-blueprint-popo-robot-add
+          size="small"
+          variant="ghost"
+          icon="plus-small"
+          class="h-7 px-2"
+          disabled={creating() || !!props.state.savingKey}
+          onClick={() => setCreating(true)}
+        >
+          {language.t("blueprint.popoService.addRobot" as never)}
+        </Button>
+      </div>
+      <Show when={creating()}>
+        <BlueprintPopoRobotEditor
+          robot={newRobot()}
+          isNew
+          saving={props.state.savingKey === "__new__"}
+          onSave={async (robot) => {
+            await props.onSaveRobot(robot)
+            resetNewRobot()
+          }}
+          onChange={setNewRobot}
+          onCancel={resetNewRobot}
+        />
+      </Show>
+      <div class="flex flex-col gap-2">
+        <Show
+          when={props.state.robots.length > 0}
+          fallback={
+            <div class="flex min-h-[96px] items-center justify-center rounded border border-dashed border-[rgba(103,232,249,0.18)] px-3 text-center text-12-regular text-[#95afc4]">
+              {props.state.loading ? language.t("common.loading") : language.t("blueprint.popoService.empty" as never)}
+            </div>
+          }
+        >
+          <For each={props.state.robots}>
+            {(robot) => (
+              <BlueprintPopoRobotEditor
+                robot={robot}
+                saving={props.state.savingKey === robot.robot_app_key}
+                onSave={props.onSaveRobot}
+                onDelete={props.onDeleteRobot}
+                onToggle={props.onToggleRobot}
+              />
+            )}
+          </For>
+        </Show>
+      </div>
+    </section>
+  )
+}
+
+function BlueprintPopoRobotEditor(props: {
+  robot: BlueprintPopoRobot
+  isNew?: boolean
+  saving?: boolean
+  onSave: (robot: BlueprintPopoRobot, previousRobotAppKey?: string) => Promise<void> | void
+  onChange?: (robot: BlueprintPopoRobot) => void
+  onDelete?: (robotAppKey: string) => Promise<void> | void
+  onToggle?: (robotAppKey: string, enabled: boolean) => Promise<void> | void
+  onCancel?: () => void
+}) {
+  const language = useLanguage()
+  const [draftRobot, setDraftRobot] = createSignal<BlueprintPopoRobot>({ ...props.robot })
+  const [advancedOpen, setAdvancedOpen] = createSignal(Boolean(props.isNew))
+  createEffect(() => {
+    setDraftRobot({ ...props.robot })
+  })
+  const updateDraft = (patch: Partial<BlueprintPopoRobot>) => {
+    const next = { ...draftRobot(), ...patch }
+    setDraftRobot(next)
+    props.onChange?.(next)
+  }
+  const hasAppKey = () => draftRobot().robot_app_key.trim().length > 0
+  const previousRobotAppKey = () => (props.isNew ? undefined : props.robot.robot_app_key)
+  const onEnabledChange = (enabled: boolean) => {
+    updateDraft({ enabled })
+    if (!props.isNew && props.robot.robot_app_key && draftRobot().robot_app_key === props.robot.robot_app_key) {
+      void props.onToggle?.(props.robot.robot_app_key, enabled)
+    }
+  }
+  const submit = () => {
+    if (!hasAppKey() || props.saving) return
+    void props.onSave(
+      {
+        ...draftRobot(),
+        robot_app_key: draftRobot().robot_app_key.trim(),
+        robot_name: draftRobot().robot_name.trim(),
+      },
+      previousRobotAppKey(),
+    )
+  }
+
+  return (
+    <div
+      data-blueprint-popo-robot
+      class="rounded border border-[rgba(103,232,249,0.22)] bg-[#101a28]/88 p-2"
+      data-enabled={draftRobot().enabled}
+    >
+      <div class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2">
+        <label class="mt-1 flex h-6 w-6 items-center justify-center rounded-sm border border-[rgba(103,232,249,0.24)] bg-[#020817]/74">
+          <input
+            data-blueprint-popo-robot-enabled
+            type="checkbox"
+            class="h-4 w-4 accent-[#22c55e]"
+            checked={draftRobot().enabled}
+            disabled={props.saving || (props.isNew && !hasAppKey())}
+            aria-label={language.t("blueprint.popoService.enabled" as never)}
+            onChange={(event) => onEnabledChange(event.currentTarget.checked)}
+          />
+        </label>
+        <div class="min-w-0 space-y-2">
+          <input
+            data-blueprint-popo-robot-app-key
+            class="h-8 w-full rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#020817]/82 px-2 font-mono text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(103,232,249,0.56)]"
+            value={draftRobot().robot_app_key}
+            placeholder={language.t("blueprint.popoService.appKeyPlaceholder" as never)}
+            spellcheck={false}
+            autocomplete="off"
+            disabled={props.saving}
+            onInput={(event) => updateDraft({ robot_app_key: event.currentTarget.value })}
+          />
+          <input
+            data-blueprint-popo-robot-name
+            class="h-8 w-full rounded-sm border border-[rgba(103,232,249,0.16)] bg-[#020817]/64 px-2 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(103,232,249,0.48)]"
+            value={draftRobot().robot_name}
+            placeholder={language.t("blueprint.popoService.namePlaceholder" as never)}
+            autocomplete="off"
+            disabled={props.saving}
+            onInput={(event) => updateDraft({ robot_name: event.currentTarget.value })}
+          />
+        </div>
+        <div class="flex shrink-0 flex-col gap-1">
+          <Tooltip value={language.t("blueprint.popoService.save" as never)} placement="left">
+            <IconButton
+              data-blueprint-popo-robot-save
+              icon="check-small"
+              variant="ghost"
+              size="small"
+              class="h-7 w-7"
+              disabled={!hasAppKey() || props.saving}
+              aria-label={language.t("blueprint.popoService.save" as never)}
+              onClick={submit}
+            />
+          </Tooltip>
+          <Show when={!props.isNew}>
+            <Tooltip value={language.t("blueprint.popoService.delete" as never)} placement="left">
+              <IconButton
+                data-blueprint-popo-robot-delete
+                icon="trash"
+                variant="ghost"
+                size="small"
+                class="h-7 w-7 text-[#fca5a5]"
+                disabled={props.saving || !props.onDelete}
+                aria-label={language.t("blueprint.popoService.delete" as never)}
+                onClick={() => void props.onDelete?.(props.robot.robot_app_key)}
+              />
+            </Tooltip>
+          </Show>
+          <Show when={props.isNew}>
+            <Tooltip value={language.t("common.cancel")} placement="left">
+              <IconButton
+                icon="close-small"
+                variant="ghost"
+                size="small"
+                class="h-7 w-7"
+                disabled={props.saving || !props.onCancel}
+                aria-label={language.t("common.cancel")}
+                onClick={() => props.onCancel?.()}
+              />
+            </Tooltip>
+          </Show>
+        </div>
+      </div>
+      <button
+        type="button"
+        data-blueprint-popo-robot-advanced
+        class="mt-2 flex w-full items-center justify-between rounded-sm px-1 py-1 text-left text-11-regular text-[#95afc4] hover:bg-[rgba(103,232,249,0.08)]"
+        aria-expanded={advancedOpen()}
+        onClick={() => setAdvancedOpen((open) => !open)}
+      >
+        <span>{language.t("blueprint.popoService.advanced" as never)}</span>
+        <Icon size="small" name="chevron-down" class={`transition-transform ${advancedOpen() ? "rotate-180" : ""}`} />
+      </button>
+      <Show when={advancedOpen()}>
+        <div class="mt-2 grid gap-2">
+          <input
+            data-blueprint-popo-robot-secret
+            type="password"
+            class="h-8 w-full rounded-sm border border-[rgba(103,232,249,0.16)] bg-[#020817]/64 px-2 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(103,232,249,0.48)]"
+            value={draftRobot().robot_app_secret}
+            placeholder={language.t("blueprint.popoService.secretPlaceholder" as never)}
+            autocomplete="new-password"
+            disabled={props.saving}
+            onInput={(event) => updateDraft({ robot_app_secret: event.currentTarget.value })}
+          />
+          <input
+            data-blueprint-popo-robot-token
+            type="password"
+            class="h-8 w-full rounded-sm border border-[rgba(103,232,249,0.16)] bg-[#020817]/64 px-2 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(103,232,249,0.48)]"
+            value={draftRobot().callback_token}
+            placeholder={language.t("blueprint.popoService.tokenPlaceholder" as never)}
+            autocomplete="new-password"
+            disabled={props.saving}
+            onInput={(event) => updateDraft({ callback_token: event.currentTarget.value })}
+          />
+          <input
+            data-blueprint-popo-robot-aes
+            type="password"
+            class="h-8 w-full rounded-sm border border-[rgba(103,232,249,0.16)] bg-[#020817]/64 px-2 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(103,232,249,0.48)]"
+            value={draftRobot().aes_key}
+            placeholder={language.t("blueprint.popoService.aesPlaceholder" as never)}
+            autocomplete="new-password"
+            disabled={props.saving}
+            onInput={(event) => updateDraft({ aes_key: event.currentTarget.value })}
+          />
+        </div>
+      </Show>
+    </div>
   )
 }
 
@@ -6098,6 +6902,8 @@ function BlueprintProgressOverlay(props: {
 
 function BlueprintRuntimePanel(props: {
   state: BlueprintRuntimeState
+  currentSession?: BlueprintSessionSummary
+  currentSessionKey: string
   startNodeOptions: BlueprintRuntimeStartNodeOption[]
   selectedStartNodeId: string
   startDisabled: boolean
@@ -6107,7 +6913,8 @@ function BlueprintRuntimePanel(props: {
   onDirectRun: () => void
   onSlotMessage: (message: string) => void
   onRefresh: () => void
-  onEnd: (action: BlueprintRunEndAction) => void
+  onTerminateSession: () => void
+  onTerminateSlot: () => void
   workspacePanelArea?: WorkspacePanelArea
   onWorkspaceAreaOpen: (area: WorkspacePanelArea) => void
   onWorkspaceAreaOpenInExplorer: (area: WorkspacePanelArea) => void
@@ -6132,8 +6939,13 @@ function BlueprintRuntimePanel(props: {
   const workspaceReports = createMemo(() => workspaceAreaItems(workspace(), "reports"))
   const explanation = createMemo(() => asRecord(props.state.explanation))
   const summary = createMemo(() => asRecord(explanation()?.summary))
-  const runStatus = createMemo(() => runtimeStatus(props.state.status) || "idle")
-  const terminal = createMemo(() => isTerminalRuntimeStatus(runStatus()))
+  const slotSummary = createMemo(() => props.state.slot)
+  const sessionRunning = createMemo(() => blueprintSessionRunning(props.currentSession))
+  const slotRunCount = createMemo(() => Number(slotSummary()?.runningRunCount ?? slotSummary()?.runningRunIds?.length ?? slotSummary()?.runs?.length ?? 0))
+  const slotRunning = createMemo(() => slotSummary()?.status === "running" || slotRunCount() > 0 || Number(slotSummary()?.activeSessionCount ?? 0) > 0)
+  const activeSessionCount = createMemo(() => Number(slotSummary()?.activeSessionCount ?? 0))
+  const queuedSessionCount = createMemo(() => Number(slotSummary()?.queuedSessionCount ?? 0))
+  const maxActiveSessions = createMemo(() => Number(slotSummary()?.maxActiveSessions ?? 3) || 3)
   const [runtimePanelOrder, setRuntimePanelOrder] = createSignal<RuntimePanelId[]>([...DEFAULT_RUNTIME_PANEL_ORDER])
   const [draggedRuntimePanel, setDraggedRuntimePanel] = createSignal<RuntimePanelId>()
   const [runtimePanelDrag, setRuntimePanelDrag] = createSignal<RuntimePanelDragState>()
@@ -6304,24 +7116,23 @@ function BlueprintRuntimePanel(props: {
           </RuntimePanelShell>
           <RuntimePanelShell {...runtimePanelShellProps("status")}>
           <div class="rounded-md border border-[rgba(103,232,249,0.18)] bg-[#06101a] p-3">
-            <div class="flex min-w-0 items-center justify-between gap-2">
-              <div class="min-w-0">
-                <div class="truncate text-12-medium text-[#f8fdff]">{props.state.runId ?? language.t("blueprint.runtime.noRun")}</div>
-                <div class="mt-0.5 truncate text-11-regular text-[#95afc4]">
-                  {language.t("blueprint.runtime.status")}: {runStatus()}
-                </div>
-              </div>
-              <div
-                class="shrink-0 rounded-sm border px-2 py-1 text-10-medium uppercase"
-                classList={{
-                  "border-[rgba(45,212,191,0.42)] text-[#5eead4]": runStatus() === "running",
-                  "border-[rgba(250,204,21,0.42)] text-[#fde68a]": runStatus() === "paused",
-                  "border-[rgba(248,113,113,0.42)] text-[#fecaca]": runStatus() === "failed" || runStatus() === "cancelled",
-                  "border-[rgba(103,232,249,0.34)] text-[#67e8f9]": !["running", "paused", "failed", "cancelled"].includes(runStatus()),
-                }}
-              >
-                {runStatus()}
-              </div>
+            <div class="flex flex-col gap-3">
+              <RuntimeBinaryStatusBlock
+                title={language.t("blueprint.runtime.currentSession" as never)}
+                primary={props.currentSession?.sessionDisplayName || props.currentSession?.blueprintName || props.currentSessionKey}
+                secondary={props.currentSession?.activeRunId || language.t("blueprint.runtime.noRun")}
+                running={sessionRunning()}
+                runningLabel={language.t("blueprint.runtime.running" as never)}
+                idleLabel={language.t("blueprint.runtime.notRunning" as never)}
+              />
+              <RuntimeBinaryStatusBlock
+                title={language.t("blueprint.runtime.slotStatus" as never)}
+                primary={slotSummary()?.blueprintName || slotSummary()?.blueprintId || language.t("blueprint.runtime.planning" as never)}
+                secondary={`${language.t("blueprint.runtime.activeSessions" as never)} ${activeSessionCount()}/${maxActiveSessions()} - ${language.t("blueprint.runtime.runningSlots" as never)} ${slotRunCount()}/${maxActiveSessions()} - ${language.t("blueprint.runtime.queuedSessions" as never)} ${queuedSessionCount()}`}
+                running={slotRunning()}
+                runningLabel={language.t("blueprint.runtime.running" as never)}
+                idleLabel={language.t("blueprint.runtime.notRunning" as never)}
+              />
             </div>
             <Show when={props.state.error}>
               {(error) => <div class="mt-2 rounded-sm bg-[rgba(248,113,113,0.12)] px-2 py-1 text-11-regular text-[#fecaca]">{error()}</div>}
@@ -6340,28 +7151,16 @@ function BlueprintRuntimePanel(props: {
             </Show>
             <div class="mt-3 flex flex-col gap-2">
               <RuntimeActionButton
-                label={language.t("blueprint.runtime.complete")}
-                description={language.t("blueprint.runtime.completeDescription")}
-                disabled={!props.state.runId || props.state.loading}
-                onClick={() => props.onEnd("complete")}
+                label={language.t("blueprint.runtime.terminateSession" as never)}
+                description={language.t("blueprint.runtime.terminateSessionDescription" as never)}
+                disabled={!props.currentSession || props.state.loading || (!sessionRunning() && props.currentSession.status !== "queued")}
+                onClick={props.onTerminateSession}
               />
               <RuntimeActionButton
-                label={language.t("blueprint.runtime.pause")}
-                description={language.t("blueprint.runtime.pauseDescription")}
-                disabled={!props.state.runId || props.state.loading || terminal()}
-                onClick={() => props.onEnd("pause")}
-              />
-              <RuntimeActionButton
-                label={language.t("blueprint.runtime.cancel")}
-                description={language.t("blueprint.runtime.cancelDescription")}
-                disabled={!props.state.runId || props.state.loading || terminal()}
-                onClick={() => props.onEnd("cancel")}
-              />
-              <RuntimeActionButton
-                label={language.t("blueprint.runtime.fail")}
-                description={language.t("blueprint.runtime.failDescription")}
-                disabled={!props.state.runId || props.state.loading || terminal()}
-                onClick={() => props.onEnd("fail")}
+                label={language.t("blueprint.runtime.terminateSlot" as never)}
+                description={language.t("blueprint.runtime.terminateSlotDescription" as never)}
+                disabled={props.state.loading || (!slotRunning() && queuedSessionCount() === 0)}
+                onClick={props.onTerminateSlot}
               />
             </div>
           </div>
@@ -6655,6 +7454,42 @@ function RuntimeActionButton(props: { label: string; description: string; disabl
   )
 }
 
+function RuntimeBinaryStatusBlock(props: {
+  title: string
+  primary: string
+  secondary?: string
+  running: boolean
+  runningLabel: string
+  idleLabel: string
+}) {
+  const label = () => (props.running ? props.runningLabel : props.idleLabel)
+  return (
+    <div
+      data-blueprint-runtime-binary-status
+      data-running={props.running}
+      class="min-w-0 rounded-sm border border-[rgba(103,232,249,0.16)] bg-[rgba(8,19,31,0.72)] px-3 py-2"
+      title={`${props.title}: ${label()}`}
+    >
+      <div class="flex min-w-0 items-center justify-between gap-2">
+        <div class="min-w-0 truncate text-11-medium text-[#67e8f9]">{props.title}</div>
+        <span
+          class="shrink-0 rounded-sm border px-2 py-0.5 text-10-medium uppercase"
+          classList={{
+            "border-[rgba(45,212,191,0.34)] bg-[rgba(45,212,191,0.10)] text-[#99f6e4]": props.running,
+            "border-[rgba(148,163,184,0.24)] bg-[rgba(148,163,184,0.08)] text-[#cbd5e1]": !props.running,
+          }}
+        >
+          {label()}
+        </span>
+      </div>
+      <div class="mt-1 truncate text-12-medium text-[#f8fdff]">{props.primary}</div>
+      <Show when={props.secondary}>
+        {(secondary) => <div class="mt-1 truncate text-10-regular text-[#95afc4]">{secondary()}</div>}
+      </Show>
+    </div>
+  )
+}
+
 function RuntimeSection(props: { title: string; children: JSX.Element }) {
   return (
     <section class="rounded-md border border-[rgba(103,232,249,0.14)] bg-[#08131f] p-3">
@@ -6876,6 +7711,7 @@ function AgentInfoPanel(props: {
   runtimeStatus?: string
   testLogActive: boolean
   events: AgentStreamEvent[]
+  sessionTimelineEvents?: BlueprintSessionTimelineEvent[]
   onClose: () => void
   onPin: () => void
   onMovePointerDown: (event: PointerEvent) => void
@@ -6921,7 +7757,10 @@ function AgentInfoPanel(props: {
   const statusUpdatedAt = createMemo(() => formatAgentStreamEventTime(statusField("created_at")))
   const lastError = createMemo(() => stringValue(statusField("last_error")))
   const visibleEvents = createMemo<AgentPanelDisplayEvent[]>((previous) =>
-    stabilizeAgentPanelDisplayEvents(previous, visibleAgentPanelEvents(props.events, props.panel.userMessages ?? [])),
+    stabilizeAgentPanelDisplayEvents(
+      previous,
+      visibleAgentPanelEvents(props.events, props.panel.userMessages ?? [], props.sessionTimelineEvents ?? []),
+    ),
   [])
   const statusDetails = createMemo(() =>
     [
@@ -7458,6 +8297,7 @@ function BlueprintNodeView(props: {
   runtimeVisualState: RuntimeNodeVisualState
   hasIncomingEdge: boolean
   hasOutgoingEdge: boolean
+  popoBlueprintAgent?: boolean
   isConnectTargetVisible: boolean
   agentPanelProgress: number
   layout?: BlueprintNodeLayout
@@ -7468,6 +8308,7 @@ function BlueprintNodeView(props: {
   onDelete: () => void
   onEdit: () => void
   onInfoPanel: () => void
+  onScriptSettings: () => void
   onAgentCollapsedChange: (collapsed: boolean) => void
   onPromptTextChange: (text: string) => void
   onPromptTriggerChange: (trigger: "once" | "always") => void
@@ -7676,6 +8517,15 @@ function BlueprintNodeView(props: {
                                 style={{ color: nodeTone().icon }}
                               />
                               <div class="min-w-0 truncate text-12-medium" style={{ color: nodeTone().text }}>{props.title}</div>
+                              <Show when={props.popoBlueprintAgent}>
+                                <div
+                                  data-blueprint-popo-agent-badge
+                                  class="ml-auto shrink-0 rounded-sm border border-[rgba(20,83,45,0.32)] bg-[rgba(20,83,45,0.12)] px-1.5 py-0.5 text-10-medium text-[#14532d]"
+                                  title={language.t("blueprint.popoEntry.activeBadge" as never)}
+                                >
+                                  POPO
+                                </div>
+                              </Show>
                             </div>
                             <Show when={props.item.type !== "terminal"}>
                               <div class="w-full truncate text-11-regular" style={{ color: nodeTone().subtitle }}>{props.subtitle}</div>
@@ -7688,6 +8538,15 @@ function BlueprintNodeView(props: {
                             <div class="pointer-events-none absolute left-3 right-3 top-3 z-10 flex min-w-0 items-center gap-2">
                               <Icon size="small" name="blueprint" class="shrink-0" style={{ color: nodeTone().icon }} />
                               <div class="min-w-0 truncate text-13-medium" style={{ color: nodeTone().text }}>{props.title}</div>
+                              <Show when={props.popoBlueprintAgent}>
+                                <div
+                                  data-blueprint-popo-agent-badge
+                                  class="ml-auto shrink-0 rounded-sm border border-[rgba(20,83,45,0.32)] bg-[rgba(20,83,45,0.12)] px-1.5 py-0.5 text-10-medium text-[#14532d]"
+                                  title={language.t("blueprint.popoEntry.activeBadge" as never)}
+                                >
+                                  POPO
+                                </div>
+                              </Show>
                             </div>
                             <div
                               class="pointer-events-none absolute left-3 right-7 top-[34px] z-10 truncate text-12-regular"
@@ -8004,6 +8863,12 @@ function BlueprintNodeView(props: {
               <ContextMenu.ItemLabel>{language.t("blueprint.context.infoPanel")}</ContextMenu.ItemLabel>
             </ContextMenu.Item>
           </Show>
+          <Show when={props.item.type === "script"}>
+            <ContextMenu.Item onSelect={props.onScriptSettings}>
+              <Icon size="small" name="edit" />
+              <ContextMenu.ItemLabel>{language.t("blueprint.context.scriptSettings" as never)}</ContextMenu.ItemLabel>
+            </ContextMenu.Item>
+          </Show>
           <ContextMenu.Item onSelect={props.onEdit}>
             <Icon size="small" name="edit" />
             <ContextMenu.ItemLabel>{language.t("blueprint.context.edit")}</ContextMenu.ItemLabel>
@@ -8099,8 +8964,33 @@ export function BlueprintInspector(props: {
   }
 
   const updatePopoEntry = <K extends keyof BlueprintPopoEntry>(field: K, value: BlueprintPopoEntry[K]) => {
-    props.setStore("runtime", "popo_entry", field, value as never)
+    if (!props.selectedAgent || props.selectedAgent.node_type !== "agent") return
+    updateAgentField("popo_entry", {
+      ...createDefaultPopoEntry(),
+      ...(props.selectedAgent.popo_entry ?? {}),
+      [field]: value,
+    })
   }
+
+  const selectedIsStartAgent = () => (props.selectedNodeId ?? "") === (props.draft.runtime?.start_node_id ?? "")
+  const selectedPopoEntry = () => props.selectedAgent?.popo_entry ?? createDefaultPopoEntry()
+  const otherEnabledPopoAgentId = () =>
+    Object.entries(props.draft.graph.agent_nodes ?? {}).find(
+      ([id, node]) =>
+        id !== props.selectedNodeId &&
+        node.node_type === "agent" &&
+        node.popo_entry?.enabled === true,
+    )?.[0]
+  const popoEntryDisabledReason = () => {
+    if (props.selectedAgent?.node_type !== "agent") return ""
+    const otherAgentId = otherEnabledPopoAgentId()
+    if (otherAgentId) {
+      return language.t("blueprint.popoEntry.lockedByAgent" as never, { nodeId: otherAgentId } as never)
+    }
+    if (!selectedIsStartAgent()) return language.t("blueprint.popoEntry.startNodeOnly" as never)
+    return ""
+  }
+  const popoEntryDisabled = () => !!popoEntryDisabledReason()
 
   const updateAgentCliKind = (value: string) => {
     const cliKind = value as BlueprintCliKind
@@ -8267,45 +9157,61 @@ export function BlueprintInspector(props: {
                 checked={!!props.selectedAgent?.external}
                 onChange={(checked) => updateAgentField("external", checked)}
               />
-              <Show
-                when={(props.selectedNodeId ?? "") === (props.draft.runtime?.start_node_id ?? "")}
-                fallback={
-                  <ReadonlyInspectorField
-                    label={language.t("blueprint.field.popoEntry" as never)}
-                    value={language.t("blueprint.popoEntry.startNodeOnly" as never)}
-                    multiline
-                  />
-                }
-              >
+              <Show when={props.selectedAgent?.node_type === "agent"}>
                 <div class="flex flex-col gap-2 border-t border-[rgba(103,232,249,0.14)] pt-3">
+                  <div class="flex min-w-0 items-center justify-between gap-2">
+                    <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.field.popoEntry" as never)}</div>
+                    <Show when={selectedIsStartAgent() && selectedPopoEntry().enabled}>
+                      <span
+                        data-blueprint-popo-badge
+                        class="shrink-0 rounded-sm border border-[rgba(103,232,249,0.38)] bg-[rgba(103,232,249,0.14)] px-1.5 py-0.5 text-10-medium text-[#67e8f9]"
+                        title={language.t("blueprint.popoEntry.activeBadge" as never)}
+                      >
+                        POPO
+                      </span>
+                    </Show>
+                  </div>
+                  <Show when={popoEntryDisabledReason()}>
+                    {(reason) => (
+                      <div class="rounded-sm border border-[rgba(148,163,184,0.18)] bg-[rgba(148,163,184,0.08)] px-2 py-1.5 text-11-regular leading-4 text-[#95afc4]">
+                        {reason()}
+                      </div>
+                    )}
+                  </Show>
                   <CheckboxField
                     label={language.t("blueprint.field.popoEntryEnabled" as never)}
-                    checked={props.draft.runtime?.popo_entry?.enabled === true}
+                    checked={selectedPopoEntry().enabled === true}
+                    disabled={popoEntryDisabled()}
                     onChange={(checked) => updatePopoEntry("enabled", checked)}
                   />
                   <InspectorTextField
                     label={language.t("blueprint.field.popoRobotAppKey" as never)}
-                    value={props.draft.runtime?.popo_entry?.robot_app_key ?? ""}
+                    value={selectedPopoEntry().robot_app_key ?? ""}
+                    disabled={popoEntryDisabled()}
                     onChange={(value) => updatePopoEntry("robot_app_key", value)}
                   />
                   <InspectorTextField
                     label={language.t("blueprint.field.popoRobotName" as never)}
-                    value={props.draft.runtime?.popo_entry?.robot_name ?? ""}
+                    value={selectedPopoEntry().robot_name ?? ""}
+                    disabled={popoEntryDisabled()}
                     onChange={(value) => updatePopoEntry("robot_name", value)}
                   />
                   <InspectorTextField
                     label={language.t("blueprint.field.popoRobotAppSecret" as never)}
-                    value={props.draft.runtime?.popo_entry?.robot_app_secret ?? ""}
+                    value={selectedPopoEntry().robot_app_secret ?? ""}
+                    disabled={popoEntryDisabled()}
                     onChange={(value) => updatePopoEntry("robot_app_secret", value)}
                   />
                   <InspectorTextField
                     label={language.t("blueprint.field.popoCallbackToken" as never)}
-                    value={props.draft.runtime?.popo_entry?.callback_token ?? ""}
+                    value={selectedPopoEntry().callback_token ?? ""}
+                    disabled={popoEntryDisabled()}
                     onChange={(value) => updatePopoEntry("callback_token", value)}
                   />
                   <InspectorTextField
                     label={language.t("blueprint.field.popoAesKey" as never)}
-                    value={props.draft.runtime?.popo_entry?.aes_key ?? ""}
+                    value={selectedPopoEntry().aes_key ?? ""}
+                    disabled={popoEntryDisabled()}
                     onChange={(value) => updatePopoEntry("aes_key", value)}
                   />
                 </div>
@@ -8495,6 +9401,16 @@ export function BlueprintInspector(props: {
                 label={language.t("blueprint.field.collapsed" as never)}
                 checked={props.selectedScript?.collapsed !== false}
                 onChange={(checked) => updateScriptField("collapsed", checked)}
+              />
+              <CheckboxField
+                label={language.t("blueprint.field.scriptFeedbackOnly" as never)}
+                checked={props.selectedScript?.feedback_only === true}
+                onChange={(checked) => updateScriptField("feedback_only", checked)}
+              />
+              <CheckboxField
+                label={language.t("blueprint.field.scriptRequireCallBeforeDispatch" as never)}
+                checked={props.selectedScript?.require_call_before_dispatch === true}
+                onChange={(checked) => updateScriptField("require_call_before_dispatch", checked)}
               />
               <Button
                 size="small"
@@ -8927,7 +9843,7 @@ function ScriptPortsInspector(props: { label: string; ports: BlueprintScriptPort
 function InspectorTextField(props: TextFieldProps & { tip?: InspectorTipKey }) {
   const [local, rest] = splitProps(props, ["label", "tip"])
   const fieldClass = () =>
-    `text-13-regular !text-[#f8fdff] placeholder:!text-[#95afc4] ${rest.class ?? ""}`.trim()
+    `text-13-regular !text-[#f8fdff] placeholder:!text-[#95afc4] disabled:cursor-not-allowed disabled:opacity-60 ${rest.class ?? ""}`.trim()
   const fieldStyle = () => ({
     color: "#f8fdff",
     "-webkit-text-fill-color": "#f8fdff",
@@ -9056,16 +9972,23 @@ function CheckboxField(props: {
   label: string
   tip?: InspectorTipKey
   checked: boolean
+  disabled?: boolean
   onChange: (checked: boolean) => void
 }) {
   return (
-    <div class="flex items-center justify-between gap-2 rounded-md border border-[rgba(103,232,249,0.22)] bg-[#06101a] px-2 py-1.5 text-12-medium text-[#f8fdff]">
+    <div
+      class="flex items-center justify-between gap-2 rounded-md border border-[rgba(103,232,249,0.22)] bg-[#06101a] px-2 py-1.5 text-12-medium text-[#f8fdff]"
+      classList={{ "opacity-60": props.disabled }}
+    >
       <label class="flex min-w-0 items-center gap-2">
         <input
           type="checkbox"
           class="size-4 accent-[#67e8f9]"
           checked={props.checked}
-          onChange={(event) => props.onChange(event.currentTarget.checked)}
+          disabled={props.disabled}
+          onChange={(event) => {
+            if (!props.disabled) props.onChange(event.currentTarget.checked)
+          }}
         />
         <span class="min-w-0 truncate">{props.label}</span>
       </label>
@@ -9419,7 +10342,62 @@ function numberValue(value: unknown): number {
   return 0
 }
 
-function blueprintSessionRunning(session: BlueprintSessionSummary) {
+function blueprintMainSessionKey(blueprintId: string) {
+  const id = blueprintId.trim() || DEFAULT_BLUEPRINT_ID
+  return `main+${id}`
+}
+
+function normalizeBlueprintSessionSummary(value: Record<string, unknown>): BlueprintSessionSummary {
+  return {
+    sessionKey: stringValue(value.sessionKey) ?? stringValue(value.session_key) ?? "",
+    sessionDisplayName: stringValue(value.sessionDisplayName) ?? stringValue(value.session_display_name),
+    projectDir: stringValue(value.projectDir) ?? stringValue(value.project_dir) ?? "",
+    blueprintId: stringValue(value.blueprintId) ?? stringValue(value.blueprint_id) ?? "",
+    blueprintName: stringValue(value.blueprintName) ?? stringValue(value.blueprint_name),
+    blueprintStructureId: stringValue(value.blueprintStructureId) ?? stringValue(value.blueprint_structure_id),
+    source: stringValue(value.source),
+    popoUserId: stringValue(value.popoUserId) ?? stringValue(value.popo_user_id),
+    popoSessionId: stringValue(value.popoSessionId) ?? stringValue(value.popo_session_id),
+    popoGroupId: stringValue(value.popoGroupId) ?? stringValue(value.popo_group_id),
+    status: stringValue(value.status),
+    activeRunId: stringValue(value.activeRunId) ?? stringValue(value.active_run_id),
+    lastRunId: stringValue(value.lastRunId) ?? stringValue(value.last_run_id),
+    startNodeId: stringValue(value.startNodeId) ?? stringValue(value.start_node_id),
+    messageCount: numberValue(value.messageCount ?? value.message_count),
+    createdAt: numberValue(value.createdAt ?? value.created_at) || undefined,
+    lastTouchedAt: numberValue(value.lastTouchedAt ?? value.last_touched_at) || undefined,
+  }
+}
+
+function normalizeBlueprintSlotSummary(value: unknown): BlueprintSlotSummary | undefined {
+  const record = asRecord(value)
+  if (!record || record.error) return undefined
+  const runningRunIdsSource = record.runningRunIds ?? record.running_run_ids
+  const runningRunIds = Array.isArray(runningRunIdsSource)
+    ? runningRunIdsSource.map((entry) => String(entry || "")).filter(Boolean)
+    : []
+  return {
+    ok: record.ok === true,
+    projectDir: stringValue(record.projectDir) ?? stringValue(record.project_dir),
+    blueprintId: stringValue(record.blueprintId) ?? stringValue(record.blueprint_id),
+    blueprintName: stringValue(record.blueprintName) ?? stringValue(record.blueprint_name),
+    blueprintStructureId: stringValue(record.blueprintStructureId) ?? stringValue(record.blueprint_structure_id),
+    poolKey: stringValue(record.poolKey) ?? stringValue(record.pool_key),
+    status: stringValue(record.status),
+    activeSessionCount: numberValue(record.activeSessionCount ?? record.active_session_count),
+    queuedSessionCount: numberValue(record.queuedSessionCount ?? record.queued_session_count),
+    idleSessionCount: numberValue(record.idleSessionCount ?? record.idle_session_count),
+    runningRunCount: numberValue(record.runningRunCount ?? record.running_run_count),
+    idleRunCount: numberValue(record.idleRunCount ?? record.idle_run_count),
+    maxActiveSessions: numberValue(record.maxActiveSessions ?? record.max_active_sessions) || 3,
+    runningRunIds,
+    runs: arrayOfRecords(record.runs),
+    sessions: arrayOfRecords(record.sessions).map(normalizeBlueprintSessionSummary),
+  }
+}
+
+function blueprintSessionRunning(session?: BlueprintSessionSummary) {
+  if (!session) return false
   return Boolean(session.activeRunId) || session.status === "running"
 }
 
@@ -9474,6 +10452,40 @@ function normalizeResidentServiceItem(value: unknown): BlueprintResidentServiceI
     pid: typeof record.pid === "number" ? record.pid : undefined,
     port: typeof record.port === "number" ? record.port : undefined,
   }
+}
+
+function normalizePopoRobot(value: unknown): BlueprintPopoRobot | undefined {
+  const record = asRecord(value)
+  if (!record) return
+  const robotAppKey = stringValue(record.robot_app_key) ?? stringValue(record.robotAppKey) ?? ""
+  if (!robotAppKey) return
+  return {
+    enabled: record.enabled === true,
+    robot_app_key: robotAppKey,
+    robot_name: stringValue(record.robot_name) ?? stringValue(record.robotName) ?? "",
+    robot_app_secret: stringValue(record.robot_app_secret) ?? stringValue(record.robotAppSecret) ?? "",
+    callback_token: stringValue(record.callback_token) ?? stringValue(record.callbackToken) ?? "",
+    aes_key: stringValue(record.aes_key) ?? stringValue(record.aesKey) ?? "",
+    updated_at: typeof record.updated_at === "number" ? record.updated_at : typeof record.updatedAt === "number" ? record.updatedAt : undefined,
+  }
+}
+
+function createBlankPopoRobot(): BlueprintPopoRobot {
+  return {
+    enabled: false,
+    robot_app_key: "",
+    robot_name: "",
+    robot_app_secret: "",
+    callback_token: "",
+    aes_key: "",
+  }
+}
+
+function popoServiceStatusLabel(status: Record<string, unknown> | undefined): string {
+  const explicit = stringValue(status?.status)
+  if (explicit) return explicit
+  if (status?.ok === true || status?.running === true) return "running"
+  return "stopped"
 }
 
 function normalizeScriptCatalogPort(value: Record<string, unknown>, fallbackName: string): BlueprintScriptPort {
@@ -9928,7 +10940,11 @@ function agentPanelDisplayEventEquals(left: AgentPanelDisplayEvent, right: Agent
   )
 }
 
-function visibleAgentPanelEvents(events: AgentStreamEvent[], userMessages: AgentPanelUserMessage[] = []): AgentPanelDisplayEvent[] {
+function visibleAgentPanelEvents(
+  events: AgentStreamEvent[],
+  userMessages: AgentPanelUserMessage[] = [],
+  sessionTimelineEvents: BlueprintSessionTimelineEvent[] = [],
+): AgentPanelDisplayEvent[] {
   const replies = new Map<string, AgentPanelDisplayEvent>()
   const reasoning = new Map<string, AgentPanelDisplayEvent>()
   const tools = new Map<string, AgentPanelDisplayEvent>()
@@ -9956,7 +10972,7 @@ function visibleAgentPanelEvents(events: AgentStreamEvent[], userMessages: Agent
     currentToolGroup.tools.push(entry)
   }
 
-  for (const item of agentPanelTimelineItems(events, userMessages)) {
+  for (const item of agentPanelTimelineItems(events, userMessages, sessionTimelineEvents)) {
     if (item.type === "user") {
       flushAgentPanelToolGroup()
       display.push({
@@ -9970,10 +10986,19 @@ function visibleAgentPanelEvents(events: AgentStreamEvent[], userMessages: Agent
       })
       continue
     }
+    if (item.type === "session") {
+      const sessionEvent = agentPanelDisplayEventFromSessionTimeline(item.event, item.order)
+      if (sessionEvent) {
+        flushAgentPanelToolGroup()
+        display.push(sessionEvent)
+      }
+      continue
+    }
 
     const event = item.event
     const kind = stringValue(event.kind) ?? "event"
     const order = item.order
+    if (isFrameworkMaintenanceAgentPanelEvent(event)) continue
     if (kind === "queue.updated") {
       const status = stringValue(event.status)
       const lastError = stringValue(event.last_error)
@@ -9990,10 +11015,13 @@ function visibleAgentPanelEvents(events: AgentStreamEvent[], userMessages: Agent
     }
     if (isHiddenAgentPanelStreamKind(kind)) continue
 
+    if (sessionTimelineHasChat(sessionTimelineEvents) && (kind === "part.delta" || kind === "message.completed")) {
+      continue
+    }
     if (kind === "part.delta" || kind === "message.completed") {
       const partType = stringValue(event.part_type)
       if (partType === "reasoning") {
-        const reasoningText = cleanAgentPanelReplyText(agentStreamEventContentText(event))
+        const reasoningText = cleanAgentPanelReplyText(agentPanelTextEventContentText(event))
         if (reasoningText) flushAgentPanelToolGroup()
         upsertAgentPanelStreamingEntry({
           map: reasoning,
@@ -10009,7 +11037,7 @@ function visibleAgentPanelEvents(events: AgentStreamEvent[], userMessages: Agent
         continue
       }
       if (!isAgentReplyTextEvent(event, kind)) continue
-      const text = cleanAgentPanelReplyText(agentStreamEventContentText(event))
+      const text = cleanAgentPanelReplyText(agentPanelTextEventContentText(event))
       if (text) flushAgentPanelToolGroup()
       upsertAgentPanelStreamingEntry({
         map: replies,
@@ -10070,14 +11098,27 @@ function visibleAgentPanelEvents(events: AgentStreamEvent[], userMessages: Agent
   )
 }
 
-function agentPanelTimelineItems(events: AgentStreamEvent[], userMessages: AgentPanelUserMessage[]): AgentPanelTimelineItem[] {
+function agentPanelTimelineItems(
+  events: AgentStreamEvent[],
+  userMessages: AgentPanelUserMessage[],
+  sessionTimelineEvents: BlueprintSessionTimelineEvent[] = [],
+): AgentPanelTimelineItem[] {
+  const hasSessionChat = sessionTimelineHasChat(sessionTimelineEvents)
   const timeline: AgentPanelTimelineItem[] = [
-    ...userMessages.map((message, index) => ({
+    ...(hasSessionChat ? [] : userMessages).map((message, index) => ({
       type: "user" as const,
       message,
       index,
       order: agentPanelUserMessageOrder(message, index),
     })),
+    ...sessionTimelineEvents
+      .filter((event) => event.type === "user_message" || event.type === "agent_reply")
+      .map((event, index) => ({
+        type: "session" as const,
+        event,
+        index,
+        order: agentPanelSessionTimelineOrder(event, index),
+      })),
     ...events.map((event, index) => ({
       type: "event" as const,
       event,
@@ -10086,6 +11127,43 @@ function agentPanelTimelineItems(events: AgentStreamEvent[], userMessages: Agent
     })),
   ]
   return timeline.sort((left, right) => left.order - right.order || left.index - right.index)
+}
+
+function sessionTimelineHasChat(events: BlueprintSessionTimelineEvent[]) {
+  return events.some((event) => event.type === "user_message" || event.type === "agent_reply")
+}
+
+function agentPanelDisplayEventFromSessionTimeline(
+  event: BlueprintSessionTimelineEvent,
+  order: number,
+): AgentPanelDisplayEvent | undefined {
+  if (event.type === "user_message") {
+    const text = stringValue(event.message) ?? stringValue(event.content)
+    if (!text) return undefined
+    return {
+      id: stringValue(event.id) ?? `session-user-${event.seq ?? order}`,
+      kind: "用户",
+      status: "sent",
+      text,
+      tone: "user",
+      order,
+      seq: event.seq,
+    }
+  }
+  if (event.type === "agent_reply") {
+    const text = stringValue(event.content) ?? stringValue(event.message)
+    if (!text) return undefined
+    return {
+      id: stringValue(event.id) ?? `session-agent-${event.seq ?? order}`,
+      kind: "Agent 回复",
+      status: "completed",
+      text,
+      tone: "reply",
+      order,
+      seq: event.seq,
+    }
+  }
+  return undefined
 }
 
 function mergeAdjacentAgentPanelToolGroups(events: AgentPanelDisplayEvent[]) {
@@ -10191,7 +11269,17 @@ function agentPanelToolGroupStatus(tools: AgentPanelDisplayEvent[]) {
 }
 
 function isHiddenAgentPanelStreamKind(kind: string) {
-  return kind === "status" || kind === "message.started" || kind === "queue.updated"
+  return kind === "status" || kind === "message.started" || kind === "queue.updated" || kind === "agent.task_status"
+}
+
+function isFrameworkMaintenanceAgentPanelEvent(event: AgentStreamEvent) {
+  const messageId = stringValue(event.message_id)
+  if (messageId?.startsWith("summary-msg-")) return true
+  const toolName = agentPanelToolName(event)
+  if (toolName === "agent_task_status") return true
+  if (toolName === "blueprint_terminate_session") return true
+  const text = agentStreamEventContentText(event) ?? ""
+  return text.includes("popo_session_termination_check") || text.includes("framework_summary_request") || text.includes("idle_task_status_missing")
 }
 
 function isAgentReplyTextEvent(event: AgentStreamEvent, kind: string) {
@@ -10228,9 +11316,7 @@ function upsertAgentPanelStreamingEntry(input: {
   collapsible?: boolean
   order: number
 }) {
-  const messageId = stringValue(input.event.message_id)
-  const partId = stringValue(input.event.part_id)
-  const key = messageId ?? partId ?? `${input.keyPrefix}-${input.event.seq ?? input.map.size}`
+  const key = agentPanelStreamingEntryKey(input.event, input.keyPrefix, input.map.size)
   const current = input.map.get(key)
   if (!current) {
     if (!input.text) return
@@ -10253,6 +11339,16 @@ function upsertAgentPanelStreamingEntry(input: {
   current.seq = input.event.seq ?? current.seq
 }
 
+function agentPanelStreamingEntryKey(event: AgentStreamEvent, keyPrefix: string, fallbackIndex: number) {
+  const partId = stringValue(event.part_id)
+  if (partId) return partId
+  const messageId = stringValue(event.message_id) ?? keyPrefix
+  const eventId = stringValue(event.event_id)
+  if (eventId) return `${messageId}-${eventId}`
+  if (event.seq !== undefined && event.seq !== null) return `${messageId}-${event.seq}`
+  return `${messageId}-${fallbackIndex}`
+}
+
 function userMessageStatusLabel(status: AgentPanelUserMessage["status"]) {
   if (status === "queued") return "排队中"
   if (status === "sent") return "已发送"
@@ -10265,6 +11361,13 @@ function userMessageStatusLabel(status: AgentPanelUserMessage["status"]) {
 function agentPanelUserMessageOrder(message: AgentPanelUserMessage, index: number) {
   const value = Date.parse(message.created_at || message.sent_at || message.completed_at || message.failed_at || "")
   return Number.isFinite(value) ? value : index
+}
+
+function agentPanelSessionTimelineOrder(event: BlueprintSessionTimelineEvent, index: number) {
+  const value = Date.parse(event.timestamp || "")
+  if (Number.isFinite(value)) return value
+  if (typeof event.seq === "number" && Number.isFinite(event.seq)) return event.seq
+  return index
 }
 
 function agentPanelStreamEventOrder(event: AgentStreamEvent) {
@@ -10354,6 +11457,13 @@ function agentStatusFieldText(value: unknown) {
   if (typeof value === "string" && value.trim()) return value.trim()
   if (typeof value === "number" && Number.isFinite(value)) return String(value)
   if (typeof value === "boolean") return String(value)
+  return undefined
+}
+
+function agentPanelTextEventContentText(event: AgentStreamEvent) {
+  const text = event.delta ?? event.text
+  if (typeof text === "string") return text
+  if (text !== undefined) return JSON.stringify(text, null, 2)
   return undefined
 }
 

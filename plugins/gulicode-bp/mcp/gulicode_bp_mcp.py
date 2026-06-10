@@ -97,6 +97,9 @@ PERSISTENT_WORKBENCH_READY_PATH = RUNTIME_DATA_DIR / "workbench_ready.json"
 PERSISTENT_WORKBENCH_LOG_DIR = RUNTIME_DATA_DIR / "logs"
 MCP_STATUS_PATH = RUNTIME_DATA_DIR / "mcp_status.json"
 MCP_LOG_PATH = PERSISTENT_WORKBENCH_LOG_DIR / "gulicode-bp-mcp.log"
+POPO_SERVICE_STATUS_PATH = RUNTIME_DATA_DIR / "popo_service.json"
+POPO_CALLBACK_HOST = os.environ.get("POPO_CALLBACK_HOST", "0.0.0.0").strip() or "0.0.0.0"
+POPO_CALLBACK_PORT = int(os.environ.get("POPO_CALLBACK_PORT", "3100"))
 MCP_HEARTBEAT_INTERVAL_SECONDS = 5.0
 MCP_HEARTBEAT_STALE_AFTER_SECONDS = 20.0
 HOP_BY_HOP_HEADERS = {
@@ -139,6 +142,11 @@ ALLOWED_COMMANDS = {
     "blueprint.runtime.executePlan",
     "blueprint.sessions.list",
     "blueprint.sessions.delete",
+    "blueprint.sessions.terminate",
+    "blueprint.sessions.message",
+    "blueprint.slots.start",
+    "blueprint.slots.message",
+    "blueprint.popo.config",
     "blueprint.listRuns",
     "blueprint.status",
     "blueprint.runDiff",
@@ -165,6 +173,7 @@ WRITE_COMMANDS = {
     "blueprint.runtime.setStartAgent",
     "blueprint.runtime.executePlan",
     "blueprint.sessions.delete",
+    "blueprint.sessions.terminate",
     "blueprint.startResidentService",
     "blueprint.stopResidentService",
     "blueprint.rollbackChangesets",
@@ -183,8 +192,15 @@ CONTROL_COMMANDS = {
 
 INTERNAL_COMMANDS = {
     "blueprint.slots.start",
+    "blueprint.slots.status",
+    "blueprint.slots.terminate",
     "blueprint.slots.message",
     "blueprint.popo.config",
+    "blueprint.popo.callbackConfig",
+    "blueprint.popo.robots",
+    "blueprint.popo.robot.save",
+    "blueprint.popo.robot.delete",
+    "blueprint.popo.robot.enabled",
 }
 
 
@@ -502,6 +518,36 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
+def _popo_health_host(host: str) -> str:
+    value = str(host or "").strip()
+    if value in {"", "0.0.0.0", "::", "[::]"}:
+        return "127.0.0.1"
+    return value.strip("[]")
+
+
+def _popo_health_url(host: str, port: int) -> str:
+    return f"http://{_popo_health_host(host)}:{int(port)}/health"
+
+
+def _popo_health_ok(host: str, port: int) -> bool:
+    try:
+        request = urlrequest.Request(_popo_health_url(host, port), headers={"Accept": "application/json"})
+        with urlrequest.urlopen(request, timeout=1.5) as response:
+            if not (200 <= int(response.status) < 300):
+                return False
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+            return bool(isinstance(payload, dict) and payload.get("ok") and payload.get("service") == "gulicode-bp-popo-callback")
+    except Exception:
+        return False
+
+
 def _terminate_process(pid: int) -> bool:
     if pid <= 0 or pid == os.getpid():
         return False
@@ -534,6 +580,7 @@ class WorkbenchServer:
         default_blueprint_id: str = DEFAULT_BLUEPRINT_ID,
         collaboration_url: str = DEFAULT_COLLABORATION_URL,
         ensure_collaboration_fn: Callable[[], None] | None = None,
+        popo_status_fn: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.service = service
         self.request_fn = request_fn
@@ -543,6 +590,7 @@ class WorkbenchServer:
         self.default_blueprint_id = default_blueprint_id or DEFAULT_BLUEPRINT_ID
         self.collaboration_url = collaboration_url.rstrip("/")
         self.ensure_collaboration_fn = ensure_collaboration_fn
+        self.popo_status_fn = popo_status_fn
         self.token = secrets.token_urlsafe(24)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -635,7 +683,9 @@ class WorkbenchServer:
                     if command == "blueprint.agentStreamToken" and not args.get("baseUrl"):
                         args = dict(args)
                         args["baseUrl"] = owner.url
-                    if command in INTERNAL_COMMANDS:
+                    if command == "service.popoStatus" and owner.popo_status_fn is not None:
+                        response = {"ok": True, "popo": owner.popo_status_fn()}
+                    elif command in INTERNAL_COMMANDS:
                         response = owner.service.handle_request({"command": command, "args": args})
                     else:
                         response = owner.request_fn(command, args)
@@ -833,6 +883,9 @@ class PluginState:
         self.collaboration_process: subprocess.Popen[bytes] | None = None
         self._collaboration_stdout: Any = None
         self._collaboration_stderr: Any = None
+        self.popo_process: subprocess.Popen[bytes] | None = None
+        self._popo_stdout: Any = None
+        self._popo_stderr: Any = None
         self.persistent_workbench_ready_path = PERSISTENT_WORKBENCH_READY_PATH
         self._persistent_workbench_stdout: Any = None
         self._persistent_workbench_stderr: Any = None
@@ -844,6 +897,150 @@ class PluginState:
             self.service.resident_service_manager().stop_all()
         except Exception:
             pass
+
+    def _close_popo_logs(self) -> None:
+        for handle_name in ("_popo_stdout", "_popo_stderr"):
+            handle = getattr(self, handle_name, None)
+            if handle is not None:
+                try:
+                    handle.close()
+                finally:
+                    setattr(self, handle_name, None)
+
+    def _write_popo_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        status = {
+            "schemaVersion": 1,
+            "timestamp": _utc_now(),
+            "host": POPO_CALLBACK_HOST,
+            "port": POPO_CALLBACK_PORT,
+            "url": f"http://{POPO_CALLBACK_HOST}:{POPO_CALLBACK_PORT}",
+            "healthUrl": _popo_health_url(POPO_CALLBACK_HOST, POPO_CALLBACK_PORT),
+            "callbackUrlTemplate": f"http://{POPO_CALLBACK_HOST}:{POPO_CALLBACK_PORT}/popo/callback/<robot_app_key>",
+            "legacyCallbackUrl": f"http://{POPO_CALLBACK_HOST}:{POPO_CALLBACK_PORT}/popo/callback",
+            "legacyCallbackAutoResolve": True,
+            **payload,
+        }
+        _write_json_file(POPO_SERVICE_STATUS_PATH, status)
+        return status
+
+    def popo_service_status(self) -> dict[str, Any]:
+        status = _read_json_file(POPO_SERVICE_STATUS_PATH) or {}
+        healthy = _popo_health_ok(POPO_CALLBACK_HOST, POPO_CALLBACK_PORT)
+        pid = int(status.get("pid") or (self.popo_process.pid if self.popo_process is not None else 0) or 0)
+        registered = []
+        try:
+            registered = self.service.list_registered_blueprint_projects()
+        except Exception:
+            registered = []
+        return {
+            "ok": healthy,
+            "status": "running" if healthy else str(status.get("status") or "stopped"),
+            "pid": pid,
+            "url": f"http://{POPO_CALLBACK_HOST}:{POPO_CALLBACK_PORT}",
+            "healthUrl": _popo_health_url(POPO_CALLBACK_HOST, POPO_CALLBACK_PORT),
+            "callbackUrlTemplate": f"http://{POPO_CALLBACK_HOST}:{POPO_CALLBACK_PORT}/popo/callback/<robot_app_key>",
+            "legacyCallbackUrl": f"http://{POPO_CALLBACK_HOST}:{POPO_CALLBACK_PORT}/popo/callback",
+            "legacyCallbackAutoResolve": True,
+            "lastError": str(status.get("lastError") or ""),
+            "registeredProjects": registered,
+            "raw": status,
+        }
+
+    def ensure_popo_callback_service(self) -> dict[str, Any]:
+        with self.lock:
+            if _popo_health_ok(POPO_CALLBACK_HOST, POPO_CALLBACK_PORT):
+                pid = int((self.popo_process.pid if self.popo_process is not None else 0) or (_read_json_file(POPO_SERVICE_STATUS_PATH) or {}).get("pid") or 0)
+                return self._write_popo_status({"ok": True, "status": "running", "pid": pid, "lastError": ""})
+
+            previous = _read_json_file(POPO_SERVICE_STATUS_PATH) or {}
+            previous_pid = int(previous.get("pid") or 0)
+            if previous_pid:
+                _terminate_process(previous_pid)
+            if self.popo_process is not None and self.popo_process.poll() is None:
+                _terminate_process(self.popo_process.pid)
+                try:
+                    self.popo_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.popo_process.kill()
+                    self.popo_process.wait(timeout=5)
+            self.popo_process = None
+            self._close_popo_logs()
+
+            log_dir = RUNTIME_DATA_DIR / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            env = os.environ.copy()
+            env["GULICODE_BP_PLUGIN_ROOT"] = str(PLUGIN_ROOT)
+            env["GULICODE_BP_RUNTIME_HOME"] = str(RUNTIME_HOME)
+            env["GULICODE_BP_DATA_DIR"] = str(RUNTIME_DATA_DIR)
+            env["GULICODE_BP_DISABLE_REPO_FALLBACK"] = "1"
+            env["POPO_CALLBACK_HOST"] = POPO_CALLBACK_HOST
+            env["POPO_CALLBACK_PORT"] = str(POPO_CALLBACK_PORT)
+            import_root = str(RUNTIME_IMPORT_ROOT)
+            if env.get("PYTHONPATH"):
+                env["PYTHONPATH"] = import_root + os.pathsep + env["PYTHONPATH"]
+            else:
+                env["PYTHONPATH"] = import_root
+            runtime_python = Path(os.environ.get("GULICODE_BP_RUNTIME_PYTHON") or sys.executable)
+            args = [
+                str(runtime_python),
+                "-m",
+                "multi_agent_tcp.popo_agent_bot_run",
+                "--host",
+                POPO_CALLBACK_HOST,
+                "--port",
+                str(POPO_CALLBACK_PORT),
+            ]
+            self._popo_stdout = (log_dir / "gulicode-bp-popo.out.log").open("ab")
+            self._popo_stderr = (log_dir / "gulicode-bp-popo.err.log").open("ab")
+            try:
+                self.popo_process = subprocess.Popen(
+                    args,
+                    cwd=str(RUNTIME_DATA_DIR),
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=self._popo_stdout,
+                    stderr=self._popo_stderr,
+                    creationflags=_hidden_creationflags(),
+                )
+            except Exception as exc:
+                self._close_popo_logs()
+                append_service_log(RUNTIME_DATA_DIR, "popo-service-spawn-failed", error=str(exc))
+                return self._write_popo_status({"ok": False, "status": "degraded", "pid": 0, "lastError": str(exc)})
+
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                if self.popo_process.poll() is not None:
+                    break
+                if _popo_health_ok(POPO_CALLBACK_HOST, POPO_CALLBACK_PORT):
+                    append_service_log(
+                        RUNTIME_DATA_DIR,
+                        "popo-service-ready",
+                        pid=self.popo_process.pid,
+                        url=f"http://{POPO_CALLBACK_HOST}:{POPO_CALLBACK_PORT}",
+                        runtimePython=str(runtime_python),
+                    )
+                    return self._write_popo_status(
+                        {
+                            "ok": True,
+                            "status": "running",
+                            "pid": self.popo_process.pid,
+                            "runtimePython": str(runtime_python),
+                            "lastError": "",
+                        }
+                    )
+                time.sleep(0.25)
+            exit_code = self.popo_process.poll() if self.popo_process is not None else None
+            error = f"POPO callback service did not become healthy; exitCode={exit_code}"
+            append_service_log(RUNTIME_DATA_DIR, "popo-service-degraded", error=error)
+            return self._write_popo_status(
+                {
+                    "ok": False,
+                    "status": "degraded",
+                    "pid": int(self.popo_process.pid if self.popo_process is not None else 0),
+                    "runtimePython": str(runtime_python),
+                    "lastError": error,
+                }
+            )
 
     def attach_owner(self, thread_id: str | None, *, reason: str = "control") -> dict[str, Any] | None:
         thread_id = _string_or_none(thread_id)
@@ -962,6 +1159,11 @@ class PluginState:
         planning_thread_id: str | None = None,
     ) -> dict[str, Any]:
         with self.lock:
+            if project_dir:
+                try:
+                    self.service.register_blueprint_project(Path(project_dir))
+                except Exception as exc:
+                    append_service_log(RUNTIME_DATA_DIR, "project-register-failed", projectDir=str(project_dir), error=str(exc))
             self.ensure_collaboration_server()
             if self.workbench is None:
                 self.workbench = WorkbenchServer(
@@ -971,6 +1173,7 @@ class PluginState:
                     default_blueprint_id=str(blueprint_id or DEFAULT_BLUEPRINT_ID),
                     collaboration_url=self.collaboration_url,
                     ensure_collaboration_fn=self.ensure_collaboration_server,
+                    popo_status_fn=self.popo_service_status,
                 )
                 self.workbench.start()
             else:
@@ -1058,6 +1261,17 @@ class PluginState:
                     self.collaboration_process.kill()
                     self.collaboration_process.wait(timeout=5)
             self.collaboration_process = None
+            if self.popo_process is not None and self.popo_process.poll() is None:
+                _terminate_process(self.popo_process.pid)
+                try:
+                    self.popo_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.popo_process.kill()
+                    self.popo_process.wait(timeout=5)
+            else:
+                status = _read_json_file(POPO_SERVICE_STATUS_PATH) or {}
+                _terminate_process(int(status.get("pid") or 0))
+            self.popo_process = None
             for handle_name in ("_collaboration_stdout", "_collaboration_stderr"):
                 handle = getattr(self, handle_name, None)
                 if handle is not None:
@@ -1065,6 +1279,8 @@ class PluginState:
                         handle.close()
                     finally:
                         setattr(self, handle_name, None)
+            self._close_popo_logs()
+            self._write_popo_status({"ok": False, "status": "stopped", "pid": 0, "lastError": ""})
             self._close_persistent_workbench_logs()
             self.service.close()
 
@@ -1173,6 +1389,9 @@ class SingletonProxyState:
     def stop_workbench(self, *, thread_id: str | None = None) -> dict[str, Any]:
         return self._rpc("service.stopWorkbench", {}, thread_id=thread_id, request_kind="control")
 
+    def popo_service_status(self) -> dict[str, Any]:
+        return self._rpc("service.popoStatus", {}, request_kind="read")
+
     def request(
         self,
         command: str,
@@ -1255,7 +1474,9 @@ class SingletonServiceServer:
         if command == "service.stopWorkbench":
             return {**self.state.stop_workbench(), "servicePid": os.getpid(), "singleton": True}
         if command == "service.status":
-            return {"ok": True, "service": self._service_info()}
+            return {"ok": True, "service": self._service_info(), "popo": self.state.popo_service_status()}
+        if command == "service.popoStatus":
+            return {"ok": True, "popo": self.state.popo_service_status()}
         if request_kind == "internal" and command in INTERNAL_COMMANDS:
             return self.state.service.handle_request({"command": command, "args": args or {}})
         return self.state.request(command, args, thread_id=thread_id)
@@ -1357,6 +1578,11 @@ class SingletonServiceServer:
             generation=self.generation,
             pluginRoot=str(PLUGIN_ROOT),
         )
+        try:
+            popo_status = self.state.ensure_popo_callback_service()
+            append_service_log(RUNTIME_DATA_DIR, "popo-service-ensured", status=popo_status.get("status"), pid=popo_status.get("pid"))
+        except Exception as exc:
+            append_service_log(RUNTIME_DATA_DIR, "popo-service-ensure-error", error=str(exc), traceback=traceback.format_exc())
 
     def close(self) -> None:
         if self._heartbeat_stop is not None:
@@ -1414,6 +1640,12 @@ def stop_blueprint_workbench(ctx: Context = None) -> dict[str, Any]:
         return stop_fn(thread_id=_current_planning_thread_id(ctx))
     except TypeError:
         return stop_fn()
+
+
+@mcp.tool()
+def blueprint_popo_service_status() -> dict[str, Any]:
+    """Read the plugin-managed POPO callback service status."""
+    return state.popo_service_status()
 
 
 @mcp.tool()

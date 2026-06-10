@@ -20,13 +20,19 @@ import json
 import os
 import sys
 import tempfile
+import urllib.request
 from pathlib import Path
 
 plugin_root = Path(os.environ["GULICODE_BP_PLUGIN_ROOT"]).resolve()
 sys.path.insert(0, str(plugin_root / "mcp"))
+os.environ["GULICODE_BP_SINGLETON_ROLE"] = "proxy"
 
+import flask
 import gulicode_bp_mcp
 import multi_agent_tcp
+import multi_agent_tcp.popo_agent_bot_run
+import requests
+from Crypto.Cipher import AES
 
 
 def agent_node_ids(document):
@@ -73,10 +79,23 @@ try:
         "blueprint.sessions.list",
         {"projectDir": str(project), "blueprintId": "standalone-smoke"},
     )
+    popo_status_response = gulicode_bp_mcp.state.popo_service_status()
+    popo_status = popo_status_response.get("popo", popo_status_response)
+    health_url = str(popo_status.get("healthUrl") or "")
+    with urllib.request.urlopen(health_url, timeout=5) as response:
+        popo_health = json.loads(response.read().decode("utf-8"))
 
     output = {
         "ok": True,
         "runtimePackage": str(Path(multi_agent_tcp.__file__).resolve()),
+        "dependencyModules": {
+            "flask": str(Path(flask.__file__).resolve()),
+            "requests": str(Path(requests.__file__).resolve()),
+            "Crypto": str(Path(AES.__file__).resolve()),
+            "popo": str(Path(multi_agent_tcp.popo_agent_bot_run.__file__).resolve()),
+        },
+        "popoStatus": popo_status,
+        "popoHealth": popo_health,
         "projectDir": str(project.resolve()),
         "listedIds": [item.get("id") for item in listed.get("blueprints", [])],
         "startNodeIds": [start_node],
@@ -88,6 +107,8 @@ try:
         raise RuntimeError("created blueprint was not listed")
     if output["openedId"] != "standalone-smoke" or not output["validateOk"]:
         raise RuntimeError("standalone blueprint CRUD validation failed")
+    if not popo_status.get("ok") or not popo_health.get("ok"):
+        raise RuntimeError("standalone POPO callback service is not healthy")
     print(json.dumps(output, ensure_ascii=False, indent=2))
 finally:
     gulicode_bp_mcp.state.close()
@@ -236,6 +257,13 @@ def run_smoke(plugin_root: Path, *, timeout: float) -> dict[str, Any]:
     runtime_home = Path(env["GULICODE_BP_RUNTIME_HOME"]).expanduser()
     if not _same_or_child(runtime_package, runtime_home / "venv"):
         raise RuntimeError(f"runtime package did not load from plugin venv: {runtime_package}")
+    dependency_modules = output.get("dependencyModules", {})
+    if not isinstance(dependency_modules, dict):
+        raise RuntimeError("standalone smoke did not report dependency modules")
+    for name, raw_path in dependency_modules.items():
+        module_path = Path(str(raw_path or "")).expanduser()
+        if not _same_or_child(module_path, runtime_home / "venv"):
+            raise RuntimeError(f"{name} did not load from plugin venv: {module_path}")
     output["bootstrap"] = bootstrap
     return output
 
@@ -248,7 +276,7 @@ def parse_args() -> argparse.Namespace:
         default=Path.home() / "plugins" / PLUGIN_NAME,
         help="installed gulicode-bp plugin root",
     )
-    parser.add_argument("--timeout", type=float, default=60.0, help="child process timeout in seconds")
+    parser.add_argument("--timeout", type=float, default=180.0, help="child process timeout in seconds")
     return parser.parse_args()
 
 

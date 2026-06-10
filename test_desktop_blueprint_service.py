@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import hashlib
 import importlib.util
 import inspect
 import os
@@ -13,6 +14,7 @@ import time
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from urllib import request
 
 import pytest
@@ -23,9 +25,12 @@ from multi_agent_tcp.desktop_blueprint_service import (
     DesktopBlueprintHTTPServer,
     DesktopBlueprintNoopBackend,
     DesktopBlueprintService,
+    blueprint_legacy_session_key_for_pool,
+    blueprint_session_key_for_pool,
 )
 from multi_agent_tcp import blueprint_script_nodes
 from multi_agent_tcp import desktop_blueprint_service as desktop_blueprint_service_module
+from multi_agent_tcp.blueprint_resident_services import _resident_service_call_timeout
 from multi_agent_tcp.blueprint_mcp_runtime import (
     MCP_TOOL_AUDIT_EVENT,
     MCPTokenScope,
@@ -120,18 +125,28 @@ def _document(project_dir: Path | None = None) -> dict:
     }
 
 
+def _popo_entry(robot_app_key: str = "robot-1") -> dict:
+    return {
+        "enabled": True,
+        "robot_app_key": robot_app_key,
+        "robot_name": "Robot",
+        "robot_app_secret": "secret",
+        "callback_token": "token",
+        "aes_key": "0123456789abcdef0123456789abcdef",
+    }
+
+
 def _popo_runtime(start_node_id: str = "planner", robot_app_key: str = "robot-1") -> dict:
     return {
         "start_node_id": start_node_id,
-        "popo_entry": {
-            "enabled": True,
-            "robot_app_key": robot_app_key,
-            "robot_name": "Robot",
-            "robot_app_secret": "secret",
-            "callback_token": "token",
-            "aes_key": "0123456789abcdef0123456789abcdef",
-        },
+        "popo_entry": _popo_entry(robot_app_key),
     }
+
+
+def _enable_agent_popo(document: dict, node_id: str = "planner", robot_app_key: str = "robot-1") -> dict:
+    document.setdefault("runtime", {})["start_node_id"] = node_id
+    document["graph"]["agent_nodes"][node_id]["popo_entry"] = _popo_entry(robot_app_key)
+    return document
 
 
 def _register_fake_slot(
@@ -143,14 +158,69 @@ def _register_fake_slot(
     robot_app_key: str = "robot-1",
     slot_status: str = "idle",
 ) -> DesktopBlueprintRun:
-    graph_dict = dict(document["graph"])
-    graph = desktop_blueprint_service_module.graph_definition_from_dict(graph_dict)
-    structure_id = desktop_blueprint_service_module.canonical_blueprint_structure_id(graph_dict)
+    preflight = service._blueprint_slot_preflight(
+        project,
+        str(document["id"]),
+        require_popo=False,
+    )
+    graph = preflight["graph"]
+    structure_id = str(preflight["blueprintStructureId"])
     pool_key = desktop_blueprint_service_module.blueprint_slot_pool_key(
         project_dir=project,
         source="popo",
         source_binding=robot_app_key,
         blueprint_structure_id=structure_id,
+    )
+    reset_calls: list[dict[str, Any]] = []
+
+    async def reset_started_agents_for_session(graph_arg=None) -> dict[str, Any]:
+        reset_calls.append(
+            {
+                "graph": graph_arg,
+                "popoTerminationSessionKey": runtime.popo_termination_session_key,
+                "popoReplySessionKey": runtime.popo_reply_session_key,
+            }
+        )
+        return {"ok": True, "restarted": [{"node_id": "planner", "agent_id": "agent-planner"}]}
+
+    runtime = SimpleNamespace(
+        popo_termination_start_node_id="",
+        popo_termination_session_key="",
+        popo_termination_reminder_interval_sec=0.0,
+        popo_reply_start_node_id="",
+        popo_reply_session_key="",
+        reset_calls=reset_calls,
+        ready_for_session_reset=lambda: True,
+        reset_started_agents_for_session=reset_started_agents_for_session,
+    )
+    mcp_calls: list[dict[str, str]] = []
+    mcp_reply_calls: list[dict[str, str]] = []
+    mcp_clear_calls: list[str] = []
+
+    def enable_blueprint_session_termination(*, start_node_id: str, session_key: str) -> None:
+        mcp_calls.append({"startNodeId": start_node_id, "sessionKey": session_key})
+
+    def enable_popo_session_termination(*, start_node_id: str, session_key: str) -> None:
+        enable_blueprint_session_termination(start_node_id=start_node_id, session_key=session_key)
+
+    def enable_popo_user_reply(*, start_node_id: str, session_key: str) -> None:
+        mcp_reply_calls.append({"startNodeId": start_node_id, "sessionKey": session_key})
+
+    mcp = SimpleNamespace(
+        termination_calls=mcp_calls,
+        reply_calls=mcp_reply_calls,
+        clear_calls=mcp_clear_calls,
+        enable_blueprint_session_termination=enable_blueprint_session_termination,
+        enable_popo_session_termination=enable_popo_session_termination,
+        enable_popo_user_reply=enable_popo_user_reply,
+        clear_blueprint_session_termination=lambda: mcp_clear_calls.append("terminate"),
+        clear_popo_user_reply=lambda: mcp_clear_calls.append("reply"),
+        close=lambda: mcp_clear_calls.append("close"),
+        summary=lambda: {
+            "terminationCalls": list(mcp_calls),
+            "replyCalls": list(mcp_reply_calls),
+            "clearCalls": list(mcp_clear_calls),
+        },
     )
     run = DesktopBlueprintRun(
         run_id=run_id,
@@ -158,7 +228,7 @@ def _register_fake_slot(
         blueprint_id=str(document["id"]),
         document=document,
         graph=graph,
-        runtime=None,
+        runtime=runtime,
         control=None,
         execution_mode="live",
         created_at=1.0,
@@ -168,6 +238,7 @@ def _register_fake_slot(
         slot_pool_key=pool_key,
         blueprint_structure_id=structure_id,
         robot_app_key=robot_app_key,
+        mcp=mcp,
         slot_started_at=1.0,
         slot_last_touched_at=1.0,
     )
@@ -260,6 +331,35 @@ def test_blueprint_runtime_set_start_agent_rejects_worker_node(tmp_path: Path) -
     assert "full Agent node" in validation["errors"][0]
 
 
+def test_blueprint_runtime_set_start_agent_disables_previous_popo_entry(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["graph"]["agent_nodes"]["review"] = {
+        "node_id": "review",
+        "node_type": "agent",
+        "agent_id": "agent-review",
+        "prompt": "Review.",
+    }
+    _enable_agent_popo(document, "planner", "robot-1")
+    service.save_blueprint(project, document)
+
+    result = service.handle_request(
+        {
+            "command": "blueprint.runtime.setStartAgent",
+            "args": {"projectDir": str(project), "blueprintId": "default", "startNodeId": "review"},
+        }
+    )
+    saved = service.open_blueprint(project, "default")
+
+    assert result["ok"] is True
+    assert saved["runtime"]["start_node_id"] == "review"
+    assert saved["runtime"]["popo_entry"]["enabled"] is False
+    assert saved["graph"]["agent_nodes"]["planner"]["popo_entry"]["enabled"] is False
+    assert saved["graph"]["agent_nodes"]["planner"]["popo_entry"]["robot_app_key"] == "robot-1"
+
+
 def test_blueprint_service_validation_allows_bounded_agent_ring_graph(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -292,6 +392,30 @@ def test_blueprint_service_validation_allows_bounded_agent_ring_graph(tmp_path: 
         "errors": [],
         "warnings": [],
     }
+
+
+def test_blueprint_service_validation_rejects_invalid_popo_forwarding_agents(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = {"start_node_id": "planner"}
+    document["graph"]["agent_nodes"]["review"] = {
+        "node_id": "review",
+        "node_type": "agent",
+        "agent_id": "agent-review",
+        "prompt": "Review.",
+        "popo_entry": _popo_entry("robot-2"),
+    }
+
+    validation = service.validate_blueprint(document, project_dir=project)
+    assert validation["ok"] is False
+    assert "saved start full Agent" in validation["errors"][0]
+
+    document["graph"]["agent_nodes"]["planner"]["popo_entry"] = _popo_entry("robot-1")
+    validation = service.validate_blueprint(document, project_dir=project)
+    assert validation["ok"] is False
+    assert "only one full Agent" in validation["errors"][0]
 
 
 def test_blueprint_runtime_execute_plan_dispatches_saved_start_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -430,7 +554,7 @@ def test_blueprint_session_message_queues_when_session_is_already_running(tmp_pa
 
     monkeypatch.setattr(service, "_active_run_for_session", lambda session_key: SimpleNamespace(run_id="run-active"))
 
-    def fake_queue(run_id, node_id, text, *, mode="default"):
+    def fake_queue(run_id, node_id, text, *, mode="default", **kwargs):
         queued.append((run_id, node_id, text))
         return {"ok": True}
 
@@ -450,20 +574,27 @@ def test_blueprint_session_message_queues_when_session_is_already_running(tmp_pa
     assert queued == [("run-active", "planner", "继续处理")]
 
 
-def test_blueprint_session_message_enforces_three_active_run_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_blueprint_session_message_queues_when_structure_capacity_is_full(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = tmp_path / "project"
     project.mkdir()
     service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
     document = _document(project)
-    document["runtime"] = {"start_node_id": "planner"}
+    document["runtime"] = _popo_runtime()
     service.save_blueprint(project, document)
 
-    monkeypatch.setattr(service, "_active_blueprint_session_run_count", lambda: 3)
+    monkeypatch.setattr(service, "_active_blueprint_slot_run_count_for_structure", lambda **kwargs: 3)
 
-    with pytest.raises(BlueprintServiceError) as exc:
-        service.message_blueprint_session(project, "default", "start", source="popo", popo_user_id="u1")
+    result = service.message_blueprint_slot(
+        project,
+        "start",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1"},
+    )
 
-    assert exc.value.code == "BLUEPRINT_SESSION_LIMIT_REACHED"
+    assert result["deferred"] is True
+    assert result["runId"] == ""
+    assert result["session"]["status"] == "queued"
 
 
 def test_blueprint_session_message_persists_context_and_uses_stable_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -483,7 +614,7 @@ def test_blueprint_session_message_persists_context_and_uses_stable_key(tmp_path
         lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
     )
 
-    def fake_queue(run_id, node_id, text, *, mode="default"):
+    def fake_queue(run_id, node_id, text, *, mode="default", **kwargs):
         queued.append((run_id, node_id, text))
         return {"ok": True}
 
@@ -510,6 +641,11 @@ def test_blueprint_session_message_persists_context_and_uses_stable_key(tmp_path
     assert queued[0][:2] == ("run-slot-1", "planner")
     assert "first message" in queued[0][2]
     assert "second message" in queued[1][2]
+    run = service._runs["run-slot-1"]
+    assert run.runtime.popo_termination_start_node_id == ""
+    assert run.runtime.popo_termination_session_key == ""
+    assert run.mcp.termination_calls == []
+    assert run.mcp.reply_calls[-1] == {"startNodeId": "planner", "sessionKey": first["sessionKey"]}
     session_path = service.blueprint_sessions_dir() / first["sessionKey"] / "session.json"
     transcript_path = service.blueprint_sessions_dir() / first["sessionKey"] / "transcript.jsonl"
     session = json.loads(session_path.read_text(encoding="utf-8"))
@@ -520,12 +656,714 @@ def test_blueprint_session_message_persists_context_and_uses_stable_key(tmp_path
     assert "second message" in transcript
 
 
+def test_blueprint_session_timeline_preserves_order_and_context_skips_queued_messages(tmp_path: Path) -> None:
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    session_key = "bps_popo_user_1234567890abcdef12345678"
+    session = {
+        "sessionKey": session_key,
+        "contextSummary": "",
+    }
+    service._append_blueprint_session_event(session_key, {"type": "user_message", "message": "first user"})
+    service._append_blueprint_session_event(session_key, {"type": "queued_message", "message": "queued duplicate"})
+    service._append_blueprint_session_event(session_key, {"type": "agent_reply", "content": "agent reply"})
+
+    timeline = service.blueprint_session_timeline(session_key)
+    assert [event["type"] for event in timeline["events"]] == ["user_message", "queued_message", "agent_reply"]
+    assert [event["content"] for event in timeline["events"]] == ["first user", "queued duplicate", "agent reply"]
+
+    context = service._build_blueprint_session_context(session, "current user")
+    assert "User: first user" in context
+    assert "Agent: agent reply" in context
+    assert "queued duplicate" not in context
+    assert "Queued user" not in context
+
+
+def test_blueprint_session_terminate_resets_agents_without_ending_run_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+    queued: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(
+        service,
+        "queue_agent_message",
+        lambda run_id, node_id, text, *, mode="default", **kwargs: queued.append((run_id, node_id, text)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        service,
+        "_end_live_run_from_mcp",
+        lambda *args, **kwargs: pytest.fail("session termination must not end the run slot"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_dispatch_queued_sessions_for_structure_in_thread",
+        lambda **kwargs: service._dispatch_queued_sessions_for_structure(**kwargs),
+    )
+
+    first = service.message_blueprint_slot(
+        project,
+        "first message",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1"},
+    )
+    service._append_blueprint_session_event(
+        first["sessionKey"],
+        {
+            "type": "agent_reply",
+            "runId": first["runId"],
+            "startNodeId": "planner",
+            "agentNodeId": "planner",
+            "agentId": "agent-planner",
+            "content": "agent handled first message",
+        },
+    )
+    monkeypatch.setattr(service, "_active_blueprint_slot_run_count_for_structure", lambda **kwargs: 3)
+    second = service.message_blueprint_slot(
+        project,
+        "second message",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u2", "popoSessionId": "s2"},
+    )
+    assert second["deferred"] is True
+    assert second["runId"] == ""
+    monkeypatch.setattr(service, "_active_blueprint_slot_run_count_for_structure", lambda **kwargs: 0)
+
+    terminated = service._terminate_blueprint_session_from_mcp(
+        first["runId"],
+        reason="done",
+        save_history=True,
+        agent_node_id="planner",
+        agent_id="agent-planner",
+    )
+    run = service._runs[first["runId"]]
+    assert terminated["ok"] is True
+    assert terminated["slotStatus"] == "resetting"
+    assert "end" not in terminated
+
+    assert run.slot_reset_future is not None
+    run.slot_reset_future.result(timeout=5)
+
+    session_path = service.blueprint_sessions_dir() / first["sessionKey"] / "session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    assert session["activeRunId"] == ""
+    assert session["lastRunId"] == first["runId"]
+    assert session["status"] == "terminated"
+    assert session["lastTerminatedByAgentNodeId"] == "planner"
+    assert run.slot_status == "assigned"
+    assert run.session_key == second["sessionKey"]
+    assert run.bound_session_key == second["sessionKey"]
+    assert run.runtime.reset_calls
+    assert run.mcp.clear_calls == ["reply"]
+
+    assert second["sessionKey"] != first["sessionKey"]
+    second_session_path = service.blueprint_sessions_dir() / second["sessionKey"] / "session.json"
+    second_session = json.loads(second_session_path.read_text(encoding="utf-8"))
+    assert second_session["activeRunId"] == first["runId"]
+    assert second_session["status"] == "running"
+    assert queued[-1][0:2] == (first["runId"], "planner")
+    assert "second message" in queued[-1][2]
+
+
+def test_blueprint_session_terminate_reset_failure_blocks_slot_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    run = _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+
+    monkeypatch.setattr(service, "_run_is_active", lambda active_run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda active_run, graph=None: {"run": {"runId": active_run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(service, "queue_agent_message", lambda run_id, node_id, text, *, mode="default", **kwargs: {"ok": True})
+
+    async def failing_reset(graph_arg=None) -> dict[str, Any]:
+        raise RuntimeError("restart failed")
+
+    run.runtime.reset_started_agents_for_session = failing_reset
+
+    first = service.message_blueprint_slot(
+        project,
+        "first message",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1"},
+    )
+    service._terminate_blueprint_session_from_mcp(
+        first["runId"],
+        reason="done",
+        save_history=True,
+        agent_node_id="planner",
+        agent_id="agent-planner",
+    )
+
+    assert run.slot_reset_future is not None
+    with pytest.raises(RuntimeError, match="restart failed"):
+        run.slot_reset_future.result(timeout=5)
+    assert run.slot_status == "reset_failed"
+    assert run.slot_reset_error == "restart failed"
+
+    started: list[str] = []
+
+    def start_new_slot(project_dir: Path, blueprint_id: str = "default") -> dict[str, Any]:
+        started.append(blueprint_id)
+        new_run = _register_fake_slot(
+            service,
+            project_dir,
+            service.open_blueprint(project_dir, blueprint_id),
+            run_id="run-slot-2",
+        )
+        return {"ok": True, "runId": new_run.run_id}
+
+    monkeypatch.setattr(service, "start_blueprint_slot", start_new_slot)
+
+    second = service.message_blueprint_slot(
+        project,
+        "second message",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1"},
+    )
+    assert started == ["default"]
+    assert second["runId"] == "run-slot-2"
+    assert run.slot_status == "reset_failed"
+
+
+def test_blueprint_session_terminate_defers_reset_until_runtime_idle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    run = _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+    ready = {"value": False}
+    run.runtime.ready_for_session_reset = lambda: ready["value"]
+
+    monkeypatch.setattr(service, "_run_is_active", lambda active_run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda active_run, graph=None: {"run": {"runId": active_run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(service, "queue_agent_message", lambda run_id, node_id, text, *, mode="default", **kwargs: {"ok": True})
+
+    first = service.message_blueprint_slot(
+        project,
+        "first message",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1"},
+    )
+    service._terminate_blueprint_session_from_mcp(
+        first["runId"],
+        reason="done",
+        save_history=True,
+        agent_node_id="planner",
+        agent_id="agent-planner",
+    )
+
+    assert run.slot_reset_future is not None
+    time.sleep(0.35)
+    assert run.slot_reset_future.done() is False
+    assert run.slot_status == "resetting"
+
+    ready["value"] = True
+    run.slot_reset_future.result(timeout=5)
+    assert run.slot_status == "idle"
+    assert run.mcp.clear_calls == ["reply"]
+
+
+def test_blueprint_session_auto_terminates_after_ten_idle_minutes_without_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    run = _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+
+    monkeypatch.setattr(service, "_run_is_active", lambda active_run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda active_run, graph=None: {"run": {"runId": active_run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(service, "queue_agent_message", lambda run_id, node_id, text, *, mode="default", **kwargs: {"ok": True})
+
+    first = service.message_blueprint_slot(
+        project,
+        "first message",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1"},
+    )
+
+    snapshot = {
+        "runStatus": "running",
+        "pendingWork": False,
+        "readyForSessionReset": True,
+        "allAgentsIdle": True,
+        "scriptRunning": False,
+        "residentServiceRunning": False,
+        "workIdleSeconds": 599.0,
+        "lastResidentServiceCompletedAt": None,
+        "residentServiceIdleSeconds": None,
+    }
+    monkeypatch.setattr(service, "_runtime_session_idle_snapshot", lambda active_run: dict(snapshot))
+    assert service._maybe_auto_terminate_blueprint_session(first["runId"]) is None
+    assert run.slot_status == "assigned"
+
+    snapshot["workIdleSeconds"] = 600.0
+    result = service._maybe_auto_terminate_blueprint_session(first["runId"])
+    assert result is not None and result["ok"] is True
+    assert result["slotStatus"] == "resetting"
+    assert run.slot_reset_future is not None
+    run.slot_reset_future.result(timeout=5)
+
+    session = json.loads((service.blueprint_sessions_dir() / first["sessionKey"] / "session.json").read_text(encoding="utf-8"))
+    assert session["status"] == "terminated"
+    transcript = (service.blueprint_sessions_dir() / first["sessionKey"] / "transcript.jsonl").read_text(encoding="utf-8")
+    assert "framework_auto_idle" in transcript
+
+
+def test_blueprint_session_auto_terminates_after_five_idle_minutes_when_queue_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    run = _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+
+    monkeypatch.setattr(service, "_run_is_active", lambda active_run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda active_run, graph=None: {"run": {"runId": active_run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(service, "queue_agent_message", lambda run_id, node_id, text, *, mode="default", **kwargs: {"ok": True})
+    monkeypatch.setattr(service, "_dispatch_queued_sessions_for_structure_in_thread", lambda **kwargs: None)
+
+    first = service.message_blueprint_slot(
+        project,
+        "first message",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1"},
+    )
+    monkeypatch.setattr(service, "_active_blueprint_slot_run_count_for_structure", lambda **kwargs: 3)
+    queued = service.message_blueprint_slot(
+        project,
+        "queued message",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u2", "popoSessionId": "s2"},
+    )
+    assert queued["deferred"] is True
+
+    snapshot = {
+        "runStatus": "running",
+        "pendingWork": False,
+        "readyForSessionReset": True,
+        "allAgentsIdle": True,
+        "scriptRunning": False,
+        "residentServiceRunning": False,
+        "workIdleSeconds": 299.0,
+        "lastResidentServiceCompletedAt": 10.0,
+        "residentServiceIdleSeconds": 299.0,
+    }
+    monkeypatch.setattr(service, "_runtime_session_idle_snapshot", lambda active_run: dict(snapshot))
+    assert service._maybe_auto_terminate_blueprint_session(first["runId"]) is None
+    assert run.slot_status == "assigned"
+
+    snapshot["workIdleSeconds"] = 300.0
+    snapshot["residentServiceIdleSeconds"] = 300.0
+    result = service._maybe_auto_terminate_blueprint_session(first["runId"])
+    assert result is not None and result["ok"] is True
+    assert run.slot_reset_future is not None
+    run.slot_reset_future.result(timeout=5)
+    assert run.slot_status == "idle"
+
+
+def test_blueprint_slot_status_counts_idle_live_run_as_running_slot(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+
+    status = service.blueprint_slot_status(project, "default")
+
+    assert status["status"] == "running"
+    assert status["activeSessionCount"] == 0
+    assert status["runningRunCount"] == 1
+    assert status["idleRunCount"] == 1
+    assert status["runningRunIds"] == ["run-slot-1"]
+
+
+def test_blueprint_slot_status_does_not_probe_live_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+
+    def fail_runtime_call(*args, **kwargs):
+        pytest.fail("slot status summary must not wait on live runtime status")
+
+    monkeypatch.setattr(service, "_runtime_call", fail_runtime_call)
+
+    status = service.blueprint_slot_status(project, "default")
+
+    assert status["status"] == "running"
+    assert status["runningRunIds"] == ["run-slot-1"]
+    assert status["runningRunCount"] == 1
+
+
+def test_popo_callback_config_does_not_probe_active_slot_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    service.save_popo_robot(_popo_entry("robot-1"))
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+
+    def fail_runtime_call(*args, **kwargs):
+        pytest.fail("POPO callback config lookup must not wait on live runtime status")
+
+    monkeypatch.setattr(service, "_runtime_call", fail_runtime_call)
+
+    result = service.resolve_popo_callback_config("robot-1")
+
+    assert result["ok"] is True
+    assert result["blueprintId"] == "default"
+    assert result["startNodeId"] == "planner"
+
+
+def test_blueprint_slot_message_chooses_idle_slot_without_runtime_active_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+    queued: list[tuple[str, str, str]] = []
+
+    def fail_active_probe(run):
+        pytest.fail("slot message routing must use slot metadata, not runtime active probes")
+
+    def fake_queue(run_id, node_id, text, *, mode="default", **kwargs):
+        queued.append((run_id, node_id, text))
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "_run_is_active", fail_active_probe)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(service, "queue_agent_message", fake_queue)
+
+    result = service.message_blueprint_slot(
+        project,
+        "hello",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={"popoUserId": "u1", "popoSessionId": "s1"},
+    )
+
+    assert result["ok"] is True
+    assert result["runId"] == "run-slot-1"
+    assert queued[0][:2] == ("run-slot-1", "planner")
+
+
+def test_blueprint_run_active_check_uses_short_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    run = _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+    timeouts: list[float | None] = []
+
+    def timeout_runtime_call(active_run: DesktopBlueprintRun, fn, *, timeout=None):
+        timeouts.append(timeout)
+        raise desktop_blueprint_service_module.FutureTimeoutError()
+
+    monkeypatch.setattr(service, "_runtime_call", timeout_runtime_call)
+
+    assert service._run_is_active(run) is True
+    assert timeouts == [desktop_blueprint_service_module.LIVE_RUN_ACTIVE_CHECK_TIMEOUT_SECONDS]
+
+
+def test_blueprint_list_runs_times_out_live_runtime_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+    timeouts: list[float | None] = []
+
+    def timeout_runtime_call(active_run: DesktopBlueprintRun, fn, *, timeout=None):
+        timeouts.append(timeout)
+        raise desktop_blueprint_service_module.FutureTimeoutError()
+
+    monkeypatch.setattr(service, "_runtime_call", timeout_runtime_call)
+
+    runs = service.list_blueprint_runs(project, "default")
+
+    assert len(runs) == 1
+    assert runs[0]["runId"] == "run-slot-1"
+    assert runs[0]["status"] == "starting"
+    assert runs[0]["statusPending"] is True
+    assert "startPending" not in runs[0]
+    assert timeouts == [desktop_blueprint_service_module.LIVE_RUNTIME_STATUS_TIMEOUT_SECONDS]
+
+
+def test_blueprint_slot_terminate_closes_all_runs_and_sessions(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    opened = service.open_blueprint(project, "default")
+    runs = [
+        _register_fake_slot(service, project, opened, run_id="run-slot-1", slot_status="assigned"),
+        _register_fake_slot(service, project, opened, run_id="run-slot-2", slot_status="assigned"),
+        _register_fake_slot(service, project, opened, run_id="run-slot-3", slot_status="idle"),
+    ]
+    events: list[tuple[str, str, str, bool | None]] = []
+
+    class FakeEndResult:
+        def __init__(self, run_id: str, action: str, archive: bool) -> None:
+            self.run_id = run_id
+            self.action = action
+            self.archive = archive
+
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "ok": True,
+                "action": self.action,
+                "run_status": "cancelled",
+                "archived": self.archive,
+            }
+
+    def install_runtime(run: DesktopBlueprintRun) -> None:
+        def end_run(action: str, *, reason: str = "", archive: bool = False) -> FakeEndResult:
+            events.append(("end", run.run_id, action, archive))
+            return FakeEndResult(run.run_id, action, archive)
+
+        async def close() -> None:
+            events.append(("close", run.run_id, "", None))
+
+        async def stop() -> None:
+            events.append(("stop", run.run_id, "", None))
+
+        run.runtime.end_run = end_run
+        run.runtime.close = close
+        run.backend = SimpleNamespace(stop=stop)
+
+    for run in runs:
+        install_runtime(run)
+
+    structure_id = runs[0].blueprint_structure_id
+    pool_key = runs[0].slot_pool_key
+
+    def save_session(session_key: str, status: str, run_id: str = "") -> None:
+        service._save_blueprint_session(
+            {
+                "sessionKey": session_key,
+                "projectDir": str(project.resolve()),
+                "poolKey": pool_key,
+                "robotAppKey": "robot-1",
+                "blueprintId": "default",
+                "assignedBlueprintId": "default",
+                "blueprintName": "Default Blueprint",
+                "blueprintStructureId": structure_id,
+                "source": "popo",
+                "popoUserId": session_key.removeprefix("bps_popo_").rsplit("_", 1)[0],
+                "popoSessionId": "",
+                "popoGroupId": "",
+                "status": status,
+                "activeRunId": run_id,
+                "lastRunId": "",
+                "contextSummary": "",
+                "messageCount": 0,
+                "queuedMessages": [{"message": "queued work"}] if status == "queued" else [],
+                "queuedMessageCount": 1 if status == "queued" else 0,
+                "createdAt": 1.0,
+                "lastTouchedAt": 1.0,
+                "deleted": False,
+            }
+        )
+
+    session_keys = [
+        "bps_popo_user1_000000000000000000000001",
+        "bps_popo_user2_000000000000000000000002",
+        "bps_popo_user3_000000000000000000000003",
+    ]
+    save_session(session_keys[0], "running", "run-slot-1")
+    save_session(session_keys[1], "running", "run-slot-2")
+    save_session(session_keys[2], "queued")
+    runs[0].session_key = runs[0].bound_session_key = session_keys[0]
+    runs[1].session_key = runs[1].bound_session_key = session_keys[1]
+
+    result = service.terminate_blueprint_slot(project, "default", reason="user requested slot terminate")
+
+    assert result["terminated"] is True
+    assert result["runningRunCount"] == 0
+    assert result["activeSessionCount"] == 0
+    assert result["queuedSessionCount"] == 0
+    assert result["terminatedRunIds"] == ["run-slot-1", "run-slot-2", "run-slot-3"]
+    assert result["terminatedSessionKeys"] == sorted(session_keys)
+    assert result["closeErrors"] == []
+    for run in runs:
+        assert run.slot_status == "closed"
+        assert run.session_key == ""
+        assert run.bound_session_key == ""
+    for session_key in session_keys:
+        session = service._load_blueprint_session(session_key)
+        assert session is not None
+        assert session["status"] == "terminated"
+        assert session["activeRunId"] == ""
+        assert session["queuedMessages"] == []
+        assert session["queuedMessageCount"] == 0
+        transcript = service._read_blueprint_session_timeline(session_key)
+        assert transcript[-1]["type"] == "session_terminated"
+        assert transcript[-1]["actor"] == "slot"
+    assert ("end", "run-slot-1", "cancel", False) in events
+    assert ("end", "run-slot-2", "cancel", False) in events
+    assert ("end", "run-slot-3", "cancel", False) in events
+    assert ("stop", "run-slot-1", "", None) in events
+    assert ("stop", "run-slot-2", "", None) in events
+    assert ("stop", "run-slot-3", "", None) in events
+
+
+def test_blueprint_slot_terminate_records_run_close_errors(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    run = _register_fake_slot(
+        service,
+        project,
+        service.open_blueprint(project, "default"),
+        run_id="run-slot-1",
+        slot_status="assigned",
+    )
+    session_key = "bps_popo_user10_000000000000000000000010"
+    service._save_blueprint_session(
+        {
+            "sessionKey": session_key,
+            "projectDir": str(project.resolve()),
+            "poolKey": run.slot_pool_key,
+            "robotAppKey": "robot-1",
+            "blueprintId": "default",
+            "assignedBlueprintId": "default",
+            "blueprintName": "Default Blueprint",
+            "blueprintStructureId": run.blueprint_structure_id,
+            "source": "popo",
+            "status": "running",
+            "activeRunId": run.run_id,
+            "queuedMessages": [],
+            "queuedMessageCount": 0,
+            "createdAt": 1.0,
+            "lastTouchedAt": 1.0,
+            "deleted": False,
+        }
+    )
+    run.session_key = run.bound_session_key = session_key
+
+    def fail_end_run(action: str, *, reason: str = "", archive: bool = False) -> None:
+        raise RuntimeError("cancel failed")
+
+    async def close() -> None:
+        return None
+
+    async def stop() -> None:
+        return None
+
+    run.runtime.end_run = fail_end_run
+    run.runtime.close = close
+    run.backend = SimpleNamespace(stop=stop)
+
+    result = service.terminate_blueprint_slot(project, "default")
+
+    assert result["terminated"] is True
+    assert result["terminatedRunIds"] == ["run-slot-1"]
+    assert result["terminatedSessionKeys"] == [session_key]
+    assert result["runningRunCount"] == 0
+    assert result["closeErrors"]
+    assert result["closeErrors"][0]["runId"] == "run-slot-1"
+    assert "cancel failed" in result["closeErrors"][0]["error"]
+    assert run.slot_status == "closed"
+    assert service._load_blueprint_session(session_key)["status"] == "terminated"
+
+
 def test_blueprint_session_message_requires_configured_start_node(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
     document = _document(project)
-    document["runtime"] = _popo_runtime(start_node_id="")
+    document["runtime"] = {"start_node_id": ""}
+    document["graph"]["agent_nodes"]["planner"]["popo_entry"] = _popo_entry("robot-1")
     service.save_blueprint(project, document)
 
     with pytest.raises(BlueprintServiceError) as exc:
@@ -537,7 +1375,7 @@ def test_blueprint_session_message_requires_configured_start_node(tmp_path: Path
             session_identity={"popoUserId": "u1"},
         )
 
-    assert exc.value.code == "BLUEPRINT_START_NODE_REQUIRED"
+    assert exc.value.code == "BLUEPRINT_POPO_START_AGENT_REQUIRED"
 
 
 def test_blueprint_session_message_queues_when_session_is_already_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -557,7 +1395,7 @@ def test_blueprint_session_message_queues_when_session_is_already_running(tmp_pa
         lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
     )
 
-    def fake_queue(run_id, node_id, text, *, mode="default"):
+    def fake_queue(run_id, node_id, text, *, mode="default", **kwargs):
         queued.append((run_id, node_id, text))
         return {"ok": True}
 
@@ -584,7 +1422,194 @@ def test_blueprint_session_message_queues_when_session_is_already_running(tmp_pa
     assert "continue task" in queued[-1][2]
 
 
-def test_blueprint_session_message_enforces_three_active_run_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_slot_start_ensures_start_agent(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    graph = desktop_blueprint_service_module.graph_definition_from_dict(document["graph"])
+    runtime = desktop_blueprint_service_module.GraphRuntime(DesktopBlueprintNoopBackend())
+    control = desktop_blueprint_service_module.GraphRuntimeControlPlane(runtime, graph)
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    run = DesktopBlueprintRun(
+        run_id="run-slot-1",
+        project_dir=project,
+        blueprint_id="default",
+        document=document,
+        graph=graph,
+        runtime=runtime,
+        control=control,
+        execution_mode="live",
+        created_at=1.0,
+        updated_at=1.0,
+        backend=runtime.cluster,
+        start_node_id="planner",
+        slot_status="idle",
+    )
+
+    try:
+        result = asyncio.run(service._complete_live_slot_start(run))
+
+        assert result["ok"] is True
+        assert "planner" in runtime.instances
+        assert runtime.instances["planner"].state == "idle"
+    finally:
+        asyncio.run(runtime.close())
+
+
+def test_graph_runtime_session_reset_restarts_started_agents_only(tmp_path: Path) -> None:
+    class FakeCluster:
+        def __init__(self) -> None:
+            self.ensured: list[str] = []
+            self.restarted: list[str] = []
+
+        async def ensure_worker(self, worker: Any) -> None:
+            self.ensured.append(str(worker.agent_id))
+
+        async def restart_worker(self, worker: Any) -> None:
+            self.restarted.append(str(worker.agent_id))
+
+    document = _document(tmp_path)
+    document["graph"]["agent_nodes"]["worker"] = {
+        "node_id": "worker",
+        "node_type": "worker_agent",
+        "prompt": "Work.",
+    }
+    document["graph"]["agent_nodes"]["not-started"] = {
+        "node_id": "not-started",
+        "node_type": "worker_agent",
+        "prompt": "Do not start.",
+    }
+    graph = desktop_blueprint_service_module.graph_definition_from_dict(document["graph"])
+    cluster = FakeCluster()
+    runtime = desktop_blueprint_service_module.GraphRuntime(cluster)
+
+    async def scenario() -> dict[str, Any]:
+        planner = await runtime.ensure_agent(graph.agent_nodes["planner"])
+        worker = await runtime.ensure_agent(graph.agent_nodes["worker"])
+        planner.messages_sent = 2
+        planner.task_status = "completed"
+        planner.task_summary = "old summary"
+        planner.run_prompt_injected = True
+        planner.prompt_node_injected_ids = {"prompt-1"}
+        worker.messages_sent = 1
+        return await runtime.reset_started_agents_for_session(graph)
+
+    result = asyncio.run(scenario())
+
+    assert result["ok"] is True
+    assert cluster.ensured == ["agent-planner", "worker"]
+    assert cluster.restarted == ["agent-planner", "worker"]
+    assert "not-started" not in runtime.instances
+    planner_state = runtime.instances["planner"]
+    assert planner_state.messages_sent == 0
+    assert planner_state.task_status == "not_started"
+    assert planner_state.task_summary == ""
+    assert planner_state.run_prompt_injected is False
+    assert planner_state.prompt_node_injected_ids == set()
+    assert planner_state.state == "idle"
+
+
+def test_queue_agent_message_ensures_agent_before_queueing(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    document = _document(project)
+    graph = desktop_blueprint_service_module.graph_definition_from_dict(document["graph"])
+    runtime = desktop_blueprint_service_module.GraphRuntime(DesktopBlueprintNoopBackend())
+    control = desktop_blueprint_service_module.GraphRuntimeControlPlane(runtime, graph)
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    run = DesktopBlueprintRun(
+        run_id="run-live-1",
+        project_dir=project,
+        blueprint_id="default",
+        document=document,
+        graph=graph,
+        runtime=runtime,
+        control=control,
+        execution_mode="live",
+        created_at=1.0,
+        updated_at=1.0,
+        backend=runtime.cluster,
+        start_node_id="planner",
+    )
+    service._runs[run.run_id] = run
+
+    try:
+        queued = service.queue_agent_message(run.run_id, "planner", "hello", mode="top")
+
+        assert queued["ok"] is True
+        assert "planner" in runtime.instances
+        assert runtime.agent_message_queues["planner"][0].message_id == queued["result"]["message_id"]
+        body = runtime.agent_message_queues["planner"][0].body
+        assert body["context"]["framework_context"]["agent_node_id"] == "planner"
+    finally:
+        asyncio.run(runtime.close())
+
+
+def test_queue_agent_message_merges_same_session_pending_messages_fifo(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    document = _document(project)
+    graph = desktop_blueprint_service_module.graph_definition_from_dict(document["graph"])
+    runtime = desktop_blueprint_service_module.GraphRuntime(DesktopBlueprintNoopBackend())
+    control = desktop_blueprint_service_module.GraphRuntimeControlPlane(runtime, graph)
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    run = DesktopBlueprintRun(
+        run_id="run-live-1",
+        project_dir=project,
+        blueprint_id="default",
+        document=document,
+        graph=graph,
+        runtime=runtime,
+        control=control,
+        execution_mode="live",
+        created_at=1.0,
+        updated_at=1.0,
+        backend=runtime.cluster,
+        start_node_id="planner",
+    )
+    service._runs[run.run_id] = run
+    merge_key = "blueprint-session:bps_popo_user:planner"
+
+    try:
+        first = service.queue_agent_message(
+            run.run_id,
+            "planner",
+            "first",
+            mode="top",
+            merge_key=merge_key,
+            merge_append_text="first",
+        )
+        second = service.queue_agent_message(
+            run.run_id,
+            "planner",
+            "second",
+            mode="top",
+            merge_key=merge_key,
+            merge_append_text="second",
+        )
+        third = service.queue_agent_message(
+            run.run_id,
+            "planner",
+            "third",
+            mode="top",
+            merge_key=merge_key,
+            merge_append_text="third",
+        )
+
+        queue = runtime.agent_message_queues["planner"]
+        assert len(queue) == 1
+        pending = queue[0]
+        assert first["result"]["message_id"] == second["result"]["message_id"] == third["result"]["message_id"]
+        assert pending.merge_count == 3
+        assert pending.merge_key == merge_key
+        prompt = pending.body["prompt"]
+        assert prompt.index("first") < prompt.index("second") < prompt.index("third")
+    finally:
+        asyncio.run(runtime.close())
+
+
+def test_popo_config_without_project_dir_uses_registered_project(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
@@ -592,7 +1617,822 @@ def test_blueprint_session_message_enforces_three_active_run_limit(tmp_path: Pat
     document["runtime"] = _popo_runtime()
     service.save_blueprint(project, document)
 
-    monkeypatch.setattr(service, "_active_blueprint_session_run_count", lambda: 3)
+    result = service.handle_request({"command": "blueprint.popo.config", "args": {"robotAppKey": "robot-1"}})
+
+    assert result["ok"] is True
+    assert result["projectDir"] == str(project.resolve())
+    assert result["startNodeId"] == "planner"
+    assert result["popoEntry"]["robot_app_key"] == "robot-1"
+
+
+def test_popo_config_uses_start_agent_popo_entry(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    _enable_agent_popo(document, "planner", "robot-agent")
+    saved = service.save_blueprint(project, document)
+
+    result = service.handle_request({"command": "blueprint.popo.config", "args": {"robotAppKey": "robot-agent"}})
+
+    assert saved["runtime"]["popo_entry"]["enabled"] is False
+    assert saved["graph"]["agent_nodes"]["planner"]["popo_entry"]["robot_app_key"] == "robot-agent"
+    assert result["ok"] is True
+    assert result["robotAppKey"] == "robot-agent"
+    assert result["startNodeId"] == "planner"
+    assert result["popoEntry"]["robot_app_key"] == "robot-agent"
+
+
+def test_popo_config_without_robot_key_uses_single_registered_project(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime(robot_app_key="robot-legacy")
+    service.save_blueprint(project, document)
+
+    result = service.handle_request({"command": "blueprint.popo.config", "args": {}})
+
+    assert result["ok"] is True
+    assert result["robotAppKey"] == "robot-legacy"
+    assert result["projectDir"] == str(project.resolve())
+    assert result["popoEntry"]["robot_app_key"] == "robot-legacy"
+
+
+def test_popo_robot_routes_persist_and_toggle(tmp_path: Path) -> None:
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+
+    saved = service.handle_request(
+        {
+            "command": "blueprint.popo.robot.save",
+            "args": {"robot": {"enabled": False, "robot_app_key": "robot-1", "robot_name": "Relu"}},
+        }
+    )
+
+    assert saved["ok"] is True
+    assert saved["robots"][0]["robot_app_key"] == "robot-1"
+    assert saved["robots"][0]["enabled"] is False
+    assert service.popo_robot_routes_path().is_file()
+
+    reloaded = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    listed = reloaded.handle_request({"command": "blueprint.popo.robots", "args": {}})
+    assert listed["robots"][0]["robot_name"] == "Relu"
+
+    with pytest.raises(BlueprintServiceError) as incomplete:
+        reloaded.handle_request(
+            {
+                "command": "blueprint.popo.robot.enabled",
+                "args": {"robotAppKey": "robot-1", "enabled": True},
+            }
+        )
+    assert incomplete.value.code == "BLUEPRINT_POPO_ENTRY_REQUIRED"
+
+    robot = _popo_entry("robot-1")
+    robot["enabled"] = False
+    robot["robot_name"] = "Relu"
+    reloaded.handle_request(
+        {
+            "command": "blueprint.popo.robot.save",
+            "args": {"robot": robot},
+        }
+    )
+    toggled = reloaded.handle_request(
+        {
+            "command": "blueprint.popo.robot.enabled",
+            "args": {"robotAppKey": "robot-1", "enabled": True},
+        }
+    )
+    assert toggled["robot"]["enabled"] is True
+
+    deleted = reloaded.handle_request(
+        {
+            "command": "blueprint.popo.robot.delete",
+            "args": {"robotAppKey": "robot-1"},
+        }
+    )
+    assert deleted["deleted"] is True
+    assert deleted["robots"] == []
+
+
+def test_popo_callback_config_requires_enabled_global_robot(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime(robot_app_key="robot-1")
+    service.save_blueprint(project, document)
+
+    with pytest.raises(BlueprintServiceError) as missing:
+        service.handle_request({"command": "blueprint.popo.callbackConfig", "args": {"robotAppKey": "robot-1"}})
+    assert missing.value.code == "BLUEPRINT_POPO_ROBOT_NOT_BOUND"
+
+    robot = _popo_entry("robot-1")
+    robot["enabled"] = False
+    service.handle_request({"command": "blueprint.popo.robot.save", "args": {"robot": robot}})
+
+    with pytest.raises(BlueprintServiceError) as disabled:
+        service.handle_request({"command": "blueprint.popo.callbackConfig", "args": {"robotAppKey": "robot-1"}})
+    assert disabled.value.code == "BLUEPRINT_POPO_ROBOT_DISABLED"
+
+
+def test_popo_callback_config_uses_global_robot_credentials_and_blueprint_binding(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime(robot_app_key="robot-1")
+    service.save_blueprint(project, document)
+    robot = _popo_entry("robot-1")
+    robot.update(
+        {
+            "robot_name": "Global Relu",
+            "robot_app_secret": "global-secret",
+            "callback_token": "global-token",
+            "aes_key": "abcdef0123456789abcdef0123456789",
+        }
+    )
+    service.handle_request({"command": "blueprint.popo.robot.save", "args": {"robot": robot}})
+
+    result = service.handle_request({"command": "blueprint.popo.callbackConfig", "args": {"robotAppKey": "robot-1"}})
+    legacy = service.handle_request({"command": "blueprint.popo.callbackConfig", "args": {}})
+
+    assert result["ok"] is True
+    assert result["robotAppKey"] == "robot-1"
+    assert result["projectDir"] == str(project.resolve())
+    assert result["startNodeId"] == "planner"
+    assert result["popoEntry"]["robot_app_secret"] == "global-secret"
+    assert result["popoEntry"]["callback_token"] == "global-token"
+    assert result["popoEntry"]["aes_key"] == "abcdef0123456789abcdef0123456789"
+    assert result["blueprintPopoEntry"]["robot_app_secret"] == "secret"
+    assert legacy["robotAppKey"] == "robot-1"
+
+
+def test_popo_callback_config_legacy_conflicts_on_multiple_enabled_global_robots(tmp_path: Path) -> None:
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    for robot_app_key in ("robot-1", "robot-2"):
+        service.handle_request(
+            {
+                "command": "blueprint.popo.robot.save",
+                "args": {"robot": _popo_entry(robot_app_key)},
+            }
+        )
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.handle_request({"command": "blueprint.popo.callbackConfig", "args": {}})
+
+    assert exc.value.code == "BLUEPRINT_POPO_ROBOT_STRUCTURE_CONFLICT"
+    assert exc.value.status == 409
+
+
+def test_popo_slot_message_without_project_dir_routes_to_registered_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+    queued: list[tuple[str, str, str, str]] = []
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+
+    def fake_queue(run_id, node_id, text, *, mode="default", **kwargs):
+        queued.append((run_id, node_id, text, mode))
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "queue_agent_message", fake_queue)
+
+    result = service.handle_request(
+        {
+            "command": "blueprint.slots.message",
+            "args": {
+                "message": "hello from popo",
+                "source": "popo",
+                "sourceIdentity": {"robotAppKey": "robot-1"},
+                "sessionIdentity": {
+                    "popoUserId": "u1",
+                    "popoSessionId": "s1",
+                    "popoReplyTo": "reply-u1",
+                    "popoSessionType": "1",
+                },
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["runId"] == "run-slot-1"
+    assert result["sessionKey"].startswith("bps_popo_u1_")
+    assert result["session"]["sessionDisplayName"] == "POPO u1"
+    assert result["session"]["popoReplyTo"] == "reply-u1"
+    assert result["session"]["popoSessionType"] == "1"
+    assert queued[-1][0:2] == ("run-slot-1", "planner")
+    assert queued[-1][3] == "top"
+    assert "hello from popo" in queued[-1][2]
+
+
+def test_popo_private_session_key_contains_user_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(service, "queue_agent_message", lambda run_id, node_id, text, *, mode="default", **kwargs: {"ok": True})
+
+    result = service.message_blueprint_slot(
+        project,
+        "hello",
+        source="popo",
+        source_identity={"robotAppKey": "robot-1"},
+        session_identity={
+            "popoUserId": "qiuhaoxuan",
+            "popoSessionId": "p2p-session-1",
+            "popoReplyTo": "qiuhaoxuan",
+            "popoSessionType": "1",
+        },
+    )
+
+    assert result["sessionKey"].startswith("bps_popo_qiuhaoxuan_")
+    assert result["session"]["sessionDisplayName"] == "POPO qiuhaoxuan"
+    session_path = service.blueprint_sessions_dir() / result["sessionKey"] / "session.json"
+    assert session_path.is_file()
+
+
+def test_popo_legacy_hash_session_key_migrates_to_readable_user_key(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    pool_key = "pool-1"
+    legacy_key = blueprint_legacy_session_key_for_pool(
+        pool_key=pool_key,
+        source="popo",
+        popo_user_id="qiuhaoxuan",
+        popo_session_id="p2p-session-1",
+    )
+    readable_key = blueprint_session_key_for_pool(
+        pool_key=pool_key,
+        source="popo",
+        popo_user_id="qiuhaoxuan",
+        popo_session_id="p2p-session-1",
+    )
+    service._save_blueprint_session(
+        {
+            "sessionKey": legacy_key,
+            "projectDir": str(project.resolve()),
+            "poolKey": pool_key,
+            "robotAppKey": "robot-1",
+            "blueprintId": "default",
+            "blueprintName": "Default Blueprint",
+            "blueprintStructureId": "structure-1",
+            "source": "popo",
+            "popoUserId": "qiuhaoxuan",
+            "popoSessionId": "p2p-session-1",
+            "popoGroupId": "",
+            "status": "idle",
+            "createdAt": 1.0,
+            "lastTouchedAt": 2.0,
+            "deleted": False,
+        }
+    )
+
+    sessions = service.list_blueprint_sessions(project, "default")
+
+    assert sessions[0]["sessionKey"] == readable_key
+    assert sessions[0]["sessionDisplayName"] == "POPO qiuhaoxuan"
+    assert (service.blueprint_sessions_dir() / readable_key / "session.json").is_file()
+    assert not (service.blueprint_sessions_dir() / legacy_key).exists()
+
+
+def test_atomic_write_json_uses_unique_temp_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    path = tmp_path / "state" / "session.json"
+    sources: list[str] = []
+    original_replace = Path.replace
+
+    def spy_replace(self: Path, target: Path) -> Path:
+        sources.append(self.name)
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", spy_replace)
+
+    service._atomic_write_json(path, {"value": 1})
+    service._atomic_write_json(path, {"value": 2})
+
+    assert len(sources) == 2
+    assert len(set(sources)) == 2
+    assert all(not name.endswith(f".{os.getpid()}.tmp") for name in sources)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"value": 2}
+
+
+def test_popo_reply_mcp_callback_sends_to_saved_reply_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    service.save_popo_robot(_popo_entry("robot-1"))
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(service, "queue_agent_message", lambda run_id, node_id, text, *, mode="default", **kwargs: {"ok": True})
+
+    started = service.handle_request(
+        {
+            "command": "blueprint.slots.message",
+            "args": {
+                "message": "hello from popo",
+                "source": "popo",
+                "sourceIdentity": {"robotAppKey": "robot-1"},
+                "sessionIdentity": {
+                    "popoUserId": "u1",
+                    "popoSessionId": "s1",
+                    "popoReplyTo": "reply-u1",
+                    "popoSessionType": "1",
+                },
+            },
+        }
+    )
+    sent: list[dict[str, Any]] = []
+
+    def fake_send_popo_message(*, receiver: str, content: str, robot_config: dict[str, Any]) -> dict[str, Any]:
+        sent.append(
+            {
+                "receiver": receiver,
+                "content": content,
+                "robotAppKey": robot_config["robot_app_key"],
+                "hasSecret": "robot_app_secret" in robot_config,
+            }
+        )
+        return {"ok": True, "sent": True, "errcode": 0}
+
+    monkeypatch.setattr(service, "_send_popo_message", fake_send_popo_message)
+    with service._lock:
+        run = service._runs[started["runId"]]
+        run.session_key = ""
+        run.bound_session_key = ""
+        run.runtime.popo_reply_session_key = ""
+    session_path = service.blueprint_sessions_dir() / started["sessionKey"] / "session.json"
+    session_payload = json.loads(session_path.read_text(encoding="utf-8"))
+    session_payload["activeRunId"] = ""
+    session_payload["lastRunId"] = started["runId"]
+    session_payload["status"] = "terminated"
+    service._save_blueprint_session(session_payload)
+
+    result = service._reply_popo_user_from_mcp(
+        started["runId"],
+        content="agent reply",
+        session_key=started["sessionKey"],
+        agent_node_id="planner",
+        agent_id="agent-planner",
+        message_id="msg-popo-tool",
+    )
+
+    assert result["ok"] is True
+    assert result["sent"] is True
+    assert "receiver" not in result
+    assert sent == [
+        {"receiver": "reply-u1", "content": "agent reply", "robotAppKey": "robot-1", "hasSecret": True}
+    ]
+    transcript = (service.blueprint_sessions_dir() / started["sessionKey"] / "transcript.jsonl").read_text(encoding="utf-8")
+    assert '"type": "agent_reply"' in transcript
+    assert '"type": "popo_reply_sent"' in transcript
+    assert '"messageId": "msg-popo-tool"' in transcript
+    assert "agent reply" in transcript
+
+
+def test_popo_direct_agent_reply_fallback_sends_when_tool_was_not_called(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    service.save_popo_robot(_popo_entry("robot-1"))
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(service, "queue_agent_message", lambda run_id, node_id, text, *, mode="default", **kwargs: {"ok": True})
+    started = service.handle_request(
+        {
+            "command": "blueprint.slots.message",
+            "args": {
+                "message": "hello from popo",
+                "source": "popo",
+                "sourceIdentity": {"robotAppKey": "robot-1"},
+                "sessionIdentity": {
+                    "popoUserId": "u1",
+                    "popoSessionId": "s1",
+                    "popoReplyTo": "reply-u1",
+                    "popoSessionType": "1",
+                },
+            },
+        }
+    )
+
+    task_status_calls: list[dict[str, Any]] = []
+    with service._lock:
+        run = service._runs[started["runId"]]
+        run.control = SimpleNamespace(handle_request=lambda payload: task_status_calls.append(payload) or {"ok": True})
+
+    sent: list[dict[str, Any]] = []
+
+    def fake_send_popo_message(*, receiver: str, content: str, robot_config: dict[str, Any]) -> dict[str, Any]:
+        sent.append({"receiver": receiver, "content": content, "robotAppKey": robot_config["robot_app_key"]})
+        return {"ok": True, "sent": True, "errcode": 0}
+
+    monkeypatch.setattr(service, "_send_popo_message", fake_send_popo_message)
+
+    first = service._deliver_popo_direct_reply_fallback(
+        started["runId"],
+        {
+            "node_id": "planner",
+            "agent_id": "agent-planner",
+            "message_id": "msg-direct-reply",
+            "said": "plain agent reply",
+        },
+        delay=0,
+    )
+    second = service._deliver_popo_direct_reply_fallback(
+        started["runId"],
+        {
+            "node_id": "planner",
+            "agent_id": "agent-planner",
+            "message_id": "msg-direct-reply",
+            "said": "plain agent reply",
+        },
+        delay=0,
+    )
+
+    assert first["sent"] is True
+    assert second["sent"] is False
+    assert second["reason"] == "already_sent"
+    assert sent == [{"receiver": "reply-u1", "content": "plain agent reply", "robotAppKey": "robot-1"}]
+    assert task_status_calls[-1]["command"] == "agent.task_status"
+    assert task_status_calls[-1]["args"]["message_id"] == "msg-direct-reply"
+    transcript = (service.blueprint_sessions_dir() / started["sessionKey"] / "transcript.jsonl").read_text(encoding="utf-8")
+    assert '"type": "popo_reply_sent"' in transcript
+    assert '"fallback": true' in transcript
+    assert '"messageId": "msg-direct-reply"' in transcript
+
+
+def test_blueprint_slot_ui_message_uses_main_session_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = {"start_node_id": "planner"}
+    service.save_blueprint(project, document)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"), robot_app_key="")
+    queued: list[tuple[str, str, str, str]] = []
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+
+    def fake_queue(run_id, node_id, text, *, mode="default", **kwargs):
+        queued.append((run_id, node_id, text, mode))
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "queue_agent_message", fake_queue)
+
+    result = service.message_blueprint_slot(
+        project,
+        "hello from ui",
+        source="ui",
+        blueprint_id="default",
+        run_id="run-slot-1",
+    )
+
+    assert result["ok"] is True
+    assert result["sessionKey"] == "main+default"
+    assert result["runId"] == "run-slot-1"
+    assert queued[-1][0:2] == ("run-slot-1", "planner")
+    assert queued[-1][3] == "top"
+    assert "hello from ui" in queued[-1][2]
+    run = service._runs["run-slot-1"]
+    assert run.mcp.termination_calls == []
+    assert run.mcp.reply_calls == []
+    session_path = service.blueprint_sessions_dir() / "main+default" / "session.json"
+    transcript_path = service.blueprint_sessions_dir() / "main+default" / "transcript.jsonl"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    assert session["sessionKey"] == "main+default"
+    assert session["source"] == "ui"
+    assert session["messageCount"] == 1
+    assert "hello from ui" in transcript_path.read_text(encoding="utf-8")
+
+
+def test_blueprint_slot_new_clears_main_session_without_deleting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = {"start_node_id": "planner"}
+    service.save_blueprint(project, document)
+    run = _register_fake_slot(service, project, service.open_blueprint(project, "default"), robot_app_key="")
+
+    monkeypatch.setattr(service, "_run_is_active", lambda active_run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda active_run, graph=None: {"run": {"runId": active_run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(service, "queue_agent_message", lambda run_id, node_id, text, *, mode="default", **kwargs: {"ok": True})
+
+    started = service.message_blueprint_slot(
+        project,
+        "hello from ui",
+        source="ui",
+        blueprint_id="default",
+        run_id="run-slot-1",
+    )
+    ended: list[tuple[str, str, str]] = []
+
+    def fake_end(run_id, action, *, reason=""):
+        ended.append((run_id, action, reason))
+        run.slot_status = "idle"
+        run.bound_session_key = ""
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "end_blueprint_run", fake_end)
+
+    cleared = service.message_blueprint_slot(
+        project,
+        "/new",
+        source="ui",
+        blueprint_id="default",
+        run_id="run-slot-1",
+    )
+
+    assert started["sessionKey"] == "main+default"
+    assert cleared["ok"] is True
+    assert cleared["sessionKey"] == "main+default"
+    assert cleared["cancelledRunId"] == "run-slot-1"
+    assert ended == [("run-slot-1", "cancel", "ui requested /new")]
+    session_path = service.blueprint_sessions_dir() / "main+default" / "session.json"
+    transcript_path = service.blueprint_sessions_dir() / "main+default" / "transcript.jsonl"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    assert session["deleted"] is False
+    assert session["status"] == "idle"
+    assert session["messageCount"] == 0
+    assert session["activeRunId"] == ""
+    assert session["lastRunId"] == "run-slot-1"
+    assert transcript_path.read_text(encoding="utf-8") == ""
+
+
+def test_popo_global_binding_conflicts_on_multiple_registered_projects(tmp_path: Path) -> None:
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    for name in ("project-a", "project-b"):
+        project = tmp_path / name
+        project.mkdir()
+        document = _document(project)
+        document["runtime"] = _popo_runtime(robot_app_key="robot-1")
+        service.save_blueprint(project, document)
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.handle_request({"command": "blueprint.popo.config", "args": {"robotAppKey": "robot-1"}})
+
+    assert exc.value.code == "BLUEPRINT_POPO_ROBOT_STRUCTURE_CONFLICT"
+
+
+def test_popo_config_without_robot_key_conflicts_on_multiple_registered_projects(tmp_path: Path) -> None:
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    for name, robot in (("project-a", "robot-a"), ("project-b", "robot-b")):
+        project = tmp_path / name
+        project.mkdir()
+        document = _document(project)
+        document["runtime"] = _popo_runtime(robot_app_key=robot)
+        service.save_blueprint(project, document)
+
+    with pytest.raises(BlueprintServiceError) as exc:
+        service.handle_request({"command": "blueprint.popo.config", "args": {}})
+
+    assert exc.value.code == "BLUEPRINT_POPO_ROBOT_STRUCTURE_CONFLICT"
+
+
+def test_popo_callback_health_and_p2p_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    popo = pytest.importorskip("multi_agent_tcp.popo_agent_bot_run")
+    aes_key = "0123456789abcdef0123456789abcdef"
+    token = "callback-token"
+    captured: list[dict[str, str]] = []
+    popo._event_cache.clear()
+
+    monkeypatch.setattr(
+        popo,
+        "load_popo_config",
+        lambda robot_app_key: {
+            "robot_app_key": robot_app_key or "robot-1",
+            "robot_app_secret": "secret",
+            "callback_token": token,
+            "aes_key": aes_key,
+        },
+    )
+    monkeypatch.setattr(
+        popo,
+        "_start_handler_thread",
+        lambda robot_config, reply_to, notify, sender, popo_session_id, popo_group_id="", session_type="": captured.append(
+            {
+                "robot": robot_config["robot_app_key"],
+                "replyTo": reply_to,
+                "notify": notify,
+                "sender": sender,
+                "sessionId": popo_session_id,
+                "groupId": popo_group_id,
+                "sessionType": session_type,
+            }
+        ),
+    )
+
+    client = popo.app.test_client()
+    assert client.get("/health").get_json()["ok"] is True
+
+    timestamp = "1"
+    nonce = "2"
+    signature = popo.check_sha256_signature
+    raw = {"token": token, "timestamp": timestamp, "nonce": nonce}
+    sign_text = "".join(value for _, value in sorted(raw.items(), key=lambda item: item[1]))
+    digest = hashlib.sha256(sign_text.encode()).hexdigest()
+    payload = {
+        "eventType": "IM_P2P_TO_ROBOT_MSG",
+        "eventData": {"from": "user-1", "notify": "hello", "sessionId": "session-1"},
+    }
+    encrypted = popo.AESCipher(aes_key).aes_cbc_encrypt(json.dumps(payload))
+
+    response = client.post(
+        f"/popo/callback/robot-1?timestamp={timestamp}&nonce={nonce}&signature={digest}",
+        json={"encrypt": encrypted},
+    )
+    legacy_response = client.post(
+        f"/popo/callback?timestamp={timestamp}&nonce={nonce}&signature={digest}",
+        json={"encrypt": encrypted},
+    )
+
+    assert signature(token, timestamp, nonce, digest) is True
+    assert response.status_code == 200
+    assert legacy_response.status_code == 200
+    assert captured == [
+        {
+            "robot": "robot-1",
+            "replyTo": "user-1",
+            "notify": "hello",
+            "sender": "user-1",
+            "sessionId": "session-1",
+            "groupId": "",
+            "sessionType": "",
+        },
+        {
+            "robot": "robot-1",
+            "replyTo": "user-1",
+            "notify": "hello",
+            "sender": "user-1",
+            "sessionId": "session-1",
+            "groupId": "",
+            "sessionType": "",
+        },
+    ]
+
+
+def test_popo_callback_ignores_duplicate_event_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    popo = pytest.importorskip("multi_agent_tcp.popo_agent_bot_run")
+    aes_key = "0123456789abcdef0123456789abcdef"
+    token = "callback-token"
+    captured: list[str] = []
+    popo._event_cache.clear()
+
+    monkeypatch.setattr(
+        popo,
+        "load_popo_config",
+        lambda robot_app_key: {
+            "robot_app_key": robot_app_key or "robot-1",
+            "robot_app_secret": "secret",
+            "callback_token": token,
+            "aes_key": aes_key,
+        },
+    )
+    monkeypatch.setattr(
+        popo,
+        "_start_handler_thread",
+        lambda robot_config, reply_to, notify, sender, popo_session_id, popo_group_id="", session_type="": captured.append(
+            notify
+        ),
+    )
+
+    timestamp = "1"
+    nonce = "2"
+    sign_text = "".join(value for _, value in sorted({"token": token, "timestamp": timestamp, "nonce": nonce}.items(), key=lambda item: item[1]))
+    digest = hashlib.sha256(sign_text.encode()).hexdigest()
+    payload = {
+        "eventType": "IM_P2P_TO_ROBOT_MSG",
+        "eventData": {
+            "uuid": "same-event-uuid",
+            "from": "user-1",
+            "notify": "hello",
+            "sessionId": "session-1",
+            "sessionType": 1,
+        },
+    }
+    encrypted = popo.AESCipher(aes_key).aes_cbc_encrypt(json.dumps(payload))
+    client = popo.app.test_client()
+
+    first = client.post(
+        f"/popo/callback/robot-1?timestamp={timestamp}&nonce={nonce}&signature={digest}",
+        json={"encrypt": encrypted},
+    )
+    second = client.post(
+        f"/popo/callback/robot-1?timestamp={timestamp}&nonce={nonce}&signature={digest}",
+        json={"encrypt": encrypted},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert captured == ["hello"]
+
+
+def test_popo_callback_config_falls_back_to_local_routes_on_service_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    popo = pytest.importorskip("multi_agent_tcp.popo_agent_bot_run")
+    routes_path = tmp_path / "popo_robot_routes.json"
+    popo._config_cache.clear()
+    routes_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "robots": {
+                    "robot-1": {
+                        "enabled": True,
+                        "robot_app_key": "robot-1",
+                        "robot_name": "Robot 1",
+                        "robot_app_secret": "secret",
+                        "callback_token": "token",
+                        "aes_key": "0123456789abcdef0123456789abcdef",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def timeout_config(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise popo.SingletonServiceError("SERVICE_ERROR", "timed out")
+
+    monkeypatch.setattr(popo, "POPO_ROBOT_ROUTES_PATH", routes_path)
+    monkeypatch.setattr(popo, "blueprint_request", timeout_config)
+
+    result = popo.load_popo_config("robot-1")
+    legacy = popo.load_popo_config("")
+
+    assert result["robot_app_key"] == "robot-1"
+    assert result["callback_token"] == "token"
+    assert result["source"] == "local_routes"
+    assert legacy["robot_app_key"] == "robot-1"
+    assert calls == []
+
+
+def test_blueprint_slot_start_enforces_three_active_run_limit_for_structure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+
+    monkeypatch.setattr(service, "_active_blueprint_slot_run_count_for_structure", lambda **kwargs: 3)
 
     with pytest.raises(BlueprintServiceError) as exc:
         service.start_blueprint_slot(project, "default")
@@ -675,6 +2515,13 @@ def test_resident_service_call_returns_error_when_not_running(tmp_path: Path) ->
 
     assert called["ok"] is False
     assert called["code"] == "RESIDENT_SERVICE_NOT_RUNNING"
+
+
+def test_resident_service_call_timeout_respects_method_timeout_argument() -> None:
+    assert _resident_service_call_timeout({}) == 20.0
+    assert _resident_service_call_timeout({"timeout_seconds": 60}) == 65.0
+    assert _resident_service_call_timeout({"timeoutSeconds": 60}) == 65.0
+    assert _resident_service_call_timeout({"timeout_seconds": 1000}) == 125.0
 
 
 def test_blueprint_service_delete_rejects_active_run(tmp_path: Path) -> None:
@@ -1265,7 +3112,9 @@ def test_blueprint_service_creates_script_node_template_and_catalog_item(tmp_pat
         ]
     )
     assert second_path.exists()
-    assert "def blueprint_node(" in script_api_path.read_text(encoding="utf-8")
+    script_api_text = script_api_path.read_text(encoding="utf-8")
+    assert "def blueprint_node(" in script_api_text
+    assert "def blueprint_service_call(" in script_api_text
     assert pyright["include"] == ["."]
     assert pyright["extraPaths"] == ["."]
     assert vscode_settings["python.analysis.extraPaths"] == ["."]
@@ -1343,6 +3192,57 @@ def test_blueprint_script_node_legacy_runtime_import_still_executes(tmp_path: Pa
 
     assert discovered["nodes"][0]["script_id"] == "legacy.py:legacy_format"
     assert output["result"] == {"legacy": 9}
+
+
+def test_blueprint_script_node_service_call_helper_executes_in_runtime_context(tmp_path: Path) -> None:
+    env = blueprint_script_nodes.ensure_script_nodes_dev_environment(tmp_path)
+    script_dir = Path(env["script_dir"])
+    (script_dir / "service_proxy.py").write_text(
+        "\n".join(
+            [
+                "from gulicode_blueprint import blueprint_node, blueprint_service_call",
+                "",
+                "@blueprint_node(outputs={'result': dict})",
+                "def service_proxy(payload: dict) -> dict:",
+                "    return blueprint_service_call('table_queue', 'health', payload)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def service_call(service_name: str, method_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((service_name, method_name, dict(arguments)))
+        return {"ok": True, "service_name": service_name, "method_name": method_name, "result": dict(arguments)}
+
+    output = asyncio.run(
+        blueprint_script_nodes.execute_script_node(
+            script_dir,
+            ScriptNode.from_dict(
+                {
+                    "node_id": "service_proxy",
+                    "script_id": "service_proxy.py:service_proxy",
+                    "module_path": "service_proxy.py",
+                    "function_name": "service_proxy",
+                    "inputs": [{"name": "payload", "type": "dict", "required": True}],
+                    "outputs": [{"name": "result", "type": "dict", "required": True}],
+                }
+            ),
+            {"payload": {"probe": True}},
+            service_call=service_call,
+        )
+    )
+
+    assert calls == [("table_queue", "health", {"probe": True})]
+    assert output["result"] == {
+        "ok": True,
+        "service_name": "table_queue",
+        "method_name": "health",
+        "result": {"probe": True},
+    }
+    with pytest.raises(RuntimeError, match="only available while a Blueprint ScriptNode is running"):
+        blueprint_script_nodes.blueprint_service_call("table_queue", "health", {})
 
 
 def test_blueprint_service_opens_script_directory_with_system_default(
@@ -1976,6 +3876,20 @@ def test_gulicode_bp_plugin_manifest_default_prompts_stay_within_codex_limit() -
     assert len(default_prompts) <= 3
 
 
+def test_gulicode_bp_mcp_popo_robot_route_commands_are_internal_only() -> None:
+    module = _load_gulicode_bp_mcp_module()
+    robot_route_commands = {
+        "blueprint.popo.callbackConfig",
+        "blueprint.popo.robots",
+        "blueprint.popo.robot.save",
+        "blueprint.popo.robot.delete",
+        "blueprint.popo.robot.enabled",
+    }
+
+    assert robot_route_commands.issubset(module.INTERNAL_COMMANDS)
+    assert robot_route_commands.isdisjoint(module.ALLOWED_COMMANDS)
+
+
 def test_gulicode_bp_mcp_planning_thread_context_does_not_leak_into_workbench_config(tmp_path: Path, monkeypatch) -> None:
     module = _load_gulicode_bp_mcp_module()
     ctx = SimpleNamespace(request_context=SimpleNamespace(meta=SimpleNamespace(model_extra={"threadId": "thread-meta"})))
@@ -2086,7 +4000,6 @@ def test_gulicode_bp_mcp_removes_planning_and_start_tools_but_keeps_session_comm
         '"blueprint.plan.create"',
         '"blueprint.plan.validate"',
         '"blueprint.start"',
-        '"blueprint.sessions.message"',
         "blueprint_take_planning_request",
         "blueprint_complete_planning_request",
         "blueprint_fail_planning_request",
@@ -2102,6 +4015,7 @@ def test_gulicode_bp_mcp_removes_planning_and_start_tools_but_keeps_session_comm
     for text in [
         '"blueprint.sessions.list"',
         '"blueprint.sessions.delete"',
+        '"blueprint.sessions.message"',
         '"blueprint.runtime.setStartAgent"',
         '"blueprint.runtime.executePlan"',
         "def blueprint_set_start_agent",
@@ -2565,6 +4479,164 @@ def test_blueprint_service_agent_info_projects_message_audit_for_node(tmp_path: 
     assert info["frameworkApiCalls"][-1]["api"] == "agent.dispatch"
     assert info["frameworkApiCalls"][-1]["summary"] == "handoff to reviewer"
     assert info["frameworkApiCalls"][-1]["batchId"] == "out-1"
+
+
+def test_blueprint_service_agent_info_does_not_hold_service_lock_during_runtime_calls(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+    project = tmp_path / "project"
+    project.mkdir()
+
+    class BlockingRuntime:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.message_journal = []
+            self.events = []
+
+        def status_snapshot(self, *, graph=None, recent_events_limit=None):
+            self.entered.set()
+            assert self.release.wait(timeout=5)
+            return {
+                "run": {"status": "running"},
+                "agents": {"planner": {"agent_id": "agent-planner", "state": "idle"}},
+                "queues": {"by_agent": {"planner": []}},
+            }
+
+        def agent_stream_events_after(self, **kwargs):
+            return []
+
+    runtime = BlockingRuntime()
+    node = SimpleNamespace(runtime_agent_id="agent-planner", to_dict=lambda: {"node_id": "planner"})
+    graph = SimpleNamespace(agent_nodes={"planner": node})
+    run = DesktopBlueprintRun(
+        run_id="run-agent-info-lock",
+        project_dir=project,
+        blueprint_id="default",
+        document={},
+        graph=graph,
+        runtime=runtime,
+        control=object(),
+        execution_mode="status",
+        created_at=1.0,
+        updated_at=1.0,
+    )
+    with service._lock:
+        service._runs[run.run_id] = run
+
+    result: list[dict[str, Any]] = []
+    errors: list[BaseException] = []
+
+    def call_agent_info() -> None:
+        try:
+            result.append(service.agent_info("planner", run_id=run.run_id))
+        except BaseException as exc:  # pragma: no cover - assertion detail
+            errors.append(exc)
+
+    thread = threading.Thread(target=call_agent_info)
+    thread.start()
+    assert runtime.entered.wait(timeout=2)
+    lock_acquired = service._lock.acquire(blocking=False)
+    if lock_acquired:
+        service._lock.release()
+    runtime.release.set()
+    thread.join(timeout=5)
+
+    assert lock_acquired is True
+    assert errors == []
+    assert result[0]["runtime"]["agent_id"] == "agent-planner"
+
+
+def test_blueprint_service_status_does_not_hold_service_lock_during_runtime_calls(tmp_path: Path) -> None:
+    service = DesktopBlueprintService()
+    project = tmp_path / "project"
+    project.mkdir()
+
+    class BlockingRuntime:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def status_snapshot(self, *, graph=None, recent_events_limit=None):
+            self.entered.set()
+            assert self.release.wait(timeout=5)
+            return {"run": {"status": "running"}, "recent_events": []}
+
+        def explain_status(self, *, graph=None):
+            return {"status": "running", "summary": "ok"}
+
+    runtime = BlockingRuntime()
+    run = DesktopBlueprintRun(
+        run_id="run-status-lock",
+        project_dir=project,
+        blueprint_id="default",
+        document={},
+        graph=SimpleNamespace(agent_nodes={}),
+        runtime=runtime,
+        control=object(),
+        execution_mode="status",
+        created_at=1.0,
+        updated_at=1.0,
+    )
+    with service._lock:
+        service._runs[run.run_id] = run
+
+    result: list[dict[str, Any]] = []
+    errors: list[BaseException] = []
+
+    def call_status() -> None:
+        try:
+            result.append(service.status_blueprint_run(run.run_id))
+        except BaseException as exc:  # pragma: no cover - assertion detail
+            errors.append(exc)
+
+    thread = threading.Thread(target=call_status)
+    thread.start()
+    assert runtime.entered.wait(timeout=2)
+    lock_acquired = service._lock.acquire(blocking=False)
+    if lock_acquired:
+        service._lock.release()
+    runtime.release.set()
+    thread.join(timeout=5)
+
+    assert lock_acquired is True
+    assert errors == []
+    assert result[0]["status"]["run"]["status"] == "running"
+
+
+def test_blueprint_agent_stream_runtime_timeout_does_not_block_forever(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DesktopBlueprintService()
+    project = tmp_path / "project"
+    project.mkdir()
+    run = DesktopBlueprintRun(
+        run_id="run-stream-timeout",
+        project_dir=project,
+        blueprint_id="default",
+        document={},
+        graph=SimpleNamespace(agent_nodes={}),
+        runtime=object(),
+        control=object(),
+        execution_mode="live",
+        created_at=1.0,
+        updated_at=1.0,
+    )
+    with service._lock:
+        service._runs[run.run_id] = run
+    calls: list[float | None] = []
+
+    def fake_runtime_call(active_run: DesktopBlueprintRun, fn, *, timeout=None):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise desktop_blueprint_service_module.FutureTimeoutError()
+        return {"status": "completed"}
+
+    monkeypatch.setattr(service, "_runtime_call", fake_runtime_call)
+
+    service.stream_agent_events(run.run_id, send=lambda event: pytest.fail("no events expected"))
+
+    assert calls == [
+        desktop_blueprint_service_module.LIVE_AGENT_STREAM_READ_TIMEOUT_SECONDS,
+        desktop_blueprint_service_module.LIVE_AGENT_STREAM_READ_TIMEOUT_SECONDS,
+    ]
 
 
 def test_blueprint_service_start_rejects_invalid_graph_and_plan(tmp_path: Path) -> None:
@@ -3190,6 +5262,238 @@ def test_run_mcp_provisions_full_agent_message_only_context(tmp_path: Path) -> N
     assert scope.checkout_dir is None
     assert scope.private_dir is None
     assert scope.allowed_tools == context["tools"]
+
+
+def test_run_mcp_session_termination_tool_is_not_exposed_to_agents(tmp_path: Path) -> None:
+    class FakeManager:
+        def __init__(self) -> None:
+            self.records = []
+
+        def _record_shared_manifest(self, run, event_type, payload):
+            self.records.append((event_type, payload))
+
+    class FakeControl:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def handle_request(self, payload):
+            self.requests.append(payload)
+            return {"ok": True}
+
+    def full_agent(node_id: str, agent_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            node_id=node_id,
+            runtime_agent_id=agent_id,
+            node_type="agent",
+            access_policy={"framework_message_tools": True},
+        )
+
+    def worker_agent(node_id: str, agent_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            node_id=node_id,
+            runtime_agent_id=agent_id,
+            node_type="worker_agent",
+            access_policy={"framework_message_tools": True},
+        )
+
+    manager = FakeManager()
+    control = FakeControl()
+    handle = RunMCPRuntimeHandle(
+        run_id="run-1",
+        runtime=object(),
+        control=control,
+        graph=object(),
+        workspace_rpc_server=SimpleNamespace(token_for=lambda agent_id: f"token-{agent_id}"),
+        manager=manager,
+        workspace_run=object(),
+        runtime_loop=None,
+    )
+    handle.enable_blueprint_session_termination(start_node_id="planner", session_key="main+default")
+
+    reviewer_context = handle.provision_context_for_node(
+        node=full_agent("reviewer", "agent-reviewer"),
+        private_dir=tmp_path / "reviewer-private",
+        checkout_dir=tmp_path / "project",
+        codex_home=tmp_path / "reviewer-private" / "codex_home",
+    )
+    worker_context = handle.provision_context_for_node(
+        node=worker_agent("worker", "agent-worker"),
+        private_dir=tmp_path / "worker-private",
+        checkout_dir=tmp_path / "project",
+        codex_home=tmp_path / "worker-private" / "codex_home",
+    )
+    planner_context = handle.provision_context_for_node(
+        node=full_agent("planner", "agent-planner"),
+        private_dir=tmp_path / "planner-private",
+        checkout_dir=tmp_path / "project",
+        codex_home=tmp_path / "planner-private" / "codex_home",
+    )
+    handle.token_store.update_message_context(
+        agent_node_id="planner",
+        agent_id="agent-planner",
+        current_message_id="msg-1",
+        outgoing_batch_id=None,
+        required_outgoing_targets=[],
+        timeout_sec=60,
+    )
+
+    planner_scope = handle.token_store.authenticate(
+        server_kind="ordinary",
+        token=planner_context["bearer_token"],
+        session_id=None,
+    )
+
+    assert "blueprint_terminate_session" not in reviewer_context["tools"]
+    assert "blueprint_terminate_session" not in worker_context["tools"]
+    assert "blueprint_terminate_session" not in planner_context["tools"]
+    assert "runtime_end" not in reviewer_context["tools"]
+    assert "runtime_end" not in worker_context["tools"]
+    assert "runtime_end" not in planner_context["tools"]
+    assert "blueprint_end" not in planner_context["tools"]
+    assert "blueprint_terminate_session" not in planner_scope.allowed_tools
+    assert handle.token_store.closed is False
+    assert manager.records == []
+
+
+def test_run_mcp_popo_reply_tool_is_start_agent_scoped(tmp_path: Path) -> None:
+    class FakeManager:
+        def __init__(self) -> None:
+            self.records = []
+
+        def _record_shared_manifest(self, run, event_type, payload):
+            self.records.append((event_type, payload))
+
+    class FakeControl:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def handle_request(self, payload):
+            self.requests.append(payload)
+            return {"ok": True}
+
+    def full_agent(node_id: str, agent_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            node_id=node_id,
+            runtime_agent_id=agent_id,
+            node_type="agent",
+            access_policy={"framework_message_tools": True},
+        )
+
+    calls: list[dict[str, Any]] = []
+
+    def reply_callback(
+        *,
+        content: str,
+        session_key: str,
+        agent_node_id: str,
+        agent_id: str,
+        message_id: str,
+    ):
+        calls.append(
+            {
+                "content": content,
+                "session_key": session_key,
+                "agent_node_id": agent_node_id,
+                "agent_id": agent_id,
+                "message_id": message_id,
+            }
+        )
+        return {"ok": True, "sent": True}
+
+    manager = FakeManager()
+    control = FakeControl()
+    handle = RunMCPRuntimeHandle(
+        run_id="run-1",
+        runtime=object(),
+        control=control,
+        graph=object(),
+        workspace_rpc_server=object(),
+        manager=manager,
+        workspace_run=object(),
+        runtime_loop=None,
+        reply_popo_user_callback=reply_callback,
+    )
+    handle.enable_popo_user_reply(start_node_id="planner", session_key="bps_000000000000000000000001")
+
+    reviewer_context = handle.provision_context_for_node(
+        node=full_agent("reviewer", "agent-reviewer"),
+        private_dir=tmp_path / "reviewer-private",
+        checkout_dir=tmp_path / "project",
+        codex_home=tmp_path / "reviewer-private" / "codex_home",
+    )
+    planner_context = handle.provision_context_for_node(
+        node=full_agent("planner", "agent-planner"),
+        private_dir=tmp_path / "planner-private",
+        checkout_dir=tmp_path / "project",
+        codex_home=tmp_path / "planner-private" / "codex_home",
+    )
+    handle.token_store.update_message_context(
+        agent_node_id="planner",
+        agent_id="agent-planner",
+        current_message_id="msg-1",
+        outgoing_batch_id=None,
+        required_outgoing_targets=[],
+        timeout_sec=60,
+    )
+
+    reviewer_scope = handle.token_store.authenticate(
+        server_kind="ordinary",
+        token=reviewer_context["bearer_token"],
+        session_id=None,
+    )
+    planner_scope = handle.token_store.authenticate(
+        server_kind="ordinary",
+        token=planner_context["bearer_token"],
+        session_id=None,
+    )
+
+    assert "blueprint_reply_popo_user" not in reviewer_context["tools"]
+    assert "blueprint_reply_popo_user" in planner_context["tools"]
+
+    async def scenario() -> dict:
+        with pytest.raises(PermissionError):
+            await handle._ordinary_blueprint_reply_popo_user(reviewer_scope, content="not allowed")
+        return await handle._ordinary_blueprint_reply_popo_user(planner_scope, content="hello user")
+
+    result = asyncio.run(scenario())
+
+    assert result == {"ok": True, "sent": True}
+    assert calls == [
+        {
+            "content": "hello user",
+            "session_key": "bps_000000000000000000000001",
+            "agent_node_id": "planner",
+            "agent_id": "agent-planner",
+            "message_id": "msg-1",
+        }
+    ]
+    assert handle.token_store.closed is False
+    assert control.requests == [
+        {
+            "command": "agent.task_status",
+            "args": {
+                "node_id": "planner",
+                "agent_id": "agent-planner",
+                "status": "completed",
+                "summary": "Replied to the POPO user.",
+                "message_id": "msg-1",
+                "batch_id": None,
+                "reports": [],
+                "artifacts": [],
+                "changesets": [],
+                "next_actions": [],
+                "metadata": {
+                    "framework_auto": True,
+                    "source_tool": "blueprint_reply_popo_user",
+                },
+            },
+        }
+    ]
+    assert manager.records[-1][0] == MCP_TOOL_AUDIT_EVENT
+    assert manager.records[-1][1]["tool_name"] == "blueprint_reply_popo_user"
+    assert "receiver" not in manager.records[-1][1]["args"]
+    assert "token" not in manager.records[-1][1]["args"]
+    assert "secret" not in manager.records[-1][1]["args"]
 
 
 def test_run_mcp_skips_full_agent_context_when_message_tools_disabled(tmp_path: Path) -> None:

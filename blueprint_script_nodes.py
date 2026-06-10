@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextvars
 import importlib.util
 import inspect
 import json
@@ -22,6 +23,9 @@ PYRIGHT_CONFIG_FILENAME = "pyrightconfig.json"
 VSCODE_SETTINGS_DIR = ".vscode"
 VSCODE_SETTINGS_FILENAME = "settings.json"
 SCRIPT_WORKSPACE_FILENAME = "blueprint-scripts.code-workspace"
+_SCRIPT_SERVICE_CALLER: contextvars.ContextVar[Optional[Callable[[str, str, Dict[str, Any]], Dict[str, Any]]]] = (
+    contextvars.ContextVar("blueprint_script_service_caller", default=None)
+)
 SCRIPT_API_SHIM = '''"""Public helpers for GuLiCode Blueprint script nodes.
 
 Scripts import ``blueprint_node`` from this local module so "Go to Definition"
@@ -59,6 +63,18 @@ def blueprint_node(
     if func is None:
         return decorate
     return decorate(func)
+
+
+def blueprint_service_call(
+    service_name: str,
+    method_name: str,
+    arguments: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Call a Blueprint resident service from inside a Script Function Node."""
+
+    from multi_agent_tcp.blueprint_script_nodes import blueprint_service_call as _runtime_call
+
+    return _runtime_call(service_name, method_name, arguments)
 '''
 
 
@@ -154,6 +170,26 @@ def blueprint_node(
     if func is None:
         return decorate
     return decorate(func)
+
+
+def blueprint_service_call(
+    service_name: str,
+    method_name: str,
+    arguments: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Call a resident service from the active ScriptNode runtime context."""
+
+    caller = _SCRIPT_SERVICE_CALLER.get()
+    if caller is None:
+        raise RuntimeError("blueprint_service_call is only available while a Blueprint ScriptNode is running")
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, Mapping):
+        raise ValueError("blueprint_service_call arguments must be a JSON object")
+    result = caller(str(service_name), str(method_name), dict(arguments))
+    if not isinstance(result, dict):
+        raise RuntimeError("blueprint_service_call returned a non-object response")
+    return dict(result)
 
 
 def script_nodes_dir(project_dir: Path) -> Path:
@@ -292,6 +328,7 @@ async def execute_script_node(
     payload: Any,
     *,
     input_port: Optional[str] = None,
+    service_call: Optional[Callable[[str, str, Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     module_path = _node_field(node, "module_path")
     function_name = _node_field(node, "function_name")
@@ -300,18 +337,23 @@ async def execute_script_node(
     if not function_name:
         raise ValueError("ScriptNode.function_name must be non-empty")
 
-    script_path = _resolve_script_path(Path(script_root), str(module_path))
-    module = _load_script_module(script_path, Path(script_root))
-    func = getattr(module, str(function_name), None)
-    if not callable(func):
-        raise ValueError(f"script function not found: {module_path}:{function_name}")
+    token = _SCRIPT_SERVICE_CALLER.set(service_call) if service_call is not None else None
+    try:
+        script_path = _resolve_script_path(Path(script_root), str(module_path))
+        module = _load_script_module(script_path, Path(script_root))
+        func = getattr(module, str(function_name), None)
+        if not callable(func):
+            raise ValueError(f"script function not found: {module_path}:{function_name}")
 
-    inputs = _ports_from_node(node, "inputs")
-    outputs = _ports_from_node(node, "outputs") or [ScriptNodePort("result", "Any")]
-    args, kwargs = _call_args_for_payload(func, inputs, payload, input_port=input_port)
-    value = func(*args, **kwargs)
-    if inspect.isawaitable(value):
-        value = await value
+        inputs = _ports_from_node(node, "inputs")
+        outputs = _ports_from_node(node, "outputs") or [ScriptNodePort("result", "Any")]
+        args, kwargs = _call_args_for_payload(func, inputs, payload, input_port=input_port)
+        value = func(*args, **kwargs)
+        if inspect.isawaitable(value):
+            value = await value
+    finally:
+        if token is not None:
+            _SCRIPT_SERVICE_CALLER.reset(token)
     output_payload = _normalize_script_output(outputs, value)
     return {
         "script_id": _node_field(node, "script_id"),

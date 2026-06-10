@@ -275,6 +275,28 @@ const createPlatform = (): Platform => {
 
     listBlueprintRuns: (projectDir?: string, blueprintId?: string) => window.api.blueprintListRuns(projectDir, blueprintId),
 
+    listBlueprintSessions: (projectDir?: string, blueprintId?: string) =>
+      window.api.blueprintListSessions(projectDir, blueprintId) as Promise<any>,
+
+    blueprintSessionTimeline: (sessionKey: string, limit?: number) =>
+      window.api.blueprintSessionTimeline(sessionKey, limit) as Promise<any>,
+
+    deleteBlueprintSession: (sessionKey: string) => window.api.blueprintDeleteSession(sessionKey),
+
+    terminateBlueprintSession: (sessionKey: string, reason?: string) =>
+      window.api.blueprintTerminateSession(sessionKey, reason),
+
+    startBlueprintSlot: (projectDir: string, blueprintId: string) => window.api.blueprintStartSlot(projectDir, blueprintId),
+
+    blueprintSlotStatus: (projectDir: string, blueprintId: string) =>
+      window.api.blueprintSlotStatus(projectDir, blueprintId) as Promise<any>,
+
+    terminateBlueprintSlot: (projectDir: string, blueprintId: string, reason?: string) =>
+      window.api.blueprintTerminateSlot(projectDir, blueprintId, reason),
+
+    sendBlueprintSlotMessage: (projectDir: string, message: string, input) =>
+      window.api.blueprintSlotMessage(projectDir, message, input),
+
     startBlueprintRun: (projectDir: string, blueprintId: string, plan, executionMode) =>
       window.api.blueprintStart(projectDir, blueprintId, plan, executionMode),
 

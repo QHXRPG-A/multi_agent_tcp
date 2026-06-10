@@ -71,6 +71,7 @@ export type BlueprintAgentNode = {
   node_id: string
   node_type: BlueprintAgentNodeType
   agent_id?: string
+  popo_entry: BlueprintPopoEntry
   prompt: string
   run_prompt: string
   collapsed: boolean
@@ -97,6 +98,7 @@ export type BlueprintAgentNode = {
 
 type LegacyBlueprintAgentNode = Partial<BlueprintAgentNode> & {
   prompt_input_enabled?: unknown
+  popoEntry?: Partial<BlueprintPopoEntry>
 }
 
 export type BlueprintRouteNode = {
@@ -123,6 +125,8 @@ export type BlueprintScriptNode = {
   inputs: BlueprintScriptPort[]
   outputs: BlueprintScriptPort[]
   collapsed: boolean
+  feedback_only?: boolean
+  require_call_before_dispatch?: boolean
 }
 
 export type BlueprintPromptNode = {
@@ -341,6 +345,20 @@ export function createDefaultPopoEntry(): BlueprintPopoEntry {
   }
 }
 
+export function popoEntryHasValues(entry?: Partial<BlueprintPopoEntry>): boolean {
+  const normalized = normalizePopoEntry(entry)
+  return (
+    normalized.enabled ||
+    Boolean(
+      normalized.robot_app_key ||
+        normalized.robot_name ||
+        normalized.robot_app_secret ||
+        normalized.callback_token ||
+        normalized.aes_key,
+    )
+  )
+}
+
 function agentNode(input: {
   node_id: string
   agent_id: string
@@ -427,7 +445,7 @@ export function cloneBlueprintDraft(draft: BlueprintDraft): BlueprintDraft {
     config: normalizeBlueprintConfig(draft.config),
     runtime: {
       start_node_id: draft.runtime?.start_node_id?.trim() ?? "",
-      popo_entry: normalizePopoEntry(draft.runtime?.popo_entry),
+      popo_entry: createDefaultPopoEntry(),
     },
     graph: {
       terminal_nodes: { ...draft.graph.terminal_nodes },
@@ -471,7 +489,7 @@ export function toBlueprintDocument(
     graph: toRuntimeGraphDraft(draft),
     runtime: {
       start_node_id: draft.runtime?.start_node_id?.trim() ?? "",
-      popo_entry: normalizePopoEntry(draft.runtime?.popo_entry),
+      popo_entry: createDefaultPopoEntry(),
     },
     ui: {
       config: normalizeBlueprintConfig(draft.config),
@@ -491,12 +509,32 @@ export function fromBlueprintDocument(
   const graph = (document.graph ?? fallback.graph) as RuntimeGraphDraft
   const ui = (document.ui ?? {}) as Partial<BlueprintDocument["ui"]>
   const runtime = (document.runtime ?? {}) as NonNullable<BlueprintDocument["runtime"]>
+  const startNodeId = String(runtime.start_node_id ?? runtime.startNodeId ?? fallback.runtime.start_node_id ?? "").trim()
+  const legacyRuntimePopoEntry = normalizePopoEntry(runtime.popo_entry ?? runtime.popoEntry ?? fallback.runtime.popo_entry)
+  const agentNodes = Object.fromEntries(
+    Object.entries(graph.agent_nodes ?? fallback.graph.agent_nodes).map(([id, node]) => [
+      id,
+      normalizeAgentNode(id, node),
+    ]),
+  )
+  if (
+    popoEntryHasValues(legacyRuntimePopoEntry) &&
+    !Object.values(agentNodes).some((node) => node.node_type === "agent" && popoEntryHasValues(node.popo_entry))
+  ) {
+    const startNode = agentNodes[startNodeId]
+    if (startNode?.node_type === "agent") {
+      agentNodes[startNodeId] = {
+        ...startNode,
+        popo_entry: legacyRuntimePopoEntry,
+      }
+    }
+  }
   return cloneBlueprintDraft({
     schema_version: 1,
     config: normalizeBlueprintConfig(ui.config ?? fallback.config),
     runtime: {
-      start_node_id: String(runtime.start_node_id ?? runtime.startNodeId ?? fallback.runtime.start_node_id ?? "").trim(),
-      popo_entry: normalizePopoEntry(runtime.popo_entry ?? runtime.popoEntry ?? fallback.runtime.popo_entry),
+      start_node_id: startNodeId,
+      popo_entry: createDefaultPopoEntry(),
     },
     graph: {
       terminal_nodes: { ...(graph.terminal_nodes ?? fallback.graph.terminal_nodes) },
@@ -512,12 +550,7 @@ export function fromBlueprintDocument(
       script_nodes: Object.fromEntries(
         Object.entries(graph.script_nodes ?? {}).map(([id, node]) => [id, normalizeScriptNode(id, node)]),
       ),
-      agent_nodes: Object.fromEntries(
-        Object.entries(graph.agent_nodes ?? fallback.graph.agent_nodes).map(([id, node]) => [
-          id,
-          normalizeAgentNode(id, node),
-        ]),
-      ),
+      agent_nodes: agentNodes,
       edges: (graph.edges ?? fallback.graph.edges).map((edge) => ({
         id: edgeId(
           edge.from,
@@ -773,6 +806,8 @@ export function addScriptNode(
     inputs: script.inputs ?? [],
     outputs: script.outputs ?? [{ name: "result", type: "Any", required: true }],
     collapsed: script.collapsed ?? true,
+    feedback_only: script.feedback_only ?? isTableQueueServiceScript(script),
+    require_call_before_dispatch: script.require_call_before_dispatch ?? isTableQueueServiceScript(script),
   })
   next.layout.nodes[node_id] = snapPosition(input.position ?? nextNodePosition(next))
   next.selection = { type: "node", id: node_id }
@@ -1076,6 +1111,10 @@ export function updateAgentNode(draft: BlueprintDraft, id: string, patch: Partia
     ...patch,
     node_id: id,
     node_type: patchedNodeType,
+    popo_entry:
+      patchedNodeType === "agent"
+        ? normalizePopoEntry(patch.popo_entry ?? current.popo_entry)
+        : createDefaultPopoEntry(),
     skills: patch.skills ? [...patch.skills] : current.skills,
     skill_selection: patch.skill_selection ? cloneSkillSelection(patch.skill_selection) : cloneSkillSelection(current.skill_selection),
     rule_paths: patch.rule_paths ? [...patch.rule_paths] : current.rule_paths,
@@ -1202,6 +1241,8 @@ export function compileScriptNodesFromCatalog(
       ...fresh,
       node_id: id,
       collapsed: current.collapsed,
+      feedback_only: current.feedback_only,
+      require_call_before_dispatch: current.require_call_before_dispatch,
     })
     updated += 1
     updatedNodeIds.add(id)
@@ -1438,6 +1479,7 @@ function createAgentNode(input: {
     node_id: input.node_id,
     node_type: nodeType,
     agent_id: input.agent_id,
+    popo_entry: createDefaultPopoEntry(),
     prompt: input.prompt,
     run_prompt: input.run_prompt ?? "",
     collapsed: true,
@@ -1490,13 +1532,14 @@ function normalizeAgentAccessPolicy(
 
 function normalizePopoEntry(value?: Partial<BlueprintPopoEntry>): BlueprintPopoEntry {
   const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {}
+  const legacy = raw as Partial<BlueprintPopoEntry> & Record<string, unknown>
   return {
     enabled: Boolean(raw.enabled),
-    robot_app_key: String(raw.robot_app_key ?? "").trim(),
-    robot_name: String(raw.robot_name ?? "").trim(),
-    robot_app_secret: String(raw.robot_app_secret ?? "").trim(),
-    callback_token: String(raw.callback_token ?? "").trim(),
-    aes_key: String(raw.aes_key ?? "").trim(),
+    robot_app_key: String(raw.robot_app_key ?? legacy.robotAppKey ?? "").trim(),
+    robot_name: String(raw.robot_name ?? legacy.robotName ?? "").trim(),
+    robot_app_secret: String(raw.robot_app_secret ?? legacy.robotAppSecret ?? "").trim(),
+    callback_token: String(raw.callback_token ?? legacy.callbackToken ?? "").trim(),
+    aes_key: String(raw.aes_key ?? legacy.aesKey ?? "").trim(),
   }
 }
 
@@ -1534,7 +1577,12 @@ function configuredRingNumber(
 }
 
 function normalizeAgentNode(id: string, node: LegacyBlueprintAgentNode): BlueprintAgentNode {
-  const { prompt_input_enabled: _legacyPromptInputEnabled, ...nodeFields } = node
+  const {
+    prompt_input_enabled: _legacyPromptInputEnabled,
+    popo_entry: rawPopoEntry,
+    popoEntry: legacyPopoEntry,
+    ...nodeFields
+  } = node
   const nodeType = normalizeAgentNodeType(node.node_type)
   const defaults = createAgentNode({
     node_id: id,
@@ -1567,6 +1615,10 @@ function normalizeAgentNode(id: string, node: LegacyBlueprintAgentNode): Bluepri
     ...nodeFields,
     node_id: id,
     node_type: nodeType,
+    popo_entry:
+      nodeType === "agent"
+        ? normalizePopoEntry(rawPopoEntry ?? legacyPopoEntry ?? defaults.popo_entry)
+        : createDefaultPopoEntry(),
     run_prompt: String(node.run_prompt ?? defaults.run_prompt),
     collapsed: node.collapsed !== false,
     skills,
@@ -1731,6 +1783,8 @@ function normalizeScriptNode(id: string, node: Partial<BlueprintScriptNode>): Bl
       normalizeScriptPort(port, index === 0 ? "result" : `out${index + 1}`),
     ),
     collapsed: node.collapsed !== false,
+    feedback_only: node.feedback_only === true,
+    require_call_before_dispatch: node.require_call_before_dispatch === true,
   }
 }
 
@@ -1738,6 +1792,13 @@ function scriptNodeLocationKey(node: Pick<BlueprintScriptNode, "module_path" | "
   const modulePath = String(node.module_path || "").replace(/\\/g, "/").trim()
   const functionName = String(node.function_name || "").trim()
   return modulePath && functionName ? `${modulePath}:${functionName}` : ""
+}
+
+function isTableQueueServiceScript(node: Partial<BlueprintScriptNode>) {
+  const functionName = String(node.function_name || "").trim()
+  const scriptId = String(node.script_id || "").trim()
+  const modulePath = String(node.module_path || "").replace(/\\/g, "/").trim()
+  return functionName === "table_queue_service" || scriptId.endsWith(":table_queue_service") || modulePath.endsWith("table_queue_service.py")
 }
 
 function scriptEdgePortsStillValid(

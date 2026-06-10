@@ -115,6 +115,58 @@ export class BlueprintRuntime {
     return this.request("blueprint.listRuns", { projectDir, blueprintId }).then((result) => result.runs)
   }
 
+  listSessions(projectDir?: string, blueprintId?: string) {
+    return this.request("blueprint.sessions.list", { projectDir, blueprintId }).then((result) => result.sessions)
+  }
+
+  sessionTimeline(sessionKey: string, limit?: number) {
+    return this.request("blueprint.sessions.timeline", { sessionKey, limit })
+  }
+
+  deleteSession(sessionKey: string) {
+    return this.request("blueprint.sessions.delete", { sessionKey })
+  }
+
+  terminateSession(sessionKey: string, reason?: string) {
+    return this.request("blueprint.sessions.terminate", { sessionKey, reason })
+  }
+
+  startSlot(projectDir: string, blueprintId: string) {
+    return this.request("blueprint.slots.start", { projectDir, blueprintId })
+  }
+
+  slotStatus(projectDir: string, blueprintId: string) {
+    return this.request("blueprint.slots.status", { projectDir, blueprintId })
+  }
+
+  terminateSlot(projectDir: string, blueprintId: string, reason?: string) {
+    return this.request("blueprint.slots.terminate", { projectDir, blueprintId, reason })
+  }
+
+  slotMessage(
+    projectDir: string,
+    message: string,
+    input: {
+      source?: string
+      blueprintId?: string
+      runId?: string
+      sourceIdentity?: Record<string, unknown>
+      sessionIdentity?: Record<string, unknown>
+      sessionKey?: string
+    } = {},
+  ) {
+    return this.request("blueprint.slots.message", {
+      projectDir,
+      message,
+      source: input.source,
+      blueprintId: input.blueprintId,
+      runId: input.runId,
+      sourceIdentity: input.sourceIdentity,
+      sessionIdentity: input.sessionIdentity,
+      sessionKey: input.sessionKey,
+    })
+  }
+
   detectPython(projectDir?: string, pythonCommand?: string) {
     const packageRoot = this.opts.packageRoot ?? findPackageRoot()
     const runtimeEnv = {

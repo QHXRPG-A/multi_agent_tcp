@@ -58,6 +58,7 @@ describe("blueprint draft model", () => {
       cli_kind: "codex",
       model: "gpt-5.4",
       cwd: ".",
+      popo_entry: createDefaultPopoEntry(),
       timeout_sec: 1800,
       prompt_via_file: "auto",
       run_prompt: "",
@@ -235,6 +236,52 @@ describe("blueprint draft model", () => {
 
     expect(document.runtime?.start_node_id).toBe("coder")
     expect(restored.runtime.start_node_id).toBe("coder")
+  })
+
+  test("stores POPO entry on the saved start full Agent instead of runtime metadata", () => {
+    const draft = createDefaultBlueprintDraft()
+    const entry = {
+      enabled: true,
+      robot_app_key: "app-key",
+      robot_name: "bot",
+      robot_app_secret: "secret",
+      callback_token: "token",
+      aes_key: "aes",
+    }
+    draft.graph.agent_nodes.planner.popo_entry = entry
+
+    const document = toBlueprintDocument(draft)
+    const restored = fromBlueprintDocument(document)
+
+    expect(document.runtime?.popo_entry).toEqual(createDefaultPopoEntry())
+    expect(document.graph.agent_nodes.planner.popo_entry).toEqual(entry)
+    expect(restored.runtime.popo_entry).toEqual(createDefaultPopoEntry())
+    expect(restored.graph.agent_nodes.planner.popo_entry).toEqual(entry)
+  })
+
+  test("migrates legacy runtime POPO entry to the saved start full Agent", () => {
+    const legacyEntry = {
+      enabled: true,
+      robot_app_key: "legacy-key",
+      robot_name: "legacy-bot",
+      robot_app_secret: "legacy-secret",
+      callback_token: "legacy-token",
+      aes_key: "legacy-aes",
+    }
+    const document = toBlueprintDocument(createDefaultBlueprintDraft())
+    document.runtime = {
+      start_node_id: "planner",
+      popo_entry: legacyEntry,
+    }
+    document.graph.agent_nodes.planner.popo_entry = createDefaultPopoEntry()
+
+    const restored = fromBlueprintDocument(document)
+    const resaved = toBlueprintDocument(restored)
+
+    expect(restored.runtime.popo_entry).toEqual(createDefaultPopoEntry())
+    expect(restored.graph.agent_nodes.planner.popo_entry).toEqual(legacyEntry)
+    expect(resaved.runtime?.popo_entry).toEqual(createDefaultPopoEntry())
+    expect(resaved.graph.agent_nodes.planner.popo_entry).toEqual(legacyEntry)
   })
 
   test("detects script-transparent agent rings and preserves ring settings", () => {
@@ -505,6 +552,8 @@ describe("blueprint draft model", () => {
           { name: "result", type: "dict", required: true },
         ],
         collapsed: false,
+        feedback_only: true,
+        require_call_before_dispatch: true,
       },
     })
     draft = addEdge(draft, "planner", "test_1", "exec", "out", "title")
@@ -542,6 +591,8 @@ describe("blueprint draft model", () => {
       title: "Format score",
       description: "New script",
       collapsed: false,
+      feedback_only: true,
+      require_call_before_dispatch: true,
       inputs: [
         { name: "title", type: "str", required: true },
         { name: "priority", type: "int", required: true },
@@ -563,6 +614,33 @@ describe("blueprint draft model", () => {
       "test_1:summary->summary:in:exec",
     ])
     expect(result.draft.inspector).toBeUndefined()
+  })
+
+  test("defaults table queue service script nodes to feedback and required call", () => {
+    const draft = addScriptNode(createDefaultBlueprintDraft(), {
+      node_id: "table_queue_service",
+      script: {
+        script_id: "table_queue_service.py:table_queue_service",
+        module_path: "table_queue_service.py",
+        function_name: "table_queue_service",
+      },
+    })
+
+    expect(draft.graph.script_nodes.table_queue_service).toMatchObject({
+      feedback_only: true,
+      require_call_before_dispatch: true,
+    })
+
+    const ordinary = addScriptNode(createDefaultBlueprintDraft(), {
+      node_id: "ordinary_script",
+      script: {
+        script_id: "ordinary.py:ordinary",
+        module_path: "ordinary.py",
+        function_name: "ordinary",
+      },
+    })
+    expect(ordinary.graph.script_nodes.ordinary_script.feedback_only).toBe(false)
+    expect(ordinary.graph.script_nodes.ordinary_script.require_call_before_dispatch).toBe(false)
   })
 
   test("reports missing script catalog entries without changing placed nodes", () => {

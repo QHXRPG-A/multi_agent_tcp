@@ -163,6 +163,14 @@ const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkben
     blueprintRequest(config, "blueprint.residentServiceLogs", { serviceName, limit }),
   blueprintResidentServiceDocs: async (serviceName: string) =>
     blueprintRequest(config, "blueprint.residentServiceDocs", { serviceName }),
+  blueprintPopoServiceStatus: async () => (await blueprintRequest(config, "service.popoStatus")).popo ?? {},
+  listBlueprintPopoRobots: async () => (await blueprintRequest(config, "blueprint.popo.robots")).robots ?? [],
+  saveBlueprintPopoRobot: async (robot, previousRobotAppKey?: string) =>
+    blueprintRequest(config, "blueprint.popo.robot.save", { robot, previousRobotAppKey }),
+  deleteBlueprintPopoRobot: async (robotAppKey: string) =>
+    blueprintRequest(config, "blueprint.popo.robot.delete", { robotAppKey }),
+  setBlueprintPopoRobotEnabled: async (robotAppKey: string, enabled: boolean) =>
+    blueprintRequest(config, "blueprint.popo.robot.enabled", { robotAppKey, enabled }),
   openDirectoryPickerDialog: async (opts) => {
     const payload = await blueprintRequest(config, "blueprint.pickDirectory", {
       title: opts?.title,
@@ -193,8 +201,12 @@ const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkben
     blueprintRequest(config, "blueprint.validate", { projectDir, blueprintId, document }),
   listBlueprintSessions: async (projectDir?: string, blueprintId?: string) =>
     (await blueprintRequest(config, "blueprint.sessions.list", { projectDir, blueprintId })).sessions ?? [],
+  blueprintSessionTimeline: async (sessionKey: string, limit?: number) =>
+    blueprintRequest(config, "blueprint.sessions.timeline", { sessionKey, limit }),
   deleteBlueprintSession: async (sessionKey: string) =>
     blueprintRequest(config, "blueprint.sessions.delete", { sessionKey }),
+  terminateBlueprintSession: async (sessionKey: string, reason?: string) =>
+    blueprintRequest(config, "blueprint.sessions.terminate", { sessionKey, reason }),
   sendBlueprintSessionMessage: async (projectDir: string, blueprintId: string, message: string, input) =>
     blueprintRequest(config, "blueprint.sessions.message", {
       projectDir,
@@ -208,6 +220,10 @@ const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkben
     }),
   startBlueprintSlot: async (projectDir: string, blueprintId: string) =>
     blueprintRequest(config, "blueprint.slots.start", { projectDir, blueprintId }),
+  blueprintSlotStatus: async (projectDir: string, blueprintId: string) =>
+    blueprintRequest(config, "blueprint.slots.status", { projectDir, blueprintId }),
+  terminateBlueprintSlot: async (projectDir: string, blueprintId: string, reason?: string) =>
+    blueprintRequest(config, "blueprint.slots.terminate", { projectDir, blueprintId, reason }),
   sendBlueprintSlotMessage: async (projectDir: string, message: string, input) =>
     blueprintRequest(config, "blueprint.slots.message", {
       projectDir,

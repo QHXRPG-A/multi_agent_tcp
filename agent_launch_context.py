@@ -214,7 +214,8 @@ def framework_agent_rules() -> str:
             "- When `framework_context.message_envelope.required_outgoing_targets` is empty, this is leaf work: do not call `agent_dispatch` or `join_contribute`; process the message and publish durable results through `workspace_publish` / `workspace_publish_file`.",
             "- Use `join_contribute` only when the framework or task explicitly provides a real `join_id`; outgoing batch ids such as `out-*` are not join ids.",
             "- To provide durable results to the framework, use assigned framework MCP tools.",
-            "- Before finishing a message, call `agent_task_status` with your own task status and summary after submit/publish/dispatch work is done.",
+            "- If `blueprint_reply_popo_user` is available and you use it, that tool is the user-visible POPO reply and records the current task as completed; do not add a second natural-language final reply.",
+            "- Before finishing a non-POPO message, call `agent_task_status` with your own task status and summary after submit/publish/dispatch work is done.",
             "- If the framework sends `framework_summary_request`, summarize only your own current task and call `agent_task_status`; do not summarize the ring or full blueprint.",
             "- Do not request or depend on top-agent-only utterance inspection APIs.",
             "- Framework rules and skills are materialized once when your private worker context is prepared; per-message updates arrive only through `framework_context`.",
@@ -296,7 +297,8 @@ def framework_agent_skill() -> str:
             "Outgoing batch ids such as `out-*` are not join ids. "
             "For leaf results, receipts, or simple status reporting, publish a shared report instead.",
             "",
-            "For task status, call `agent_task_status` before your final CLI reply. "
+            "If `blueprint_reply_popo_user` is available and you use it, that tool is the user-visible POPO reply and records the current task as completed; do not add a second natural-language final reply. "
+            "For non-POPO task status, call `agent_task_status` before your final CLI reply. "
             "Use `completed` after your own work is done, `blocked` when a framework or project condition prevents completion, "
             "`needs_input` when user input is required, and `failed` for unrecoverable errors. "
             "If the framework asks with `framework_summary_request`, summarize only your own current task and then call `agent_task_status`; "

@@ -238,6 +238,42 @@ export function registerIpcHandlers(deps: Deps) {
       deps.blueprintRuntime.listRuns(projectDir, blueprintId),
   )
   ipcMain.handle(
+    "blueprint-list-sessions",
+    (_event: IpcMainInvokeEvent, projectDir?: string, blueprintId?: string) =>
+      deps.blueprintRuntime.listSessions(projectDir, blueprintId),
+  )
+  ipcMain.handle("blueprint-session-timeline", (_event: IpcMainInvokeEvent, sessionKey: string, limit?: number) =>
+    deps.blueprintRuntime.sessionTimeline(sessionKey, limit),
+  )
+  ipcMain.handle("blueprint-delete-session", (_event: IpcMainInvokeEvent, sessionKey: string) =>
+    deps.blueprintRuntime.deleteSession(sessionKey),
+  )
+  ipcMain.handle(
+    "blueprint-terminate-session",
+    (_event: IpcMainInvokeEvent, sessionKey: string, reason?: string) =>
+      deps.blueprintRuntime.terminateSession(sessionKey, reason),
+  )
+  ipcMain.handle(
+    "blueprint-start-slot",
+    (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string) =>
+      deps.blueprintRuntime.startSlot(projectDir, blueprintId),
+  )
+  ipcMain.handle(
+    "blueprint-slot-status",
+    (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string) =>
+      deps.blueprintRuntime.slotStatus(projectDir, blueprintId),
+  )
+  ipcMain.handle(
+    "blueprint-terminate-slot",
+    (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string, reason?: string) =>
+      deps.blueprintRuntime.terminateSlot(projectDir, blueprintId, reason),
+  )
+  ipcMain.handle(
+    "blueprint-slot-message",
+    (_event: IpcMainInvokeEvent, projectDir: string, message: string, input?: Record<string, unknown>) =>
+      deps.blueprintRuntime.slotMessage(projectDir, message, input),
+  )
+  ipcMain.handle(
     "blueprint-start",
     async (
       _event: IpcMainInvokeEvent,

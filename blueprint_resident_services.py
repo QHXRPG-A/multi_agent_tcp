@@ -30,6 +30,8 @@ RESIDENT_SERVICES_DIRNAME = "resident_services"
 RESIDENT_SERVICE_API_FILENAME = "gulicode_blueprint_service.py"
 RESIDENT_SERVICE_STATE_DIRNAME = ".state"
 RESIDENT_SERVICE_LOG_DIRNAME = ".logs"
+RESIDENT_SERVICE_DEFAULT_CALL_TIMEOUT_SECONDS = 20.0
+RESIDENT_SERVICE_MAX_CALL_TIMEOUT_SECONDS = 125.0
 PYRIGHT_CONFIG_FILENAME = "pyrightconfig.json"
 VSCODE_SETTINGS_DIR = ".vscode"
 VSCODE_SETTINGS_FILENAME = "settings.json"
@@ -557,7 +559,7 @@ class ResidentServiceManager:
             method="POST",
         )
         try:
-            with urlrequest.urlopen(req, timeout=20) as response:
+            with urlrequest.urlopen(req, timeout=_resident_service_call_timeout(arguments)) as response:
                 response_data = response.read().decode("utf-8")
                 result = json.loads(response_data) if response_data else {}
         except HTTPError as exc:
@@ -1169,6 +1171,24 @@ def _request_service_shutdown(state: Mapping[str, Any]) -> None:
             return
     except Exception:
         return
+
+
+def _resident_service_call_timeout(arguments: Mapping[str, Any] | None) -> float:
+    requested = 0.0
+    if isinstance(arguments, Mapping):
+        raw = arguments.get("timeout_seconds")
+        if raw is None:
+            raw = arguments.get("timeoutSeconds")
+        try:
+            requested = float(raw) if raw is not None else 0.0
+        except Exception:
+            requested = 0.0
+    if requested <= 0:
+        return RESIDENT_SERVICE_DEFAULT_CALL_TIMEOUT_SECONDS
+    return min(
+        RESIDENT_SERVICE_MAX_CALL_TIMEOUT_SECONDS,
+        max(RESIDENT_SERVICE_DEFAULT_CALL_TIMEOUT_SECONDS, requested + 5.0),
+    )
 
 
 def _tail_text(path: Path, *, limit: int) -> str:

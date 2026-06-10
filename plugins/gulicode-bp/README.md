@@ -67,6 +67,26 @@ document must save exactly one `runtime.start_node_id`; Workbench and POPO
 messages are delivered to that start node, while Codex MCP tools remain focused
 on inspection, monitoring, diffs, and ending active runs.
 
+Installed plugin mode also starts a packaged POPO callback service with the
+singleton runtime service. The default callback endpoint is:
+
+```text
+http://<host>:3100/popo/callback/<robot_app_key>
+```
+
+`POPO_CALLBACK_HOST` and `POPO_CALLBACK_PORT` can override the bind address and
+port. The callback service routes by `robotAppKey`; it first checks active
+Blueprint run slots, then scans projects registered by the plugin runtime.
+Opening/saving a blueprint in the Workbench or starting a run slot registers the
+project under plugin runtime state. A robot app key must resolve to one
+registered blueprint target; multiple targets return a conflict instead of
+guessing.
+
+Use `blueprint_popo_service_status` to inspect the callback pid, health URL,
+last error, and registered projects. If the callback cannot bind to the port,
+Blueprint MCP/workbench tools keep running and the POPO status is marked
+degraded.
+
 The plugin also exposes direct CRUD tools:
 
 - `blueprint_create`

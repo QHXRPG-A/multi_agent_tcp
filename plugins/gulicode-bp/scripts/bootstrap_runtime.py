@@ -183,9 +183,13 @@ def validate_runtime_imports(python: Path, plugin_root: Path, runtime_root: Path
     code = (
         "import json\n"
         "from pathlib import Path\n"
+        "import flask\n"
         "import multi_agent_tcp\n"
+        "import requests\n"
+        "from Crypto.Cipher import AES\n"
         "from mcp.server.fastmcp import FastMCP\n"
         "from multi_agent_tcp.desktop_blueprint_service import DesktopBlueprintService\n"
+        "import multi_agent_tcp.popo_agent_bot_run\n"
         "print(json.dumps({'runtimePackage': str(Path(multi_agent_tcp.__file__).resolve())}))\n"
     )
     result = _run_checked(

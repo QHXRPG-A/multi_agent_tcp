@@ -107,6 +107,33 @@ class RunMCPTokenStore:
         with self._lock:
             self._closed = True
 
+    def enable_tool_for_agent(self, agent_node_id: str, tool_name: str) -> None:
+        node_id = str(agent_node_id or "").strip()
+        tool = str(tool_name or "").strip()
+        if not node_id or not tool:
+            return
+        with self._lock:
+            for scope in self._scopes_by_token.values():
+                if scope.server_kind != "ordinary":
+                    continue
+                if str(scope.agent_node_id or "") != node_id:
+                    continue
+                if tool not in scope.allowed_tools:
+                    scope.allowed_tools.append(tool)
+
+    def disable_tool_for_agent(self, agent_node_id: str, tool_name: str) -> None:
+        node_id = str(agent_node_id or "").strip()
+        tool = str(tool_name or "").strip()
+        if not node_id or not tool:
+            return
+        with self._lock:
+            for scope in self._scopes_by_token.values():
+                if scope.server_kind != "ordinary":
+                    continue
+                if str(scope.agent_node_id or "") != node_id:
+                    continue
+                scope.allowed_tools = [item for item in scope.allowed_tools if item != tool]
+
     def create_ordinary_scope(
         self,
         *,
@@ -468,6 +495,8 @@ class RunMCPRuntimeHandle:
         top_agent_node_id: Optional[str] = None,
         top_agent_id: Optional[str] = None,
         close_run_callback: Optional[Callable[..., Any]] = None,
+        terminate_session_callback: Optional[Callable[..., Any]] = None,
+        reply_popo_user_callback: Optional[Callable[..., Any]] = None,
         request_user_input_callback: Optional[Callable[[list[dict[str, Any]]], Any]] = None,
         stage_start_plan_callback: Optional[Callable[[dict[str, Any], str], Any]] = None,
         control_command_callback: Optional[Callable[..., Any]] = None,
@@ -488,6 +517,14 @@ class RunMCPRuntimeHandle:
         self.top_agent_node_id = top_agent_node_id
         self.top_agent_id = top_agent_id
         self.close_run_callback = close_run_callback
+        self.terminate_session_callback = terminate_session_callback
+        self.reply_popo_user_callback = reply_popo_user_callback
+        self.session_termination_start_node_id = ""
+        self.session_termination_session_key = ""
+        self.popo_termination_start_node_id = ""
+        self.popo_termination_session_key = ""
+        self.popo_reply_start_node_id = ""
+        self.popo_reply_session_key = ""
         self.request_user_input_callback = request_user_input_callback
         self.stage_start_plan_callback = stage_start_plan_callback
         self.control_command_callback = control_command_callback
@@ -504,6 +541,39 @@ class RunMCPRuntimeHandle:
         self._ordinary_mcp: Any = None
         self._control_mcp: Any = None
         self._state = "created"
+
+    def enable_blueprint_session_termination(self, *, start_node_id: str, session_key: str) -> None:
+        next_start = str(start_node_id or "").strip()
+        self.session_termination_start_node_id = next_start
+        self.session_termination_session_key = str(session_key or "").strip()
+        # Backward-compatible aliases for older service/tests that still inspect
+        # the previous POPO-specific field names.
+        self.popo_termination_start_node_id = self.session_termination_start_node_id
+        self.popo_termination_session_key = self.session_termination_session_key
+
+    def clear_blueprint_session_termination(self) -> None:
+        self.session_termination_start_node_id = ""
+        self.session_termination_session_key = ""
+        self.popo_termination_start_node_id = ""
+        self.popo_termination_session_key = ""
+
+    def enable_popo_session_termination(self, *, start_node_id: str, session_key: str) -> None:
+        self.enable_blueprint_session_termination(start_node_id=start_node_id, session_key=session_key)
+
+    def enable_popo_user_reply(self, *, start_node_id: str, session_key: str) -> None:
+        self.popo_reply_start_node_id = str(start_node_id or "").strip()
+        self.popo_reply_session_key = str(session_key or "").strip()
+        self.token_store.enable_tool_for_agent(
+            self.popo_reply_start_node_id,
+            "blueprint_reply_popo_user",
+        )
+
+    def clear_popo_user_reply(self) -> None:
+        start_node_id = str(self.popo_reply_start_node_id or "").strip()
+        if start_node_id:
+            self.token_store.disable_tool_for_agent(start_node_id, "blueprint_reply_popo_user")
+        self.popo_reply_start_node_id = ""
+        self.popo_reply_session_key = ""
 
     @property
     def base_url(self) -> str:
@@ -619,6 +689,8 @@ class RunMCPRuntimeHandle:
             allowed_tools = list(ORDINARY_MESSAGE_TOOL_NAMES)
             if isinstance(access_policy, dict) and access_policy.get("blueprint_monitor_tools") is True:
                 allowed_tools.extend(ORDINARY_MONITOR_TOOL_NAMES)
+            if node_id == self.popo_reply_start_node_id and self.popo_reply_session_key:
+                allowed_tools.append("blueprint_reply_popo_user")
             scope = self.token_store.create_message_scope(
                 agent_node_id=node_id,
                 agent_id=agent_id,
@@ -963,6 +1035,14 @@ class RunMCPRuntimeHandle:
                 changesets=changesets,
                 next_actions=next_actions,
                 metadata=metadata,
+            )
+
+        @mcp.tool()
+        async def blueprint_reply_popo_user(content: str) -> Dict[str, Any]:
+            scope = _require_scope("ordinary", "blueprint_reply_popo_user")
+            return await self._ordinary_blueprint_reply_popo_user(
+                scope,
+                content=content,
             )
 
         @mcp.tool()
@@ -1708,6 +1788,68 @@ class RunMCPRuntimeHandle:
                 dict(arguments or {}),
             )
         )
+
+    async def _ordinary_blueprint_reply_popo_user(
+        self,
+        scope: MCPTokenScope,
+        *,
+        content: str,
+    ) -> Dict[str, Any]:
+        if scope.agent_node_id is None:
+            raise PermissionError("ordinary MCP token is not bound to an AgentNode")
+        _require_allowed_tool(scope, "blueprint_reply_popo_user")
+        start_node_id = str(self.popo_reply_start_node_id or "").strip()
+        if not start_node_id or str(scope.agent_node_id) != start_node_id:
+            raise PermissionError("blueprint_reply_popo_user is only enabled for the POPO start AgentNode")
+        session_key = str(self.popo_reply_session_key or "").strip()
+        if not session_key:
+            raise PermissionError("blueprint_reply_popo_user requires an active POPO blueprint session")
+        text = str(content or "").strip()
+        if not text:
+            raise ValueError("content must be a non-empty string")
+        args = {
+            "content": text,
+            "session_key": session_key,
+        }
+        self._record_mcp_tool_call(scope, "blueprint_reply_popo_user", args)
+        callback = self.reply_popo_user_callback
+        if callback is None:
+            raise PermissionError("blueprint_reply_popo_user is not connected to a POPO reply callback")
+        message_context = scope.current_message_context
+        result = callback(
+            content=text,
+            session_key=session_key,
+            agent_node_id=scope.agent_node_id,
+            agent_id=scope.agent_id,
+            message_id=message_context.current_message_id if message_context is not None else "",
+        )
+        if asyncio.iscoroutine(result):
+            result = await result
+        await self._auto_complete_popo_reply_task_status(scope)
+        return dict(result) if isinstance(result, dict) else {"ok": True, "result": result}
+
+    async def _auto_complete_popo_reply_task_status(self, scope: MCPTokenScope) -> None:
+        context = scope.current_message_context
+        args = {
+            "node_id": scope.agent_node_id,
+            "agent_id": scope.agent_id,
+            "status": "completed",
+            "summary": "Replied to the POPO user.",
+            "message_id": context.current_message_id if context is not None else None,
+            "batch_id": context.outgoing_batch_id if context is not None else None,
+            "reports": [],
+            "artifacts": [],
+            "changesets": [],
+            "next_actions": [],
+            "metadata": {
+                "framework_auto": True,
+                "source_tool": "blueprint_reply_popo_user",
+            },
+        }
+        try:
+            await self._runtime_call(lambda: self.control.handle_request({"command": "agent.task_status", "args": args}))
+        except Exception:
+            return
 
     async def _ordinary_agent_task_status(
         self,

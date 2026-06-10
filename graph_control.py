@@ -35,6 +35,8 @@ from .graph_runtime import (
 )
 from .blueprint_script_nodes import execute_script_node
 
+SCRIPT_ONLY_RESIDENT_SERVICES = {"table_queue"}
+
 
 @dataclass
 class GraphControlResponse:
@@ -347,20 +349,28 @@ def ordinary_agent_framework_context(
             organization["agent"]["ring_context"] = ring_context
     required_targets = list(batch.required_target_node_ids) if batch is not None else []
     remaining_targets = list(batch.remaining_targets) if batch is not None else []
+    forced_script_blockers = _pending_forced_script_calls_for_batch(batch)
+    visible_downstream_nodes = [] if forced_script_blockers else list(downstream_nodes)
+    visible_downstream_agents = [] if forced_script_blockers else list(downstream_agents)
+    visible_required_targets = [] if forced_script_blockers else list(required_targets)
+    visible_remaining_targets = [] if forced_script_blockers else list(remaining_targets)
     message_envelope: Dict[str, Any] = {
         "outgoing_batch_id": batch.batch_id if batch is not None else None,
         "route_id": batch.route_id if batch is not None else route_id,
-        "required_outgoing_targets": required_targets,
+        "required_outgoing_targets": visible_required_targets,
         "required_script_calls": _required_script_calls_for_envelope(batch),
     }
     if batch is not None:
-        message_envelope["remaining_targets"] = remaining_targets
+        message_envelope["remaining_targets"] = visible_remaining_targets
+        if forced_script_blockers:
+            message_envelope["blocked_outgoing_targets"] = required_targets
+            message_envelope["forced_script_call_blocking"] = True
     context = {
         "agent_node_id": node_id,
         "agent_id": agent_view["agent_id"],
         "upstream_agents": list(agent_view.get("upstream_agents", [])),
-        "downstream_agents": downstream_agents,
-        "downstream_nodes": downstream_nodes,
+        "downstream_agents": visible_downstream_agents,
+        "downstream_nodes": visible_downstream_nodes,
         "common_nodes": {
             common_id: node.to_dict()
             for common_id, node in graph.common_nodes.items()
@@ -369,6 +379,10 @@ def ordinary_agent_framework_context(
         "organization": organization,
         "message_envelope": message_envelope,
     }
+    organization["framework_connections"] = {node_id: list(visible_downstream_nodes)}
+    organization["agent_connections"] = {node_id: list(visible_downstream_agents)}
+    organization["agent"]["downstream_nodes"] = list(visible_downstream_nodes)
+    organization["agent"]["downstream_agents"] = list(visible_downstream_agents)
     if runtime is not None:
         ring_counts = runtime.agent_ring_circulation_counts_for(node_id)
         if ring_counts:
@@ -401,6 +415,7 @@ def _resident_services_summary(runtime: GraphRuntime) -> list[Dict[str, Any]]:
         }
         for item in services
         if isinstance(item, dict)
+        and str(item.get("service_name") or "") not in SCRIPT_ONLY_RESIDENT_SERVICES
     ]
 
 
@@ -874,18 +889,29 @@ class GraphRuntimeControlPlane:
             script_node_id=script_node_id,
         )
         node = self.graph.script_nodes[record["script_node_id"]]
-        if str(record.get("status") or "") in {"completed", "delivered"}:
+        if str(record.get("status") or "") in {"completed", "delivered", "feedback_delivered"}:
+            reveal_result = bool(record.get("feedback_only", False))
             return GraphControlResponse(
                 True,
                 {
-                    "script_call": dict(record),
-                    "result": dict(record.get("result") or {}),
+                    "script_call": _script_call_response_record(record, reveal_result=reveal_result),
+                    "result": dict(record.get("result") or {}) if reveal_result else None,
                     "delivery": [],
                     "already_called": True,
-                    "batch": batch.to_dict(),
+                    "batch": _script_batch_response(batch, reveal_script_node_id=node.node_id if reveal_result else None),
                 },
             ).to_dict()
 
+        activity_id = self.runtime.begin_runtime_activity(
+            "script_node",
+            node_id=node.node_id,
+            name=node.function_name,
+            payload={
+                "batch_id": batch.batch_id,
+                "source_node_id": source_node_id,
+                "script_id": node.script_id,
+            },
+        )
         self.runtime._emit(
             GraphEvent(
                 "ScriptNodeRunning",
@@ -904,8 +930,22 @@ class GraphRuntimeControlPlane:
                 self.script_root,
                 node,
                 arguments,
+                service_call=(
+                    lambda service_name, method_name, call_arguments: self._call_script_resident_service_result(
+                        node.node_id,
+                        service_name,
+                        method_name,
+                        call_arguments,
+                        payload={
+                            "batch_id": batch.batch_id,
+                            "source_node_id": source_node_id,
+                            "script_id": node.script_id,
+                        },
+                    )
+                ),
             )
         except Exception as exc:
+            self.runtime.end_runtime_activity(activity_id, status="failed", error=str(exc))
             record.update(
                 {
                     "status": "failed",
@@ -931,6 +971,7 @@ class GraphRuntimeControlPlane:
             )
             raise
 
+        self.runtime.end_runtime_activity(activity_id, status="completed")
         record.update(
             {
                 "status": "completed",
@@ -957,13 +998,14 @@ class GraphRuntimeControlPlane:
             )
         )
         delivery = await self._deliver_completed_script_targets(batch)
+        reveal_result = bool(node.feedback_only)
         return GraphControlResponse(
             True,
             {
-                "script_call": dict(record),
-                "result": dict(result),
+                "script_call": _script_call_response_record(record, reveal_result=reveal_result),
+                "result": dict(result) if reveal_result else None,
                 "delivery": delivery,
-                "batch": batch.to_dict(),
+                "batch": _script_batch_response(batch, reveal_script_node_id=node.node_id if reveal_result else None),
             },
         ).to_dict()
 
@@ -990,24 +1032,36 @@ class GraphRuntimeControlPlane:
             raise KeyError(f"unknown source AgentNode: {source_node_id}")
         if not isinstance(arguments, dict):
             raise ValueError("blueprint_service_call arguments must be a JSON object")
-        if self.resident_services is None or not callable(getattr(self.resident_services, "call", None)):
-            result = {
-                "ok": False,
-                "code": "RESIDENT_SERVICES_UNAVAILABLE",
-                "error": "resident service manager is not configured",
-                "service_name": str(service_name),
-                "method_name": str(method_name),
-            }
-        else:
-            result = self.resident_services.call(str(service_name), str(method_name), dict(arguments))
-            if not isinstance(result, dict):
-                result = {
-                    "ok": False,
-                    "code": "RESIDENT_SERVICE_BAD_RESPONSE",
-                    "error": "resident service call returned a non-object response",
-                    "service_name": str(service_name),
-                    "method_name": str(method_name),
-                }
+        activity_id = self.runtime.begin_runtime_activity(
+            "resident_service",
+            node_id=source_node_id,
+            name=f"{service_name}.{method_name}",
+            payload={"service_name": str(service_name), "method_name": str(method_name)},
+        )
+        try:
+            result = self._call_resident_service_result(
+                service_name,
+                method_name,
+                arguments,
+                allow_script_only=False,
+            )
+        except Exception as exc:
+            self.runtime.end_runtime_activity(activity_id, status="failed", error=str(exc))
+            raise
+        self.runtime.end_runtime_activity(
+            activity_id,
+            status="completed" if bool(result.get("ok")) else "failed",
+            error=str(result.get("error") or ""),
+        )
+        if str(result.get("code") or "") == "SERVICE_REQUIRES_SCRIPT_NODE":
+            return GraphControlResponse(
+                False,
+                {
+                    "service_call": dict(result),
+                    "result": None,
+                    "queued_message": None,
+                },
+            ).to_dict()
 
         queued = self._queue_resident_service_result(
             source_node_id,
@@ -1024,6 +1078,83 @@ class GraphRuntimeControlPlane:
                 "queued_message": queued,
             },
         ).to_dict()
+
+    def _call_resident_service_result(
+        self,
+        service_name: str,
+        method_name: str,
+        arguments: Dict[str, Any],
+        *,
+        allow_script_only: bool,
+    ) -> Dict[str, Any]:
+        service = str(service_name)
+        method = str(method_name)
+        if service in SCRIPT_ONLY_RESIDENT_SERVICES and not allow_script_only:
+            return {
+                "ok": False,
+                "code": "SERVICE_REQUIRES_SCRIPT_NODE",
+                "error": (
+                    f"resident service {service!r} can only be called through "
+                    "the table_queue_service Blueprint ScriptNode"
+                ),
+                "service_name": service,
+                "method_name": method,
+            }
+        if self.resident_services is None or not callable(getattr(self.resident_services, "call", None)):
+            return {
+                "ok": False,
+                "code": "RESIDENT_SERVICES_UNAVAILABLE",
+                "error": "resident service manager is not configured",
+                "service_name": service,
+                "method_name": method,
+            }
+        result = self.resident_services.call(service, method, dict(arguments))
+        if isinstance(result, dict):
+            return dict(result)
+        return {
+            "ok": False,
+            "code": "RESIDENT_SERVICE_BAD_RESPONSE",
+            "error": "resident service call returned a non-object response",
+            "service_name": service,
+            "method_name": method,
+        }
+
+    def _call_script_resident_service_result(
+        self,
+        script_node_id: str,
+        service_name: str,
+        method_name: str,
+        arguments: Dict[str, Any],
+        *,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        activity_id = self.runtime.begin_runtime_activity(
+            "resident_service",
+            node_id=str(script_node_id or ""),
+            name=f"{service_name}.{method_name}",
+            payload={
+                **dict(payload or {}),
+                "service_name": str(service_name),
+                "method_name": str(method_name),
+                "allow_script_only": True,
+            },
+        )
+        try:
+            result = self._call_resident_service_result(
+                service_name,
+                method_name,
+                arguments,
+                allow_script_only=True,
+            )
+        except Exception as exc:
+            self.runtime.end_runtime_activity(activity_id, status="failed", error=str(exc))
+            raise
+        self.runtime.end_runtime_activity(
+            activity_id,
+            status="completed" if bool(result.get("ok")) else "failed",
+            error=str(result.get("error") or ""),
+        )
+        return result
 
     def _queue_resident_service_result(
         self,
@@ -1114,7 +1245,11 @@ class GraphRuntimeControlPlane:
             if not path:
                 continue
             records = [batch.script_calls.get(script_node_id) for script_node_id in path]
-            if any(not isinstance(record, dict) or str(record.get("status") or "") not in {"completed", "delivered"} for record in records):
+            if any(
+                not isinstance(record, dict)
+                or str(record.get("status") or "") not in {"completed", "delivered", "feedback_delivered"}
+                for record in records
+            ):
                 continue
 
             downstream_batch = None
@@ -1280,12 +1415,14 @@ class GraphRuntimeControlPlane:
                 f"target {target_node_id!r} is not in current required_outgoing_targets"
             )
         is_no_op = is_dispatch_no_op_body(body)
-        if (
-            target_is_agent
-            and batch.script_paths_by_target.get(target_node_id)
-        ):
+        blocking = batch.pending_forced_script_call_records()
+        if blocking:
+            names = ", ".join(
+                str(record.get("function_name") or record.get("script_node_id") or "script")
+                for record in blocking
+            )
             raise ValueError(
-                f"target {target_node_id!r} requires blueprint_script_call before downstream delivery"
+                f"current outgoing batch requires blueprint_script_call before downstream delivery: {names}"
             )
         fan_in_target = self.runtime.target_uses_live_fan_in(self.graph, target_node_id)
         downstream_batch = None
@@ -1355,6 +1492,16 @@ class GraphRuntimeControlPlane:
         results: List[Dict[str, Any]] = []
         for script_node_id in script_path:
             node = self.graph.script_nodes[script_node_id]
+            activity_id = self.runtime.begin_runtime_activity(
+                "script_node",
+                node_id=node.node_id,
+                name=node.function_name,
+                payload={
+                    "source_node_id": source_node_id,
+                    "target_node_id": target_node_id,
+                    "script_id": node.script_id,
+                },
+            )
             self.runtime._emit(
                 GraphEvent(
                     "ScriptNodeRunning",
@@ -1370,6 +1517,7 @@ class GraphRuntimeControlPlane:
                     payload,
                 )
             except Exception as exc:
+                self.runtime.end_runtime_activity(activity_id, status="failed", error=str(exc))
                 self.runtime._emit(
                     GraphEvent(
                         "ScriptNodeFailed",
@@ -1381,6 +1529,7 @@ class GraphRuntimeControlPlane:
                 raise
             payload = dict(result.get("outputs") or {})
             results.append({"node_id": node.node_id, **result})
+            self.runtime.end_runtime_activity(activity_id, status="completed")
             self.runtime._emit(
                 GraphEvent(
                     "ScriptNodeCompleted",
@@ -1447,6 +1596,8 @@ def _required_script_calls_for_envelope(batch: Any) -> list[Dict[str, Any]]:
                 "function_name": str(record.get("function_name") or ""),
                 "title": str(record.get("title") or record.get("function_name") or ""),
                 "description": str(record.get("description") or ""),
+                "feedback_only": bool(record.get("feedback_only", False)),
+                "require_call_before_dispatch": bool(record.get("require_call_before_dispatch", False)),
                 "inputs": [dict(item) for item in record.get("inputs", []) if isinstance(item, dict)],
                 "outputs": [dict(item) for item in record.get("outputs", []) if isinstance(item, dict)],
                 "batch_id": getattr(batch, "batch_id", None),
@@ -1460,6 +1611,44 @@ def _required_script_calls_for_envelope(batch: Any) -> list[Dict[str, Any]]:
             }
         )
     return result
+
+
+def _pending_forced_script_calls_for_batch(batch: Any) -> list[Dict[str, Any]]:
+    if batch is None:
+        return []
+    method = getattr(batch, "pending_forced_script_call_records", None)
+    if not callable(method):
+        return []
+    try:
+        records = method()
+    except Exception:
+        return []
+    return [dict(record) for record in records if isinstance(record, dict)]
+
+
+def _script_call_response_record(record: Dict[str, Any], *, reveal_result: bool) -> Dict[str, Any]:
+    data = dict(record)
+    if not reveal_result:
+        data.pop("result", None)
+        data.pop("outputs", None)
+    return data
+
+
+def _script_batch_response(batch: Any, *, reveal_script_node_id: Optional[str]) -> Dict[str, Any]:
+    data = batch.to_dict()
+    calls = data.get("script_calls")
+    if not isinstance(calls, dict):
+        return data
+    reveal_id = str(reveal_script_node_id or "")
+    for record in calls.values():
+        if not isinstance(record, dict):
+            continue
+        reveal = bool(reveal_id and str(record.get("script_node_id") or "") == reveal_id and record.get("feedback_only"))
+        if reveal:
+            continue
+        record.pop("result", None)
+        record.pop("outputs", None)
+    return data
 
 
 def _script_arguments_summary(arguments: Dict[str, Any]) -> Dict[str, Any]:

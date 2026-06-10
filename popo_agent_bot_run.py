@@ -12,7 +12,9 @@ import sys
 import threading
 import time
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from typing import Any
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 import requests
 from Crypto.Cipher import AES
@@ -22,14 +24,19 @@ from flask import Flask, jsonify, make_response, request
 DEFAULT_ROBOT_APP_KEY = os.environ.get("POPO_APP_KEY", "").strip()
 POPO_API_BASE = "https://open.popo.netease.com"
 
-BLUEPRINT_PROJECT_DIR = os.environ.get("POPO_BLUEPRINT_PROJECT_DIR") or os.getcwd()
+BLUEPRINT_PROJECT_DIR = os.environ.get("POPO_BLUEPRINT_PROJECT_DIR", "").strip()
 BLUEPRINT_REPLY_TIMEOUT = int(os.environ.get("POPO_BLUEPRINT_REPLY_TIMEOUT", "300"))
 BLUEPRINT_POLL_INTERVAL = float(os.environ.get("POPO_BLUEPRINT_POLL_INTERVAL", "2"))
+BLUEPRINT_CALLBACK_CONFIG_TIMEOUT = float(os.environ.get("POPO_BLUEPRINT_CALLBACK_CONFIG_TIMEOUT", "3"))
+POPO_EVENT_DEDUP_TTL = float(os.environ.get("POPO_EVENT_DEDUP_TTL", "600"))
+POPO_CALLBACK_HOST = os.environ.get("POPO_CALLBACK_HOST", "0.0.0.0").strip() or "0.0.0.0"
+POPO_CALLBACK_PORT = int(os.environ.get("POPO_CALLBACK_PORT", "3100"))
 
 REPO_ROOT = Path(__file__).resolve().parent
 PLUGIN_ROOT = Path(os.environ.get("GULICODE_BP_PLUGIN_ROOT") or REPO_ROOT / "plugins" / "gulicode-bp").resolve()
 RUNTIME_HOME = Path(os.environ.get("GULICODE_BP_RUNTIME_HOME") or PLUGIN_ROOT / ".runtime").resolve()
 RUNTIME_DATA_DIR = Path(os.environ.get("GULICODE_BP_DATA_DIR") or RUNTIME_HOME / "state").resolve()
+POPO_ROBOT_ROUTES_PATH = RUNTIME_DATA_DIR / "popo_robot_routes.json"
 MCP_DIR = PLUGIN_ROOT / "mcp"
 if str(MCP_DIR) not in sys.path:
     sys.path.insert(0, str(MCP_DIR))
@@ -41,9 +48,27 @@ app = Flask(__name__)
 
 _service_lock = threading.Lock()
 _config_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_event_cache: dict[str, float] = {}
 _token_cache: dict[str, dict[str, Any]] = {}
 _config_lock = threading.Lock()
+_event_lock = threading.Lock()
 _token_lock = threading.Lock()
+
+
+class ThreadingCallbackServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify(
+        {
+            "ok": True,
+            "service": "gulicode-bp-popo-callback",
+            "runtimeDataDir": str(RUNTIME_DATA_DIR),
+        }
+    )
 
 
 def _runtime_python() -> Path:
@@ -79,21 +104,133 @@ def blueprint_request(
     )
 
 
+def _normal_popo_robot_config(robot: dict[str, Any], *, fallback_app_key: str = "") -> dict[str, Any]:
+    return {
+        "robot_app_key": str(robot.get("robot_app_key") or robot.get("robotAppKey") or fallback_app_key).strip(),
+        "robot_name": str(robot.get("robot_name") or robot.get("robotName") or "").strip(),
+        "robot_app_secret": str(robot.get("robot_app_secret") or robot.get("robotAppSecret") or "").strip(),
+        "callback_token": str(robot.get("callback_token") or robot.get("callbackToken") or "").strip(),
+        "aes_key": str(robot.get("aes_key") or robot.get("aesKey") or "").strip(),
+        "blueprint_id": "",
+        "blueprint_name": "",
+        "blueprint_structure_id": "",
+        "source": "local_routes",
+    }
+
+
+def _validate_popo_robot_config(config: dict[str, Any]) -> dict[str, Any]:
+    missing = [key for key in ("robot_app_key", "robot_app_secret", "callback_token", "aes_key") if not config.get(key)]
+    if missing:
+        raise SingletonServiceError(
+            "BLUEPRINT_POPO_ENTRY_REQUIRED",
+            "POPO entry is incomplete: " + ", ".join(missing),
+            status=400,
+            details={"missing": missing},
+        )
+    return config
+
+
+def _load_local_popo_robot_routes() -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(POPO_ROBOT_ROUTES_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        raise SingletonServiceError(
+            "BLUEPRINT_POPO_ROUTES_INVALID",
+            f"local POPO robot routes are invalid: {exc}",
+            status=500,
+        ) from exc
+    robots = payload.get("robots") if isinstance(payload, dict) else None
+    values = robots.values() if isinstance(robots, dict) else []
+    return [dict(item) for item in values if isinstance(item, dict) and item.get("enabled") is True]
+
+
+def _load_popo_config_from_local_routes(robot_app_key: str) -> dict[str, Any]:
+    app_key = str(robot_app_key or "").strip()
+    enabled = _load_local_popo_robot_routes()
+    if app_key:
+        for robot in enabled:
+            if str(robot.get("robot_app_key") or robot.get("robotAppKey") or "").strip() == app_key:
+                return _validate_popo_robot_config(_normal_popo_robot_config(robot, fallback_app_key=app_key))
+        raise SingletonServiceError(
+            "BLUEPRINT_POPO_ROBOT_NOT_BOUND",
+            "POPO callback robot is not enabled in local routes",
+            details={"robotAppKey": app_key},
+            status=404,
+        )
+    if not enabled:
+        raise SingletonServiceError(
+            "BLUEPRINT_POPO_ROBOT_NOT_BOUND",
+            "no enabled POPO callback robot is configured in local routes",
+            status=404,
+        )
+    if len(enabled) > 1:
+        raise SingletonServiceError(
+            "BLUEPRINT_POPO_ROBOT_STRUCTURE_CONFLICT",
+            "legacy POPO callback path matched multiple enabled callback robots in local routes",
+            details={"robotAppKeys": sorted(str(item.get("robot_app_key") or item.get("robotAppKey") or "") for item in enabled)},
+            status=409,
+        )
+    return _validate_popo_robot_config(_normal_popo_robot_config(enabled[0]))
+
+
+def _should_use_local_popo_config_fallback(exc: SingletonServiceError) -> bool:
+    message = str(getattr(exc, "message", "") or exc).lower()
+    return getattr(exc, "code", "") in {"SERVICE_UNAVAILABLE", "SERVICE_ERROR"} or "timed out" in message or "timeout" in message
+
+
+def _popo_config_cache_key(robot_app_key: str) -> str:
+    return str(robot_app_key or "").strip() or "<legacy>"
+
+
+def _get_cached_popo_config(robot_app_key: str) -> dict[str, Any] | None:
+    key = _popo_config_cache_key(robot_app_key)
+    with _config_lock:
+        cached = _config_cache.get(key)
+        if not cached:
+            return None
+        cached_at, config = cached
+        if time.time() - cached_at > 60:
+            _config_cache.pop(key, None)
+            return None
+        return dict(config)
+
+
+def _set_cached_popo_config(robot_app_key: str, config: dict[str, Any]) -> dict[str, Any]:
+    key = _popo_config_cache_key(robot_app_key)
+    payload = dict(config)
+    with _config_lock:
+        _config_cache[key] = (time.time(), payload)
+    return dict(payload)
+
+
 def load_popo_config(robot_app_key: str) -> dict[str, Any]:
     app_key = str(robot_app_key or "").strip()
-    if not app_key:
-        raise SingletonServiceError("BLUEPRINT_POPO_ROBOT_REQUIRED", "robot_app_key is required", status=400)
-    now = time.time()
-    with _config_lock:
-        cached = _config_cache.get(app_key)
-        if cached and now - cached[0] < 30:
-            return dict(cached[1])
-    response = blueprint_request(
-        "blueprint.popo.config",
-        {"projectDir": BLUEPRINT_PROJECT_DIR, "robotAppKey": app_key},
-        request_kind="internal",
-        timeout=30,
-    )
+    cached = _get_cached_popo_config(app_key)
+    if cached is not None:
+        return cached
+    try:
+        return _set_cached_popo_config(app_key, _load_popo_config_from_local_routes(app_key))
+    except SingletonServiceError as local_exc:
+        local_error = local_exc
+    request_args: dict[str, Any] = {}
+    if app_key:
+        request_args["robotAppKey"] = app_key
+    if BLUEPRINT_PROJECT_DIR:
+        request_args["projectDir"] = BLUEPRINT_PROJECT_DIR
+    try:
+        response = blueprint_request(
+            "blueprint.popo.callbackConfig",
+            request_args,
+            request_kind="internal",
+            timeout=BLUEPRINT_CALLBACK_CONFIG_TIMEOUT,
+        )
+    except SingletonServiceError as exc:
+        if not _should_use_local_popo_config_fallback(exc) or getattr(local_error, "code", "") != "BLUEPRINT_POPO_ROBOT_NOT_BOUND":
+            raise
+        print(f"[WARN] POPO config service unavailable and no local route matched: {exc}", flush=True)
+        raise local_error from exc
     entry = response.get("popoEntry")
     if not isinstance(entry, dict):
         raise SingletonServiceError("BLUEPRINT_POPO_ENTRY_REQUIRED", "POPO entry is missing", status=400)
@@ -107,17 +244,7 @@ def load_popo_config(robot_app_key: str) -> dict[str, Any]:
         "blueprint_name": str(response.get("blueprintName") or "").strip(),
         "blueprint_structure_id": str(response.get("blueprintStructureId") or "").strip(),
     }
-    missing = [key for key in ("robot_app_key", "robot_app_secret", "callback_token", "aes_key") if not config[key]]
-    if missing:
-        raise SingletonServiceError(
-            "BLUEPRINT_POPO_ENTRY_REQUIRED",
-            "POPO entry is incomplete: " + ", ".join(missing),
-            status=400,
-            details={"missing": missing},
-        )
-    with _config_lock:
-        _config_cache[app_key] = (now, dict(config))
-    return config
+    return _set_cached_popo_config(app_key, _validate_popo_robot_config(config))
 
 
 def get_access_token(robot_config: dict[str, Any]):
@@ -208,94 +335,35 @@ def _runtime_summary_text(status_response: dict[str, Any]) -> str:
 def call_blueprint(
     user_message: str,
     *,
-    sender: str = "",
-    popo_session_id: str = "",
-    popo_group_id: str = "",
-) -> str:
-    print(
-        f"[BLUEPRINT] message: {user_message} (sender={sender}, session={popo_session_id}, group={popo_group_id})",
-        flush=True,
-    )
-    try:
-        started = blueprint_request(
-            "blueprint.slots.message",
-            {
-                "projectDir": BLUEPRINT_PROJECT_DIR,
-                "message": user_message,
-                "source": "popo",
-                "sourceIdentity": {"robotAppKey": ""},
-                "sessionIdentity": {
-                    "popoUserId": sender or "",
-                    "popoSessionId": popo_session_id or "",
-                    "popoGroupId": popo_group_id or "",
-                },
-            },
-            request_kind="internal",
-            timeout=90,
-        )
-    except SingletonServiceError as exc:
-        print(f"[BLUEPRINT] service error: {exc}", flush=True)
-        return f"蓝图服务处理失败：{exc}"
-    except Exception as exc:
-        print(f"[BLUEPRINT] exception: {exc}", flush=True)
-        return f"蓝图服务处理失败：{exc}"
-
-    session_key = str(started.get("sessionKey") or "")
-    run_id = str(started.get("runId") or "")
-    if started.get("queued"):
-        return f"已发送到蓝图会话队列。\n会话：{session_key}\n运行：{run_id}"
-    if not run_id:
-        return f"蓝图会话已接收消息。\n会话：{session_key}"
-
-    deadline = time.time() + BLUEPRINT_REPLY_TIMEOUT
-    last_status = ""
-    while time.time() < deadline:
-        try:
-            status_response = blueprint_request(
-                "blueprint.status",
-                {"runId": run_id},
-                request_kind="read",
-                timeout=30,
-            )
-        except Exception as exc:
-            print(f"[BLUEPRINT] status error: {exc}", flush=True)
-            break
-        last_status = _runtime_status_text(status_response)
-        if last_status in {"completed", "cancelled", "failed"}:
-            summary = _runtime_summary_text(status_response)
-            if summary:
-                return summary
-            return f"蓝图运行已结束：{last_status}\n会话：{session_key}\n运行：{run_id}"
-        time.sleep(BLUEPRINT_POLL_INTERVAL)
-    return f"蓝图会话已启动，仍在运行中。\n会话：{session_key}\n运行：{run_id}\n状态：{last_status or 'starting'}"
-
-
-def call_blueprint(
-    user_message: str,
-    *,
     robot_app_key: str,
     sender: str = "",
     popo_session_id: str = "",
     popo_group_id: str = "",
+    reply_to: str = "",
+    session_type: Any = "",
 ) -> str:
     print(
         f"[BLUEPRINT] message: {user_message} (robot={robot_app_key}, sender={sender}, session={popo_session_id}, group={popo_group_id})",
         flush=True,
     )
     try:
+        request_args = {
+            "message": user_message,
+            "source": "popo",
+            "sourceIdentity": {"robotAppKey": robot_app_key},
+            "sessionIdentity": {
+                "popoUserId": sender or "",
+                "popoSessionId": popo_session_id or "",
+                "popoGroupId": popo_group_id or "",
+                "popoReplyTo": reply_to or "",
+                "popoSessionType": str(session_type or ""),
+            },
+        }
+        if BLUEPRINT_PROJECT_DIR:
+            request_args["projectDir"] = BLUEPRINT_PROJECT_DIR
         started = blueprint_request(
             "blueprint.slots.message",
-            {
-                "projectDir": BLUEPRINT_PROJECT_DIR,
-                "message": user_message,
-                "source": "popo",
-                "sourceIdentity": {"robotAppKey": robot_app_key},
-                "sessionIdentity": {
-                    "popoUserId": sender or "",
-                    "popoSessionId": popo_session_id or "",
-                    "popoGroupId": popo_group_id or "",
-                },
-            },
+            request_args,
             request_kind="internal",
             timeout=90,
         )
@@ -319,10 +387,12 @@ def call_blueprint(
 
     session_key = str(started.get("sessionKey") or "")
     run_id = str(started.get("runId") or "")
+    if started.get("cleared"):
+        return "已开启新会话"
     if started.get("queued"):
-        return f"已发送到蓝图运行槽。\n会话：{session_key}\n运行：{run_id}"
+        return ""
     if not run_id:
-        return f"蓝图会话已接收消息。\n会话：{session_key}"
+        return ""
 
     deadline = time.time() + BLUEPRINT_REPLY_TIMEOUT
     last_status = ""
@@ -345,28 +415,6 @@ def call_blueprint(
             return f"蓝图运行已结束：{last_status}\n会话：{session_key}\n运行：{run_id}"
         time.sleep(BLUEPRINT_POLL_INTERVAL)
     return f"蓝图运行仍在处理中。\n会话：{session_key}\n运行：{run_id}\n状态：{last_status or 'starting'}"
-
-
-def handle_and_reply(
-    reply_to: str,
-    user_message: str,
-    *,
-    sender: str = "",
-    popo_session_id: str = "",
-    popo_group_id: str = "",
-) -> None:
-    try:
-        send_message(reply_to, "正在提交到蓝图会话，请稍候...")
-        reply = call_blueprint(
-            user_message,
-            sender=sender,
-            popo_session_id=popo_session_id,
-            popo_group_id=popo_group_id,
-        )
-        send_message(reply_to, reply)
-    except Exception as exc:
-        print(f"[HANDLE] exception: {exc}", flush=True)
-        send_message(reply_to, f"处理消息时出错：{str(exc)}")
 
 
 class AESCipher:
@@ -404,6 +452,33 @@ def check_sha256_signature(token, timestamp, nonce, signature):
     return hash_value == signature
 
 
+def _popo_event_id(event_json: dict[str, Any]) -> str:
+    event_data = event_json.get("eventData") if isinstance(event_json, dict) else {}
+    if not isinstance(event_data, dict):
+        return ""
+    value = event_data.get("uuid") or event_data.get("msgId") or event_data.get("messageId")
+    return str(value or "").strip()
+
+
+def _mark_popo_event_seen(event_id: str) -> bool:
+    event_key = str(event_id or "").strip()
+    if not event_key:
+        return True
+    now = time.time()
+    with _event_lock:
+        expired = [key for key, seen_at in _event_cache.items() if now - seen_at > POPO_EVENT_DEDUP_TTL]
+        for key in expired:
+            _event_cache.pop(key, None)
+        if event_key in _event_cache:
+            return False
+        _event_cache[event_key] = now
+    return True
+
+
+def _success_response(aes: AESCipher):
+    return jsonify({"success": aes.aes_cbc_encrypt("success")})
+
+
 def handle_and_reply(
     reply_to: str,
     user_message: str,
@@ -412,23 +487,27 @@ def handle_and_reply(
     sender: str = "",
     popo_session_id: str = "",
     popo_group_id: str = "",
+    session_type: Any = "",
 ) -> None:
     try:
-        send_message(reply_to, "正在提交到蓝图运行槽，请稍候...", robot_config)
+        send_message(reply_to, "思考中....", robot_config)
         reply = call_blueprint(
             user_message,
             robot_app_key=str(robot_config.get("robot_app_key") or ""),
             sender=sender,
             popo_session_id=popo_session_id,
             popo_group_id=popo_group_id,
+            reply_to=reply_to,
+            session_type=session_type,
         )
-        send_message(reply_to, reply, robot_config)
+        if reply:
+            send_message(reply_to, reply, robot_config)
     except Exception as exc:
         print(f"[HANDLE] exception: {exc}", flush=True)
         send_message(reply_to, f"处理消息时出错：{str(exc)}", robot_config)
 
 
-def _start_handler_thread(robot_config, reply_to, notify, sender, popo_session_id, popo_group_id=""):
+def _start_handler_thread(robot_config, reply_to, notify, sender, popo_session_id, popo_group_id="", session_type=""):
     threading.Thread(
         target=handle_and_reply,
         kwargs={
@@ -438,6 +517,7 @@ def _start_handler_thread(robot_config, reply_to, notify, sender, popo_session_i
             "sender": sender,
             "popo_session_id": popo_session_id,
             "popo_group_id": popo_group_id,
+            "session_type": session_type,
         },
         daemon=True,
     ).start()
@@ -449,13 +529,16 @@ def popo_callback(robot_app_key=None):
     timestamp = request.args.get("timestamp", "")
     signature = request.args.get("signature", "")
     nonce = request.args.get("nonce", "")
-    app_key = str(robot_app_key or DEFAULT_ROBOT_APP_KEY or "").strip()
-    if not app_key:
-        return jsonify({"error": "robot_app_key required in callback URL"}), 404
+    app_key = str(robot_app_key or "").strip()
     try:
         robot_config = load_popo_config(app_key)
+    except SingletonServiceError as exc:
+        label = app_key or "<auto>"
+        print(f"[WARN] POPO config rejected for {label}: {exc}", flush=True)
+        return jsonify({"ok": False, "code": exc.code, "error": exc.message, "details": exc.details}), exc.status
     except Exception as exc:
-        print(f"[WARN] POPO config load failed for {app_key}: {exc}", flush=True)
+        label = app_key or "<auto>"
+        print(f"[WARN] POPO config load failed for {label}: {exc}", flush=True)
         return jsonify({"error": "robot config unavailable"}), 503
     callback_token = str(robot_config.get("callback_token") or "")
     aes_key = str(robot_config.get("aes_key") or "")
@@ -514,8 +597,7 @@ def popo_callback(robot_app_key=None):
     )
 
     if event_type == "valid_url":
-        plaintext = aes.aes_cbc_encrypt("success")
-        return jsonify({"success": plaintext})
+        return _success_response(aes)
 
     if event_type == "MSG_SEND":
         event_data = event_json.get("eventData", {})
@@ -529,21 +611,30 @@ def popo_callback(robot_app_key=None):
         )
         print(f"[MSG] content={notify}", flush=True)
 
+        event_id = _popo_event_id(event_json)
+        if not _mark_popo_event_seen(event_id):
+            print(f"[INFO] duplicate POPO event ignored: {event_id}", flush=True)
+            return _success_response(aes)
         reply_to = sender if session_type == 1 else session_id
         group_id = session_id if session_type == 3 else ""
-        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, group_id)
-        return jsonify({"success": aes.aes_cbc_encrypt("success")})
+        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, group_id, session_type)
+        return _success_response(aes)
 
     if event_type == "IM_P2P_TO_ROBOT_MSG":
         event_data = event_json.get("eventData", {})
         sender = event_data.get("from", "")
         notify = event_data.get("notify", "")
         session_id = event_data.get("sessionId", "")
+        session_type = event_data.get("sessionType", "")
         print(f"[MSG] user {sender} p2p: {notify}", flush=True)
 
+        event_id = _popo_event_id(event_json)
+        if not _mark_popo_event_seen(event_id):
+            print(f"[INFO] duplicate POPO event ignored: {event_id}", flush=True)
+            return _success_response(aes)
         reply_to = sender or session_id
-        _start_handler_thread(robot_config, reply_to, notify, sender, session_id)
-        return jsonify({"success": aes.aes_cbc_encrypt("success")})
+        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, "", session_type)
+        return _success_response(aes)
 
     if event_type == "IM_CHAT_TO_ROBOT_AT_MSG":
         event_data = event_json.get("eventData", {})
@@ -556,41 +647,46 @@ def popo_callback(robot_app_key=None):
             flush=True,
         )
 
+        event_id = _popo_event_id(event_json)
+        if not _mark_popo_event_seen(event_id):
+            print(f"[INFO] duplicate POPO event ignored: {event_id}", flush=True)
+            return _success_response(aes)
         reply_to = session_id if session_type == 3 else sender
         group_id = session_id if session_type == 3 else ""
-        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, group_id)
-        return jsonify({"success": aes.aes_cbc_encrypt("success")})
+        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, group_id, session_type)
+        return _success_response(aes)
 
     print(f"[INFO] ignored event: {event_type}", flush=True)
-    return jsonify({"success": aes.aes_cbc_encrypt("success")})
+    return _success_response(aes)
+
+
+def run_callback_server(host: str, port: int) -> None:
+    with make_server(host, port, app, server_class=ThreadingCallbackServer, handler_class=WSGIRequestHandler) as server:
+        print(f"serving: http://{host}:{port}", flush=True)
+        server.serve_forever()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="POPO Blueprint Agent service")
-    parser.add_argument("--app-key", default=DEFAULT_ROBOT_APP_KEY, help="Optional default POPO robot AppKey for /popo/callback")
-    parser.add_argument("--project-dir", default=BLUEPRINT_PROJECT_DIR, help="Blueprint project directory")
+    parser.add_argument("--app-key", default=DEFAULT_ROBOT_APP_KEY, help="Deprecated; callback robots are resolved from plugin state")
+    parser.add_argument("--project-dir", default=BLUEPRINT_PROJECT_DIR, help="Optional fallback Blueprint project directory")
+    parser.add_argument("--host", default=POPO_CALLBACK_HOST, help="Callback bind host")
+    parser.add_argument("--port", type=int, default=POPO_CALLBACK_PORT, help="Callback bind port")
     args = parser.parse_args()
 
-    missing = [
-        name
-        for name, value in {
-            "project-dir": args.project_dir,
-        }.items()
-        if not value
-    ]
-    if missing:
-        parser.error("missing required configuration: " + ", ".join(missing))
-
     DEFAULT_ROBOT_APP_KEY = str(args.app_key or "").strip()
-    BLUEPRINT_PROJECT_DIR = str(Path(args.project_dir).expanduser().resolve())
+    BLUEPRINT_PROJECT_DIR = str(Path(args.project_dir).expanduser().resolve()) if str(args.project_dir or "").strip() else ""
+    POPO_CALLBACK_HOST = str(args.host or "0.0.0.0").strip() or "0.0.0.0"
+    POPO_CALLBACK_PORT = int(args.port)
 
     print("=" * 60, flush=True)
     print("POPO Blueprint Agent service started", flush=True)
-    print("callback: http://0.0.0.0:3100/popo/callback/<robot_app_key>", flush=True)
-    if DEFAULT_ROBOT_APP_KEY:
-        print("legacy callback: http://0.0.0.0:3100/popo/callback", flush=True)
-    print(f"projectDir: {BLUEPRINT_PROJECT_DIR}", flush=True)
+    print(f"callback: http://{POPO_CALLBACK_HOST}:{POPO_CALLBACK_PORT}/popo/callback/<robot_app_key>", flush=True)
+    print(f"legacy callback: http://{POPO_CALLBACK_HOST}:{POPO_CALLBACK_PORT}/popo/callback", flush=True)
+    print(f"moduleFile: {Path(__file__).resolve()}", flush=True)
+    print(f"routes: {[rule.rule for rule in app.url_map.iter_rules()]}", flush=True)
+    print(f"projectDir: {BLUEPRINT_PROJECT_DIR or '(registry routing)'}", flush=True)
     print(f"runtimeDataDir: {RUNTIME_DATA_DIR}", flush=True)
     print(f"replyTimeout: {BLUEPRINT_REPLY_TIMEOUT}s", flush=True)
     print("=" * 60, flush=True)
-    app.run(host="0.0.0.0", port=3100, debug=False)
+    run_callback_server(POPO_CALLBACK_HOST, POPO_CALLBACK_PORT)

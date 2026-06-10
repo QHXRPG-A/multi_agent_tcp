@@ -48,6 +48,7 @@ export type BlueprintValidationResult = {
 
 export type BlueprintSessionSummary = {
   sessionKey: string
+  sessionDisplayName?: string
   projectDir: string
   blueprintId: string
   blueprintName?: string
@@ -63,6 +64,60 @@ export type BlueprintSessionSummary = {
   messageCount?: number
   createdAt?: number
   lastTouchedAt?: number
+}
+
+export type BlueprintSessionTimelineEvent = {
+  id?: string
+  seq?: number
+  type: string
+  timestamp?: string
+  sessionKey?: string
+  runId?: string
+  startNodeId?: string
+  agentNodeId?: string
+  agentId?: string
+  source?: string
+  message?: string
+  content?: string
+  reason?: string
+  actor?: string
+  raw?: Record<string, unknown>
+}
+
+export type BlueprintSessionTimeline = {
+  ok?: boolean
+  sessionKey: string
+  session?: BlueprintSessionSummary
+  events: BlueprintSessionTimelineEvent[]
+}
+
+export type BlueprintSlotSummary = {
+  ok?: boolean
+  projectDir?: string
+  blueprintId?: string
+  blueprintName?: string
+  blueprintStructureId?: string
+  poolKey?: string
+  status?: string
+  activeSessionCount?: number
+  queuedSessionCount?: number
+  idleSessionCount?: number
+  runningRunCount?: number
+  idleRunCount?: number
+  maxActiveSessions?: number
+  runningRunIds?: string[]
+  runs?: Record<string, unknown>[]
+  sessions?: BlueprintSessionSummary[]
+}
+
+export type BlueprintPopoRobot = {
+  enabled: boolean
+  robot_app_key: string
+  robot_name: string
+  robot_app_secret: string
+  callback_token: string
+  aes_key: string
+  updated_at?: number
 }
 
 export type BlueprintRunEndAction = "complete" | "cancel" | "fail" | "pause"
@@ -195,6 +250,21 @@ export type Platform = {
   /** Read resident service interface docs (desktop only) */
   blueprintResidentServiceDocs?(serviceName: string): Promise<Record<string, unknown>>
 
+  /** Read the plugin-managed POPO callback service status (desktop only) */
+  blueprintPopoServiceStatus?(): Promise<Record<string, unknown>>
+
+  /** List globally configured POPO callback robot entries (desktop only) */
+  listBlueprintPopoRobots?(): Promise<BlueprintPopoRobot[]>
+
+  /** Save one globally configured POPO callback robot entry (desktop only) */
+  saveBlueprintPopoRobot?(robot: BlueprintPopoRobot, previousRobotAppKey?: string): Promise<Record<string, unknown>>
+
+  /** Delete one globally configured POPO callback robot entry (desktop only) */
+  deleteBlueprintPopoRobot?(robotAppKey: string): Promise<Record<string, unknown>>
+
+  /** Enable or disable one globally configured POPO callback robot entry (desktop only) */
+  setBlueprintPopoRobotEnabled?(robotAppKey: string, enabled: boolean): Promise<Record<string, unknown>>
+
   /** Move the current blueprint document to a new project workdir and make that directory the blueprint root. */
   relocateBlueprintProjectWorkdir?(
     projectDir: string,
@@ -210,8 +280,14 @@ export type Platform = {
   /** List blueprint sessions, with running sessions first (desktop only) */
   listBlueprintSessions?(projectDir?: string, blueprintId?: string): Promise<BlueprintSessionSummary[]>
 
+  /** Read one blueprint session transcript timeline (desktop only) */
+  blueprintSessionTimeline?(sessionKey: string, limit?: number): Promise<BlueprintSessionTimeline>
+
   /** Soft-delete an idle blueprint session (desktop only) */
   deleteBlueprintSession?(sessionKey: string): Promise<Record<string, unknown>>
+
+  /** Terminate one running or queued blueprint session without clearing its transcript. */
+  terminateBlueprintSession?(sessionKey: string, reason?: string): Promise<Record<string, unknown>>
 
   /** Send one message into a blueprint session and start/queue work at the configured start node. */
   sendBlueprintSessionMessage?(
@@ -229,6 +305,12 @@ export type Platform = {
 
   /** Manually start one idle blueprint run slot. */
   startBlueprintSlot?(projectDir: string, blueprintId: string): Promise<Record<string, unknown>>
+
+  /** Read the structure-level blueprint slot summary. */
+  blueprintSlotStatus?(projectDir: string, blueprintId: string): Promise<BlueprintSlotSummary>
+
+  /** Terminate all running or queued sessions for the structure-level blueprint slot. */
+  terminateBlueprintSlot?(projectDir: string, blueprintId: string, reason?: string): Promise<Record<string, unknown>>
 
   /** Send one message into an existing blueprint run slot. */
   sendBlueprintSlotMessage?(

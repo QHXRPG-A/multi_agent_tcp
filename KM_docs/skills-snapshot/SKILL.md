@@ -97,6 +97,136 @@ Read these first based on the task:
 
 ## Recent Handoff
 
+For the latest Blueprint slot termination hardening, POPO concurrent session
+write fix, direct Agent reply fallback, `blueprint_reply_popo_user` message id
+regression fix, and POPO `/new` confirmation behavior from 2026-06-10:
+
+- Runtime/backend `blueprint.slots.terminate` structure-level forced cleanup,
+  `session.json` unique temp writes and Windows retry, ordinary start-Agent
+  reply fallback to POPO with `messageId` / `fallback` transcript fields,
+  corrected `scope.current_message_context` usage in
+  `blueprint_reply_popo_user`, and `/new` returning `已开启新会话`:
+  `archive/runtime-backend/blueprint_slot_termination_popo_direct_reply_new_session_2026-06-10.md`
+
+Use this file when the user reports:
+
+- `终止运行槽` only killed one instance or left queued/running sessions behind.
+- POPO callback fails with `[WinError 5] 拒绝访问` while replacing
+  `session.json`.
+- POPO sees `思考中....` but no second message even though Workbench shows an
+  ordinary Agent reply.
+- `blueprint_reply_popo_user` raises `name 'context' is not defined`.
+- POPO `/new` clears the session but appears stuck because there is no
+  confirmation.
+
+For the latest Blueprint session-slot lifecycle, framework-managed session
+termination, POPO callback resilience, and Agent panel transcript timeline work
+from 2026-06-10:
+
+- Runtime/backend structure-level slot summaries, per-pool max three active
+  sessions, queued sessions, removal of Agent-visible
+  `blueprint_terminate_session`, framework idle auto termination, POPO callback
+  local-route fallback, `agent_info()` service-lock fix, and POPO reply
+  auto-task-status behavior:
+  `archive/runtime-backend/blueprint_session_slots_framework_auto_popo_resilience_2026-06-10.md`
+- Workbench current-session vs Blueprint-slot status card, active/queued
+  session counts, session terminate / slot terminate actions,
+  transcript-backed Agent panel timeline, maintenance-event filtering, and
+  stream text null-guard crash fix:
+  `archive/frontend/blueprint_session_slot_panel_timeline_2026-06-10.md`
+
+Use those files when the user reports:
+
+- A POPO message was sent but did not enter the Blueprint session transcript.
+- `/popo/callback` returns 500 because callback config lookup timed out.
+- The main runtime or callback config query is unresponsive while the Agent
+  information panel is open.
+- An Agent can see or call `blueprint_terminate_session`, or a run slot is
+  completed by an Agent instead of by UI/framework policy.
+- The runtime panel confuses session count, live run instance count, and
+  structure-level Blueprint slot status.
+- The Agent panel shows task-status/summary/session-maintenance text as a
+  normal Agent reply.
+
+For the latest POPO start-Agent reply MCP tool and readable POPO session keys
+from 2026-06-09:
+
+- Runtime/backend `blueprint_reply_popo_user(content)` ordinary MCP tool,
+  start-Agent-only visibility, service-side receiver ownership via saved
+  `popoReplyTo`, POPO send helper, transcript `agent_reply` /
+  `popo_reply_sent` events, readable `bps_popo_<user>_<hash>` session keys,
+  and legacy `bps_<hash>` migration:
+  `archive/runtime-backend/blueprint_popo_reply_tool_readable_sessions_2026-06-09.md`
+- Workbench session dropdown `sessionDisplayName` support, session-key-first
+  display, and POPO user-readable second-line label:
+  `archive/frontend/blueprint_popo_readable_session_list_2026-06-09.md`
+
+Use those files when the user reports:
+
+- A POPO-started Agent can see the message but cannot reply to the POPO user.
+- `blueprint_reply_popo_user` is missing, visible to the wrong Agent, or
+  appears to require receiver/token/app secret fields.
+- POPO reply target selection is wrong for private or group conversations.
+- The session list shows only opaque `bps_<hash>` ids instead of including the
+  POPO user such as `qiuhaoxuan`.
+- Existing old POPO sessions do not migrate to readable `bps_popo_...` keys.
+
+For the latest POPO callback service global robot route configuration and
+Workbench control drawer work from 2026-06-09:
+
+- Runtime/backend plugin-level POPO callback robot allowlist
+  `popo_robot_routes.json`, internal list/save/delete/toggle commands,
+  `blueprint.popo.callbackConfig`, legacy `/popo/callback` unique-enabled auto
+  resolution, multi-enabled conflict behavior, and MCP public/internal
+  credential boundary:
+  `archive/runtime-backend/blueprint_popo_global_callback_routes_2026-06-09.md`
+- Workbench Blueprint Control drawer, POPO Callback Service panel, service
+  status/callback URL display, robot enable checkbox and credential editor, and
+  collaboration panel relocation into the drawer:
+  `archive/frontend/blueprint_popo_global_callback_service_drawer_2026-06-09.md`
+
+Use those files when the user reports:
+
+- `/popo/callback/<robot_app_key>` accepts or rejects the wrong robot.
+- Legacy `/popo/callback` should auto resolve one enabled robot or reject
+  multiple enabled robots.
+- `blueprint.popo.robots` or related Workbench API calls return
+  `UNKNOWN_COMMAND`.
+- The Blueprint Control drawer or POPO Callback Service panel is missing from
+  the Workbench.
+- A packaged plugin still uses old POPO callback credentials after rebuild or
+  restart.
+- Public Codex MCP exposes or can mutate POPO callback robot credentials.
+
+For the latest POPO Blueprint session identity, start-Agent ownership, idle
+termination, and agent-level POPO Inspector work from 2026-06-09:
+
+- Runtime/backend direct Workbench session key `main+<blueprintId>`, POPO
+  session-key separation, agent-level `popo_entry` validation, `/new` session
+  clear behavior, POPO idle termination checks, start-Agent-only
+  `blueprint_terminate_session` MCP tool, plugin rebuild/restart, and smoke
+  results:
+  `archive/runtime-backend/blueprint_popo_session_identity_termination_2026-06-09.md`
+- Workbench full-Agent `popo_entry` model, legacy runtime POPO migration,
+  Inspector disabled-state reasons, saved-start-only POPO editability, previous
+  start-Agent POPO clearing, POPO Blueprint indicator, i18n, frontend tests, and
+  page smoke:
+  `archive/frontend/blueprint_agent_level_popo_entry_ui_2026-06-09.md`
+
+Use those files when the user reports:
+
+- Direct Blueprint run-slot messages still create `bps_...` sessions instead of
+  using `main+<blueprintId>`.
+- POPO forwarding appears editable on the wrong full Agent, multiple full
+  Agents can enable POPO, or the disabled reason is unclear.
+- A POPO-enabled full Agent is not forced to be the saved start Agent.
+- A POPO Blueprint is missing its visual indicator.
+- `/new` does not clear the expected Blueprint session history.
+- POPO Blueprint sessions do not ask the start full Agent whether to terminate
+  when all Agents, ScriptNodes, and resident-service calls are idle.
+- `blueprint_terminate_session` is missing for the POPO start Agent or is
+  exposed to the wrong Agent.
+
 For the latest Blueprint sessions, run slots, POPO entry, Codex start-agent
 setting, and MCP boundary work from 2026-06-05:
 
@@ -126,6 +256,25 @@ Use those files when the user reports:
   `blueprint_execute_plan` but not `blueprint.slots.*`
 - full AgentNode Blueprint monitor tools need run-scoped status/events/diff
   access without cross-run mutation
+
+For the latest `table_queue_service` ScriptNode help/schema pattern and
+table-occupation resident service work from 2026-06-08:
+
+- `table_queue_service` as the reference design for ScriptNodes that expose
+  multiple operations through `action` + `arguments`, targeted `help`/`schema`
+  behavior, script-only resident service gating, valid table name validation,
+  and `refresh_valid_tables` running SVN update before scanning `.xlsx` files:
+  `archive/runtime-backend/blueprint_table_queue_script_help_pattern_2026-06-08.md`
+
+Use that file when the user reports:
+
+- a future ScriptNode needs an Agent-facing help/schema contract
+- an Agent is unsure what structure to pass to a ScriptNode
+- a ScriptNode multiplexes operations through `action` + `arguments`
+- `table_queue_service` action formats, unknown-action behavior, or schema
+  output size need clarification
+- table occupation requests should reject unknown `.xlsx` names
+- `refresh_valid_tables` should update SVN before reading table names
 
 For the latest Blueprint resident service and Script Function Node boundary
 notes, plus a real AgentNode `xltool` resident-service write smoke from
@@ -546,6 +695,10 @@ files for implementation decisions unless an archive is explicitly called out.
 - For ordinary agents, preserve private workspace isolation. Project mutations
   should flow through the framework workspace/MCP path, not direct writes to the
   shared project root.
+- For ScriptNodes that expose multiple operations, use the `table_queue_service`
+  `help`/`schema` contract as the reference: targeted help returns one schema,
+  empty help returns all schemas, unknown actions return allowed actions plus a
+  hint, and business calls return only business results.
 - When changing skill knowledge, keep this `SKILL.md` short and move detail to
   `knowledge_base/`, `tasks/`, or `archive/`.
 - When copying into `KM_docs/skills-snapshot`, mirror the current installed

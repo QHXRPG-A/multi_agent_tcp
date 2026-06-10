@@ -1,6 +1,33 @@
 import { describe, expect, test } from "bun:test"
 import { createTestAgentPanelSnapshot } from "./blueprint-test-agent-snapshot"
 
+type AgentPanelProjection = (
+  events: Array<Record<string, unknown>>,
+  userMessages?: Array<Record<string, unknown>>,
+  sessionTimelineEvents?: Array<Record<string, unknown>>,
+) => Array<Record<string, unknown>>
+
+async function loadAgentPanelProjection(): Promise<AgentPanelProjection> {
+  const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+  const projectionStart = source.indexOf("function visibleAgentPanelEvents")
+  const projectionEnd = source.indexOf("function agentStatusFieldText")
+  const textHelperStart = projectionEnd
+  const textHelperEnd = source.indexOf("function formatRuntimeTime")
+  const projectionSource = source.slice(projectionStart, projectionEnd)
+  const textHelperSource = source.slice(textHelperStart, textHelperEnd)
+  const script = `
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined
+}
+${projectionSource}
+${textHelperSource}
+export { visibleAgentPanelEvents }
+`
+  const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(script)
+  const module = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`)
+  return module.visibleAgentPanelEvents as AgentPanelProjection
+}
+
 describe("blueprint inspector source", () => {
   test("does not render framework-managed agent fields as editable inspector controls", async () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
@@ -77,6 +104,30 @@ describe("blueprint inspector source", () => {
     expect(en).toContain("agent_dispatch, agent_context, agent_task_status, and join_contribute")
   })
 
+  test("edits POPO forwarding on the saved start full Agent and marks POPO blueprints", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const en = await Bun.file(new URL("../../i18n/en.ts", import.meta.url)).text()
+    const zh = await Bun.file(new URL("../../i18n/zh.ts", import.meta.url)).text()
+    const zht = await Bun.file(new URL("../../i18n/zht.ts", import.meta.url)).text()
+    const inspectorPanel = source.slice(source.indexOf("export function BlueprintInspector"), source.indexOf("function BlueprintGlobalConfigPanel"))
+    const nodeView = source.slice(source.indexOf("function BlueprintNodeView"), source.indexOf("function PortButton"))
+
+    expect(source).toContain('setDraft("graph", "agent_nodes", previousNodeId, "popo_entry", "enabled", false)')
+    expect(inspectorPanel).toContain('updateAgentField("popo_entry"')
+    expect(inspectorPanel).not.toContain('props.setStore("runtime", "popo_entry"')
+    expect(inspectorPanel).toContain("otherEnabledPopoAgentId")
+    expect(inspectorPanel).toContain("blueprint.popoEntry.lockedByAgent")
+    expect(inspectorPanel).toContain("blueprint.popoEntry.startNodeOnly")
+    expect(inspectorPanel).toContain('disabled={popoEntryDisabled()}')
+    expect(inspectorPanel).toContain('checked={selectedPopoEntry().enabled === true}')
+    expect(source).toContain("popoBlueprintAgent={")
+    expect(nodeView).toContain("data-blueprint-popo-agent-badge")
+    expect(nodeView).toContain("blueprint.popoEntry.activeBadge")
+    expect(en).toContain('"blueprint.popoEntry.lockedByAgent"')
+    expect(zh).toContain('"blueprint.popoEntry.lockedByAgent"')
+    expect(zht).toContain('"blueprint.popoEntry.lockedByAgent"')
+  })
+
   test("renders resident services panel and service controls", async () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
     const platform = await Bun.file(new URL("../../context/platform.tsx", import.meta.url)).text()
@@ -109,14 +160,61 @@ describe("blueprint inspector source", () => {
     expect(source).toContain('"blueprint.resident.noMatches"')
     expect(source).not.toContain("normalizedResidentServiceSearch() && services().length > 0")
   })
+
+  test("renders global POPO callback service control drawer", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const platform = await Bun.file(new URL("../../context/platform.tsx", import.meta.url)).text()
+    const entry = await Bun.file(new URL("../../entry.tsx", import.meta.url)).text()
+    const en = await Bun.file(new URL("../../i18n/en.ts", import.meta.url)).text()
+    const zh = await Bun.file(new URL("../../i18n/zh.ts", import.meta.url)).text()
+
+    expect(platform).toContain("BlueprintPopoRobot")
+    expect(platform).toContain("blueprintPopoServiceStatus")
+    expect(platform).toContain("listBlueprintPopoRobots")
+    expect(platform).toContain("saveBlueprintPopoRobot")
+    expect(platform).toContain("deleteBlueprintPopoRobot")
+    expect(platform).toContain("setBlueprintPopoRobotEnabled")
+    expect(entry).toContain('"service.popoStatus"')
+    expect(entry).toContain('"blueprint.popo.robots"')
+    expect(entry).toContain('"blueprint.popo.robot.save"')
+    expect(entry).toContain('"blueprint.popo.robot.delete"')
+    expect(entry).toContain('"blueprint.popo.robot.enabled"')
+    expect(source).toContain("data-blueprint-control-toggle")
+    expect(source).toContain("data-blueprint-control-handle")
+    expect(source).toContain("data-blueprint-control-drawer")
+    expect(source).toContain("function BlueprintControlDrawer")
+    expect(source).toContain("function BlueprintPopoServicePanel")
+    expect(source).toContain("function BlueprintPopoRobotEditor")
+    expect(source).toContain("data-blueprint-popo-service-panel")
+    expect(source).toContain("data-blueprint-popo-robot")
+    expect(source).toContain("data-blueprint-popo-robot-enabled")
+    expect(source).toContain("data-blueprint-popo-robot-app-key")
+    expect(source).toContain("data-blueprint-popo-robot-secret")
+    expect(source).toContain("data-blueprint-popo-robot-token")
+    expect(source).toContain("data-blueprint-popo-robot-aes")
+    expect(source).toContain("callbackUrlTemplate")
+    expect(source).toContain("legacyCallbackUrl")
+    expect(source).toContain("onSaveRobot={savePopoRobot}")
+    expect(source).toContain("onDeleteRobot={deletePopoRobot}")
+    expect(source).toContain("onToggleRobot={setPopoRobotEnabled}")
+    expect(source).toContain("<Show when={!blueprintControlOpen()}>")
+    expect(source).toContain('<BlueprintCollaborationAuthPanel defaultUsername="1" />')
+    expect(en).toContain('"blueprint.popoService.title": "POPO Callback Service"')
+    expect(en).toContain('"blueprint.popoService.appKeyPlaceholder": "Robot AppKey"')
+    expect(zh).toContain('"blueprint.popoService.title": "POPO 回调服务"')
+  })
 })
 
 describe("blueprint project persistence source", () => {
   test("lists project blueprints, opens the selected document, and keeps local fallback", async () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const en = await Bun.file(new URL("../../i18n/en.ts", import.meta.url)).text()
+    const zh = await Bun.file(new URL("../../i18n/zh.ts", import.meta.url)).text()
+    const zht = await Bun.file(new URL("../../i18n/zht.ts", import.meta.url)).text()
 
     expect(source).toContain("const openBlueprint = platform.openBlueprint")
     expect(source).toContain("platform.listBlueprints")
+    expect(source).toContain("platform.deleteBlueprint")
     expect(source).toContain("initialBlueprintId?: string")
     expect(source).toContain('const routeInitialBlueprintId = () => props.initialBlueprintId?.trim() || ""')
     expect(source).toContain("const requestedBlueprintId = initialBlueprintId()")
@@ -128,7 +226,11 @@ describe("blueprint project persistence source", () => {
     expect(source).toContain("syncWorkbenchBlueprintRoute(blueprintId)")
     expect(source).toContain("data-blueprint-document-select")
     expect(source).toContain("data-blueprint-document-create")
+    expect(source).toContain("data-blueprint-document-delete")
     expect(source).toContain("BlueprintCreateDialog")
+    expect(source).toContain("BlueprintDeleteDialog")
+    expect(source).toContain("openDeleteBlueprintDialog")
+    expect(source).toContain("createDefaultProjectBlueprintAfterDelete")
     expect(source).toContain("uniqueBlueprintId")
     expect(source).not.toContain("toBlueprintDocument(next, DEFAULT_BLUEPRINT_ID, DEFAULT_BLUEPRINT_NAME)")
     expect(source).toContain('code === "NOT_FOUND"')
@@ -138,6 +240,10 @@ describe("blueprint project persistence source", () => {
     expect(source).toContain("function BlueprintHeaderStatus")
     expect(source).toContain("data-blueprint-header-status-trigger")
     expect(source).toContain("data-blueprint-header-status-details")
+    expect(en).toContain('"blueprint.document.delete": "Delete blueprint"')
+    expect(en).toContain('"blueprint.document.deleteConfirm":')
+    expect(zh).toContain('"blueprint.document.delete": "删除蓝图"')
+    expect(zht).toContain('"blueprint.document.delete": "刪除藍圖"')
   })
 
   test("confirms and relocates the project workdir through the desktop bridge", async () => {
@@ -403,6 +509,9 @@ describe("blueprint runtime source", () => {
 
     expect(addOptions).not.toContain('kind: "start" as const')
     expect(addOptions).not.toContain('kind: "end" as const')
+    expect(addOptions).not.toContain('kind: "route-sequence" as const')
+    expect(addOptions).not.toContain('kind: "route-parallel" as const')
+    expect(addOptions).not.toContain('kind: "route-parallel-reduce" as const')
     expect(addOptions).toContain('kind: "agent" as const')
     expect(addOptions).toContain('kind: "worker-agent" as const')
     expect(nodes).not.toContain("draft.graph.terminal_nodes")
@@ -464,6 +573,12 @@ describe("blueprint runtime source", () => {
     expect(source).toContain("scriptCompiling={scriptCompiling()}")
     expect(source).toContain('if (item.type === "script")')
     expect(source).toContain("void openScriptNodeInEditor(item.node)")
+    expect(source).toContain("onScriptSettings")
+    expect(source).toContain('"blueprint.context.scriptSettings"')
+    expect(source).toContain('updateScriptField("feedback_only", checked)')
+    expect(source).toContain('updateScriptField("require_call_before_dispatch", checked)')
+    expect(source).toContain('"blueprint.field.scriptFeedbackOnly"')
+    expect(source).toContain('"blueprint.field.scriptRequireCallBeforeDispatch"')
     expect(source).toContain('kind: "prompt" as const')
     expect(source).toContain('type: "prompt" as const')
     expect(source).toContain("data-blueprint-prompt-node")
@@ -525,6 +640,9 @@ describe("blueprint runtime source", () => {
       expect(locale).toContain('"blueprint.script.openSuccess"')
       expect(locale).toContain('"blueprint.script.openSuccessDescription"')
       expect(locale).toContain('"blueprint.script.openFailed"')
+      expect(locale).toContain('"blueprint.context.scriptSettings"')
+      expect(locale).toContain('"blueprint.field.scriptFeedbackOnly"')
+      expect(locale).toContain('"blueprint.field.scriptRequireCallBeforeDispatch"')
       expect(locale).toContain('"blueprint.node.prompt"')
       expect(locale).toContain('"blueprint.add.prompt.description"')
       expect(locale).toContain('"blueprint.prompt.trigger.once"')
@@ -774,7 +892,7 @@ describe("blueprint runtime source", () => {
     expect(visibleEvents).toContain('kind === "part.delta" || kind === "message.completed"')
     expect(visibleEvents).toContain('"Agent 思考"')
     expect(visibleEvents).toContain("`工具调用")
-    expect(visibleEvents).toContain("agentPanelTimelineItems(events, userMessages)")
+    expect(visibleEvents).toContain("agentPanelTimelineItems(events, userMessages, sessionTimelineEvents)")
     expect(visibleEvents).toContain("flushAgentPanelToolGroup()")
     expect(visibleEvents).toContain("agentPanelToolGroupDisplayEvent")
     expect(visibleEvents).toContain("mergeAdjacentAgentPanelToolGroups(")
@@ -792,8 +910,14 @@ describe("blueprint runtime source", () => {
     expect(visibleEvents).toContain("cleanAgentPanelReplyText")
     expect(visibleEvents).toContain("isCodexInternalLogLine")
     expect(visibleEvents).toContain("shouldReplaceAgentReplyDraft")
+    expect(visibleEvents).toContain("agentPanelTextEventContentText(event)")
+    expect(visibleEvents).toContain("agentPanelStreamingEntryKey(input.event")
+    expect(visibleEvents).toContain("const partId = stringValue(event.part_id)")
     expect(visibleEvents).toContain('"Agent 回复"')
     expect(visibleEvents).toContain("userMessages: AgentPanelUserMessage[] = []")
+    expect(visibleEvents).toContain("sessionTimelineEvents: BlueprintSessionTimelineEvent[] = []")
+    expect(visibleEvents).toContain("agentPanelDisplayEventFromSessionTimeline")
+    expect(visibleEvents).toContain("sessionTimelineHasChat(sessionTimelineEvents)")
     expect(visibleEvents).toContain('tone: "user"')
     expect(visibleEvents).toContain('tone: "reasoning"')
     expect(visibleEvents).toContain('tone: "tool"')
@@ -809,7 +933,8 @@ describe("blueprint runtime source", () => {
     expect(eventBody).toContain("[&_pre]:!bg-[#06101a]")
     expect(eventBody).toContain("[&_.shiki]:!bg-[#06101a]")
     expect(eventBody).toContain("<pre")
-    expect(agentPanel).toContain("visibleAgentPanelEvents(props.events, props.panel.userMessages ?? [])")
+    expect(agentPanel).toContain("visibleAgentPanelEvents(")
+    expect(agentPanel).toContain("props.sessionTimelineEvents ?? []")
     expect(agentPanel).toContain('statusField("busy_count")')
     expect(agentPanel).toContain("latestAgentTaskStatusEvent(props.events)")
     expect(agentPanel).toContain('statusField("task_status")')
@@ -817,7 +942,7 @@ describe("blueprint runtime source", () => {
     expect(agentPanel).toContain('statusField("last_error")')
     expect(agentPanel).toContain('props.runId ? "idle" : "未运行"')
     expect(agentPanel).not.toContain('props.runtimeStatus ?? "running"')
-    expect(agentPanel).toContain("stabilizeAgentPanelDisplayEvents(previous")
+    expect(agentPanel).toContain("stabilizeAgentPanelDisplayEvents(")
     expect(source).toContain("const AGENT_PANEL_DEFAULT_WIDTH = 420")
     expect(source).toContain("const AGENT_PANEL_DEFAULT_HEIGHT = 620")
     expect(agentPanel).not.toContain("agent panel size preset")
@@ -864,6 +989,178 @@ describe("blueprint runtime source", () => {
     expect(agentPanel).not.toContain("For each={props.events}")
   })
 
+  test("keeps agent replies interleaved with tool calls for the same runtime message", async () => {
+    const visibleAgentPanelEvents = await loadAgentPanelProjection()
+    const projected = visibleAgentPanelEvents([
+      {
+        kind: "part.delta",
+        seq: 1,
+        created_at: 1,
+        message_id: "msg-1",
+        part_id: "reply-a",
+        part_type: "text",
+        delta: "before tool",
+        status: "completed",
+      },
+      {
+        kind: "tool.completed",
+        seq: 2,
+        created_at: 2,
+        message_id: "msg-1",
+        part_id: "tool-1",
+        part_type: "tool",
+        tool_name: "blueprint_current_status",
+        tool_kind: "command_execution",
+        tool_input: { command: "status" },
+        status: "completed",
+      },
+      {
+        kind: "part.delta",
+        seq: 3,
+        created_at: 3,
+        message_id: "msg-1",
+        part_id: "reply-b",
+        part_type: "text",
+        delta: "after tool",
+        status: "completed",
+      },
+      {
+        kind: "message.completed",
+        seq: 4,
+        created_at: 4,
+        message_id: "msg-1",
+        status: "completed",
+      },
+    ])
+
+    expect(projected.map((event) => event.tone)).toEqual(["reply", "tool", "reply"])
+    expect(projected[0]?.text).toBe("before tool")
+    expect(String(projected[1]?.text)).toContain('"command": "status"')
+    expect(projected[2]?.text).toBe("after tool")
+    expect(projected[0]?.id).toBe("reply-a")
+    expect(projected[2]?.id).toBe("reply-b")
+    const toolItems = projected[1]?.toolItems as Array<Record<string, unknown>>
+    expect(toolItems).toHaveLength(1)
+    expect(toolItems[0]?.id).toBe("tool-1")
+  })
+
+  test("uses blueprint session transcript as the agent panel chat timeline", async () => {
+    const visibleAgentPanelEvents = await loadAgentPanelProjection()
+    const projected = visibleAgentPanelEvents(
+      [
+        {
+          kind: "message.completed",
+          seq: 3,
+          created_at: "2026-06-09T13:29:26.000Z",
+          message_id: "msg-1",
+          text: "agent reply",
+          status: "completed",
+        },
+        {
+          kind: "tool.completed",
+          seq: 4,
+          created_at: "2026-06-09T13:29:27.000Z",
+          message_id: "msg-1",
+          part_id: "tool-1",
+          tool_name: "blueprint_reply_popo_user",
+          tool_kind: "mcp_tool_call",
+          status: "completed",
+        },
+      ],
+      [
+        {
+          id: "local-user",
+          nodeId: "planner",
+          mode: "top",
+          text: "local duplicate",
+          status: "sent",
+          created_at: "2026-06-09T13:29:00.000Z",
+        },
+      ],
+      [
+        {
+          id: "session-1",
+          seq: 1,
+          type: "user_message",
+          timestamp: "2026-06-09T13:29:01.000Z",
+          message: "user message",
+        },
+        {
+          id: "session-2",
+          seq: 2,
+          type: "agent_reply",
+          timestamp: "2026-06-09T13:29:26.000Z",
+          content: "agent reply",
+        },
+      ],
+    )
+
+    expect(projected.map((event) => event.tone)).toEqual(["user", "reply", "tool"])
+    expect(projected[0]?.text).toBe("user message")
+    expect(projected[1]?.text).toBe("agent reply")
+    expect(projected.some((event) => event.text === "local duplicate")).toBe(false)
+    expect(projected.filter((event) => event.tone === "reply")).toHaveLength(1)
+  })
+
+  test("ignores textless stream events before maintenance filtering", async () => {
+    const visibleAgentPanelEvents = await loadAgentPanelProjection()
+
+    expect(() =>
+      visibleAgentPanelEvents([
+        {
+          kind: "status",
+          seq: 1,
+          created_at: "2026-06-10T01:00:00.000Z",
+          message_id: "msg-1",
+        },
+      ]),
+    ).not.toThrow()
+
+    expect(
+      visibleAgentPanelEvents([
+        {
+          kind: "status",
+          seq: 1,
+          created_at: "2026-06-10T01:00:00.000Z",
+          message_id: "msg-1",
+        },
+      ]),
+    ).toEqual([])
+  })
+
+  test("hides framework summary and task status maintenance events", async () => {
+    const visibleAgentPanelEvents = await loadAgentPanelProjection()
+    const projected = visibleAgentPanelEvents([
+      {
+        kind: "message.completed",
+        seq: 1,
+        created_at: "2026-06-10T02:06:56.000Z",
+        message_id: "summary-msg-planner-1",
+        text: "Recording the current agent outcome for the framework and marking this task complete.",
+        status: "completed",
+      },
+      {
+        kind: "tool.completed",
+        seq: 2,
+        created_at: "2026-06-10T02:06:57.000Z",
+        message_id: "summary-msg-planner-1",
+        part_id: "tool-status-1",
+        tool_name: "agent_task_status",
+        tool_kind: "mcp_tool_call",
+        status: "completed",
+      },
+      {
+        kind: "agent.task_status",
+        seq: 3,
+        created_at: "2026-06-10T02:06:58.000Z",
+        message_id: "summary-msg-planner-1",
+        status: "completed",
+      },
+    ])
+
+    expect(projected).toEqual([])
+  })
+
   test("lets agent info panels move off canvas while keeping selection and wheel scrolling", async () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
     const updateFrame = source.slice(source.indexOf("function updateAgentPanelFrame"), source.indexOf("function agentPanelSize"))
@@ -908,33 +1205,36 @@ describe("blueprint runtime source", () => {
     expect(source).toContain("function runtimeAgentDetail")
     expect(source).toContain("blueprint.runtime.taskStatus")
     expect(runtimePanel).toContain("ready_for_top_agent_summary")
-    expect(source).toContain("ready_for_top_agent_summary_generation")
+    expect(source).not.toContain("ready_for_top_agent_summary_generation")
     expect(source).not.toContain("autoTopAgentSummaryAttempts")
     expect(source).not.toContain("buildTopAgentSummaryMessage")
     expect(source).not.toContain("Summarize completed blueprint run")
     expect(source).not.toContain("silentBlocked: true")
-    expect(source).toContain("autoCompletedRuntimeKeys")
     expect(source).toContain("blueprintFlowLockStore")
-    expect(source).toContain("blueprintRuntimeManualUnlockKeys")
-    expect(source).toContain("runtimeManualUnlockVersion()")
-    expect(source).toContain("unlockRuntimeForManualControl(runId)")
+    expect(source).not.toContain("autoCompletedRuntimeKeys")
+    expect(source).not.toContain("blueprintRuntimeManualUnlockKeys")
+    expect(source).not.toContain("runtimeManualUnlockVersion()")
+    expect(source).not.toContain("unlockRuntimeForManualControl(runId)")
     expect(source).toContain("BLUEPRINT_FLOW_LOCK_PENDING_GRACE_MS")
     expect(source).toContain("function planningProgressActive()")
     expect(source).toContain("active: true")
     expect(source).toContain("planningSeen: true")
-    expect(source).toContain("runtimeSummaryKey")
-    expect(source).toContain("AUTO_RUNTIME_COMPLETE_REASON")
-    expect(source).toContain('endBlueprintRuntime("complete"')
+    expect(source).not.toContain("runtimeSummaryKey")
+    expect(source).not.toContain("AUTO_RUNTIME_COMPLETE_REASON")
+    expect(source).not.toContain('reason: AUTO_RUNTIME_COMPLETE_REASON')
     expect(source).toContain("const runtimeRunActive = createMemo")
     expect(source).toContain("const runtimeStarted = createMemo")
-    expect(source).toContain("const runtimeSummaryLockActive = createMemo")
+    expect(source).toContain("const blueprintSlotRunCount = createMemo")
+    expect(source).toContain("const blueprintSlotCapacityFull = createMemo")
+    expect(source).toContain("const runId = currentBlueprintSession()?.activeRunId || \"\"")
+    expect(source).not.toContain("const runId = currentBlueprintSession()?.activeRunId || runtime().runId")
+    expect(source).not.toContain("const runtimeSummaryLockActive = createMemo")
     expect(source).toContain("const blueprintFlowLockActive = createMemo")
     expect(source).toContain("runtimeStatus(runtime().status)")
     expect(source).toContain("const blueprintProgressPhase = createMemo")
     expect(source).toContain("if (!blueprintFlowLockActive()) return undefined")
     expect(source).toContain("if (runtimeStarted()) return undefined")
-    expect(source).toContain('if (runId && status === "running" && !runtimeSummaryReady())')
-    expect(source).toContain("if (!blueprintFlowLockActive()) return")
+    expect(source).toContain('if (runId && status === "running")')
     expect(source).toContain("BlueprintProgressOverlay")
     expect(source).toContain("data-blueprint-progress-overlay")
     expect(source).toContain("data-blueprint-progress-mask")

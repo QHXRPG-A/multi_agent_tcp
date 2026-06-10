@@ -173,6 +173,25 @@ export type ElectronAPI = {
     document?: BlueprintDocument,
   ) => Promise<BlueprintValidationResult>
   blueprintListRuns: (projectDir?: string, blueprintId?: string) => Promise<Record<string, unknown>[]>
+  blueprintListSessions: (projectDir?: string, blueprintId?: string) => Promise<Record<string, unknown>[]>
+  blueprintSessionTimeline: (sessionKey: string, limit?: number) => Promise<Record<string, unknown>>
+  blueprintDeleteSession: (sessionKey: string) => Promise<Record<string, unknown>>
+  blueprintTerminateSession: (sessionKey: string, reason?: string) => Promise<Record<string, unknown>>
+  blueprintStartSlot: (projectDir: string, blueprintId: string) => Promise<Record<string, unknown>>
+  blueprintSlotStatus: (projectDir: string, blueprintId: string) => Promise<Record<string, unknown>>
+  blueprintTerminateSlot: (projectDir: string, blueprintId: string, reason?: string) => Promise<Record<string, unknown>>
+  blueprintSlotMessage: (
+    projectDir: string,
+    message: string,
+    input?: {
+      source?: string
+      blueprintId?: string
+      runId?: string
+      sourceIdentity?: Record<string, unknown>
+      sessionIdentity?: Record<string, unknown>
+      sessionKey?: string
+    },
+  ) => Promise<Record<string, unknown>>
   blueprintStart: (
     projectDir: string,
     blueprintId: string,

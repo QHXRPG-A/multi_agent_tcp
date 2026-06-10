@@ -121,6 +121,35 @@ def test_graph_definition_json_loads_agent_ring_refresh_periods() -> None:
     assert ring.to_dict()["context_refresh_period"] == 3
 
 
+def test_script_node_persists_feedback_and_force_call_flags() -> None:
+    node = ScriptNode.from_dict(
+        {
+            "node_id": "table_queue_service",
+            "script_id": "table_queue_service.py:table_queue_service",
+            "module_path": "table_queue_service.py",
+            "function_name": "table_queue_service",
+            "feedback_only": True,
+            "require_call_before_dispatch": True,
+        }
+    )
+
+    assert node.feedback_only is True
+    assert node.require_call_before_dispatch is True
+    assert node.to_dict()["feedback_only"] is True
+    assert node.to_dict()["require_call_before_dispatch"] is True
+
+    legacy = ScriptNode.from_dict(
+        {
+            "node_id": "legacy",
+            "script_id": "legacy.py:legacy",
+            "module_path": "legacy.py",
+            "function_name": "legacy",
+        }
+    )
+    assert legacy.feedback_only is False
+    assert legacy.require_call_before_dispatch is False
+
+
 def test_graph_definition_json_loads_prompt_nodes_and_validates_prompt_edges() -> None:
     graph = graph_definition_from_dict(
         {
@@ -209,6 +238,8 @@ def test_control_plane_executes_script_nodes_between_agents(tmp_path: Path) -> N
                         {"name": "ratio", "type": "float"},
                     ],
                     "outputs": [{"name": "result", "type": "str"}],
+                    "feedback_only": True,
+                    "require_call_before_dispatch": True,
                 }
             },
             "edges": [
@@ -288,6 +319,252 @@ def test_control_plane_executes_script_nodes_between_agents(tmp_path: Path) -> N
     assert "ScriptNodeCompleted" in event_types
 
 
+def test_control_plane_default_script_nodes_can_be_bypassed(tmp_path: Path) -> None:
+    script_root = tmp_path / ".multi_agent_workspace" / "scripts"
+    script_root.mkdir(parents=True)
+    (script_root / "score.py").write_text(
+        "\n".join(
+            [
+                "from multi_agent_tcp.blueprint_script_nodes import blueprint_node",
+                "",
+                "@blueprint_node()",
+                "def score() -> str:",
+                "    return 'script output'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    graph = graph_definition_from_dict(
+        {
+            "agent_nodes": {
+                "planner": {"agent_id": "planner"},
+                "writer": {"agent_id": "writer"},
+            },
+            "script_nodes": {
+                "score": {
+                    "script_id": "score.py:score",
+                    "module_path": "score.py",
+                    "function_name": "score",
+                    "outputs": [{"name": "result", "type": "str"}],
+                }
+            },
+            "edges": [
+                {"from": "planner", "to": "score", "edge_type": "exec"},
+                {"from": "score", "to": "writer", "edge_type": "exec"},
+            ],
+        }
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph, script_root=script_root)
+
+    batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "planner",
+                "required_target_node_ids": ["writer"],
+                "batch_id": "legacy-script-batch",
+            },
+        }
+    )["batch"]
+    dispatched = control.handle_request(
+        {
+            "command": "agent.dispatch",
+            "args": {
+                "source_node_id": "planner",
+                "target_node_id": "writer",
+                "batch_id": batch["batch_id"],
+                "body": {"prompt": "direct handoff"},
+            },
+        }
+    )
+
+    assert dispatched["ok"] is True
+    writer_body = runtime.status_snapshot()["queues"]["by_agent"]["writer"][0]["body"]
+    assert writer_body["prompt"] == "direct handoff"
+
+
+def test_control_plane_forced_script_call_blocks_whole_source_batch(tmp_path: Path) -> None:
+    script_root = tmp_path / ".multi_agent_workspace" / "scripts"
+    script_root.mkdir(parents=True)
+    (script_root / "gate.py").write_text(
+        "\n".join(
+            [
+                "from multi_agent_tcp.blueprint_script_nodes import blueprint_node",
+                "",
+                "@blueprint_node(outputs={'result': str})",
+                "def gate() -> str:",
+                "    return 'ready'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    graph = graph_definition_from_dict(
+        {
+            "agent_nodes": {
+                "planner": {"agent_id": "planner"},
+                "writer": {"agent_id": "writer"},
+                "reviewer": {"agent_id": "reviewer"},
+            },
+            "script_nodes": {
+                "gate": {
+                    "script_id": "gate.py:gate",
+                    "module_path": "gate.py",
+                    "function_name": "gate",
+                    "outputs": [{"name": "result", "type": "str"}],
+                    "feedback_only": True,
+                    "require_call_before_dispatch": True,
+                }
+            },
+            "edges": [
+                {"from": "planner", "to": "gate", "edge_type": "exec"},
+                {"from": "gate", "to": "writer", "edge_type": "exec"},
+                {"from": "planner", "to": "reviewer", "edge_type": "exec"},
+            ],
+        }
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph, script_root=script_root)
+    batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "planner",
+                "required_target_node_ids": ["writer", "reviewer"],
+                "batch_id": "forced-whole-batch",
+            },
+        }
+    )["batch"]
+
+    context = control.handle_request(
+        {
+            "command": "agent.context",
+            "args": {"source_node_id": "planner", "batch_id": batch["batch_id"]},
+        }
+    )["context"]
+    envelope = context["message_envelope"]
+    assert context["downstream_nodes"] == []
+    assert envelope["forced_script_call_blocking"] is True
+    assert envelope["blocked_outgoing_targets"] == ["writer", "reviewer"]
+
+    with pytest.raises(ValueError, match="requires blueprint_script_call"):
+        control.handle_request(
+            {
+                "command": "agent.dispatch",
+                "args": {
+                    "source_node_id": "planner",
+                    "target_node_id": "reviewer",
+                    "batch_id": batch["batch_id"],
+                    "body": {"prompt": "review direct"},
+                },
+            }
+        )
+
+    called = control.handle_request(
+        {
+            "command": "script.call",
+            "args": {
+                "source_node_id": "planner",
+                "batch_id": batch["batch_id"],
+                "function_name": "gate",
+                "arguments": {},
+            },
+        }
+    )
+    assert called["ok"] is True
+    assert called["result"]["result"] == "ready"
+    assert called["delivery"][0]["target_node_id"] == "writer"
+
+    dispatched = control.handle_request(
+        {
+            "command": "agent.dispatch",
+            "args": {
+                "source_node_id": "planner",
+                "target_node_id": "reviewer",
+                "batch_id": batch["batch_id"],
+                "body": {"prompt": "review direct"},
+            },
+        }
+    )
+    assert dispatched["ok"] is True
+    snapshot = runtime.status_snapshot()
+    assert snapshot["queues"]["by_agent"]["writer"][0]["body"]["result"] == "ready"
+    assert snapshot["queues"]["by_agent"]["reviewer"][0]["body"]["prompt"] == "review direct"
+
+
+def test_control_plane_non_feedback_script_hides_result_from_caller(tmp_path: Path) -> None:
+    script_root = tmp_path / ".multi_agent_workspace" / "scripts"
+    script_root.mkdir(parents=True)
+    (script_root / "secret.py").write_text(
+        "\n".join(
+            [
+                "from multi_agent_tcp.blueprint_script_nodes import blueprint_node",
+                "",
+                "@blueprint_node(outputs={'result': dict})",
+                "def secret() -> dict:",
+                "    return {'token': 'hidden'}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    graph = graph_definition_from_dict(
+        {
+            "agent_nodes": {
+                "planner": {"agent_id": "planner"},
+                "writer": {"agent_id": "writer"},
+            },
+            "script_nodes": {
+                "secret": {
+                    "script_id": "secret.py:secret",
+                    "module_path": "secret.py",
+                    "function_name": "secret",
+                    "outputs": [{"name": "result", "type": "dict"}],
+                    "feedback_only": False,
+                    "require_call_before_dispatch": True,
+                }
+            },
+            "edges": [
+                {"from": "planner", "to": "secret", "edge_type": "exec"},
+                {"from": "secret", "to": "writer", "edge_type": "exec"},
+            ],
+        }
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph, script_root=script_root)
+    batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "planner",
+                "required_target_node_ids": ["writer"],
+                "batch_id": "non-feedback",
+            },
+        }
+    )["batch"]
+
+    called = control.handle_request(
+        {
+            "command": "script.call",
+            "args": {
+                "source_node_id": "planner",
+                "batch_id": batch["batch_id"],
+                "function_name": "secret",
+                "arguments": {},
+            },
+        }
+    )
+
+    assert called["ok"] is True
+    assert called["result"] is None
+    assert "result" not in called["script_call"]
+    assert "outputs" not in called["script_call"]
+    assert "result" not in called["batch"]["script_calls"]["secret"]
+    assert "outputs" not in called["batch"]["script_calls"]["secret"]
+    writer_body = runtime.status_snapshot()["queues"]["by_agent"]["writer"][0]["body"]
+    assert writer_body["outputs"] == {"result": {"token": "hidden"}}
+    assert writer_body["result"] == {"token": "hidden"}
+
+
 class _FakeResidentServices:
     def __init__(self, result: dict[str, Any]) -> None:
         self.result = result
@@ -364,6 +641,123 @@ def test_control_plane_queues_resident_service_error_for_stopped_service() -> No
     assert queued["type"] == "blueprint_service_error"
     assert queued["code"] == "RESIDENT_SERVICE_NOT_RUNNING"
     assert queued["error"] == "resident service is not running: echo_service"
+
+
+class _FakeTableQueueServices:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def summary(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "service_name": "table_queue",
+                "title": "table_queue",
+                "description": "Script-only table queue.",
+                "status": "running",
+            }
+        ]
+
+    def docs(self, service_name: str) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "service": {"service_name": service_name, "methods": [{"name": "health"}]},
+        }
+
+    def call(self, service_name: str, method_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((service_name, method_name, arguments))
+        return {
+            "ok": True,
+            "service_name": service_name,
+            "method_name": method_name,
+            "result": {"healthy": True, "arguments": dict(arguments)},
+        }
+
+
+def test_control_plane_blocks_table_queue_direct_service_calls_and_allows_script_proxy(tmp_path: Path) -> None:
+    services = _FakeTableQueueServices()
+    direct_graph = graph_definition_from_dict({"agent_nodes": {"planner": {"agent_id": "planner"}}})
+    direct_runtime = GraphRuntime(_FakeCluster())
+    direct_control = GraphRuntimeControlPlane(direct_runtime, direct_graph, resident_services=services)
+
+    context = direct_control.handle_request({"command": "agent.context", "args": {"source_node_id": "planner"}})
+    called = asyncio.run(direct_control.call_resident_service("planner", "table_queue", "health", {}))
+
+    assert context["context"]["resident_services"] == []
+    assert called["ok"] is False
+    assert called["service_call"]["code"] == "SERVICE_REQUIRES_SCRIPT_NODE"
+    assert called["queued_message"] is None
+    assert services.calls == []
+    assert direct_runtime.status_snapshot()["queues"]["by_agent"].get("planner", []) == []
+
+    script_root = tmp_path / ".multi_agent_workspace" / "scripts"
+    script_root.mkdir(parents=True)
+    (script_root / "table_queue_proxy.py").write_text(
+        "\n".join(
+            [
+                "from multi_agent_tcp.blueprint_script_nodes import blueprint_node, blueprint_service_call",
+                "",
+                "@blueprint_node(outputs={'result': dict})",
+                "def proxy() -> dict:",
+                "    return blueprint_service_call('table_queue', 'health', {'source': 'script'})",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    graph = graph_definition_from_dict(
+        {
+            "agent_nodes": {
+                "planner": {"agent_id": "planner"},
+                "writer": {"agent_id": "writer"},
+            },
+            "script_nodes": {
+                "table_queue_proxy": {
+                    "script_id": "table_queue_proxy.py:proxy",
+                    "module_path": "table_queue_proxy.py",
+                    "function_name": "proxy",
+                    "outputs": [{"name": "result", "type": "dict"}],
+                    "feedback_only": True,
+                    "require_call_before_dispatch": True,
+                }
+            },
+            "edges": [
+                {"from": "planner", "to": "table_queue_proxy", "edge_type": "exec"},
+                {"from": "table_queue_proxy", "to": "writer", "edge_type": "exec"},
+            ],
+        }
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph, script_root=script_root, resident_services=services)
+    batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "planner",
+                "required_target_node_ids": ["writer"],
+                "batch_id": "table-queue-proxy",
+            },
+        }
+    )["batch"]
+    proxied = control.handle_request(
+        {
+            "command": "script.call",
+            "args": {
+                "source_node_id": "planner",
+                "batch_id": batch["batch_id"],
+                "function_name": "proxy",
+                "arguments": {},
+            },
+        }
+    )
+
+    assert proxied["ok"] is True
+    assert proxied["result"]["result"]["ok"] is True
+    assert proxied["result"]["result"]["result"] == {"healthy": True, "arguments": {"source": "script"}}
+    assert services.calls == [("table_queue", "health", {"source": "script"})]
+    activities = runtime.status_snapshot()["runtime_activities"].values()
+    resident_activities = [activity for activity in activities if activity.get("kind") == "resident_service"]
+    assert len(resident_activities) == 1
+    assert resident_activities[0]["status"] == "completed"
+    assert resident_activities[0]["completed_at"] is not None
 
 
 def test_graph_definition_parses_common_nodes_and_validates_port_types() -> None:

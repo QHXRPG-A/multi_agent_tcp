@@ -73,6 +73,14 @@ DEFAULT_WORKER_AGENT_ACCESS_POLICY = {
     "framework_message_tools": True,
     "blueprint_monitor_tools": False,
 }
+DEFAULT_POPO_ENTRY = {
+    "enabled": False,
+    "robot_app_key": "",
+    "robot_name": "",
+    "robot_app_secret": "",
+    "callback_token": "",
+    "aes_key": "",
+}
 _VALID_AGENT_RUNTIME_STATES = {
     "created",
     "starting",
@@ -119,6 +127,19 @@ def _normalize_agent_access_policy(value: Any, node_type: AgentNodeType) -> Dict
     return {
         key: bool(value.get(key, default))
         for key, default in defaults.items()
+    }
+
+
+def _normalize_popo_entry(value: Any = None) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    return {
+        "enabled": bool(value.get("enabled", False)),
+        "robot_app_key": str(value.get("robot_app_key") or value.get("robotAppKey") or "").strip(),
+        "robot_name": str(value.get("robot_name") or value.get("robotName") or "").strip(),
+        "robot_app_secret": str(value.get("robot_app_secret") or value.get("robotAppSecret") or "").strip(),
+        "callback_token": str(value.get("callback_token") or value.get("callbackToken") or "").strip(),
+        "aes_key": str(value.get("aes_key") or value.get("aesKey") or "").strip(),
     }
 
 
@@ -626,6 +647,7 @@ class AgentNode:
     write_scope: List[str] = field(default_factory=list)
     artifact_scope: List[str] = field(default_factory=list)
     access_policy: Dict[str, bool] = field(default_factory=dict)
+    popo_entry: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not str(self.node_id).strip():
@@ -638,6 +660,7 @@ class AgentNode:
                 "AgentNode.execution_mode must be 'blocking' or 'nonblocking'"
             )
         self.access_policy = _normalize_agent_access_policy(self.access_policy, self.node_type)
+        self.popo_entry = _normalize_popo_entry(self.popo_entry)
         if not isinstance(self.skill_selection, AgentSkillSelection):
             self.skill_selection = AgentSkillSelection.from_value(
                 self.skill_selection,
@@ -707,6 +730,8 @@ class AgentNode:
             "artifact_scope": list(self.artifact_scope),
             "access_policy": dict(self.access_policy),
         }
+        if self.node_type == "agent" or self.popo_entry != DEFAULT_POPO_ENTRY:
+            data["popo_entry"] = dict(self.popo_entry)
         if self.agent_id is not None:
             data["agent_id"] = self.agent_id
         if self.workspace_id is not None:
@@ -787,6 +812,7 @@ class AgentNode:
             ),
             artifact_scope=[str(s) for s in data.get("artifact_scope", [])],
             access_policy=_normalize_agent_access_policy(data.get("access_policy"), node_type),
+            popo_entry=_normalize_popo_entry(data.get("popo_entry") or data.get("popoEntry")),
         )
 
 
@@ -1327,9 +1353,12 @@ class PendingAgentMessage:
     source_node_id: Optional[str] = None
     source_agent_id: Optional[str] = None
     route_id: Optional[str] = None
+    merge_key: Optional[str] = None
     timeout_sec: Optional[float] = None
     queue_mode: str = "default"
+    merge_count: int = 1
     created_at: float = field(default_factory=time.monotonic)
+    merged_at: Optional[float] = None
     dispatched_at: Optional[float] = None
     completed_at: Optional[float] = None
     status: str = "queued"
@@ -1352,6 +1381,11 @@ class PendingAgentMessage:
             data["source_agent_id"] = self.source_agent_id
         if self.route_id is not None:
             data["route_id"] = self.route_id
+        if self.merge_key is not None:
+            data["merge_key"] = self.merge_key
+            data["merge_count"] = self.merge_count
+        if self.merged_at is not None:
+            data["merged_at"] = self.merged_at
         if self.timeout_sec is not None:
             data["timeout_sec"] = self.timeout_sec
         if self.dispatched_at is not None:
@@ -1425,6 +1459,35 @@ class OutgoingMessageBatch:
     @property
     def ready_to_dispatch(self) -> bool:
         return not self.remaining_targets
+
+    def blocking_script_call_records_for_target(self, target_node_id: str) -> List[Dict[str, Any]]:
+        """Return forced ScriptNode calls that still block direct dispatch to target."""
+
+        path = [str(item) for item in self.script_paths_by_target.get(str(target_node_id), [])]
+        records: List[Dict[str, Any]] = []
+        complete_statuses = {"completed", "delivered", "feedback_delivered"}
+        for script_node_id in path:
+            record = self.script_calls.get(script_node_id)
+            if not isinstance(record, dict):
+                continue
+            if not bool(record.get("require_call_before_dispatch", False)):
+                continue
+            if str(record.get("status") or "pending") in complete_statuses:
+                continue
+            records.append(record)
+        return records
+
+    def pending_forced_script_call_records(self) -> List[Dict[str, Any]]:
+        """Return forced ScriptNode calls that still block this source batch."""
+
+        complete_statuses = {"completed", "delivered", "feedback_delivered"}
+        return [
+            record
+            for record in self.script_calls.values()
+            if isinstance(record, dict)
+            and bool(record.get("require_call_before_dispatch", False))
+            and str(record.get("status") or "pending") not in complete_statuses
+        ]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -2065,12 +2128,15 @@ class GraphRuntime:
         self._dispatch_tasks: Dict[str, asyncio.Task[None]] = {}
         self._job_tasks: Dict[str, asyncio.Task[None]] = {}
         self._jobs: Dict[str, GraphJob] = {}
+        self._runtime_activities: Dict[str, Dict[str, Any]] = {}
         self._events: List[GraphEvent] = []
         self._agent_stream_events: List[Dict[str, Any]] = []
         self._agent_stream_seq = 0
         self.agent_stream_run_id: Optional[str] = None
         self.agent_stream_event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+        self.agent_reply_callback: Optional[Callable[[Dict[str, Any]], Any]] = None
         self.agent_message_context_callback: Optional[Callable[[Dict[str, Any]], Any]] = None
+        self.blueprint_session_idle_check_callback: Optional[Callable[[], Any]] = None
         self._tick_task: Optional[asyncio.Task[None]] = None
         self._last_tick_at: Optional[float] = None
         self._run_status: RunLifecycleStatus = "created"
@@ -2082,6 +2148,10 @@ class GraphRuntime:
         self._completion_generation = 0
         self._ready_for_top_agent_summary = False
         self._ready_for_top_agent_summary_generation: Optional[int] = None
+        self.popo_termination_start_node_id = ""
+        self.popo_termination_session_key = ""
+        self.popo_termination_reminder_interval_sec = 300.0
+        self._popo_termination_prompted_at: Optional[float] = None
         self._closed = False
 
     def _ensure_private_context_runtime(self, node: AgentNode) -> None:
@@ -2382,6 +2452,12 @@ class GraphRuntime:
             status="received",
             metadata={"task_id": task_id} if task_id is not None else {},
         )
+        callback = self.agent_reply_callback
+        if callback is not None:
+            try:
+                callback(utterance.to_dict())
+            except Exception:
+                log.exception("agent reply callback failed")
         return utterance
 
     def _task_id_from_body(self, body: Any, *, message_id: Optional[str]) -> Optional[str]:
@@ -2742,6 +2818,68 @@ class GraphRuntime:
     def _completion_node_ids(self) -> List[str]:
         return list(self._completion_agent_node_ids or sorted(self._instances))
 
+    def begin_runtime_activity(
+        self,
+        kind: str,
+        *,
+        node_id: str = "",
+        name: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        activity_id = f"activity-{uuid.uuid4().hex[:12]}"
+        record = {
+            "activity_id": activity_id,
+            "kind": str(kind or "activity"),
+            "node_id": str(node_id or ""),
+            "name": str(name or ""),
+            "status": "running",
+            "started_at": time.monotonic(),
+            "payload": dict(payload or {}),
+        }
+        self._runtime_activities[activity_id] = record
+        self._emit(
+            GraphEvent(
+                "RuntimeActivityStarted",
+                node_id=record["node_id"] or None,
+                status="running",
+                payload=record,
+            )
+        )
+        return activity_id
+
+    def end_runtime_activity(
+        self,
+        activity_id: str,
+        *,
+        status: str = "completed",
+        error: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        record = self._runtime_activities.get(str(activity_id))
+        if record is None:
+            return
+        record["status"] = str(status or "completed")
+        record["completed_at"] = time.monotonic()
+        if error:
+            record["error"] = str(error)
+        if payload:
+            record["result"] = dict(payload)
+        self._emit(
+            GraphEvent(
+                "RuntimeActivityCompleted",
+                node_id=str(record.get("node_id") or "") or None,
+                status=str(record.get("status") or ""),
+                payload=dict(record),
+            )
+        )
+
+    def _active_runtime_activities(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            activity_id: dict(activity)
+            for activity_id, activity in self._runtime_activities.items()
+            if str(activity.get("status") or "") == "running"
+        }
+
     def _has_visible_pending_runtime_work(self) -> bool:
         queued = any(
             message.status in {"queued", "dispatching"}
@@ -2752,8 +2890,200 @@ class GraphRuntime:
         waiting_fan_in = any(gate.status == "waiting" for gate in self._fan_in_gates.values())
         waiting_joins = any(barrier.status == "waiting" for barrier in self._join_barriers.values())
         running_jobs = any(job.status in {"queued", "running"} for job in self._jobs.values())
+        running_activities = bool(self._active_runtime_activities())
         conflicts = bool(self._workspace_state_snapshot().get("conflicts", []))
-        return queued or dispatching or waiting_batches or waiting_fan_in or waiting_joins or running_jobs or conflicts
+        return queued or dispatching or waiting_batches or waiting_fan_in or waiting_joins or running_jobs or running_activities or conflicts
+
+    def ready_for_session_reset(self) -> bool:
+        """Return whether all started agents can be safely restarted for session reuse."""
+
+        if self._has_visible_pending_runtime_work():
+            return False
+        for inst in self._instances.values():
+            if inst.state != "idle":
+                return False
+            if int(inst.busy_count or 0) != 0:
+                return False
+            if inst.current_message_id is not None:
+                return False
+        return True
+
+    def blueprint_session_idle_snapshot(self) -> Dict[str, Any]:
+        """Return framework-owned session idle signals without queuing Agent work."""
+
+        now = time.monotonic()
+        agent_rows = []
+        all_agents_idle = bool(self._instances)
+        agent_idle_since_values: List[float] = []
+        for inst in self._instances.values():
+            idle = inst.state == "idle" and int(inst.busy_count or 0) == 0 and inst.current_message_id is None
+            if not idle:
+                all_agents_idle = False
+            if idle and inst.idle_since is not None:
+                agent_idle_since_values.append(float(inst.idle_since))
+            elif idle:
+                all_agents_idle = False
+            agent_rows.append(
+                {
+                    "node_id": inst.node.node_id,
+                    "agent_id": inst.agent_id,
+                    "state": inst.state,
+                    "busy_count": inst.busy_count,
+                    "current_message_id": inst.current_message_id,
+                    "idle_since": inst.idle_since,
+                }
+            )
+
+        active_activities = self._active_runtime_activities()
+        resident_activities = [
+            dict(activity)
+            for activity in self._runtime_activities.values()
+            if str(activity.get("kind") or "") == "resident_service"
+        ]
+        script_activities = [
+            dict(activity)
+            for activity in self._runtime_activities.values()
+            if str(activity.get("kind") or "") == "script_node"
+        ]
+        resident_running = any(str(activity.get("status") or "") == "running" for activity in resident_activities)
+        script_running = any(str(activity.get("status") or "") == "running" for activity in script_activities)
+        last_resident_completed_at = max(
+            [
+                float(activity.get("completed_at") or 0.0)
+                for activity in resident_activities
+                if activity.get("completed_at") is not None
+            ]
+            or [0.0]
+        )
+        last_script_completed_at = max(
+            [
+                float(activity.get("completed_at") or 0.0)
+                for activity in script_activities
+                if activity.get("completed_at") is not None
+            ]
+            or [0.0]
+        )
+        agent_idle_since = min(agent_idle_since_values) if agent_idle_since_values and all_agents_idle else None
+        work_idle_since_values = [value for value in [agent_idle_since, last_script_completed_at or None] if value is not None]
+        work_idle_since = max(work_idle_since_values) if work_idle_since_values else None
+        pending_work = self._has_visible_pending_runtime_work()
+        return {
+            "now": now,
+            "runStatus": self._run_status,
+            "pendingWork": pending_work,
+            "readyForSessionReset": self.ready_for_session_reset(),
+            "allAgentsIdle": all_agents_idle,
+            "agentIdleSince": agent_idle_since,
+            "scriptRunning": script_running,
+            "lastScriptCompletedAt": last_script_completed_at or None,
+            "workIdleSince": work_idle_since,
+            "workIdleSeconds": (now - work_idle_since) if work_idle_since is not None else 0.0,
+            "residentServiceRunning": resident_running,
+            "lastResidentServiceCompletedAt": last_resident_completed_at or None,
+            "residentServiceIdleSeconds": (
+                now - last_resident_completed_at if last_resident_completed_at else None
+            ),
+            "activeRuntimeActivities": active_activities,
+            "agents": agent_rows,
+        }
+
+    def _maybe_call_blueprint_session_idle_check(self) -> None:
+        callback = self.blueprint_session_idle_check_callback
+        if not callable(callback):
+            return
+        try:
+            result = callback()
+            if asyncio.iscoroutine(result):
+                asyncio.create_task(result)
+        except Exception:
+            log.exception("failed to run blueprint session idle check callback")
+
+    def _reset_agent_instance_session_state(self, inst: AgentInstance) -> None:
+        inst.messages_sent = 0
+        inst.busy_count = 0
+        inst.current_message_id = None
+        inst.last_error = None
+        inst.has_received_flow = False
+        inst.task_status = "not_started"
+        inst.task_summary = ""
+        inst.task_status_updated_at = None
+        inst.task_status_message_id = None
+        inst.task_status_batch_id = None
+        inst.task_status_reports = []
+        inst.task_status_artifacts = []
+        inst.task_status_changesets = []
+        inst.task_status_next_actions = []
+        inst.task_status_metadata = {}
+        inst.summary_prompted_at = None
+        inst.summary_prompt_message_id = None
+        inst.run_prompt_injected = False
+        inst.prompt_node_injected_ids = set()
+
+    async def reset_started_agents_for_session(self, graph: Optional["GraphDefinition"] = None) -> Dict[str, Any]:
+        """Restart all already-started AgentNode workers and clear session-scoped runtime state."""
+
+        if self._closed:
+            raise RuntimeError("GraphRuntime is closed")
+        if not self.ready_for_session_reset():
+            raise RuntimeError("runtime is not idle enough to reset the blueprint session")
+
+        instances = list(self._instances.values())
+        restart_worker = getattr(self.cluster, "restart_worker", None)
+        restartable = [inst for inst in instances if not inst.external]
+        if restartable and not callable(restart_worker):
+            raise RuntimeError("cluster does not support worker restart")
+
+        for queue in self._agent_message_queues.values():
+            queue.clear()
+        for queue in self._common_node_message_queues.values():
+            queue.clear()
+        self._pending_messages.clear()
+        self._pending_common_messages.clear()
+        self._dispatch_tasks.clear()
+        self._job_tasks.clear()
+        self._outgoing_batches.clear()
+        self._fan_in_gates.clear()
+        self._join_barriers.clear()
+        self._jobs.clear()
+        self._runtime_activities.clear()
+        self._ready_for_top_agent_summary = False
+        self._ready_for_top_agent_summary_generation = None
+        self._popo_termination_prompted_at = None
+
+        restarted: List[Dict[str, Any]] = []
+        reset_only: List[Dict[str, Any]] = []
+        for inst in instances:
+            self._set_agent_state(inst, "restarting")
+            source_node = inst.node
+            if graph is not None:
+                candidate = graph.agent_nodes.get(inst.node.node_id)
+                if candidate is not None:
+                    source_node = candidate
+            self._launch_nodes.pop(inst.node.node_id, None)
+            if inst.external:
+                self._reset_agent_instance_session_state(inst)
+                self._set_agent_state(inst, "idle")
+                reset_only.append({"node_id": inst.node.node_id, "agent_id": inst.agent_id, "external": True})
+                continue
+            launch_node = self._node_for_launch(source_node)
+            try:
+                await restart_worker(launch_node.to_worker_config())
+            except Exception as exc:
+                self._set_agent_state(inst, "failed", error=str(exc))
+                raise
+            inst.node = launch_node
+            self._reset_agent_instance_session_state(inst)
+            self._set_agent_state(inst, "idle")
+            restarted.append({"node_id": inst.node.node_id, "agent_id": inst.agent_id})
+
+        self._emit(
+            GraphEvent(
+                "BlueprintSessionAgentsReset",
+                status="completed",
+                payload={"restarted": restarted, "reset_only": reset_only},
+            )
+        )
+        return {"ok": True, "restarted": restarted, "resetOnly": reset_only}
 
     def _all_completion_agents_terminal(self) -> bool:
         node_ids = self._completion_node_ids()
@@ -3807,6 +4137,7 @@ class GraphRuntime:
             self._dispatch_tasks[pending.message_id] = asyncio.create_task(
                 self._dispatch_pending_message(inst.node, pending)
             )
+        self._maybe_call_blueprint_session_idle_check()
         self._maybe_emit_top_agent_summary_ready()
 
     def _pending_script_call_records(self, batch: OutgoingMessageBatch) -> List[Dict[str, Any]]:
@@ -3829,6 +4160,8 @@ class GraphRuntime:
                 "function_name": str(record.get("function_name") or ""),
                 "title": str(record.get("title") or record.get("function_name") or ""),
                 "description": str(record.get("description") or ""),
+                "feedback_only": bool(record.get("feedback_only", False)),
+                "require_call_before_dispatch": bool(record.get("require_call_before_dispatch", False)),
                 "inputs": [dict(item) for item in record.get("inputs", []) if isinstance(item, dict)],
                 "outputs": [dict(item) for item in record.get("outputs", []) if isinstance(item, dict)],
                 "batch_id": batch.batch_id,
@@ -4520,6 +4853,10 @@ class GraphRuntime:
             job_id: job.to_dict()
             for job_id, job in self._jobs.items()
         }
+        activity_state = {
+            activity_id: dict(activity)
+            for activity_id, activity in self._runtime_activities.items()
+        }
         events = self._events[-recent_events_limit:] if recent_events_limit >= 0 else self._events
 
         snapshot: Dict[str, Any] = {
@@ -4550,6 +4887,7 @@ class GraphRuntime:
             "agent_rings": self.agent_ring_status(graph),
             "joins": join_state,
             "jobs": jobs_state,
+            "runtime_activities": activity_state,
             "recent_events": [event.to_dict() for event in events],
             "agent_stream_events": self.agent_stream_events_after(),
             "workspace": self._workspace_state_snapshot(),
@@ -4575,6 +4913,7 @@ class GraphRuntime:
         outgoing = snapshot["outgoing_batches"]
         joins = snapshot["joins"]
         jobs = snapshot["jobs"]
+        runtime_activities = snapshot.get("runtime_activities", {})
         workspace = snapshot.get("workspace") or {}
 
         agent_states: Dict[str, List[str]] = {}
@@ -4604,6 +4943,11 @@ class GraphRuntime:
             for job_id, job in jobs.items()
             if job.get("status") in {"queued", "running"}
         }
+        running_activities = {
+            activity_id: activity
+            for activity_id, activity in runtime_activities.items()
+            if activity.get("status") == "running"
+        }
         conflicts = list(workspace.get("conflicts", []))
         reports = list(workspace.get("reports", []))
         artifacts = list(workspace.get("artifacts", []))
@@ -4625,6 +4969,8 @@ class GraphRuntime:
             observations.append(f"{len(waiting_joins)} join barrier(s) waiting for sources")
         if running_jobs:
             observations.append(f"{len(running_jobs)} background job(s) still running")
+        if running_activities:
+            observations.append(f"{len(running_activities)} runtime activity item(s) still running")
         if failed_jobs:
             observations.append(f"{len(failed_jobs)} failed job(s)")
         if conflicts:
@@ -4637,6 +4983,7 @@ class GraphRuntime:
                 waiting_batches,
                 waiting_joins,
                 running_jobs,
+                running_activities,
                 failed_jobs,
                 conflicts,
             ]
@@ -4696,6 +5043,7 @@ class GraphRuntime:
                     for join_id, join in waiting_joins.items()
                 },
                 "running_jobs": sorted(running_jobs),
+                "running_activities": sorted(running_activities),
             },
             "risks": {
                 "failed_jobs": sorted(failed_jobs),
@@ -4758,6 +5106,11 @@ class GraphRuntime:
             for job in self._jobs.values()
             if job.status in {"queued", "running"}
         ]
+        running_activities = [
+            dict(activity)
+            for activity in self._runtime_activities.values()
+            if str(activity.get("status") or "") == "running"
+        ]
         accepted_changesets = [
             item
             for barrier in self._join_barriers.values()
@@ -4775,6 +5128,7 @@ class GraphRuntime:
             "failed_messages": failed_messages,
             "failed_jobs": failed_jobs,
             "running_jobs": running_jobs,
+            "running_activities": running_activities,
             "waiting_joins": waiting_joins,
             "timed_out_joins": timed_out_joins,
             "conflicts": conflict_items,
@@ -4799,7 +5153,13 @@ class GraphRuntime:
             state in {"failed", "disconnected"} for state in summary["agent_states"].values()
         ):
             return "failed"
-        if summary["pending_messages"] or summary["pending_common_messages"] or summary["running_jobs"] or summary["waiting_joins"]:
+        if (
+            summary["pending_messages"]
+            or summary["pending_common_messages"]
+            or summary["running_jobs"]
+            or summary["running_activities"]
+            or summary["waiting_joins"]
+        ):
             if summary["completed_jobs"] or summary["accepted_changesets"]:
                 return "partial_success"
             return "failed"
@@ -4868,6 +5228,23 @@ class GraphRuntime:
                 )
             )
 
+        cancelled_activities: List[str] = []
+        for activity_id, activity in self._runtime_activities.items():
+            if str(activity.get("status") or "") != "running":
+                continue
+            activity["status"] = "cancelled"
+            activity["completed_at"] = time.monotonic()
+            activity["error"] = reason or "run ended"
+            cancelled_activities.append(activity_id)
+            self._emit(
+                GraphEvent(
+                    "RuntimeActivityCompleted",
+                    node_id=str(activity.get("node_id") or "") or None,
+                    status="cancelled",
+                    payload=dict(activity),
+                )
+            )
+
         cancelled_joins: List[str] = []
         for barrier in self._join_barriers.values():
             if barrier.status != "waiting":
@@ -4889,11 +5266,12 @@ class GraphRuntime:
             "messages": cancelled_messages,
             "common_messages": cancelled_common_messages,
             "jobs": cancelled_jobs,
+            "activities": cancelled_activities,
             "joins": cancelled_joins,
             "dispatch_tasks": list(self._dispatch_tasks),
             "job_tasks": list(self._job_tasks),
         }
-        if any(summary[key] for key in ("messages", "common_messages", "jobs", "joins", "dispatch_tasks", "job_tasks")):
+        if any(summary[key] for key in ("messages", "common_messages", "jobs", "activities", "joins", "dispatch_tasks", "job_tasks")):
             self._emit(
                 GraphEvent(
                     "RunPendingWorkCancelled",
@@ -5683,6 +6061,8 @@ class GraphRuntime:
                         "function_name": node.function_name,
                         "title": node.title,
                         "description": node.description,
+                        "feedback_only": node.feedback_only,
+                        "require_call_before_dispatch": node.require_call_before_dispatch,
                         "inputs": [port.to_dict() for port in node.inputs],
                         "outputs": [port.to_dict() for port in node.outputs],
                         "required_target_node_ids": [],
@@ -5894,8 +6274,6 @@ class GraphRuntime:
                     if script_node_id:
                         edge_source_node_id = script_node_id
                         script_path = [*script_path, script_node_id] if script_node_id not in script_path else script_path
-                elif script_path:
-                    edge_source_node_id = script_path[-1]
 
                 for edge in graph.edges:
                     if edge.source == edge_source_node_id and edge.target == target_node_id and edge.is_exec_edge:
@@ -6066,6 +6444,33 @@ class GraphRuntime:
             message_id=f"msg-{uuid.uuid4().hex[:12]}",
         )
 
+    @staticmethod
+    def _merge_prompt_text_from_body(body: Any) -> str:
+        if isinstance(body, dict):
+            for key in ("prompt", "message", "user_message"):
+                value = body.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return ""
+        if isinstance(body, str):
+            return body.strip()
+        return ""
+
+    @classmethod
+    def _append_merged_agent_message_body(cls, body: Any, append_text: str) -> Any:
+        text = str(append_text or "").strip()
+        if not text:
+            return body
+        section = f"[Additional User Message]\n{text}"
+        if isinstance(body, dict):
+            merged = dict(body)
+            prompt = cls._merge_prompt_text_from_body(merged)
+            merged["prompt"] = f"{prompt}\n\n{section}".strip() if prompt else section
+            return merged
+        if isinstance(body, str):
+            return f"{body.strip()}\n\n{section}".strip()
+        return {"payload": body, "prompt": section}
+
     def queue_agent_message(
         self,
         node: AgentNode,
@@ -6076,6 +6481,8 @@ class GraphRuntime:
         source_agent_id: Optional[str] = None,
         route_id: Optional[str] = None,
         message_id: Optional[str] = None,
+        merge_key: Optional[str] = None,
+        merge_append_text: Optional[str] = None,
         queue_mode: str = "default",
     ) -> PendingAgentMessage:
         """Store a message until the target agent returns to an idle state."""
@@ -6087,6 +6494,57 @@ class GraphRuntime:
         self._mark_run_running()
         inst = self._instances.get(node.node_id)
         agent_id = inst.agent_id if inst is not None else node.runtime_agent_id
+        queue = self._agent_message_queues.setdefault(node.node_id, [])
+        normalized_merge_key = str(merge_key or "").strip()
+        if normalized_merge_key:
+            for existing in queue:
+                if (
+                    existing.merge_key == normalized_merge_key
+                    and existing.status == "queued"
+                    and existing.dispatched_at is None
+                ):
+                    append_text = str(merge_append_text or "").strip()
+                    if not append_text:
+                        append_text = self._merge_prompt_text_from_body(body)
+                    existing.body = self._append_merged_agent_message_body(existing.body, append_text)
+                    existing.merge_count += 1
+                    existing.merged_at = time.monotonic()
+                    self.record_agent_stream_event(
+                        {
+                            "kind": "queue.merged",
+                            "node_id": existing.node_id,
+                            "agent_id": existing.agent_id,
+                            "message_id": existing.message_id,
+                            "status": existing.status,
+                            "queue_size": len(queue),
+                            "queue_mode": existing.queue_mode,
+                            "merge_key": normalized_merge_key,
+                            "merge_count": existing.merge_count,
+                        }
+                    )
+                    self._record_message_io(
+                        record_type="framework.message.merged",
+                        sender={
+                            "type": "agent" if source_agent_id else "framework",
+                            "agent_id": source_agent_id,
+                            "node_id": source_node_id,
+                        },
+                        receiver={"type": "agent", "agent_id": existing.agent_id, "node_id": existing.node_id},
+                        payload=body,
+                        message_id=existing.message_id,
+                        status=existing.status,
+                    )
+                    self._emit(
+                        GraphEvent(
+                            "AgentMessageMerged",
+                            node_id=existing.node_id,
+                            agent_id=existing.agent_id,
+                            status=existing.status,
+                            payload=existing.to_dict(),
+                        )
+                    )
+                    return existing
+
         pending = PendingAgentMessage(
             message_id=message_id or f"msg-{uuid.uuid4().hex[:12]}",
             node_id=node.node_id,
@@ -6095,12 +6553,12 @@ class GraphRuntime:
             source_node_id=source_node_id,
             source_agent_id=source_agent_id,
             route_id=str(route_id) if route_id is not None else None,
+            merge_key=normalized_merge_key or None,
             timeout_sec=timeout_sec,
             queue_mode=normalized_queue_mode,
         )
         if inst is not None:
             self._mark_agent_flow_received(inst, message_id=pending.message_id, body=body)
-        queue = self._agent_message_queues.setdefault(node.node_id, [])
         if normalized_queue_mode == "top":
             queue.insert(0, pending)
         else:
@@ -6818,6 +7276,8 @@ class ScriptNode:
     inputs: List[ScriptNodePort] = field(default_factory=list)
     outputs: List[ScriptNodePort] = field(default_factory=list)
     collapsed: bool = True
+    feedback_only: bool = False
+    require_call_before_dispatch: bool = False
 
     def __post_init__(self) -> None:
         self.node_id = str(self.node_id).strip()
@@ -6834,6 +7294,8 @@ class ScriptNode:
             for index, port in enumerate(self.outputs or [ScriptNodePort("result", "Any")])
         ]
         self.collapsed = bool(self.collapsed)
+        self.feedback_only = bool(self.feedback_only)
+        self.require_call_before_dispatch = bool(self.require_call_before_dispatch)
         if not self.module_path:
             raise ValueError("ScriptNode.module_path must be non-empty")
         if not self.function_name:
@@ -6850,6 +7312,8 @@ class ScriptNode:
             "inputs": [port.to_dict() for port in self.inputs],
             "outputs": [port.to_dict() for port in self.outputs],
             "collapsed": self.collapsed,
+            "feedback_only": self.feedback_only,
+            "require_call_before_dispatch": self.require_call_before_dispatch,
         }
 
     @classmethod
@@ -6872,6 +7336,8 @@ class ScriptNode:
                 for index, item in enumerate(data.get("outputs", []))
             ],
             collapsed=bool(data.get("collapsed", True)),
+            feedback_only=bool(data.get("feedback_only", False)),
+            require_call_before_dispatch=bool(data.get("require_call_before_dispatch", False)),
         )
 
 

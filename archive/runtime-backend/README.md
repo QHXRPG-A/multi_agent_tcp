@@ -6,6 +6,7 @@ worker adapters.
 
 Current records:
 
+- `blueprint_slot_termination_popo_direct_reply_new_session_2026-06-10.md`
 - `blueprint_agent_ring_runtime_workbench_2026-06-08.md`
 - `blueprint_resident_services_script_nodes_xltool_smoke_2026-06-08.md`
 - `blueprint_sessions_slots_popo_mcp_2026-06-05.md`
