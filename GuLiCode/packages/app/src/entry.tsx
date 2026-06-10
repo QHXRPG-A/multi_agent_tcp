@@ -124,6 +124,12 @@ const blueprintRequest = async (config: BlueprintWorkbenchConfig, command: strin
   return payload
 }
 
+const blueprintCatalogDirsPayload = (dirs?: string | string[]) => {
+  if (Array.isArray(dirs)) return { dirs }
+  const dir = String(dirs ?? "").trim()
+  return dir ? { dir } : {}
+}
+
 type BlueprintPickerPaths = Awaited<ReturnType<NonNullable<Platform["openDirectoryPickerDialog"]>>>
 
 const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkbenchConfig): Platform => ({
@@ -142,7 +148,12 @@ const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkben
     (await blueprintRequest(config, "blueprint.save", { projectDir, document })).document,
   detectBlueprintPython: async (projectDir?: string, pythonCommand?: string) =>
     blueprintRequest(config, "blueprint.detectPython", { projectDir, pythonCommand }),
-  listBlueprintSkills: async () => (await blueprintRequest(config, "blueprint.listSkills")).skills ?? [],
+  listBlueprintModels: async (cliKind: string) =>
+    (await blueprintRequest(config, "blueprint.listModels", { cliKind })).models ?? [],
+  listBlueprintSkills: async (dirs?: string | string[]) =>
+    (await blueprintRequest(config, "blueprint.listSkills", blueprintCatalogDirsPayload(dirs))).skills ?? [],
+  listBlueprintRules: async (dirs?: string | string[]) =>
+    (await blueprintRequest(config, "blueprint.listRules", blueprintCatalogDirsPayload(dirs))).rules ?? [],
   listBlueprintScriptNodes: async (projectDir: string) =>
     blueprintRequest(config, "blueprint.scriptNodes", { projectDir }),
   createBlueprintScriptNode: async (projectDir: string, name: string, description?: string) =>

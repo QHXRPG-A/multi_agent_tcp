@@ -48,7 +48,9 @@ export type BlueprintConfig = {
   python_path: string
   project_workdir: string
   skill_dir: string
+  skill_dirs: string[]
   rule_dir: string
+  rule_dirs: string[]
 }
 
 export type BlueprintPopoEntry = {
@@ -330,7 +332,9 @@ export function createDefaultBlueprintConfig(projectWorkdir = DEFAULT_PROJECT_WO
     python_path: DEFAULT_PYTHON_PATH,
     project_workdir: projectWorkdir || DEFAULT_PROJECT_WORKDIR,
     skill_dir: DEFAULT_SKILL_DIR,
+    skill_dirs: [],
     rule_dir: DEFAULT_RULE_DIR,
+    rule_dirs: [],
   }
 }
 
@@ -1351,6 +1355,30 @@ export function isAbsoluteBlueprintPath(value: string) {
   return /^\\\\[^\\]+\\[^\\]+/.test(path)
 }
 
+export function normalizeBlueprintConfigPathList(paths: unknown, legacyPath?: unknown) {
+  const rawList = Array.isArray(paths) ? paths : []
+  const values = rawList
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean)
+  const source = values.length > 0 ? values : [String(legacyPath ?? "").trim()].filter(Boolean)
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of source) {
+    if (seen.has(value)) continue
+    seen.add(value)
+    result.push(value)
+  }
+  return result
+}
+
+export function effectiveBlueprintSkillDirs(config?: Partial<BlueprintConfig>) {
+  return normalizeBlueprintConfigPathList(config?.skill_dirs, config?.skill_dir)
+}
+
+export function effectiveBlueprintRuleDirs(config?: Partial<BlueprintConfig>) {
+  return normalizeBlueprintConfigPathList(config?.rule_dirs, config?.rule_dir)
+}
+
 export function requiredBlueprintConfigFields(draft: BlueprintDraft): BlueprintConfigField[] {
   const fields: BlueprintConfigField[] = ["python_path", "project_workdir"]
   if (blueprintUsesRuleDirectory(draft)) fields.push("rule_dir")
@@ -1358,19 +1386,29 @@ export function requiredBlueprintConfigFields(draft: BlueprintDraft): BlueprintC
 }
 
 export function validateBlueprintConfigForStart(draft: BlueprintDraft): BlueprintConfigValidationIssue[] {
-  const config = draft.config ?? createDefaultBlueprintConfig()
+  const config = normalizeBlueprintConfig(draft.config)
   const required = new Set(requiredBlueprintConfigFields(draft))
-  const fields: BlueprintConfigField[] = ["python_path", "project_workdir", "rule_dir"]
   const issues: BlueprintConfigValidationIssue[] = []
 
-  for (const field of fields) {
+  const addIssue = (field: BlueprintConfigField, reason: BlueprintConfigValidationIssue["reason"]) => {
+    if (!issues.some((issue) => issue.field === field && issue.reason === reason)) issues.push({ field, reason })
+  }
+
+  for (const field of ["python_path", "project_workdir"] as BlueprintConfigField[]) {
     const value = String(config[field] ?? "").trim()
     if (!value) {
-      if (required.has(field)) issues.push({ field, reason: "missing" })
+      if (required.has(field)) addIssue(field, "missing")
       continue
     }
-    if (!isAbsoluteBlueprintPath(value)) issues.push({ field, reason: "not_absolute" })
+    if (!isAbsoluteBlueprintPath(value)) addIssue(field, "not_absolute")
   }
+
+  const skillDirs = effectiveBlueprintSkillDirs(config)
+  if (skillDirs.some((value) => !isAbsoluteBlueprintPath(value))) addIssue("skill_dir", "not_absolute")
+
+  const ruleDirs = effectiveBlueprintRuleDirs(config)
+  if (required.has("rule_dir") && ruleDirs.length === 0) addIssue("rule_dir", "missing")
+  else if (ruleDirs.some((value) => !isAbsoluteBlueprintPath(value))) addIssue("rule_dir", "not_absolute")
 
   return issues
 }
@@ -1544,13 +1582,17 @@ function normalizePopoEntry(value?: Partial<BlueprintPopoEntry>): BlueprintPopoE
 }
 
 function normalizeBlueprintConfig(config?: Partial<BlueprintConfig>): BlueprintConfig {
+  const skillDirs = normalizeBlueprintConfigPathList(config?.skill_dirs, config?.skill_dir)
+  const ruleDirs = normalizeBlueprintConfigPathList(config?.rule_dirs, config?.rule_dir)
   return {
     ...createDefaultBlueprintConfig(),
     ...(config ?? {}),
     python_path: config?.python_path?.trim() ?? DEFAULT_PYTHON_PATH,
     project_workdir: config?.project_workdir?.trim() ?? DEFAULT_PROJECT_WORKDIR,
-    skill_dir: config?.skill_dir?.trim() ?? DEFAULT_SKILL_DIR,
-    rule_dir: config?.rule_dir?.trim() ?? DEFAULT_RULE_DIR,
+    skill_dir: skillDirs[0] ?? DEFAULT_SKILL_DIR,
+    skill_dirs: skillDirs,
+    rule_dir: ruleDirs[0] ?? DEFAULT_RULE_DIR,
+    rule_dirs: ruleDirs,
   }
 }
 

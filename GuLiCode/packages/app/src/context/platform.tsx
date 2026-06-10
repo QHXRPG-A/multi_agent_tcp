@@ -183,11 +183,11 @@ export type Platform = {
   /** Blueprint directory candidates (desktop only) */
   listBlueprintDirectories?(dir: string): Promise<BlueprintCatalogItem[]>
 
-  /** Blueprint skill candidates from a skill directory (desktop only) */
-  listBlueprintSkills?(dir: string): Promise<BlueprintCatalogItem[]>
+  /** Blueprint skill candidates from one or more skill directories (desktop only) */
+  listBlueprintSkills?(dirs?: string | string[]): Promise<BlueprintCatalogItem[]>
 
-  /** Blueprint rule candidates from a rule directory (desktop only) */
-  listBlueprintRules?(dir: string): Promise<BlueprintCatalogItem[]>
+  /** Blueprint rule candidates from one or more rule directories (desktop only) */
+  listBlueprintRules?(dirs?: string | string[]): Promise<BlueprintCatalogItem[]>
 
   /** Blueprint model candidates for the selected CLI adapter (desktop only) */
   listBlueprintModels?(cliKind: string): Promise<string[]>

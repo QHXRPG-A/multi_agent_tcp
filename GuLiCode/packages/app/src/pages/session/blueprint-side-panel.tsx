@@ -43,6 +43,8 @@ import {
   deleteEdge,
   deleteNode,
   deleteSelection,
+  effectiveBlueprintRuleDirs,
+  effectiveBlueprintSkillDirs,
   fanEdgeGroup,
   jsonText,
   nodeKind,
@@ -103,6 +105,16 @@ const SCRIPT_NODE_PORT_ROW_HEIGHT = 22
 const SCRIPT_NODE_MIN_EXPANDED_HEIGHT = 102
 const COMMON_BRANCH_WIDTH = SCRIPT_NODE_WIDTH
 const COMMON_BRANCH_HEIGHT = SCRIPT_NODE_MIN_EXPANDED_HEIGHT
+const FRAMEWORK_AGENT_SKILL_OPTION: BlueprintCatalogItem = {
+  value: "framework-agent-runtime",
+  label: "framework-agent-runtime",
+  description: "Framework-managed runtime skill. Stored in framework_assets/skills/framework-agent-runtime/SKILL.md.",
+}
+const FRAMEWORK_AGENT_RULE_OPTION: BlueprintCatalogItem = {
+  value: "framework_assets/rules/framework-agent-runtime.md",
+  label: "framework-agent-runtime.md",
+  description: "Framework-managed runtime rule. Stored in framework_assets/rules/framework-agent-runtime.md.",
+}
 const PROMPT_NODE_WIDTH = 220
 const PROMPT_NODE_HEIGHT = 150
 const PROMPT_EDITOR_DEFAULT_WIDTH = 440
@@ -270,12 +282,14 @@ const BLUEPRINT_INSPECTOR_THEME = {
 } as JSX.CSSProperties
 
 const MODEL_LIST_FALLBACKS: Record<string, string[]> = {
-  codex: ["gpt-5.4"],
+  codex: ["gpt-5.5", "gpt-5.4"],
 }
 
 export type CatalogState = {
   skillDir: string
+  skillDirs: string[]
   ruleDir: string
+  ruleDirs: string[]
   scriptDir: string
   skills: BlueprintCatalogItem[]
   rules: BlueprintCatalogItem[]
@@ -1015,7 +1029,9 @@ export function BlueprintSidePanel(props: {
   const [progressAnchorVersion, setProgressAnchorVersion] = createSignal(0)
   const [catalog, setCatalog] = createSignal<CatalogState>({
     skillDir: "",
+    skillDirs: [],
     ruleDir: "",
+    ruleDirs: [],
     scriptDir: "",
     skills: [],
     rules: [],
@@ -1505,7 +1521,9 @@ export function BlueprintSidePanel(props: {
     python_path: draft.config?.python_path ?? "",
     project_workdir: draft.config?.project_workdir ?? projectDirectory ?? ".",
     skill_dir: draft.config?.skill_dir ?? "",
+    skill_dirs: draft.config?.skill_dirs ?? [],
     rule_dir: draft.config?.rule_dir ?? "",
+    rule_dirs: draft.config?.rule_dirs ?? [],
   }))
   const runtimeStartNodeOptions = createMemo<BlueprintRuntimeStartNodeOption[]>(() =>
     Object.entries(draft.graph.agent_nodes)
@@ -1576,7 +1594,9 @@ export function BlueprintSidePanel(props: {
   })
 
   const updateConfigField = <K extends keyof BlueprintConfig>(field: K, value: BlueprintConfig[K]) => {
-    setConfigIssues((issues) => issues.filter((issue) => issue.field !== field))
+    const issueField =
+      field === "skill_dirs" ? "skill_dir" : field === "rule_dirs" ? "rule_dir" : field
+    setConfigIssues((issues) => issues.filter((issue) => issue.field !== issueField && issue.field !== field))
     if (field === "python_path") setPythonDetectFailed(false)
     setDraft("config", field, value as never)
   }
@@ -1716,14 +1736,14 @@ export function BlueprintSidePanel(props: {
     }, 450)
   }
 
-  const listSkills = async () => {
-    const items = await platform.listBlueprintSkills?.("")
+  const listSkills = async (skillDirs: string[]) => {
+    const items = await platform.listBlueprintSkills?.(skillDirs)
     return items ?? []
   }
 
-  const listRules = async (ruleDir: string) => {
-    if (!ruleDir) return [] as BlueprintCatalogItem[]
-    const items = await platform.listBlueprintRules?.(ruleDir)
+  const listRules = async (ruleDirs: string[]) => {
+    if (ruleDirs.length === 0) return [] as BlueprintCatalogItem[]
+    const items = await platform.listBlueprintRules?.(ruleDirs)
     return items ?? []
   }
 
@@ -2399,12 +2419,15 @@ export function BlueprintSidePanel(props: {
     if (blankCommonPath(config.project_workdir)) updates.project_workdir = projectRoot
 
     const ruleDirCandidate = joinProjectPath(projectRoot, "rules")
-    if (blankCommonPath(config.rule_dir)) {
-      const rules = await listRules(ruleDirCandidate).catch(() => [] as BlueprintCatalogItem[])
-      if (rules.length > 0) updates.rule_dir = ruleDirCandidate
+    if (effectiveBlueprintRuleDirs(config).length === 0) {
+      const rules = await listRules([ruleDirCandidate]).catch(() => [] as BlueprintCatalogItem[])
+      if (rules.length > 0) {
+        updates.rule_dir = ruleDirCandidate
+        updates.rule_dirs = [ruleDirCandidate]
+      }
     }
 
-    for (const [field, value] of Object.entries(updates) as Array<[keyof BlueprintConfig, string]>) {
+    for (const [field, value] of Object.entries(updates) as Array<[keyof BlueprintConfig, BlueprintConfig[keyof BlueprintConfig]]>) {
       setDraft("config", field, value as never)
     }
   }
@@ -2415,15 +2438,19 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
-    const ruleDir = currentConfig().rule_dir
+    const config = currentConfig()
+    const skillDirs = effectiveBlueprintSkillDirs(config)
+    const ruleDirs = effectiveBlueprintRuleDirs(config)
     catalogRefreshVersion()
     let cancelled = false
 
-    void Promise.allSettled([listSkills(), listRules(ruleDir), listScriptNodes()]).then(([skills, rules, scripts]) => {
+    void Promise.allSettled([listSkills(skillDirs), listRules(ruleDirs), listScriptNodes()]).then(([skills, rules, scripts]) => {
       if (cancelled) return
       setCatalog({
-        skillDir: "$CODEX_HOME/skills",
-        ruleDir,
+        skillDir: skillDirs[0] ?? "$CODEX_HOME/skills",
+        skillDirs,
+        ruleDir: ruleDirs[0] ?? "",
+        ruleDirs,
         scriptDir: scripts.status === "fulfilled" ? scripts.value.scriptDir : "",
         skills: skills.status === "fulfilled" ? skills.value : [],
         rules: rules.status === "fulfilled" ? rules.value : [],
@@ -4844,6 +4871,8 @@ export function BlueprintSidePanel(props: {
                 onConfigChange={updateConfigField}
                 onProjectWorkdirBrowse={() => void pickProjectWorkdir(currentConfig().project_workdir)}
                 locked={blueprintConfigLocked()}
+                skillCount={catalog().skills.length}
+                skillError={catalog().skillError}
                 ruleCount={catalog().rules.length}
                 ruleError={catalog().ruleError}
                 invalidFields={configIssues().map((issue) => issue.field)}
@@ -6536,6 +6565,14 @@ function ResidentServicesPanel(props: {
   const [residentServiceSearchQuery, setResidentServiceSearchQuery] = createSignal("")
   const [residentServicePage, setResidentServicePage] = createSignal(1)
   const [residentServiceCollapsed, setResidentServiceCollapsed] = createSignal(false)
+  let residentServicePanelRef: HTMLDivElement | undefined
+  const residentServicePanelInitialPosition = () => {
+    const margin = 12
+    const width = 320
+    const viewportWidth = typeof window === "undefined" ? 1024 : window.innerWidth
+    return { x: Math.max(margin, viewportWidth - width - margin), y: margin }
+  }
+  const [residentServicePanelPosition, setResidentServicePanelPosition] = createSignal(residentServicePanelInitialPosition())
   const services = () => props.state.services
   const normalizedResidentServiceSearch = () => residentServiceSearchQuery().trim().toLowerCase()
   const filteredResidentServices = createMemo(() => {
@@ -6561,6 +6598,54 @@ function ResidentServicesPanel(props: {
         : language.t("blueprint.resident.empty" as never)
   const serviceRunning = (service: BlueprintResidentServiceItem) => service.status === "running"
   const setResidentServicePageClamped = (page: number) => setResidentServicePage(clamp(page, 1, totalResidentServicePages()))
+  const clampResidentServicePanelPosition = (position: { x: number; y: number }) => {
+    if (typeof window === "undefined") return position
+    const margin = 12
+    const width = residentServicePanelRef?.offsetWidth || 320
+    const height = residentServicePanelRef?.offsetHeight || 120
+    return {
+      x: clamp(position.x, margin, Math.max(margin, window.innerWidth - width - margin)),
+      y: clamp(position.y, margin, Math.max(margin, window.innerHeight - height - margin)),
+    }
+  }
+  const startResidentServicePanelDrag = (event: PointerEvent) => {
+    event.stopPropagation()
+    event.preventDefault()
+    const handle = event.currentTarget as HTMLElement
+    handle.setPointerCapture?.(event.pointerId)
+    const start = residentServicePanelPosition()
+    const startX = event.clientX
+    const startY = event.clientY
+    const pointerId = event.pointerId
+    const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return
+      moveEvent.stopPropagation()
+      moveEvent.preventDefault()
+      setResidentServicePanelPosition(
+        clampResidentServicePanelPosition({
+          x: start.x + moveEvent.clientX - startX,
+          y: start.y + moveEvent.clientY - startY,
+        }),
+      )
+    }
+    const stop = (stopEvent: PointerEvent) => {
+      if (stopEvent.pointerId !== pointerId) return
+      stopEvent.stopPropagation()
+      handle.releasePointerCapture?.(pointerId)
+      window.removeEventListener("pointermove", move)
+      window.removeEventListener("pointerup", stop)
+      window.removeEventListener("pointercancel", stop)
+    }
+    window.addEventListener("pointermove", move)
+    window.addEventListener("pointerup", stop)
+    window.addEventListener("pointercancel", stop)
+  }
+  onMount(() => {
+    const clampCurrentPosition = () => setResidentServicePanelPosition((position) => clampResidentServicePanelPosition(position))
+    clampCurrentPosition()
+    window.addEventListener("resize", clampCurrentPosition)
+    onCleanup(() => window.removeEventListener("resize", clampCurrentPosition))
+  })
   createEffect(
     on(
       residentServiceSearchQuery,
@@ -6575,21 +6660,23 @@ function ResidentServicesPanel(props: {
 
   return (
     <div
+      ref={residentServicePanelRef}
       data-blueprint-resident-services-panel
-      class="pointer-events-auto absolute right-3 top-3 z-40 flex w-[320px] max-w-[calc(100%-6rem)] flex-col gap-2 rounded-md border border-[rgba(103,232,249,0.28)] bg-[#08111d]/94 p-2 shadow-[0_18px_46px_rgba(0,0,0,0.36)] backdrop-blur"
+      class="pointer-events-auto absolute z-40 flex w-[320px] max-w-[calc(100%-6rem)] flex-col gap-2 rounded-md border border-[rgba(103,232,249,0.28)] bg-[#08111d]/94 p-2 shadow-[0_18px_46px_rgba(0,0,0,0.36)] backdrop-blur"
+      style={{
+        left: `${residentServicePanelPosition().x}px`,
+        top: `${residentServicePanelPosition().y}px`,
+      }}
       onPointerDown={(event) => event.stopPropagation()}
     >
       <div class="flex min-w-0 items-center justify-between gap-2 px-1">
-        <button
-          data-blueprint-resident-toggle
-          type="button"
-          class="flex min-w-0 flex-1 items-center gap-2 text-left"
-          aria-expanded={!residentServiceCollapsed()}
-          aria-label={language.t((residentServiceCollapsed() ? "blueprint.resident.expand" : "blueprint.resident.collapse") as never)}
-          onClick={() => setResidentServiceCollapsed((collapsed) => !collapsed)}
+        <div
+          data-blueprint-resident-drag-handle
+          class="flex min-w-0 flex-1 cursor-move items-center gap-2 text-left"
+          onPointerDown={startResidentServicePanelDrag}
         >
           <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.resident.panelTitle" as never)}</div>
-        </button>
+        </div>
         <Tooltip value={language.t("blueprint.resident.refresh" as never)} placement="left">
           <IconButton
             icon="reset"
@@ -6609,6 +6696,7 @@ function ResidentServicesPanel(props: {
           placement="left"
         >
           <IconButton
+            data-blueprint-resident-toggle
             icon="chevron-down"
             variant="ghost"
             size="small"
@@ -9260,6 +9348,8 @@ export function BlueprintInspector(props: {
                 label={language.t("blueprint.field.skills")}
                 values={props.selectedAgent?.skills ?? []}
                 options={props.catalog.skills}
+                lockedValues={[FRAMEWORK_AGENT_SKILL_OPTION.value]}
+                lockedOptions={[FRAMEWORK_AGENT_SKILL_OPTION]}
                 emptyLabel={props.catalog.skillError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.empty")}
                 onChange={updateAgentSkills}
               />
@@ -9268,6 +9358,8 @@ export function BlueprintInspector(props: {
                 label={language.t("blueprint.field.rulePaths")}
                 values={props.selectedAgent?.rule_paths ?? []}
                 options={props.catalog.rules}
+                lockedValues={[FRAMEWORK_AGENT_RULE_OPTION.value]}
+                lockedOptions={[FRAMEWORK_AGENT_RULE_OPTION]}
                 emptyLabel={props.catalog.ruleError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.empty")}
                 onChange={(value) => updateAgentField("rule_paths", value)}
               />
@@ -9485,6 +9577,8 @@ function BlueprintGlobalConfigPanel(props: {
   onConfigChange: <K extends keyof BlueprintConfig>(field: K, value: BlueprintConfig[K]) => void
   onProjectWorkdirBrowse: () => void
   locked?: boolean
+  skillCount: number
+  skillError?: string
   ruleCount: number
   ruleError?: string
   invalidFields: BlueprintConfigField[]
@@ -9496,14 +9590,14 @@ function BlueprintGlobalConfigPanel(props: {
   const platform = usePlatform()
   const invalid = (field: BlueprintConfigField) => props.invalidFields.includes(field)
 
-  const pickDirectory = async (field: keyof BlueprintConfig, title: string, defaultPath?: string) => {
+  const pickDirectory = async (title: string, defaultPath?: string) => {
     if (props.locked) return
     const result = await platform.openDirectoryPickerDialog?.({
       title,
       multiple: false,
       defaultPath,
     })
-    if (typeof result === "string" && result.trim()) props.onConfigChange(field, result)
+    return typeof result === "string" && result.trim() ? result.trim() : ""
   }
 
   const pickFile = async (field: keyof BlueprintConfig, title: string, defaultPath?: string) => {
@@ -9517,10 +9611,45 @@ function BlueprintGlobalConfigPanel(props: {
     if (typeof result === "string" && result.trim()) props.onConfigChange(field, result)
   }
 
+  const normalizePathList = (values: string[]) => {
+    const seen = new Set<string>()
+    const result: string[] = []
+    for (const value of values.map((item) => item.trim()).filter(Boolean)) {
+      if (seen.has(value)) continue
+      seen.add(value)
+      result.push(value)
+    }
+    return result
+  }
+
+  const updateSkillDirs = (values: string[]) => {
+    const next = normalizePathList(values)
+    props.onConfigChange("skill_dirs", next)
+    props.onConfigChange("skill_dir", next[0] ?? "")
+  }
+
+  const updateRuleDirs = (values: string[]) => {
+    const next = normalizePathList(values)
+    props.onConfigChange("rule_dirs", next)
+    props.onConfigChange("rule_dir", next[0] ?? "")
+  }
+
+  const addSkillDir = async () => {
+    const current = effectiveBlueprintSkillDirs(props.config)
+    const selected = await pickDirectory(language.t("blueprint.directory.pickSkill"), current[current.length - 1] ?? current[0] ?? "")
+    if (selected) updateSkillDirs([...current, selected])
+  }
+
+  const addRuleDir = async () => {
+    const current = effectiveBlueprintRuleDirs(props.config)
+    const selected = await pickDirectory(language.t("blueprint.directory.pickRule"), current[current.length - 1] ?? current[0] ?? "")
+    if (selected) updateRuleDirs([...current, selected])
+  }
+
   return (
     <div
       data-blueprint-global-config
-      class="absolute left-0 top-8 z-40 max-h-[270px] w-[360px] max-w-[calc(100vw-1rem)] overflow-y-auto rounded-md border border-[rgba(103,232,249,0.22)] bg-[rgba(7,16,25,0.94)] p-3 text-[#d6e9f5] shadow-[0_18px_48px_rgba(0,0,0,0.34)] backdrop-blur"
+      class="absolute left-0 top-8 z-40 max-h-[calc(100vh-5rem)] w-[360px] max-w-[calc(100vw-1rem)] overflow-y-auto rounded-md border border-[rgba(103,232,249,0.22)] bg-[rgba(7,16,25,0.94)] p-3 text-[#d6e9f5] shadow-[0_18px_48px_rgba(0,0,0,0.34)] backdrop-blur"
       style={BLUEPRINT_INSPECTOR_THEME}
     >
       <div class="flex flex-col gap-2">
@@ -9553,15 +9682,25 @@ function BlueprintGlobalConfigPanel(props: {
           disabled={props.locked}
           onBrowse={props.onProjectWorkdirBrowse}
         />
-        <DirectoryConfigField
+        <PathListConfigField
+          label={language.t("blueprint.field.skillDir")}
+          tip="skillDir"
+          values={effectiveBlueprintSkillDirs(props.config)}
+          note={props.skillError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.count", { count: props.skillCount })}
+          invalid={invalid("skill_dir")}
+          disabled={props.locked}
+          onChange={updateSkillDirs}
+          onAdd={() => void addSkillDir()}
+        />
+        <PathListConfigField
           label={language.t("blueprint.field.ruleDir")}
           tip="ruleDir"
-          value={props.config.rule_dir}
+          values={effectiveBlueprintRuleDirs(props.config)}
           note={props.ruleError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.count", { count: props.ruleCount })}
           invalid={invalid("rule_dir")}
           disabled={props.locked}
-          onChange={(value) => props.onConfigChange("rule_dir", value)}
-          onBrowse={() => void pickDirectory("rule_dir", language.t("blueprint.directory.pickRule"), props.config.rule_dir)}
+          onChange={updateRuleDirs}
+          onAdd={() => void addRuleDir()}
         />
       </div>
     </div>
@@ -9700,6 +9839,89 @@ function BlueprintProjectWorkdirConflictDialog(props: {
         </div>
       </div>
     </Dialog>
+  )
+}
+
+function PathListConfigField(props: {
+  label: string
+  tip?: InspectorTipKey
+  values: string[]
+  note?: string
+  invalid?: boolean
+  disabled?: boolean
+  onChange: (values: string[]) => void
+  onAdd: () => void
+}) {
+  const language = useLanguage()
+  const buttonClass =
+    "!h-9 !w-9 rounded-md border border-[rgba(103,232,249,0.24)] !bg-[#0d1826] !text-[#d7f7ff] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] hover:!bg-[rgba(56,214,244,0.12)] disabled:opacity-50 [&_[data-slot=icon-svg]]:!text-[#d7f7ff]"
+  const removeValue = (target: string) => props.onChange(props.values.filter((value) => value !== target))
+
+  return (
+    <div data-blueprint-path-list-field class="flex min-w-0 flex-col gap-1">
+      <InspectorFieldHeader label={props.label} tip={props.tip} placement="right-start" />
+      <div
+        class={`flex min-w-0 flex-col gap-1 rounded-md border bg-[#06101a] p-1 transition-colors ${
+          props.invalid ? "border-[#fb7185]" : "border-[rgba(103,232,249,0.22)]"
+        }`}
+      >
+        <Show
+          when={props.values.length > 0}
+          fallback={
+            <div
+              data-blueprint-path-list-empty
+              class="flex h-9 items-center rounded-sm px-2 font-mono text-[10.5px] text-[#95afc4]"
+            >
+              {language.t("blueprint.globalConfig.unset")}
+            </div>
+          }
+        >
+          <For each={props.values}>
+            {(value) => (
+              <div data-blueprint-path-list-item class="flex min-w-0 items-stretch gap-1">
+                <textarea
+                  class="h-9 min-w-0 flex-1 resize-none rounded-sm border border-[rgba(103,232,249,0.14)] bg-[#020817]/64 px-2 py-1 font-mono text-[10.5px] leading-4 text-[#f8fdff] outline-none"
+                  value={value}
+                  title={value}
+                  aria-label={props.label}
+                  spellcheck={false}
+                  wrap="soft"
+                  readOnly
+                  disabled={props.disabled}
+                />
+                <Tooltip placement="top" value={language.t("common.delete" as never)}>
+                  <IconButton
+                    icon="close-small"
+                    variant="ghost"
+                    size="small"
+                    iconSize="small"
+                    class="h-9 w-8 shrink-0"
+                    disabled={props.disabled}
+                    onClick={() => removeValue(value)}
+                    aria-label={language.t("common.delete" as never)}
+                  />
+                </Tooltip>
+              </div>
+            )}
+          </For>
+        </Show>
+        <Tooltip placement="top" value={props.label}>
+          <IconButton
+            icon="folder"
+            variant="secondary"
+            size="normal"
+            iconSize="small"
+            class={buttonClass}
+            disabled={props.disabled}
+            onClick={() => props.onAdd()}
+            aria-label={props.label}
+          />
+        </Tooltip>
+      </div>
+      <Show when={props.note}>
+        {(note) => <span class="truncate text-10-regular text-[#95afc4]">{note()}</span>}
+      </Show>
+    </div>
   )
 }
 
@@ -9897,24 +10119,34 @@ function MultiSelectField(props: {
   tip?: InspectorTipKey
   values: string[]
   options: BlueprintCatalogItem[]
+  lockedValues?: string[]
+  lockedOptions?: BlueprintCatalogItem[]
   emptyLabel: string
   onChange: (values: string[]) => void
 }) {
-  const selected = () => new Set(props.values)
+  const locked = () => new Set(props.lockedValues ?? [])
+  const editableValues = () => props.values.filter((value) => !locked().has(value))
+  const selected = () => new Set([...(props.lockedValues ?? []), ...editableValues()])
   const options = () => {
-    const byValue = new Map(props.options.map((option) => [option.value, option]))
+    const byValue = new Map((props.lockedOptions ?? []).map((option) => [option.value, option]))
+    for (const option of props.options) byValue.set(option.value, option)
+    for (const value of props.lockedValues ?? []) {
+      if (!byValue.has(value)) byValue.set(value, { value, label: value })
+    }
     for (const value of props.values) {
       if (!byValue.has(value)) byValue.set(value, { value, label: value })
     }
     return Array.from(byValue.values())
   }
   const label = () => {
-    if (props.values.length === 0) return props.emptyLabel
+    const values = [...(props.lockedValues ?? []), ...editableValues()]
+    if (values.length === 0) return props.emptyLabel
     const byValue = new Map(options().map((option) => [option.value, option.label]))
-    return props.values.map((value) => byValue.get(value) ?? value).join(", ")
+    return values.map((value) => byValue.get(value) ?? value).join(", ")
   }
   const toggle = (value: string) => {
-    const next = selected()
+    if (locked().has(value)) return
+    const next = new Set(editableValues())
     if (next.has(value)) next.delete(value)
     else next.add(value)
     props.onChange(Array.from(next))
@@ -9941,14 +10173,23 @@ function MultiSelectField(props: {
                 {(option) => (
                   <DropdownMenu.CheckboxItem
                     checked={selected().has(option.value)}
+                    disabled={locked().has(option.value)}
                     onChange={() => toggle(option.value)}
                     class="gap-2"
+                    classList={{ "opacity-70": locked().has(option.value) }}
                   >
                     <DropdownMenu.ItemIndicator>
                       <Icon name="check-small" size="small" class="mt-0.5 text-[#67e8f9]" />
                     </DropdownMenu.ItemIndicator>
                     <div class="min-w-0">
-                      <DropdownMenu.ItemLabel class="truncate text-12-medium">{option.label}</DropdownMenu.ItemLabel>
+                      <div class="flex min-w-0 items-center gap-1.5">
+                        <DropdownMenu.ItemLabel class="truncate text-12-medium">{option.label}</DropdownMenu.ItemLabel>
+                        <Show when={locked().has(option.value)}>
+                          <span class="shrink-0 rounded-sm border border-[rgba(103,232,249,0.28)] px-1 py-0.5 text-10-medium text-[#67e8f9]">
+                            locked
+                          </span>
+                        </Show>
+                      </div>
                       <Show when={option.description}>
                         {(description) => (
                           <DropdownMenu.ItemDescription class="line-clamp-2 text-11-regular text-[#95afc4]">
@@ -10977,7 +11218,7 @@ function visibleAgentPanelEvents(
       flushAgentPanelToolGroup()
       display.push({
         id: `user-${item.message.id}`,
-        kind: "用户",
+        kind: agentPanelLocalUserKind(),
         status: userMessageStatusLabel(item.message.status),
         text: item.message.text,
         tone: "user",
@@ -11103,22 +11344,24 @@ function agentPanelTimelineItems(
   userMessages: AgentPanelUserMessage[],
   sessionTimelineEvents: BlueprintSessionTimelineEvent[] = [],
 ): AgentPanelTimelineItem[] {
-  const hasSessionChat = sessionTimelineHasChat(sessionTimelineEvents)
+  const sessionChatEvents = agentPanelSessionChatTimelineEvents(sessionTimelineEvents)
+  const hasSessionChat = sessionChatEvents.length > 0
+  const panelUserMessages = hasSessionChat
+    ? userMessages.filter((message) => !agentPanelSessionTimelineHasLocalUserMessage(sessionChatEvents, message))
+    : userMessages
   const timeline: AgentPanelTimelineItem[] = [
-    ...(hasSessionChat ? [] : userMessages).map((message, index) => ({
+    ...panelUserMessages.map((message, index) => ({
       type: "user" as const,
       message,
       index,
       order: agentPanelUserMessageOrder(message, index),
     })),
-    ...sessionTimelineEvents
-      .filter((event) => event.type === "user_message" || event.type === "agent_reply")
-      .map((event, index) => ({
-        type: "session" as const,
-        event,
-        index,
-        order: agentPanelSessionTimelineOrder(event, index),
-      })),
+    ...sessionChatEvents.map((event, index) => ({
+      type: "session" as const,
+      event,
+      index,
+      order: agentPanelSessionTimelineOrder(event, index),
+    })),
     ...events.map((event, index) => ({
       type: "event" as const,
       event,
@@ -11130,20 +11373,20 @@ function agentPanelTimelineItems(
 }
 
 function sessionTimelineHasChat(events: BlueprintSessionTimelineEvent[]) {
-  return events.some((event) => event.type === "user_message" || event.type === "agent_reply")
+  return agentPanelSessionChatTimelineEvents(events).length > 0
 }
 
 function agentPanelDisplayEventFromSessionTimeline(
   event: BlueprintSessionTimelineEvent,
   order: number,
 ): AgentPanelDisplayEvent | undefined {
-  if (event.type === "user_message") {
-    const text = stringValue(event.message) ?? stringValue(event.content)
+  if (agentPanelSessionUserEventType(event.type)) {
+    const text = agentPanelSessionEventText(event)
     if (!text) return undefined
     return {
       id: stringValue(event.id) ?? `session-user-${event.seq ?? order}`,
-      kind: "用户",
-      status: "sent",
+      kind: agentPanelSessionUserKind(event),
+      status: userMessageStatusLabel(event.type === "queued_message" ? "queued" : "sent"),
       text,
       tone: "user",
       order,
@@ -11164,6 +11407,59 @@ function agentPanelDisplayEventFromSessionTimeline(
     }
   }
   return undefined
+}
+
+function agentPanelSessionChatTimelineEvents(events: BlueprintSessionTimelineEvent[]) {
+  const hasUserMessage = events.some((event) => event.type === "user_message")
+  return events.filter((event) => {
+    if (event.type === "user_message" || event.type === "agent_reply") return true
+    if (event.type === "queued_message") return !hasUserMessage
+    return false
+  })
+}
+
+function agentPanelSessionTimelineHasLocalUserMessage(
+  events: BlueprintSessionTimelineEvent[],
+  message: AgentPanelUserMessage,
+) {
+  const text = stringValue(message.text)
+  if (!text) return false
+  return events.some((event) => {
+    if (!agentPanelSessionUserEventType(event.type)) return false
+    if (agentPanelSessionEventText(event) !== text) return false
+    if (!agentPanelSessionEventCanMirrorLocalPanelMessage(event)) return false
+    if (message.runId && event.runId && message.runId !== event.runId) return false
+    return true
+  })
+}
+
+function agentPanelSessionUserEventType(type: string) {
+  return type === "user_message" || type === "queued_message"
+}
+
+function agentPanelSessionEventText(event: BlueprintSessionTimelineEvent) {
+  return stringValue(event.message) ?? stringValue(event.content)
+}
+
+function agentPanelSessionEventSource(event: BlueprintSessionTimelineEvent) {
+  const raw = typeof event.raw === "object" && event.raw !== null && !Array.isArray(event.raw) ? event.raw : undefined
+  return (stringValue(event.source) ?? stringValue(raw?.source) ?? "").toLowerCase()
+}
+
+function agentPanelSessionEventCanMirrorLocalPanelMessage(event: BlueprintSessionTimelineEvent) {
+  const source = agentPanelSessionEventSource(event)
+  return !source || source === "ui" || source === "local" || source === "desktop"
+}
+
+function agentPanelLocalUserKind() {
+  return "\u672c\u673a\u7528\u6237"
+}
+
+function agentPanelSessionUserKind(event: BlueprintSessionTimelineEvent) {
+  const source = agentPanelSessionEventSource(event)
+  if (source === "popo") return "POPO \u7528\u6237"
+  if (source === "ui" || source === "local" || source === "desktop") return agentPanelLocalUserKind()
+  return "\u7528\u6237"
 }
 
 function mergeAdjacentAgentPanelToolGroups(events: AgentPanelDisplayEvent[]) {

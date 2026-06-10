@@ -81,7 +81,7 @@ LIVE_RUNTIME_STATUS_TIMEOUT_SECONDS = 1.0
 LIVE_SLOT_TERMINATE_TIMEOUT_SECONDS = 1.0
 LIVE_RUN_ACTIVE_CHECK_TIMEOUT_SECONDS = 0.25
 LIVE_AGENT_STREAM_READ_TIMEOUT_SECONDS = 1.0
-POPO_DIRECT_REPLY_FALLBACK_DELAY_SECONDS = 1.0
+BLUEPRINT_MODEL_COMMAND_TIMEOUT_SECONDS = 15.0
 MAX_ACTIVE_BLUEPRINT_SESSION_RUNS = 3
 MAX_ACTIVE_BLUEPRINT_SLOT_SESSIONS = MAX_ACTIVE_BLUEPRINT_SESSION_RUNS
 BLUEPRINT_SESSION_CONTEXT_RECENT_LIMIT = 20
@@ -94,6 +94,9 @@ BLUEPRINT_SESSION_SCHEMA_VERSION = 1
 BLUEPRINT_PROJECT_REGISTRY_FILENAME = "blueprint_projects.json"
 POPO_ROBOT_ROUTES_FILENAME = "popo_robot_routes.json"
 POPO_API_BASE = "https://open.popo.netease.com"
+POPO_STREAMING_CARD_TEMPLATE_UUID = "series_5564199"
+POPO_STREAMING_CARD_KEY = "resultStream"
+POPO_STREAMING_CARD_LAST_MESSAGE = "AI正在回复..."
 BLUEPRINT_MAIN_SESSION_PREFIX = "main+"
 BLUEPRINT_POPO_SESSION_PREFIX = "bps_popo_"
 POPO_TERMINATION_REMINDER_INTERVAL_SECONDS = 300.0
@@ -740,10 +743,17 @@ class DesktopBlueprintNoopBackend:
 
 
 class DesktopBlueprintSkillCatalog:
-    """SkillSpace-compatible view over the desktop blueprint skill directory."""
+    """SkillSpace-compatible view over the desktop blueprint skill directories."""
 
-    def __init__(self, skill_dir: Optional[Path]) -> None:
-        self.skill_dir = Path(skill_dir).expanduser().resolve() if skill_dir is not None else None
+    def __init__(self, skill_dirs: Optional[Path | Sequence[Path]]) -> None:
+        if skill_dirs is None:
+            raw_dirs: Sequence[Path] = []
+        elif isinstance(skill_dirs, Path):
+            raw_dirs = [skill_dirs]
+        else:
+            raw_dirs = list(skill_dirs)
+        self.skill_dirs = [_resolve_catalog_dir(path) for path in raw_dirs if str(path).strip()]
+        self.skill_dir = self.skill_dirs[0] if self.skill_dirs else None
         self._records: Optional[Dict[str, SkillRecord]] = None
 
     def records(self) -> Dict[str, SkillRecord]:
@@ -759,30 +769,30 @@ class DesktopBlueprintSkillCatalog:
             rec = records.get(key)
             if rec is None:
                 raise KeyError(f"skill not found in desktop skill directory: {key}")
-            if self.skill_dir is not None:
-                try:
-                    rec.skill_dir.resolve().relative_to(self.skill_dir.resolve())
-                except ValueError as exc:
-                    raise ValueError(f"skill path escapes desktop skill directory: {rec.skill_dir}") from exc
+            if self.skill_dirs and not _path_is_under_any(rec.skill_dir.resolve(), self.skill_dirs):
+                raise ValueError(f"skill path escapes desktop skill directories: {rec.skill_dir}")
             resolved.append(rec)
         return resolved
 
     def _scan_records(self) -> Dict[str, SkillRecord]:
-        if self.skill_dir is None or not self.skill_dir.is_dir():
-            return {}
         records: Dict[str, SkillRecord] = {}
-        for child in sorted(self.skill_dir.iterdir()):
-            skill_md = child / "SKILL.md"
-            if not child.is_dir() or not skill_md.is_file():
+        for root in self.skill_dirs:
+            if not root.is_dir():
                 continue
-            name = child.name
-            records[name] = SkillRecord(
-                skill_hash=name,
-                name=name,
-                description=_description_from_skill_md(skill_md),
-                skill_dir=child.resolve(),
-                skill_md_path=skill_md.resolve(),
-            )
+            for child in sorted(root.iterdir()):
+                skill_md = child / "SKILL.md"
+                if not child.is_dir() or not skill_md.is_file():
+                    continue
+                name = child.name
+                if name in records:
+                    continue
+                records[name] = SkillRecord(
+                    skill_hash=name,
+                    name=name,
+                    description=_description_from_skill_md(skill_md),
+                    skill_dir=child.resolve(),
+                    skill_md_path=skill_md.resolve(),
+                )
         return records
 
 
@@ -793,16 +803,119 @@ def default_codex_skill_dir() -> Path:
     return Path.home() / ".codex" / "skills"
 
 
+def _resolve_catalog_dir(path: Path) -> Path:
+    return Path(path).expanduser().resolve()
+
+
+def _path_is_under_any(path: Path, roots: Sequence[Path]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _blueprint_catalog_item_from_skill_record(rec: SkillRecord) -> Dict[str, str]:
+    return {
+        "value": rec.skill_hash,
+        "label": rec.name,
+        "description": rec.description,
+    }
+
+
+def list_blueprint_skills_for_dirs(skill_dirs: Sequence[Path]) -> list[Dict[str, str]]:
+    roots = list(skill_dirs) or [default_codex_skill_dir()]
+    records = DesktopBlueprintSkillCatalog(roots).records()
+    return [_blueprint_catalog_item_from_skill_record(rec) for rec in records.values()]
+
+
 def list_default_blueprint_skills() -> list[Dict[str, str]]:
-    records = DesktopBlueprintSkillCatalog(default_codex_skill_dir()).records()
-    return [
-        {
-            "value": rec.skill_hash,
-            "label": rec.name,
-            "description": rec.description,
-        }
-        for rec in sorted(records.values(), key=lambda item: item.name.lower())
-    ]
+    return list_blueprint_skills_for_dirs([default_codex_skill_dir()])
+
+
+def list_blueprint_rules_for_dirs(rule_dirs: Sequence[Path]) -> list[Dict[str, str]]:
+    rules: list[Dict[str, str]] = []
+    seen: set[str] = set()
+    for root in [_resolve_catalog_dir(path) for path in rule_dirs if str(path).strip()]:
+        if not root.is_dir():
+            continue
+        for child in sorted(root.iterdir()):
+            if not child.is_file() or child.name.startswith("."):
+                continue
+            resolved = str(child.resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            rules.append(
+                {
+                    "value": resolved,
+                    "label": child.name,
+                    "description": str(root),
+                }
+            )
+    return rules
+
+
+def parse_codex_model_slugs(output: str) -> list[str]:
+    try:
+        data = json.loads(str(output or "").strip())
+    except json.JSONDecodeError:
+        return []
+    raw_models = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(raw_models, list):
+        return []
+    models: list[str] = []
+    seen: set[str] = set()
+    for item in raw_models:
+        slug = str(item.get("slug", "")).strip() if isinstance(item, dict) else ""
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        models.append(slug)
+    return models
+
+
+def codex_model_command_candidates() -> list[list[str]]:
+    commands = [["codex", "debug", "models"]]
+    if sys.platform == "win32":
+        commands.append(["codex.cmd", "debug", "models"])
+    return commands
+
+
+def list_blueprint_models(cli_kind: str = "codex") -> list[str]:
+    kind = str(cli_kind or "").strip() or "codex"
+    if kind != "codex":
+        return []
+    commands = codex_model_command_candidates()
+    for index, command in enumerate(commands):
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=BLUEPRINT_MODEL_COMMAND_TIMEOUT_SECONDS,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except subprocess.TimeoutExpired as exc:
+            log.warning("codex model listing timed out: %s", exc)
+            return []
+        except (FileNotFoundError, OSError) as exc:
+            if index + 1 < len(commands):
+                continue
+            log.warning("codex model listing failed: %s", exc)
+            return []
+        if proc.returncode != 0:
+            log.warning(
+                "codex model listing failed with exit code %s: %s",
+                proc.returncode,
+                str(proc.stderr or "").strip(),
+            )
+            return []
+        return parse_codex_model_slugs(proc.stdout)
+    return []
 
 
 @dataclass
@@ -866,6 +979,8 @@ class DesktopBlueprintService:
             if python_command is not None and not isinstance(python_command, str):
                 raise BlueprintServiceError("BAD_REQUEST", "pythonCommand must be a string")
             return detect_blueprint_python(project_dir=project_dir, python_command=python_command)
+        if command == "blueprint.listModels":
+            return {"ok": True, "models": list_blueprint_models(str(args.get("cliKind", "codex")))}
         if command == "blueprint.scriptNodes":
             project_dir = request_project_dir(args)
             return {"ok": True, **discover_script_nodes(project_dir)}
@@ -890,7 +1005,11 @@ class DesktopBlueprintService:
                 raise BlueprintServiceError("BAD_REQUEST", "editorId must be a string")
             return open_blueprint_script_in_editor(project_dir, module_path, editor_id)
         if command == "blueprint.listSkills":
-            return {"ok": True, "skills": list_default_blueprint_skills()}
+            skill_dirs = _request_path_list(args, "dirs", "dir")
+            return {"ok": True, "skills": list_blueprint_skills_for_dirs(skill_dirs)}
+        if command == "blueprint.listRules":
+            rule_dirs = _request_path_list(args, "dirs", "dir")
+            return {"ok": True, "rules": list_blueprint_rules_for_dirs(rule_dirs)}
         if command == "blueprint.residentServices":
             return {"ok": True, **self.resident_service_manager().discover()}
         if command == "blueprint.popo.robots":
@@ -1477,29 +1596,55 @@ class DesktopBlueprintService:
             }
         return access_token
 
-    def _send_popo_message(self, *, receiver: str, content: str, robot_config: Dict[str, Any]) -> Dict[str, Any]:
-        target = str(receiver or "").strip()
-        text = str(content or "").strip()
-        if not target:
-            raise BlueprintServiceError("BLUEPRINT_POPO_REPLY_TARGET_REQUIRED", "POPO reply receiver is missing", status=400)
-        if not text:
-            raise BlueprintServiceError("BAD_REQUEST", "POPO reply content must be a non-empty string", status=400)
-        token = self._get_popo_access_token(robot_config)
+    def _popo_api_headers(self, token: str) -> Dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Open-Access-Token": token,
+        }
+
+    def _safe_popo_response_json(self, response: Any) -> Dict[str, Any]:
+        try:
+            data = response.json()
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _summarize_popo_send_error(self, exc: Exception) -> str:
+        if isinstance(exc, BlueprintServiceError):
+            details = exc.details if isinstance(exc.details, dict) else {}
+            parts = [exc.code]
+            status_code = details.get("statusCode")
+            errcode = details.get("errcode")
+            errmsg = str(details.get("errmsg") or "").strip()
+            if status_code is not None:
+                parts.append(f"status={status_code}")
+            if errcode is not None:
+                parts.append(f"errcode={errcode}")
+            if errmsg:
+                parts.append(f"errmsg={errmsg[:160]}")
+            return "; ".join(parts)
+        message = str(exc).strip()
+        return f"{type(exc).__name__}: {message[:200]}" if message else type(exc).__name__
+
+    def _send_popo_text_message(
+        self,
+        *,
+        receiver: str,
+        content: str,
+        token: str,
+    ) -> Dict[str, Any]:
         try:
             response = requests.post(
                 f"{POPO_API_BASE}/open-apis/robots/v1/im/send-msg",
                 json={
-                    "receiver": target,
+                    "receiver": receiver,
                     "msgType": "text",
-                    "message": {"content": text},
+                    "message": {"content": content},
                 },
-                headers={
-                    "Content-Type": "application/json",
-                    "Open-Access-Token": token,
-                },
+                headers=self._popo_api_headers(token),
                 timeout=10,
             )
-            data = response.json()
+            data = self._safe_popo_response_json(response)
         except Exception as exc:
             raise BlueprintServiceError(
                 "BLUEPRINT_POPO_SEND_FAILED",
@@ -1507,8 +1652,6 @@ class DesktopBlueprintService:
                 details={"error": str(exc)},
                 status=502,
             ) from exc
-        if not isinstance(data, dict):
-            data = {}
         if response.status_code >= 400 or data.get("errcode") != 0:
             raise BlueprintServiceError(
                 "BLUEPRINT_POPO_SEND_FAILED",
@@ -1521,6 +1664,117 @@ class DesktopBlueprintService:
                 status=502,
             )
         return {"ok": True, "sent": True, "errcode": data.get("errcode")}
+
+    def _send_popo_streaming_card_message(
+        self,
+        *,
+        receiver: str,
+        content: str,
+        token: str,
+    ) -> Dict[str, Any]:
+        instance_uuid = str(uuid.uuid4())
+        init_payload = {
+            "receiver": receiver,
+            "msgType": "card",
+            "message": {
+                "instanceUuid": instance_uuid,
+                "templateUuid": POPO_STREAMING_CARD_TEMPLATE_UUID,
+                "options": {
+                    "enableForward": True,
+                    "enableMultipleSelected": True,
+                    "lastMessage": POPO_STREAMING_CARD_LAST_MESSAGE,
+                    "compatibleMessage": content,
+                },
+            },
+        }
+        try:
+            init_response = requests.post(
+                f"{POPO_API_BASE}/open-apis/robots/v1/im/send-msg",
+                json=init_payload,
+                headers=self._popo_api_headers(token),
+                timeout=10,
+            )
+            init_data = self._safe_popo_response_json(init_response)
+        except Exception as exc:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_SEND_FAILED",
+                "failed to initialize POPO streaming card",
+                details={"error": str(exc)},
+                status=502,
+            ) from exc
+        if init_response.status_code >= 400 or init_data.get("errcode") != 0:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_SEND_FAILED",
+                "POPO streaming card init request failed",
+                details={
+                    "statusCode": init_response.status_code,
+                    "errcode": init_data.get("errcode"),
+                    "errmsg": init_data.get("errmsg"),
+                },
+                status=502,
+            )
+
+        update_payload = {
+            "instanceUuid": instance_uuid,
+            "templateUuid": POPO_STREAMING_CARD_TEMPLATE_UUID,
+            "key": POPO_STREAMING_CARD_KEY,
+            "content": content,
+            "sequence": 1,
+            "isFinalize": True,
+        }
+        try:
+            update_response = requests.put(
+                f"{POPO_API_BASE}/open-apis/robots/v1/im/msg-card/stream",
+                json=update_payload,
+                headers=self._popo_api_headers(token),
+                timeout=10,
+            )
+            update_data = self._safe_popo_response_json(update_response)
+        except Exception as exc:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_SEND_FAILED",
+                "failed to finalize POPO streaming card",
+                details={"error": str(exc)},
+                status=502,
+            ) from exc
+        if update_response.status_code >= 400 or update_data.get("errcode") != 0:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_SEND_FAILED",
+                "POPO streaming card update request failed",
+                details={
+                    "statusCode": update_response.status_code,
+                    "errcode": update_data.get("errcode"),
+                    "errmsg": update_data.get("errmsg"),
+                },
+                status=502,
+            )
+        return {
+            "ok": True,
+            "sent": True,
+            "errcode": update_data.get("errcode"),
+            "transport": "streaming_card",
+            "messageId": instance_uuid,
+        }
+
+    def _send_popo_message(self, *, receiver: str, content: str, robot_config: Dict[str, Any]) -> Dict[str, Any]:
+        target = str(receiver or "").strip()
+        text = str(content or "").strip()
+        if not target:
+            raise BlueprintServiceError("BLUEPRINT_POPO_REPLY_TARGET_REQUIRED", "POPO reply receiver is missing", status=400)
+        if not text:
+            raise BlueprintServiceError("BAD_REQUEST", "POPO reply content must be a non-empty string", status=400)
+        token = self._get_popo_access_token(robot_config)
+        try:
+            return self._send_popo_streaming_card_message(receiver=target, content=text, token=token)
+        except Exception as exc:
+            fallback_reason = self._summarize_popo_send_error(exc)
+            log.warning("[blueprint] POPO streaming card send failed; falling back to text: %s", fallback_reason)
+        result = self._send_popo_text_message(receiver=target, content=text, token=token)
+        return {
+            **result,
+            "transport": "text_fallback",
+            "fallbackReason": fallback_reason,
+        }
 
     def _read_blueprint_project_registry(self) -> Dict[str, Any]:
         path = self.blueprint_project_registry_path()
@@ -2107,6 +2361,24 @@ class DesktopBlueprintService:
         with (directory / "transcript.jsonl").open("a", encoding="utf-8") as file:
             file.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
+    def _record_blueprint_session_terminator(
+        self,
+        session: Dict[str, Any],
+        *,
+        actor: str,
+        agent_node_id: str = "",
+        agent_id: str = "",
+    ) -> None:
+        session["lastTerminatedBy"] = str(actor or "")
+        if agent_node_id:
+            session["lastTerminatedByAgentNodeId"] = str(agent_node_id or "")
+        else:
+            session.pop("lastTerminatedByAgentNodeId", None)
+        if agent_id:
+            session["lastTerminatedByAgentId"] = str(agent_id or "")
+        else:
+            session.pop("lastTerminatedByAgentId", None)
+
     def _read_blueprint_session_events(self, session_key: str, *, limit: int = BLUEPRINT_SESSION_CONTEXT_RECENT_LIMIT) -> list[Dict[str, Any]]:
         path = self._blueprint_session_transcript_path(session_key)
         if not path.is_file():
@@ -2307,7 +2579,7 @@ class DesktopBlueprintService:
                     lines.append(f"{role}: {text}")
             lines.append("")
         lines.append("[Current POPO Message]")
-        lines.append(str(current_message).strip())
+        lines.append(f"[popo_user] {str(current_message).strip()}")
         context = "\n".join(lines).strip()
         if len(context) <= BLUEPRINT_SESSION_CONTEXT_CHAR_LIMIT:
             return context
@@ -2768,6 +3040,7 @@ class DesktopBlueprintService:
         session["status"] = "terminated"
         session["queuedMessages"] = []
         session["lastTouchedAt"] = now
+        self._record_blueprint_session_terminator(session, actor=actor)
         self._save_blueprint_session(session)
         self._append_blueprint_session_event(
             normalized_key,
@@ -2805,7 +3078,7 @@ class DesktopBlueprintService:
         current["queuedMessages"] = []
         current["queuedMessageCount"] = 0
         current["lastTouchedAt"] = now
-        current["lastTerminatedBy"] = "slot"
+        self._record_blueprint_session_terminator(current, actor="slot")
         self._save_blueprint_session(current)
         self._append_blueprint_session_event(
             session_key,
@@ -5036,11 +5309,7 @@ class DesktopBlueprintService:
             with run.stream_condition:
                 run.stream_condition.notify_all()
 
-        def notify_reply(utterance: Dict[str, Any]) -> None:
-            self._schedule_popo_direct_reply_fallback(run.run_id, utterance)
-
         run.runtime.agent_stream_event_callback = notify
-        run.runtime.agent_reply_callback = notify_reply
 
     def _runtime_call(
         self,
@@ -6221,11 +6490,12 @@ class DesktopBlueprintService:
             session["queuedMessageCount"] = 0
             session["lastTouchedAt"] = now
             if save_history:
-                session["lastTerminatedBy"] = str(actor or "")
-                if agent_node_id:
-                    session["lastTerminatedByAgentNodeId"] = str(agent_node_id or "")
-                if agent_id:
-                    session["lastTerminatedByAgentId"] = str(agent_id or "")
+                self._record_blueprint_session_terminator(
+                    session,
+                    actor=actor,
+                    agent_node_id=agent_node_id,
+                    agent_id=agent_id,
+                )
             self._save_blueprint_session(session)
             if save_history:
                 self._append_blueprint_session_event(
@@ -6300,7 +6570,6 @@ class DesktopBlueprintService:
         agent_node_id: str = "",
         agent_id: str = "",
         message_id: str = "",
-        fallback: bool = False,
     ) -> Dict[str, Any]:
         text = str(content or "").strip()
         if not text:
@@ -6341,13 +6610,8 @@ class DesktopBlueprintService:
         session = self._load_blueprint_session(session_key)
         session_run_matches = bool(
             session
-            and (
-                str(session.get("activeRunId") or "") == run_id
-                or (
-                    bool(explicit_session_key)
-                    and str(session.get("lastRunId") or "") == run_id
-                )
-            )
+            and str(session.get("status") or "") == "running"
+            and str(session.get("activeRunId") or "") == run_id
         )
         if not session_run_matches:
             raise BlueprintServiceError(
@@ -6402,160 +6666,35 @@ class DesktopBlueprintService:
                 "agentNodeId": str(agent_node_id or ""),
                 "agentId": str(agent_id or ""),
                 "messageId": str(message_id or ""),
-                "fallback": bool(fallback),
                 "content": text,
             },
         )
-        self._append_blueprint_session_event(
-            session_key,
-            {
-                "type": "popo_reply_sent",
-                "runId": run_id,
-                "startNodeId": start_node_id,
-                "agentNodeId": str(agent_node_id or ""),
-                "agentId": str(agent_id or ""),
-                "messageId": str(message_id or ""),
-                "fallback": bool(fallback),
-                "content": text,
-                "robotAppKey": robot_app_key,
-            },
-        )
+        popo_reply_event = {
+            "type": "popo_reply_sent",
+            "runId": run_id,
+            "startNodeId": start_node_id,
+            "agentNodeId": str(agent_node_id or ""),
+            "agentId": str(agent_id or ""),
+            "messageId": str(message_id or ""),
+            "content": text,
+            "robotAppKey": robot_app_key,
+        }
+        transport = str(send_result.get("transport") or "").strip()
+        popo_message_id = str(send_result.get("messageId") or "").strip()
+        fallback_reason = str(send_result.get("fallbackReason") or "").strip()
+        if transport:
+            popo_reply_event["transport"] = transport
+        if popo_message_id:
+            popo_reply_event["popoMessageId"] = popo_message_id
+        if fallback_reason:
+            popo_reply_event["fallbackReason"] = fallback_reason
+        self._append_blueprint_session_event(session_key, popo_reply_event)
         return {
             "ok": True,
             "sent": bool(send_result.get("sent", True)),
             "runId": run_id,
             "sessionKey": session_key,
         }
-
-    def _popo_reply_already_sent_for_message(
-        self,
-        session_key: str,
-        *,
-        run_id: str,
-        message_id: str,
-        content: str = "",
-    ) -> bool:
-        normalized_key = blueprint_session_key_path_component(session_key)
-        target_message_id = str(message_id or "").strip()
-        target_content = str(content or "").strip()
-        for event in self._read_blueprint_session_timeline(normalized_key, limit=2000):
-            raw = event.get("raw") if isinstance(event.get("raw"), dict) else event
-            if str(raw.get("type") or "") != "popo_reply_sent":
-                continue
-            if str(raw.get("runId") or "") != str(run_id or ""):
-                continue
-            if target_message_id and str(raw.get("messageId") or "") == target_message_id:
-                return True
-            if target_content and str(raw.get("content") or "").strip() == target_content:
-                return True
-        return False
-
-    def _mark_popo_direct_reply_task_completed(
-        self,
-        run_id: str,
-        *,
-        agent_node_id: str,
-        agent_id: str,
-        message_id: str,
-    ) -> None:
-        with self._lock:
-            run = self._runs.get(run_id)
-        if run is None or run.control is None:
-            return
-        args = {
-            "node_id": str(agent_node_id or ""),
-            "agent_id": str(agent_id or ""),
-            "status": "completed",
-            "summary": "Replied to the POPO user from the agent's direct text response.",
-            "message_id": str(message_id or "") or None,
-            "batch_id": None,
-            "reports": [],
-            "artifacts": [],
-            "changesets": [],
-            "next_actions": [],
-            "metadata": {
-                "framework_auto": True,
-                "source_tool": "popo_direct_reply_fallback",
-            },
-        }
-        try:
-            self._runtime_call(
-                run,
-                lambda: run.control.handle_request({"command": "agent.task_status", "args": args}),
-                timeout=LIVE_RUNTIME_STATUS_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            log.debug("failed to mark POPO direct reply task completed", exc_info=True)
-
-    def _deliver_popo_direct_reply_fallback(
-        self,
-        run_id: str,
-        utterance: Dict[str, Any],
-        *,
-        delay: float = POPO_DIRECT_REPLY_FALLBACK_DELAY_SECONDS,
-    ) -> Dict[str, Any]:
-        message_id = str(utterance.get("message_id") or "").strip()
-        if not message_id or message_id.startswith("summary-msg-"):
-            return {"ok": True, "sent": False, "reason": "maintenance_message"}
-        text = str(utterance.get("said") or "").strip()
-        if not text:
-            return {"ok": True, "sent": False, "reason": "empty_reply"}
-        agent_node_id = str(utterance.get("node_id") or "").strip()
-        agent_id = str(utterance.get("agent_id") or "").strip()
-        with self._lock:
-            run = self._runs.get(run_id)
-            if run is None:
-                return {"ok": True, "sent": False, "reason": "run_closed"}
-            session_key = str(
-                run.session_key
-                or run.bound_session_key
-                or getattr(run.runtime, "popo_reply_session_key", "")
-                or ""
-            ).strip()
-            start_node_id = str(run.start_node_id or document_start_node_id(run.document))
-            robot_app_key = str(run.robot_app_key or "").strip()
-        if not session_key or not robot_app_key:
-            return {"ok": True, "sent": False, "reason": "not_popo_run"}
-        if agent_node_id != start_node_id:
-            return {"ok": True, "sent": False, "reason": "not_start_agent"}
-        if delay > 0:
-            time.sleep(float(delay))
-        if self._popo_reply_already_sent_for_message(
-            session_key,
-            run_id=run_id,
-            message_id=message_id,
-            content=text,
-        ):
-            return {"ok": True, "sent": False, "reason": "already_sent"}
-        try:
-            result = self._reply_popo_user_from_mcp(
-                run_id,
-                content=text,
-                session_key=session_key,
-                agent_node_id=agent_node_id,
-                agent_id=agent_id,
-                message_id=message_id,
-                fallback=True,
-            )
-            self._mark_popo_direct_reply_task_completed(
-                run_id,
-                agent_node_id=agent_node_id,
-                agent_id=agent_id,
-                message_id=message_id,
-            )
-            return {**result, "fallback": True}
-        except Exception as exc:
-            log.exception("failed to send POPO direct reply fallback")
-            return {"ok": False, "sent": False, "error": str(exc)}
-
-    def _schedule_popo_direct_reply_fallback(self, run_id: str, utterance: Dict[str, Any]) -> None:
-        thread = threading.Thread(
-            target=self._deliver_popo_direct_reply_fallback,
-            kwargs={"run_id": run_id, "utterance": dict(utterance)},
-            name=f"popo-direct-reply-fallback-{run_id}",
-            daemon=True,
-        )
-        thread.start()
 
     def close(self) -> None:
         with self._lock:
@@ -7125,7 +7264,65 @@ def _desktop_skill_catalog_from_document(
     document: Dict[str, Any],
     project_dir: Path,
 ) -> DesktopBlueprintSkillCatalog:
-    return DesktopBlueprintSkillCatalog(default_codex_skill_dir())
+    config = _blueprint_common_config(document)
+    skill_dirs = _configured_skill_dirs_from_config(config)
+    return DesktopBlueprintSkillCatalog(skill_dirs or [default_codex_skill_dir()])
+
+
+def _request_path_list(args: Dict[str, Any], plural_key: str, legacy_key: str) -> list[Path]:
+    raw_paths = args.get(plural_key)
+    values = _string_list(raw_paths)
+    if not values:
+        values = _string_list(args.get(legacy_key))
+    return _dedupe_paths(values)
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        raw_values = value
+    else:
+        raw_values = [value]
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        text = str(item).strip() if item is not None else ""
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _dedupe_paths(paths: Sequence[str]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for value in paths:
+        text = str(value).strip()
+        if not text:
+            continue
+        key = os.path.normcase(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(Path(text))
+    return result
+
+
+def _configured_path_strings_from_config(config: Dict[str, Any], plural_key: str, legacy_key: str) -> list[str]:
+    values = _string_list(config.get(plural_key))
+    if not values:
+        values = _string_list(config.get(legacy_key))
+    return values
+
+
+def _configured_skill_dirs_from_config(config: Dict[str, Any]) -> list[Path]:
+    return _dedupe_paths(_configured_path_strings_from_config(config, "skill_dirs", "skill_dir"))
+
+
+def _configured_rule_dirs_from_config(config: Dict[str, Any]) -> list[Path]:
+    return _dedupe_paths(_configured_path_strings_from_config(config, "rule_dirs", "rule_dir"))
 
 
 def _description_from_skill_md(skill_md: Path) -> str:
@@ -7759,11 +7956,9 @@ def document_with_project_workdir(
 def blueprint_common_config_issues(document: Dict[str, Any]) -> list[Dict[str, str]]:
     config = _blueprint_common_config(document)
     required = {"python_path", "project_workdir"}
-    if _document_uses_rule_dir(document):
-        required.add("rule_dir")
 
     issues: list[Dict[str, str]] = []
-    for field_name in ("python_path", "project_workdir", "rule_dir"):
+    for field_name in ("python_path", "project_workdir"):
         raw_value = config.get(field_name) if isinstance(config, dict) else None
         value = raw_value.strip() if isinstance(raw_value, str) else ""
         if not value:
@@ -7772,6 +7967,14 @@ def blueprint_common_config_issues(document: Dict[str, Any]) -> list[Dict[str, s
             continue
         if not _is_absolute_blueprint_path(value):
             issues.append({"field": field_name, "reason": "not_absolute"})
+    skill_dirs = _configured_path_strings_from_config(config, "skill_dirs", "skill_dir")
+    if any(not _is_absolute_blueprint_path(value) for value in skill_dirs):
+        issues.append({"field": "skill_dir", "reason": "not_absolute"})
+    rule_dirs = _configured_path_strings_from_config(config, "rule_dirs", "rule_dir")
+    if _document_uses_rule_dir(document) and not rule_dirs:
+        issues.append({"field": "rule_dir", "reason": "missing"})
+    elif any(not _is_absolute_blueprint_path(value) for value in rule_dirs):
+        issues.append({"field": "rule_dir", "reason": "not_absolute"})
     return issues
 
 
@@ -7779,7 +7982,7 @@ def document_with_common_config_paths(document: Dict[str, Any]) -> Dict[str, Any
     normalized = normalize_document(document)
     config = _blueprint_common_config(normalized)
     project_workdir = str(config.get("project_workdir") or "").strip()
-    rule_dir = str(config.get("rule_dir") or "").strip()
+    rule_dirs = _configured_rule_dirs_from_config(config)
     graph = dict(normalized["graph"])
     agent_nodes = graph.get("agent_nodes")
     if isinstance(agent_nodes, dict):
@@ -7791,9 +7994,9 @@ def document_with_common_config_paths(document: Dict[str, Any]) -> Dict[str, Any
             node = dict(raw_node)
             if project_workdir:
                 node["cwd"] = project_workdir
-            if rule_dir and isinstance(node.get("rule_paths"), list):
+            if rule_dirs and isinstance(node.get("rule_paths"), list):
                 node["rule_paths"] = [
-                    _rule_path_from_common_config(raw_rule_path, rule_dir)
+                    _rule_path_from_common_config(raw_rule_path, rule_dirs)
                     for raw_rule_path in node["rule_paths"]
                 ]
             updated_nodes[node_id] = node
@@ -7837,23 +8040,23 @@ def _is_absolute_blueprint_path(value: str) -> bool:
     return Path(raw).expanduser().is_absolute() or bool(WINDOWS_ABSOLUTE_PATH_RE.match(raw))
 
 
-def _rule_path_from_common_config(raw_rule_path: Any, rule_dir: str) -> str:
+def _rule_path_from_common_config(raw_rule_path: Any, rule_dirs: Sequence[Path]) -> str:
     value = str(raw_rule_path).strip()
     if not value:
         return value
-    root = Path(rule_dir).expanduser().resolve()
+    roots = [_resolve_catalog_dir(path) for path in rule_dirs if str(path).strip()]
     source = Path(value).expanduser()
     if not _is_absolute_blueprint_path(value):
-        source = root / value
+        if not roots:
+            return value
+        source = roots[0] / value
     source = source.resolve()
-    try:
-        source.relative_to(root)
-    except ValueError as exc:
+    if roots and not _path_is_under_any(source, roots):
         raise BlueprintServiceError(
             "BLUEPRINT_RULE_PATH_OUTSIDE_CONFIG",
-            f"rule path is outside configured rule_dir: {value}",
-            details={"rulePath": value, "ruleDir": str(root)},
-        ) from exc
+            f"rule path is outside configured rule_dirs: {value}",
+            details={"rulePath": value, "ruleDirs": [str(root) for root in roots]},
+        )
     return str(source)
 
 

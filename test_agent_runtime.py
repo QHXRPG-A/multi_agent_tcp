@@ -2975,11 +2975,16 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert manager.status_checkout(run, manager.open_agent_checkout(run, "agent-cx")) == []
         agents_md = (checkout / "AGENTS.md").read_text(encoding="utf-8")
         assert "Business Review Rule" in agents_md
-        assert "`framework_context.message_envelope.outgoing_batch_id`" in agents_md
-        assert "Upstream/source batch ids" in agents_md
-        assert "leaf work" in agents_md
-        assert "out-*` are not join ids" in agents_md
+        assert "# Framework Rules" in agents_md
+        assert "framework-agent-runtime.md" in agents_md
+        assert "`framework_context.message_envelope.outgoing_batch_id`" not in agents_md
         assert (private / "rules" / "01-business-rule.md").is_file()
+        assert (private / "rules" / "framework-agent-runtime.md").is_file()
+        framework_rule = (private / "rules" / "framework-agent-runtime.md").read_text(encoding="utf-8")
+        assert "`framework_context.message_envelope.outgoing_batch_id`" in framework_rule
+        assert "Upstream/source batch ids" in framework_rule
+        assert "leaf work" in framework_rule
+        assert "out-*` are not join ids" in framework_rule
         assert (codex_home / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
         framework_skill = (
             codex_home / "skills" / "framework-agent-runtime" / "SKILL.md"
@@ -3021,7 +3026,13 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert "out-1" in merged_prompt
         private_context = inst.node.adapter_options["execution_context"]["private_context"]
         assert private_context["codex_home"] == str(codex_home)
-        assert private_context["rule_catalog"][0]["rule_path"] == str(private / "rules" / "01-business-rule.md")
+        assert private_context["rule_catalog"][0]["source"] == "framework"
+        assert private_context["rule_catalog"][0]["rule_path"] == str(private / "rules" / "framework-agent-runtime.md")
+        assert any(
+            item.get("rule_path") == str(private / "rules" / "01-business-rule.md")
+            and item.get("source") != "framework"
+            for item in private_context["rule_catalog"]
+        )
         prompt_context = inst.node.adapter_options["prompt_execution_context"]
         assert "codex_home" not in prompt_context["private_context"]
         assert "workspace_api" not in prompt_context
@@ -3076,7 +3087,10 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
     assert inst.node.cwd == project.resolve()
     assert cluster.worker_cwds["agent-shell"] == project.resolve()
     assert not (run.agents_dir / "agent-shell").exists()
-    assert (run.path / "runtime_agent_context" / "agent-shell" / "codex_home").is_dir()
+    support_dir = run.path / "runtime_agent_context" / "agent-shell"
+    assert (support_dir / "codex_home").is_dir()
+    assert (support_dir / "codex_home" / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
+    assert (support_dir / "rules" / "framework-agent-runtime.md").is_file()
     assert inst.node.workspace_id is None
     assert inst.node.workspace_root is None
     assert inst.node.read_scope == []
@@ -3086,6 +3100,12 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
     assert inst.node.adapter_options["dangerous_access"] is True
     assert "--dangerously-bypass-approvals-and-sandbox" in inst.node.adapter_options["extra_args"]
     assert inst.node.adapter_options["execution_context"]["agent_access"]["workspace_tools"] is False
+    private_context = inst.node.adapter_options["execution_context"]["private_context"]
+    assert private_context["support_dir"] == str(support_dir)
+    assert private_context["skill_catalog"][0]["source"] == "framework"
+    assert private_context["rule_catalog"][0]["source"] == "framework"
+    assert private_context["rule_catalog"][0]["rule_path"] == str(support_dir / "rules" / "framework-agent-runtime.md")
+    assert "framework-agent-runtime.md" in inst.node.adapter_options["prompt_preamble"]
     assert inst.node.adapter_options["execution_context"]["mcp"]["tools"] == [
         "agent_dispatch",
         "agent_context",

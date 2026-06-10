@@ -53,6 +53,10 @@ describe("blueprint inspector source", () => {
     expect(agentBranch).not.toContain('onChange={(value) => updateAgentField("run_prompt", value)}')
     expect(agentBranch).toContain('label={language.t("blueprint.field.skills")}')
     expect(agentBranch).toContain('label={language.t("blueprint.field.rulePaths")}')
+    expect(agentBranch).toContain("lockedValues={[FRAMEWORK_AGENT_SKILL_OPTION.value]}")
+    expect(agentBranch).toContain("lockedOptions={[FRAMEWORK_AGENT_SKILL_OPTION]}")
+    expect(agentBranch).toContain("lockedValues={[FRAMEWORK_AGENT_RULE_OPTION.value]}")
+    expect(agentBranch).toContain("lockedOptions={[FRAMEWORK_AGENT_RULE_OPTION]}")
     expect(agentBranch).toContain('label={language.t("blueprint.field.adapterOptions")}')
     expect(agentBranch).toContain('props.selectedAgent?.node_type === "agent"')
     expect(agentBranch).toContain('label={language.t("blueprint.field.directProjectIo" as never)}')
@@ -60,6 +64,23 @@ describe("blueprint inspector source", () => {
     expect(agentBranch).toContain('label={language.t("blueprint.field.unrestrictedCommands" as never)}')
     expect(agentBranch).toContain('label={language.t("blueprint.field.disableSandbox" as never)}')
     expect(agentBranch).toContain('label={language.t("blueprint.field.frameworkMessageTools" as never)}')
+  })
+
+  test("keeps framework skill and rule selections locked out of user edits", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const multiSelect = source.slice(source.indexOf("function MultiSelectField"), source.indexOf("function CheckboxField"))
+
+    expect(source).toContain("FRAMEWORK_AGENT_SKILL_OPTION")
+    expect(source).toContain("framework_assets/skills/framework-agent-runtime/SKILL.md")
+    expect(source).toContain("FRAMEWORK_AGENT_RULE_OPTION")
+    expect(source).toContain("framework_assets/rules/framework-agent-runtime.md")
+    expect(multiSelect).toContain("lockedValues?: string[]")
+    expect(multiSelect).toContain("lockedOptions?: BlueprintCatalogItem[]")
+    expect(multiSelect).toContain("const locked = () => new Set(props.lockedValues ?? [])")
+    expect(multiSelect).toContain("const editableValues = () => props.values.filter((value) => !locked().has(value))")
+    expect(multiSelect).toContain("if (locked().has(value)) return")
+    expect(multiSelect).toContain("const next = new Set(editableValues())")
+    expect(multiSelect).toContain("disabled={locked().has(option.value)}")
   })
 
   test("uses separate copy for agent description and Prompt node help", async () => {
@@ -149,6 +170,11 @@ describe("blueprint inspector source", () => {
     expect(source).toContain("residentServiceSearchQuery")
     expect(source).toContain("residentServicePage")
     expect(source).toContain("residentServiceCollapsed")
+    expect(source).toContain("residentServicePanelPosition")
+    expect(source).toContain("clampResidentServicePanelPosition")
+    expect(source).toContain("data-blueprint-resident-drag-handle")
+    expect(source).toContain("setPointerCapture")
+    expect(source).toContain("releasePointerCapture")
     expect(source).toContain("data-blueprint-resident-search")
     expect(source).toContain("data-blueprint-resident-pagination")
     expect(source).toContain("data-blueprint-resident-page-first")
@@ -658,14 +684,24 @@ describe("blueprint runtime source", () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
     const entry = await Bun.file(new URL("../../entry.tsx", import.meta.url)).text()
     const configPanel = source.slice(source.indexOf("function BlueprintGlobalConfigPanel"), source.indexOf("function BlueprintConfigRequiredDialog"))
+    const pathListField = source.slice(source.indexOf("function PathListConfigField"), source.indexOf("function DirectoryConfigField"))
     const configField = source.slice(source.indexOf("function DirectoryConfigField"), source.indexOf("function blueprintConfigFieldLabel"))
 
     expect(configPanel).toContain('tip="pythonPath"')
     expect(configPanel).toContain('tip="projectWorkdir"')
-    expect(configPanel).not.toContain('tip="skillDir"')
+    expect(configPanel).toContain('tip="skillDir"')
     expect(configPanel).toContain('tip="ruleDir"')
+    expect(configPanel).toContain("PathListConfigField")
+    expect(configPanel).toContain("updateSkillDirs")
+    expect(configPanel).toContain("updateRuleDirs")
+    expect(configPanel).toContain("effectiveBlueprintSkillDirs(props.config)")
+    expect(configPanel).toContain("effectiveBlueprintRuleDirs(props.config)")
     expect(configPanel).toContain('language.t("blueprint.field.pythonPath")')
+    expect(configPanel).toContain('language.t("blueprint.field.skillDir")')
+    expect(configPanel).toContain('language.t("blueprint.field.ruleDir")')
     expect(configPanel).toContain('language.t("blueprint.directory.pickPython")')
+    expect(configPanel).toContain('language.t("blueprint.directory.pickSkill")')
+    expect(configPanel).toContain('language.t("blueprint.directory.pickRule")')
     expect(configPanel).toContain('language.t("blueprint.python.detect")')
     expect(configPanel).toContain('language.t("blueprint.python.detectShort")')
     expect(configPanel).toContain('language.t("blueprint.python.detecting")')
@@ -682,6 +718,12 @@ describe("blueprint runtime source", () => {
     expect(configPanel).not.toContain("left-3 top-3")
     expect(configPanel).not.toContain('language.t("blueprint.globalConfig.title")')
     expect(configPanel).not.toContain("props.skillCount} / {props.ruleCount")
+    expect(pathListField).toContain("data-blueprint-path-list-field")
+    expect(pathListField).toContain("data-blueprint-path-list-item")
+    expect(pathListField).toContain("data-blueprint-path-list-empty")
+    expect(pathListField).toContain('icon="folder"')
+    expect(pathListField).toContain('icon="close-small"')
+    expect(pathListField).toContain('language.t("blueprint.globalConfig.unset")')
     expect(configField).toContain("InspectorFieldHeader")
     expect(configField).toContain("<textarea")
     expect(configField).toContain("readOnly={props.readOnly}")
@@ -706,7 +748,12 @@ describe("blueprint runtime source", () => {
     expect(source).toContain("ensureDetectedPythonPath")
     expect(source).toContain("draftSnapshotWithPythonPath")
     expect(source).toContain("configureBlueprintRuntime")
-    expect(entry).toContain('blueprintRequest(config, "blueprint.listSkills")')
+    expect(source).toContain('codex: ["gpt-5.5", "gpt-5.4"]')
+    expect(entry).toContain('blueprintRequest(config, "blueprint.listSkills", blueprintCatalogDirsPayload(dirs))')
+    expect(entry).toContain('blueprintRequest(config, "blueprint.listRules", blueprintCatalogDirsPayload(dirs))')
+    expect(entry).toContain("blueprintCatalogDirsPayload")
+    expect(entry).toContain("listBlueprintModels: async (cliKind: string) =>")
+    expect(entry).toContain('blueprintRequest(config, "blueprint.listModels", { cliKind })')
     expect(entry).toContain("detectBlueprintPython: async (projectDir?: string, pythonCommand?: string) =>")
     expect(entry).toContain('blueprintRequest(config, "blueprint.detectPython", { projectDir, pythonCommand })')
     expect(source).toContain("invalidFields={configIssues().map((issue) => issue.field)}")
@@ -726,8 +773,11 @@ describe("blueprint runtime source", () => {
     expect(source.slice(canvasStart, canvasNodeLayer)).not.toContain("BlueprintGlobalConfigPanel")
     expect(source).toContain("backfillCommonConfigPaths")
     expect(source).not.toContain('joinProjectPath(projectRoot, "skill_list")')
-    expect(source).toContain('platform.listBlueprintSkills?.("")')
-    expect(source).toContain('skillDir: "$CODEX_HOME/skills"')
+    expect(source).toContain("platform.listBlueprintSkills?.(skillDirs)")
+    expect(source).toContain("platform.listBlueprintRules?.(ruleDirs)")
+    expect(source).toContain('skillDirs,')
+    expect(source).toContain('ruleDirs,')
+    expect(source).toContain('skillDir: skillDirs[0] ?? "$CODEX_HOME/skills"')
     expect(source).toContain("function InspectorTipButton")
     expect(source).toContain("placement={props.placement ?? \"left-start\"}")
   })
@@ -1072,7 +1122,7 @@ describe("blueprint runtime source", () => {
           id: "local-user",
           nodeId: "planner",
           mode: "top",
-          text: "local duplicate",
+          text: "user message",
           status: "sent",
           created_at: "2026-06-09T13:29:00.000Z",
         },
@@ -1083,6 +1133,7 @@ describe("blueprint runtime source", () => {
           seq: 1,
           type: "user_message",
           timestamp: "2026-06-09T13:29:01.000Z",
+          source: "ui",
           message: "user message",
         },
         {
@@ -1096,10 +1147,93 @@ describe("blueprint runtime source", () => {
     )
 
     expect(projected.map((event) => event.tone)).toEqual(["user", "reply", "tool"])
+    expect(projected[0]?.kind).toBe("\u672c\u673a\u7528\u6237")
     expect(projected[0]?.text).toBe("user message")
     expect(projected[1]?.text).toBe("agent reply")
-    expect(projected.some((event) => event.text === "local duplicate")).toBe(false)
     expect(projected.filter((event) => event.tone === "reply")).toHaveLength(1)
+  })
+
+  test("shows all current session users in the agent panel timeline", async () => {
+    const visibleAgentPanelEvents = await loadAgentPanelProjection()
+    const projected = visibleAgentPanelEvents(
+      [],
+      [
+        {
+          id: "pending-local",
+          nodeId: "planner",
+          mode: "default",
+          text: "local panel message",
+          status: "sent",
+          created_at: "2026-06-09T13:29:04.000Z",
+        },
+      ],
+      [
+        {
+          id: "popo-user",
+          seq: 1,
+          type: "user_message",
+          timestamp: "2026-06-09T13:29:01.000Z",
+          source: "popo",
+          message: "POPO message",
+        },
+        {
+          id: "ui-user",
+          seq: 2,
+          type: "user_message",
+          timestamp: "2026-06-09T13:29:02.000Z",
+          source: "ui",
+          message: "local session message",
+        },
+        {
+          id: "session-agent",
+          seq: 3,
+          type: "agent_reply",
+          timestamp: "2026-06-09T13:29:03.000Z",
+          content: "agent answer",
+        },
+      ],
+    )
+
+    expect(projected.map((event) => event.kind)).toEqual([
+      "POPO \u7528\u6237",
+      "\u672c\u673a\u7528\u6237",
+      "Agent 回复",
+      "\u672c\u673a\u7528\u6237",
+    ])
+    expect(projected.map((event) => event.text)).toEqual([
+      "POPO message",
+      "local session message",
+      "agent answer",
+      "local panel message",
+    ])
+  })
+
+  test("falls back to queued session messages when old transcripts lack user_message rows", async () => {
+    const visibleAgentPanelEvents = await loadAgentPanelProjection()
+    const projected = visibleAgentPanelEvents(
+      [],
+      [],
+      [
+        {
+          id: "queued-popo",
+          seq: 1,
+          type: "queued_message",
+          timestamp: "2026-06-09T13:29:01.000Z",
+          source: "popo",
+          message: "old POPO message",
+        },
+        {
+          id: "session-agent",
+          seq: 2,
+          type: "agent_reply",
+          timestamp: "2026-06-09T13:29:02.000Z",
+          content: "agent answer",
+        },
+      ],
+    )
+
+    expect(projected.map((event) => event.kind)).toEqual(["POPO \u7528\u6237", "Agent 回复"])
+    expect(projected[0]?.text).toBe("old POPO message")
   })
 
   test("ignores textless stream events before maintenance filtering", async () => {

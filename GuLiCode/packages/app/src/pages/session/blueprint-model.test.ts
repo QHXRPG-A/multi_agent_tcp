@@ -42,7 +42,9 @@ describe("blueprint draft model", () => {
       python_path: DEFAULT_PYTHON_PATH,
       project_workdir: ".",
       skill_dir: DEFAULT_SKILL_DIR,
+      skill_dirs: [],
       rule_dir: "",
+      rule_dirs: [],
     })
     expect(draft.runtime).toEqual({ start_node_id: "planner", popo_entry: createDefaultPopoEntry() })
     expect(draft.graph.terminal_nodes).toEqual({})
@@ -762,13 +764,15 @@ describe("blueprint draft model", () => {
           project_workdir: ".",
           skill_dir: "",
           rule_dir: "",
-        },
+        } as never,
         nodes: {},
         viewport: { x: 0, y: 0, zoom: 1 },
       },
     })
 
     expect(draft.graph.agent_nodes.legacy.node_type).toBe("worker_agent")
+    expect(draft.config.skill_dirs).toEqual([])
+    expect(draft.config.rule_dirs).toEqual([])
     expect(draft.graph.agent_nodes.legacy.access_policy).toEqual({
       direct_project_io: false,
       outside_project_io: false,
@@ -801,7 +805,7 @@ describe("blueprint draft model", () => {
     expect(validateBlueprintConfigForStart(draft)).toEqual([])
 
     draft.config.skill_dir = "skill_list"
-    expect(validateBlueprintConfigForStart(draft)).toEqual([])
+    expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "skill_dir", reason: "not_absolute" }])
 
     draft.config.skill_dir = "/repo/skill_list"
     draft = updateAgentNode(draft, "planner", {
@@ -809,6 +813,13 @@ describe("blueprint draft model", () => {
     })
     expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "rule_dir", reason: "missing" }])
 
+    draft.config.rule_dir = "/repo/rules"
+    expect(validateBlueprintConfigForStart(draft)).toEqual([])
+
+    draft.config.rule_dirs = ["rules"]
+    expect(validateBlueprintConfigForStart(draft)).toEqual([{ field: "rule_dir", reason: "not_absolute" }])
+
+    draft.config.rule_dirs = ["/repo/rules", "/repo/more-rules"]
     draft.config.rule_dir = "/repo/rules"
     expect(validateBlueprintConfigForStart(draft)).toEqual([])
   })
@@ -833,7 +844,9 @@ describe("blueprint draft model", () => {
           python_path: DEFAULT_PYTHON_PATH,
           project_workdir: "F:\\repo\\game",
           skill_dir: DEFAULT_SKILL_DIR,
+          skill_dirs: [],
           rule_dir: "",
+          rule_dirs: [],
         },
       },
     })
@@ -843,13 +856,41 @@ describe("blueprint draft model", () => {
     expect(toRuntimeGraphDraft(restored).agent_nodes.planner.cwd).toBe("F:\\repo\\game")
   })
 
+  test("migrates legacy single skill and rule config paths to path lists", () => {
+    const restored = fromBlueprintDocument({
+      schema_version: 1,
+      id: "legacy-config",
+      name: "Legacy Config",
+      graph: createDefaultBlueprintDraft("F:\\repo\\game").graph,
+      ui: {
+        config: {
+          python_path: "C:\\Python313\\python.exe",
+          project_workdir: "F:\\repo\\game",
+          skill_dir: "F:\\repo\\game\\skills",
+          rule_dir: "F:\\repo\\game\\rules",
+        } as never,
+        nodes: {},
+        viewport: { x: 0, y: 0, zoom: 1 },
+      },
+    })
+
+    expect(restored.config).toMatchObject({
+      skill_dir: "F:\\repo\\game\\skills",
+      skill_dirs: ["F:\\repo\\game\\skills"],
+      rule_dir: "F:\\repo\\game\\rules",
+      rule_dirs: ["F:\\repo\\game\\rules"],
+    })
+  })
+
   test("round-trips persisted common config, agent settings, tick settings, and UI state", () => {
     let draft = createDefaultBlueprintDraft("F:\\repo\\persist")
     draft.config = {
       python_path: "C:\\Python313\\python.exe",
       project_workdir: "F:\\repo\\persist",
       skill_dir: "F:\\repo\\persist\\skills",
+      skill_dirs: ["F:\\repo\\persist\\skills", "F:\\repo\\persist\\more-skills"],
       rule_dir: "F:\\repo\\persist\\rules",
+      rule_dirs: ["F:\\repo\\persist\\rules", "F:\\repo\\persist\\more-rules"],
     }
     draft = updateAgentNode(draft, "planner", {
       prompt: "Plan with saved settings.",

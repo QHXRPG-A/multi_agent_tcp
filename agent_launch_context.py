@@ -24,6 +24,9 @@ WORKSPACE_API_CONTEXT_ENV = "MULTI_AGENT_WORKSPACE_CONTEXT"
 CODEX_RUNTIME_STATE_FILES = ("config.toml", "auth.json", "models_cache.json")
 LOCAL_MCP_NO_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
 CODEX_DANGEROUS_BYPASS_ARG = "--dangerously-bypass-approvals-and-sandbox"
+FRAMEWORK_ASSETS_DIR = Path(__file__).resolve().parent / "framework_assets"
+FRAMEWORK_AGENT_RUNTIME_NAME = "framework-agent-runtime"
+FRAMEWORK_TOP_AGENT_RUNTIME_NAME = "framework-top-agent-runtime"
 PROXY_ENV_NAMES_BY_SCHEME = {
     "http": ("HTTP_PROXY", "http_proxy"),
     "https": ("HTTPS_PROXY", "https_proxy"),
@@ -187,155 +190,39 @@ def workspace_api_doc() -> str:
     )
 
 
+def _framework_runtime_name(*, is_top_agent: bool) -> str:
+    return FRAMEWORK_TOP_AGENT_RUNTIME_NAME if is_top_agent else FRAMEWORK_AGENT_RUNTIME_NAME
+
+
+def _framework_skill_dir(*, is_top_agent: bool) -> Path:
+    return FRAMEWORK_ASSETS_DIR / "skills" / _framework_runtime_name(is_top_agent=is_top_agent)
+
+
+def _framework_rule_path(*, is_top_agent: bool) -> Path:
+    return FRAMEWORK_ASSETS_DIR / "rules" / f"{_framework_runtime_name(is_top_agent=is_top_agent)}.md"
+
+
+def _read_framework_asset(path: Path) -> str:
+    resolved = Path(path)
+    if not resolved.is_file():
+        raise FileNotFoundError(f"framework asset not found: {resolved}")
+    return resolved.read_text(encoding="utf-8")
+
+
 def framework_agent_rules() -> str:
-    return "\n".join(
-        [
-            "# Multi-Agent Framework Baseline Rules",
-            "",
-            "- Understand the three workspace zones before acting: project directory is the authoritative code source/final target, private checkout is your personal workbench, temporary shared workspace is read-only collaboration state.",
-            "- Read project_context / project_code_root directly as read-only context when you need project files.",
-            "- Read the temporary shared workspace directly as read-only filesystem context when you need reports, artifacts, manifest.json, or logs.",
-            "- Fetch or checkout only task-relevant code into your private checkout before editing.",
-            "- Use framework MCP tools when they are configured in Codex.",
-            "- Submit code changes from the private checkout through `workspace_submit`.",
-            "- Publish reports, artifacts, summaries, file/version references, and changeset ids through `workspace_publish` / `workspace_publish_file`.",
-            "- If multiple AgentNodes may publish to one shared path, either use an agent-specific path or read the current shared file plus shared `manifest.json`, then publish the full replacement content with `expected_version`; cross-agent overwrites without `expected_version` are rejected.",
-            "- Do not write directly into project_context, project_code_root, or the temporary shared workspace as a code/output completion path.",
-            "- If a direct project/shared write is denied by the sandbox, treat that as boundary enforcement and continue through checkout/submit/publish instead of stopping.",
-            "- Communicate with other AgentNodes through framework messages and shared references, not by copying project source trees into shared space.",
-            "- Your natural-language worker reply is a framework-private utterance record; it is not delivered to other AgentNodes.",
-            "- The only current batch you may read or dispatch for this message is `framework_context.message_envelope.outgoing_batch_id`.",
-            "- Upstream/source batch ids mentioned in message text are provenance/audit labels; do not pass them to `agent_context(batch_id=...)`.",
-            "- To inspect the current readable batch, call `agent_context({})` with no explicit batch_id.",
-            "- When `framework_context.message_envelope.required_script_calls` is non-empty, call `blueprint_script_call` for the listed function(s); the framework executes the ScriptNode and delivers outputs to connected downstream AgentNodes.",
-            "- `framework_context.resident_services` lists global resident services by name, description, and status. Use `blueprint_service_docs(service_name)` for method signatures and `blueprint_service_call(service_name, method_name, arguments)` to call one. Ordinary Agent tools cannot start or stop resident services.",
-            "- To provide information to another AgentNode, use `agent_dispatch` for the current batch.",
-            "- Sending an empty string `\"\"` or numeric `0` through `agent_dispatch` means this target has no task and should not receive a downstream message.",
-            "- When `framework_context.message_envelope.required_outgoing_targets` is empty, this is leaf work: do not call `agent_dispatch` or `join_contribute`; process the message and publish durable results through `workspace_publish` / `workspace_publish_file`.",
-            "- Use `join_contribute` only when the framework or task explicitly provides a real `join_id`; outgoing batch ids such as `out-*` are not join ids.",
-            "- To provide durable results to the framework, use assigned framework MCP tools.",
-            "- If `blueprint_reply_popo_user` is available and you use it, that tool is the user-visible POPO reply and records the current task as completed; do not add a second natural-language final reply.",
-            "- Before finishing a non-POPO message, call `agent_task_status` with your own task status and summary after submit/publish/dispatch work is done.",
-            "- If the framework sends `framework_summary_request`, summarize only your own current task and call `agent_task_status`; do not summarize the ring or full blueprint.",
-            "- Do not request or depend on top-agent-only utterance inspection APIs.",
-            "- Framework rules and skills are materialized once when your private worker context is prepared; per-message updates arrive only through `framework_context`.",
-            "- Use only skills and rules exposed in your private CODEX_HOME/cwd context.",
-        ]
-    )
+    return _read_framework_asset(_framework_rule_path(is_top_agent=False))
 
 
 def framework_top_agent_rules() -> str:
-    return "\n".join(
-        [
-            "# GuLiCode Desktop Top Agent Rules",
-            "",
-            "- You are operating inside GuLiCode desktop blueprint planning mode; the desktop app/current chat session is the Top Agent.",
-            "- Do not assume, start, or ask for a separate bottom Top Agent CLI/worker.",
-            "- Treat the desktop app as the authority for plan confirmation, runtime start, permissions, and audit.",
-            "- Use only the injected `framework_control` MCP tools for organization, status, explanation, utterance inspection, user questions, and start-plan staging.",
-            "- Ask missing blocking questions with `top_agent_request_user_input`; do not simulate user confirmation.",
-            "- Validate a complete `TopAgentStartPlan` with `runtime_validate_start`, then stage it with `top_agent_stage_start_plan`.",
-            "- Use `required_start_groups`: select exactly one start AgentNode from each source component, including isolated AgentNodes.",
-            "- Do not call `runtime_start`; the app calls `blueprint.start` only after the user approves the staged plan.",
-            "- Do not modify, persist, or rewrite blueprint graph structure in v1.",
-            "- Do not expose MCP tokens, private workspace paths, or framework internals to the user or ordinary agents.",
-            "- Explain validation failures and runtime status directly and concisely.",
-        ]
-    )
+    return _read_framework_asset(_framework_rule_path(is_top_agent=True))
 
 
 def framework_agent_skill() -> str:
-    return "\n".join(
-        [
-            "---",
-            "name: framework-agent-runtime",
-            "description: Baseline multi-agent runtime, MCP tools, dispatch, and private context workflow.",
-            "---",
-            "# Framework Agent Runtime",
-            "",
-            "Use the injected `framework_context` for your current message envelope, "
-            "including `outgoing_batch_id`, required downstream targets, and `agent_dispatch` usage.",
-            "`framework_context.message_envelope.outgoing_batch_id` is the current batch available to this Agent. "
-            "If you need the current batch context, call `agent_context({})` with no explicit batch_id. "
-            "Batch ids in the message body from upstream Agents are source/audit labels and must not be passed to `agent_context(batch_id=...)`.",
-            "The framework runtime skill is stable for the worker context; per-message state changes are provided through `framework_context`.",
-            "",
-            "If Codex lists a framework MCP server such as `framework_ordinary`, use those MCP tools first. "
-            "They are the preferred interface for checkout/status/diff/submit/sync, publish/publish_file, downstream dispatch, and task status reporting. "
-            "Read project files and temporary shared workspace files directly from the read-only paths injected into AGENTS.md, the prompt preamble, and the Codex Execution Context. "
-            "The shared workspace includes reports, artifacts, manifest.json, and logs; write reports and artifacts through publish tools.",
-            "",
-            "Your final CLI reply is only a minimal framework-private utterance record "
-            "containing who spoke, what was said, time, and task/message identity. "
-            "It is not a communication channel to other AgentNodes and is not proof of submitted work.",
-            "",
-            "For code changes, edit the private checkout in the current working directory, "
-            "fetching only task-relevant project files with `workspace_checkout`, "
-            "inspect with `workspace_status` / `workspace_diff`, "
-            "then submit through `workspace_submit`.",
-            "If a direct write outside the private checkout is denied by sandbox policy, "
-            "recover by using the framework checkout/submit flow rather than treating the denial as completed work.",
-            "",
-            "For reports and artifacts, publish through `workspace_publish` / `workspace_publish_file` "
-            "as shared run context. Use summaries, file paths, versions, and changeset ids when another AgentNode needs code context. "
-            "`workspace_publish` writes complete file content, not a line-level append patch. "
-            "If you need to continue from an existing shared file, read that file and the shared `manifest.json` directly, build the full new content, and pass the current version as `expected_version`. "
-            "When updating a shared path previously written by another AgentNode, pass `expected_version` or publish to a unique per-agent path; silent last-write-wins overwrites are blocked. "
-            "When `framework_context.message_envelope.required_outgoing_targets` is empty, treat the message as leaf work: "
-            "do not call `agent_dispatch` or `join_contribute`; process the message and publish the result or receipt as a shared report.",
-            "",
-            "For downstream messages, use the `agent_dispatch` MCP tool. The target must be listed in the current message's "
-            "`framework_context.message_envelope.required_outgoing_targets`.",
-            "If `framework_context.message_envelope.required_script_calls` is non-empty, call `blueprint_script_call` for each listed Script Function Node instead of dispatching directly to its downstream AgentNode. "
-            "The framework executes the Python function and automatically delivers function name, description, arguments, and outputs to connected downstream AgentNodes.",
-            "`framework_context.resident_services` lists global resident services visible to Agent class nodes. "
-            "Use `blueprint_service_docs(service_name)` to inspect interfaces and `blueprint_service_call(service_name, method_name, arguments)` to call a service; ordinary Agent tools cannot start or stop services.",
-            "If a target has no work, dispatch `\"\"` or `0` for that target; the framework records it as no-op and does not queue a downstream task.",
-            "If `required_outgoing_targets` is empty, there is no downstream dispatch to perform.",
-            "",
-            "Use `join_contribute` only when the framework or task explicitly provides a real `join_id`. "
-            "Outgoing batch ids such as `out-*` are not join ids. "
-            "For leaf results, receipts, or simple status reporting, publish a shared report instead.",
-            "",
-            "If `blueprint_reply_popo_user` is available and you use it, that tool is the user-visible POPO reply and records the current task as completed; do not add a second natural-language final reply. "
-            "For non-POPO task status, call `agent_task_status` before your final CLI reply. "
-            "Use `completed` after your own work is done, `blocked` when a framework or project condition prevents completion, "
-            "`needs_input` when user input is required, and `failed` for unrecoverable errors. "
-            "If the framework asks with `framework_summary_request`, summarize only your own current task and then call `agent_task_status`; "
-            "do not summarize the ring or the whole blueprint.",
-        ]
-    )
+    return _read_framework_asset(_framework_skill_dir(is_top_agent=False) / "SKILL.md")
 
 
 def framework_top_agent_skill() -> str:
-    return "\n".join(
-        [
-            "---",
-            "name: framework-top-agent-runtime",
-            "description: GuLiCode desktop Top Agent runtime-control planning workflow.",
-            "---",
-            "# GuLiCode Desktop Top Agent Runtime",
-            "",
-            "Use this skill when handling GuLiCode desktop blueprint planning mode. "
-            "The desktop app/current chat session is the Top Agent; there is no separate bottom Top Agent CLI/worker. "
-            "Your role is to understand the user's intent, inspect the current blueprint organization, ask any required questions, and stage a valid start plan for desktop confirmation.",
-            "",
-            "Workflow:",
-            "- Inspect organization and status through `framework_control` before proposing a start plan.",
-            "- If required choices or constraints are missing, call `top_agent_request_user_input(questions)` and wait for the desktop answer.",
-            "- Cover every `required_start_groups` entry with exactly one selected start AgentNode; for an isolated AgentNode, select that node.",
-            "- Build a complete `TopAgentStartPlan` with `user_goal`, `agent_descriptions`, `start_nodes`, `tasks`, and `run_policy`.",
-            "- Call `runtime_validate_start(plan)` and fix validation errors before staging.",
-            "- Call `top_agent_stage_start_plan(plan, plan_markdown)` when the proposal is ready for the user confirmation card.",
-            "- After staging, summarize the plan and wait for the app/user confirmation flow.",
-            "",
-            "Boundaries:",
-            "- Never call `runtime_start`; GuLiCode desktop starts the run after explicit approval.",
-            "- Do not edit or save blueprint graph structure in v1.",
-            "- Do not use ordinary worker workspace submit/publish APIs as a completion path.",
-            "- Keep user-facing replies focused on questions, plan rationale, validation issues, and observed status.",
-        ]
-    )
+    return _read_framework_asset(_framework_skill_dir(is_top_agent=True) / "SKILL.md")
 
 
 def shared_workspace_context(run: RunWorkspace) -> Dict[str, Any]:
@@ -369,6 +256,18 @@ def copy_skill_dir_to_codex_home(source_skill_dir: Path, codex_home: Path, *, na
     }
 
 
+def materialize_framework_skill(node: AgentNode, *, codex_home: Path) -> Dict[str, str]:
+    is_top_agent = is_framework_top_agent_node(node)
+    framework_name = _framework_runtime_name(is_top_agent=is_top_agent)
+    copied = copy_skill_dir_to_codex_home(
+        _framework_skill_dir(is_top_agent=is_top_agent),
+        codex_home,
+        name=framework_name,
+    )
+    copied["source"] = "framework"
+    return copied
+
+
 def materialize_codex_skill_selection(
     node: AgentNode,
     *,
@@ -379,29 +278,7 @@ def materialize_codex_skill_selection(
 
     skills_root = codex_home / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
-    catalog: list[Dict[str, str]] = []
-
-    is_top_agent = is_framework_top_agent_node(node)
-    framework_name = "framework-top-agent-runtime" if is_top_agent else "framework-agent-runtime"
-    framework_dir = skills_root / framework_name
-    framework_dir.mkdir(parents=True, exist_ok=True)
-    framework_md = framework_dir / "SKILL.md"
-    _write_text_no_bom(
-        framework_md,
-        framework_top_agent_skill() if is_top_agent else framework_agent_skill(),
-    )
-    catalog.append(
-        {
-            "name": framework_name,
-            "description": (
-                "GuLiCode desktop Top Agent runtime-control planning workflow."
-                if is_top_agent
-                else "Baseline multi-agent runtime, MCP tools, dispatch, and private context workflow."
-            ),
-            "skill_md_path": str(framework_md),
-            "source": "framework",
-        }
-    )
+    catalog: list[Dict[str, str]] = [materialize_framework_skill(node, codex_home=codex_home)]
 
     if skill_space is None:
         return catalog
@@ -416,6 +293,31 @@ def materialize_codex_skill_selection(
         copied["source"] = "business"
         catalog.append(copied)
     return catalog
+
+
+def _markdown_title(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("# ").strip()
+    return ""
+
+
+def materialize_framework_rule(node: AgentNode, *, private_dir: Path) -> Dict[str, str]:
+    is_top_agent = is_framework_top_agent_node(node)
+    framework_name = _framework_runtime_name(is_top_agent=is_top_agent)
+    source = _framework_rule_path(is_top_agent=is_top_agent)
+    content = source.read_text(encoding="utf-8")
+    rules_dir = private_dir / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    target = rules_dir / f"{framework_name}.md"
+    _write_text_no_bom(target, content)
+    return {
+        "name": framework_name,
+        "description": _markdown_title(content) or f"Framework rule copied from {source.name}",
+        "rule_path": str(target),
+        "source": "framework",
+    }
 
 
 def materialize_rule_paths(
@@ -439,12 +341,7 @@ def materialize_rule_paths(
         target = rules_dir / f"{index:02d}-{_safe_skill_dir_name(source.stem)}{source.suffix or '.md'}"
         content = source.read_text(encoding="utf-8-sig")
         _write_text_no_bom(target, content)
-        title = ""
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                title = stripped.lstrip("# ").strip()
-                break
+        title = _markdown_title(content)
         catalog.append(
             {
                 "name": title or source.stem,
@@ -600,11 +497,9 @@ def build_private_agents_md(
     project_context: Path,
     checkout_path: Path,
     shared_workspace: Dict[str, Any],
-    business_rule_catalog: Optional[Sequence[Dict[str, str]]] = None,
+    rule_catalog: Optional[Sequence[Dict[str, str]]] = None,
 ) -> str:
     sections = [
-        framework_top_agent_rules() if is_framework_top_agent_node(node) else framework_agent_rules(),
-        "",
         "# Private Agent Workspace",
         "",
         f"- AgentNode: `{node.node_id}`",
@@ -624,7 +519,32 @@ def build_private_agents_md(
         ),
         "",
     ]
-    if business_rule_catalog:
+
+    framework_rules = [
+        item
+        for item in (rule_catalog or [])
+        if isinstance(item, dict) and item.get("source") == "framework"
+    ]
+    business_rules = [
+        item
+        for item in (rule_catalog or [])
+        if isinstance(item, dict) and item.get("source") != "framework"
+    ]
+    if framework_rules:
+        sections.extend(
+            [
+                "# Framework Rules",
+                "",
+                "The following framework rule files are required for this agent. Read and follow them before acting.",
+                "",
+            ]
+        )
+        for item in framework_rules:
+            sections.append(
+                f"- `{item['name']}`: {item['description']} (file: `{item['rule_path']}`)"
+            )
+        sections.append("")
+    if business_rules:
         sections.extend(
             [
                 "# Business Rules",
@@ -633,7 +553,7 @@ def build_private_agents_md(
                 "",
             ]
         )
-        for item in business_rule_catalog:
+        for item in business_rules:
             sections.append(
                 f"- `{item['name']}`: {item['description']} (file: `{item['rule_path']}`)"
             )
@@ -682,17 +602,19 @@ def materialize_private_agent_context(
         codex_home=codex_home,
         skill_space=skill_space,
     )
-    rule_catalog = materialize_rule_paths(
+    business_rule_catalog = materialize_rule_paths(
         node.rule_paths,
         private_dir=private_dir,
         project_root=manager.project_root,
     )
+    framework_rule = materialize_framework_rule(node, private_dir=private_dir)
+    rule_catalog = [framework_rule, *business_rule_catalog]
     agents_md = build_private_agents_md(
         node=node,
         project_context=project_context,
         checkout_path=checkout.checkout_dir,
         shared_workspace=shared_workspace,
-        business_rule_catalog=rule_catalog,
+        rule_catalog=rule_catalog,
     )
     _write_text_no_bom(checkout.checkout_dir / "AGENTS.md", agents_md)
     _write_text_no_bom(checkout.base_dir / "AGENTS.md", agents_md)
@@ -863,8 +785,13 @@ def materialize_full_agent_context(
     access_policy = dict(getattr(node, "access_policy", {}) or {})
     mcp_context: Optional[Dict[str, Any]] = None
     codex_home = support_dir / "codex_home"
+    skill_catalog: list[Dict[str, str]] = []
+    rule_catalog: list[Dict[str, str]] = []
     if node.cli_kind == "codex":
         initialize_private_codex_home(codex_home)
+        skill_catalog = [materialize_framework_skill(node, codex_home=codex_home)]
+        materialize_rule_paths([], private_dir=support_dir, project_root=root)
+        rule_catalog = [materialize_framework_rule(node, private_dir=support_dir)]
         adapter_options.setdefault("codex_home", str(codex_home))
         adapter_options.setdefault("diagnostics_dir", str(support_dir / "logs" / "codex"))
         adapter_options.setdefault("skip_git_repo_check", True)
@@ -927,6 +854,31 @@ def materialize_full_agent_context(
             "server_name": str(mcp_context.get("server_name", "")),
             "tools": [str(item) for item in mcp_context.get("tools", [])],
         }
+    if skill_catalog or rule_catalog:
+        execution_context["private_context"] = {
+            "support_dir": str(support_dir),
+            "codex_home": str(codex_home),
+            "skill_catalog": skill_catalog,
+            "rule_catalog": rule_catalog,
+        }
+        framework_lines = [
+            "Framework runtime assets are materialized for this Agent:",
+            *[
+                f"- Skill `{item['name']}`: {item['description']} (file: `{item['skill_md_path']}`)"
+                for item in skill_catalog
+            ],
+            *[
+                f"- Rule `{item['name']}`: {item['description']} (file: `{item['rule_path']}`)"
+                for item in rule_catalog
+            ],
+            "Read and follow the framework rule file before acting.",
+        ]
+        framework_preamble = "\n".join(framework_lines)
+        existing = adapter_options.get("prompt_preamble")
+        if isinstance(existing, str) and existing.strip():
+            adapter_options["prompt_preamble"] = f"{existing.strip()}\n\n{framework_preamble}"
+        else:
+            adapter_options["prompt_preamble"] = framework_preamble
     adapter_options["execution_context"] = execution_context
     adapter_options["prompt_execution_context"] = _build_prompt_execution_context(execution_context)
     data["adapter_options"] = adapter_options

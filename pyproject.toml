@@ -32,5 +32,6 @@ multi_agent_tcp = [
     "agents_registry.json",
     "docs/*.md",
     "examples/*.json",
+    "framework_assets/**/*",
     "skill_list/**/*",
 ]
