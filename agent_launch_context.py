@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -22,11 +23,13 @@ from .workspace_rpc import WorkspaceRPCServer
 
 WORKSPACE_API_CONTEXT_ENV = "MULTI_AGENT_WORKSPACE_CONTEXT"
 CODEX_RUNTIME_STATE_FILES = ("config.toml", "auth.json", "models_cache.json")
+CODEX_SERVICE_TIER_COMPAT_ALIASES = {"default": "fast", "priority": "fast"}
 LOCAL_MCP_NO_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
 CODEX_DANGEROUS_BYPASS_ARG = "--dangerously-bypass-approvals-and-sandbox"
 FRAMEWORK_ASSETS_DIR = Path(__file__).resolve().parent / "framework_assets"
 FRAMEWORK_AGENT_RUNTIME_NAME = "framework-agent-runtime"
 FRAMEWORK_TOP_AGENT_RUNTIME_NAME = "framework-top-agent-runtime"
+SELECTED_SKILLS_INDEX_FILENAME = "selected_skills_index.md"
 PROXY_ENV_NAMES_BY_SCHEME = {
     "http": ("HTTP_PROXY", "http_proxy"),
     "https": ("HTTPS_PROXY", "https_proxy"),
@@ -48,9 +51,33 @@ def workspace_api_base_command() -> str:
     return f"{quoted} -m multi_agent_tcp.workspace_api"
 
 
+def _windows_long_path(path: Path) -> str:
+    raw = str(Path(path).resolve())
+    if os.name != "nt" or raw.startswith("\\\\?\\"):
+        return raw
+    if raw.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + raw.lstrip("\\")
+    return "\\\\?\\" + raw
+
+
+def _agent_visible_path(path: Path) -> str:
+    raw = str(Path(path).resolve())
+    if os.name == "nt" and len(raw) >= 248:
+        return _windows_long_path(path)
+    return raw
+
+
 def _write_text_no_bom(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except FileNotFoundError:
+        os.makedirs(_windows_long_path(path.parent), exist_ok=True)
+    try:
+        path.write_text(text, encoding="utf-8")
+    except FileNotFoundError:
+        os.makedirs(_windows_long_path(path.parent), exist_ok=True)
+        with open(_windows_long_path(path), "w", encoding="utf-8") as handle:
+            handle.write(text)
 
 
 def _split_no_proxy_hosts(raw: str) -> list[str]:
@@ -110,6 +137,38 @@ def _default_user_codex_home() -> Path:
     return Path.home() / ".codex"
 
 
+def _normalize_codex_config_for_cli_compat(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        value = match.group("value")
+        mapped = CODEX_SERVICE_TIER_COMPAT_ALIASES.get(value.strip().lower())
+        if not mapped:
+            return match.group(0)
+        return f"{match.group('prefix')}{match.group('quote')}{mapped}{match.group('quote')}{match.group('suffix')}"
+
+    return re.sub(
+        r"(?m)^(?P<prefix>\s*service_tier\s*=\s*)(?P<quote>[\"'])(?P<value>[^\"']+)(?P=quote)(?P<suffix>\s*(?:#.*)?)$",
+        replace,
+        text,
+    )
+
+
+def _strip_codex_plugin_sections_for_private_home(text: str) -> str:
+    """Private agent homes should not inherit desktop/plugin loader state."""
+
+    lines = str(text or "").splitlines(keepends=True)
+    filtered: list[str] = []
+    skipping = False
+    for line in lines:
+        stripped = line.strip()
+        header_match = re.match(r"^\[(?P<header>[^\]]+)\]\s*(?:#.*)?$", stripped)
+        if header_match:
+            header = header_match.group("header").strip().strip('"').strip("'")
+            skipping = header == "plugins" or header.startswith("plugins.")
+        if not skipping:
+            filtered.append(line)
+    return "".join(filtered)
+
+
 def initialize_private_codex_home(
     codex_home: Path,
     *,
@@ -140,6 +199,14 @@ def initialize_private_codex_home(
 
     if not copied_config and not (codex_home / "config.toml").exists():
         _write_text_no_bom(codex_home / "config.toml", "")
+    config_path = codex_home / "config.toml"
+    if config_path.is_file():
+        existing = config_path.read_text(encoding="utf-8")
+        normalized = _strip_codex_plugin_sections_for_private_home(
+            _normalize_codex_config_for_cli_compat(existing)
+        )
+        if normalized != existing:
+            _write_text_no_bom(config_path, normalized)
 
 
 def _safe_skill_dir_name(raw: str) -> str:
@@ -252,6 +319,7 @@ def copy_skill_dir_to_codex_home(source_skill_dir: Path, codex_home: Path, *, na
     return {
         "name": skill_name,
         "description": _description_from_skill_md(copied_md),
+        "skill_dir": str(copied_md.parent),
         "skill_md_path": str(copied_md),
     }
 
@@ -268,31 +336,112 @@ def materialize_framework_skill(node: AgentNode, *, codex_home: Path) -> Dict[st
     return copied
 
 
+def _business_skill_catalog(
+    node: AgentNode,
+    *,
+    skill_space: Optional[SkillSpace] = None,
+) -> list[Dict[str, str]]:
+    if skill_space is None:
+        return []
+    hashes = node.resolve_skill_hashes(skill_space)
+    catalog: list[Dict[str, str]] = []
+    for rec in skill_space.resolve_hashes(hashes):
+        source_dir = Path(rec.skill_dir).resolve()
+        skill_md = Path(getattr(rec, "skill_md_path", source_dir / "SKILL.md")).resolve()
+        if not skill_md.is_file():
+            raise FileNotFoundError(f"skill directory missing SKILL.md: {source_dir}")
+        catalog.append(
+            {
+                "hash": str(rec.skill_hash),
+                "name": str(rec.name),
+                "description": str(rec.description or _description_from_skill_md(skill_md)),
+                "skill_dir": str(source_dir),
+                "skill_md_path": str(skill_md),
+                "source": "business",
+            }
+        )
+    return catalog
+
+
+def _selected_skill_index_markdown(business_catalog: Sequence[Dict[str, str]]) -> str:
+    lines = [
+        "# Selected Business Skills",
+        "",
+        "This index is generated by the framework for the current Agent. "
+        "Only the skills listed here are authorized for this Agent.",
+        "",
+        "When a task may match one of these skills, read the listed absolute "
+        "`SKILL.md` path first and follow that skill before acting.",
+        "",
+    ]
+    if not business_catalog:
+        lines.extend(
+            [
+                "No business skills are selected for this Agent.",
+                "",
+            ]
+        )
+        return "\n".join(lines)
+    for item in business_catalog:
+        lines.extend(
+            [
+                f"## {item.get('name', '')}",
+                "",
+                f"- Description: {item.get('description', '')}",
+                f"- SKILL.md: `{item.get('skill_md_path', '')}`",
+                f"- Skill directory: `{item.get('skill_dir', '')}`",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _append_selected_skill_index_reference(framework_skill_md: Path, selected_skill_index_path: Path) -> None:
+    content = framework_skill_md.read_text(encoding="utf-8-sig").rstrip()
+    visible_index_path = _agent_visible_path(selected_skill_index_path)
+    note = (
+        "## Runtime Selected Skill Index\n\n"
+        f"The selected business skill index for this Agent is `{SELECTED_SKILLS_INDEX_FILENAME}` "
+        "in this framework skill directory. Read that index before deciding no selected business skill applies. "
+        "For any relevant entry, read the absolute `SKILL.md` path listed in the index and follow that skill.\n\n"
+        f"Absolute index path: `{visible_index_path}`"
+    )
+    _write_text_no_bom(framework_skill_md, f"{content}\n\n{note}\n")
+
+
+def _selected_skill_index_path(skill_catalog: Sequence[Dict[str, str]]) -> str:
+    for item in skill_catalog:
+        if isinstance(item, dict) and item.get("source") == "framework":
+            path = item.get("selected_skill_index_path")
+            if path:
+                return str(path)
+    return ""
+
+
 def materialize_codex_skill_selection(
     node: AgentNode,
     *,
     codex_home: Path,
     skill_space: Optional[SkillSpace] = None,
 ) -> list[Dict[str, str]]:
-    """Copy authorized business skills into the agent's private CODEX_HOME."""
+    """Expose framework skill files and index authorized business skills."""
 
     skills_root = codex_home / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
-    catalog: list[Dict[str, str]] = [materialize_framework_skill(node, codex_home=codex_home)]
-
-    if skill_space is None:
-        return catalog
-    hashes = node.resolve_skill_hashes(skill_space)
-    for rec in skill_space.resolve_hashes(hashes):
-        copied = copy_skill_dir_to_codex_home(
-            rec.skill_dir,
-            codex_home,
-            name=f"{rec.skill_hash}-{rec.name}",
-        )
-        copied["hash"] = rec.skill_hash
-        copied["source"] = "business"
-        catalog.append(copied)
-    return catalog
+    framework_skill = materialize_framework_skill(node, codex_home=codex_home)
+    business_catalog = _business_skill_catalog(node, skill_space=skill_space)
+    framework_skill_dir = Path(str(framework_skill["skill_dir"]))
+    selected_skill_index_path = framework_skill_dir / SELECTED_SKILLS_INDEX_FILENAME
+    _write_text_no_bom(
+        selected_skill_index_path,
+        _selected_skill_index_markdown(business_catalog),
+    )
+    _append_selected_skill_index_reference(
+        Path(str(framework_skill["skill_md_path"])),
+        selected_skill_index_path,
+    )
+    framework_skill["selected_skill_index_path"] = _agent_visible_path(selected_skill_index_path)
+    return [framework_skill, *business_catalog]
 
 
 def _markdown_title(text: str) -> str:
@@ -384,17 +533,9 @@ def _build_prompt_execution_context(execution_context: Dict[str, Any]) -> Dict[s
     private_context = execution_context.get("private_context")
     if isinstance(private_context, dict):
         prompt_private_context: Dict[str, Any] = {}
-        skill_catalog = private_context.get("skill_catalog")
-        if isinstance(skill_catalog, list):
-            prompt_private_context["skill_catalog"] = [
-                {
-                    key: item[key]
-                    for key in ("name", "description")
-                    if isinstance(item, dict) and key in item
-                }
-                for item in skill_catalog
-                if isinstance(item, dict)
-            ]
+        selected_skill_index_path = private_context.get("selected_skill_index_path")
+        if selected_skill_index_path:
+            prompt_private_context["selected_skill_index_path"] = str(selected_skill_index_path)
         rule_catalog = private_context.get("rule_catalog")
         if isinstance(rule_catalog, list):
             prompt_private_context["rule_catalog"] = [
@@ -715,6 +856,7 @@ def materialize_private_agent_context(
         "private_dir": str(private_dir),
         "codex_home": str(codex_home),
         "agents_md": str(checkout.checkout_dir / "AGENTS.md"),
+        "selected_skill_index_path": _selected_skill_index_path(skill_catalog),
         "skill_catalog": skill_catalog,
         "rule_catalog": rule_catalog,
     }
@@ -751,6 +893,7 @@ def materialize_full_agent_context(
     *,
     project_root: Optional[Path] = None,
     run: Optional[RunWorkspace] = None,
+    skill_space: Optional[SkillSpace] = None,
     mcp_context_provider: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
 ) -> AgentNode:
     """Return a full CLI AgentNode with optional message-only MCP wiring.
@@ -789,7 +932,11 @@ def materialize_full_agent_context(
     rule_catalog: list[Dict[str, str]] = []
     if node.cli_kind == "codex":
         initialize_private_codex_home(codex_home)
-        skill_catalog = [materialize_framework_skill(node, codex_home=codex_home)]
+        skill_catalog = materialize_codex_skill_selection(
+            node,
+            codex_home=codex_home,
+            skill_space=skill_space,
+        )
         materialize_rule_paths([], private_dir=support_dir, project_root=root)
         rule_catalog = [materialize_framework_rule(node, private_dir=support_dir)]
         adapter_options.setdefault("codex_home", str(codex_home))
@@ -858,21 +1005,37 @@ def materialize_full_agent_context(
         execution_context["private_context"] = {
             "support_dir": str(support_dir),
             "codex_home": str(codex_home),
+            "selected_skill_index_path": _selected_skill_index_path(skill_catalog),
             "skill_catalog": skill_catalog,
             "rule_catalog": rule_catalog,
         }
-        framework_lines = [
-            "Framework runtime assets are materialized for this Agent:",
-            *[
-                f"- Skill `{item['name']}`: {item['description']} (file: `{item['skill_md_path']}`)"
-                for item in skill_catalog
-            ],
-            *[
-                f"- Rule `{item['name']}`: {item['description']} (file: `{item['rule_path']}`)"
-                for item in rule_catalog
-            ],
-            "Read and follow the framework rule file before acting.",
+        framework_lines: list[str] = []
+        framework_items = [
+            item
+            for item in skill_catalog
+            if isinstance(item, dict) and item.get("source") == "framework"
         ]
+        if framework_items:
+            framework_lines.append("Framework runtime skills are materialized for this Agent:")
+            framework_lines.extend(
+                [
+                    f"- Skill `{item['name']}`: {item['description']} (file: `{item['skill_md_path']}`)"
+                    for item in framework_items
+                ]
+            )
+        if rule_catalog:
+            if framework_lines:
+                framework_lines.append("")
+            framework_lines.extend(
+                [
+                    "Runtime rule files are materialized for this Agent:",
+                    *[
+                        f"- Rule `{item['name']}`: {item['description']} (file: `{item['rule_path']}`)"
+                        for item in rule_catalog
+                    ],
+                    "Read and follow the framework rule file before acting.",
+                ]
+            )
         framework_preamble = "\n".join(framework_lines)
         existing = adapter_options.get("prompt_preamble")
         if isinstance(existing, str) and existing.strip():

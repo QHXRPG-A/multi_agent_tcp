@@ -55,6 +55,7 @@ from multi_agent_tcp.codex_bridge import load_codex_runtime
 from multi_agent_tcp.agent_launch_context import (
     _apply_local_mcp_proxy_env,
     initialize_private_codex_home,
+    materialize_full_agent_context,
 )
 from multi_agent_tcp.blueprint_mcp_runtime import RunMCPRuntimeHandle
 from multi_agent_tcp.ryven_blueprint import _apply_run_workspace_to_node
@@ -192,7 +193,18 @@ def test_body_to_agent_message_uses_whole_dict_when_prompt_missing() -> None:
 def test_initialize_private_codex_home_seeds_runtime_state_only(tmp_path: Path) -> None:
     source = tmp_path / "source-codex-home"
     source.mkdir()
-    (source / "config.toml").write_text('model = "gpt-5.5"\n', encoding="utf-8")
+    (source / "config.toml").write_text(
+        (
+            'model = "gpt-5.5"\n'
+            '\n'
+            '[plugins."browser@openai-bundled"]\n'
+            'enabled = true\n'
+            '\n'
+            '[mcp_servers.node_repl]\n'
+            "command = 'node_repl.exe'\n"
+        ),
+        encoding="utf-8",
+    )
     (source / "auth.json").write_text('{"auth_mode":"api"}\n', encoding="utf-8")
     (source / "models_cache.json").write_text('{"models":[]}\n', encoding="utf-8")
     user_skill = source / "skills" / "user-skill"
@@ -203,11 +215,47 @@ def test_initialize_private_codex_home_seeds_runtime_state_only(tmp_path: Path) 
     private = tmp_path / "private-codex-home"
     initialize_private_codex_home(private, source_codex_home=source)
 
-    assert (private / "config.toml").read_text(encoding="utf-8") == 'model = "gpt-5.5"\n'
+    private_config = (private / "config.toml").read_text(encoding="utf-8")
+    assert 'model = "gpt-5.5"' in private_config
+    assert '[plugins."browser@openai-bundled"]' not in private_config
+    assert "enabled = true" not in private_config
+    assert "[mcp_servers.node_repl]" in private_config
     assert (private / "auth.json").read_text(encoding="utf-8") == '{"auth_mode":"api"}\n'
     assert (private / "models_cache.json").read_text(encoding="utf-8") == '{"models":[]}\n'
     assert not (private / "skills" / "user-skill").exists()
     assert not (private / "sessions").exists()
+
+
+def test_initialize_private_codex_home_maps_legacy_priority_service_tier(tmp_path: Path) -> None:
+    source = tmp_path / "source-codex-home"
+    source.mkdir()
+    (source / "config.toml").write_text(
+        'model = "gpt-5.5"\nservice_tier = "priority"\n',
+        encoding="utf-8",
+    )
+
+    private = tmp_path / "private-codex-home"
+    initialize_private_codex_home(private, source_codex_home=source)
+
+    assert (private / "config.toml").read_text(encoding="utf-8") == (
+        'model = "gpt-5.5"\nservice_tier = "fast"\n'
+    )
+
+
+def test_initialize_private_codex_home_maps_default_service_tier(tmp_path: Path) -> None:
+    source = tmp_path / "source-codex-home"
+    source.mkdir()
+    (source / "config.toml").write_text(
+        'model = "gpt-5.5"\nservice_tier = "default"\n',
+        encoding="utf-8",
+    )
+
+    private = tmp_path / "private-codex-home"
+    initialize_private_codex_home(private, source_codex_home=source)
+
+    assert (private / "config.toml").read_text(encoding="utf-8") == (
+        'model = "gpt-5.5"\nservice_tier = "fast"\n'
+    )
 
 
 def test_local_mcp_proxy_env_preserves_proxy_compatibility(monkeypatch) -> None:
@@ -349,6 +397,7 @@ def test_agent_node_from_dict_defaults_full_agent_to_codex_access() -> None:
         "unrestricted_commands": True,
         "disable_sandbox": True,
         "framework_message_tools": True,
+        "blueprint_monitor_tools": False,
     }
     worker = node.to_worker_config()
     assert worker.adapter_options["node_type"] == "agent"
@@ -1263,6 +1312,7 @@ class _RestartableCluster(_FakeCluster):
     async def restart_worker(self, worker: WorkerConfig) -> None:
         self.restarted.append(worker.agent_id)
         self.worker_cwds[worker.agent_id] = worker.cwd
+        self.worker_configs[worker.agent_id] = worker
 
     async def run_single(
         self,
@@ -1443,7 +1493,7 @@ async def test_graph_runtime_injects_run_prompt_independently_per_agent() -> Non
 
 
 @pytest.mark.asyncio
-async def test_graph_runtime_injects_prompt_nodes_by_trigger_and_edge_order() -> None:
+async def test_graph_runtime_injects_prompt_nodes_into_launch_preamble_by_edge_order() -> None:
     cluster = _FakeCluster()
     node = AgentNode(
         node_id="node-a",
@@ -1470,6 +1520,15 @@ async def test_graph_runtime_injects_prompt_nodes_by_trigger_and_edge_order() ->
         runtime.reset_run_prompt_injections()
         await runtime.send_agent_message(node, {"prompt": "new run task"})
 
+    worker_preamble = cluster.worker_configs["node-a"].adapter_options["prompt_preamble"]
+    assert worker_preamble == "\n\n".join(
+        [
+            "# Blueprint Prompt: first_prompt",
+            "First extra prompt.",
+            "# Blueprint Prompt: second_prompt",
+            "Second extra prompt.",
+        ]
+    )
     assert cluster.sent[0] == (
         "node-a",
         {
@@ -1477,10 +1536,6 @@ async def test_graph_runtime_injects_prompt_nodes_by_trigger_and_edge_order() ->
                 [
                     "# Agent Run Prompt",
                     "Follow the per-run contract.",
-                    "# Blueprint Prompt: first_prompt",
-                    "First extra prompt.",
-                    "# Blueprint Prompt: second_prompt",
-                    "Second extra prompt.",
                     "---",
                     "first task",
                 ]
@@ -1490,16 +1545,7 @@ async def test_graph_runtime_injects_prompt_nodes_by_trigger_and_edge_order() ->
     )
     assert cluster.sent[1] == (
         "node-a",
-        {
-            "prompt": "\n\n".join(
-                [
-                    "# Blueprint Prompt: second_prompt",
-                    "Second extra prompt.",
-                    "---",
-                    "second task",
-                ]
-            )
-        },
+        {"prompt": "second task"},
         42.0,
     )
     assert cluster.sent[2] == (
@@ -1509,10 +1555,6 @@ async def test_graph_runtime_injects_prompt_nodes_by_trigger_and_edge_order() ->
                 [
                     "# Agent Run Prompt",
                     "Follow the per-run contract.",
-                    "# Blueprint Prompt: first_prompt",
-                    "First extra prompt.",
-                    "# Blueprint Prompt: second_prompt",
-                    "Second extra prompt.",
                     "---",
                     "new run task",
                 ]
@@ -1523,7 +1565,7 @@ async def test_graph_runtime_injects_prompt_nodes_by_trigger_and_edge_order() ->
 
 
 @pytest.mark.asyncio
-async def test_graph_runtime_does_not_consume_once_prompt_node_for_no_op() -> None:
+async def test_graph_runtime_keeps_prompt_node_out_of_message_body_for_no_op() -> None:
     cluster = _FakeCluster()
     node = AgentNode(node_id="node-a", cwd=Path("."))
     graph = GraphDefinition(
@@ -1538,13 +1580,12 @@ async def test_graph_runtime_does_not_consume_once_prompt_node_for_no_op() -> No
         await runtime.send_agent_message(node, {"payload": "missing prompt"})
         await runtime.send_agent_message(node, {"prompt": "real task"})
 
+    assert cluster.worker_configs["node-a"].adapter_options["prompt_preamble"] == (
+        "# Blueprint Prompt: guard\n\nOnly real work."
+    )
     assert cluster.sent[0] == ("node-a", "", 1800.0)
     assert cluster.sent[1] == ("node-a", {"payload": "missing prompt"}, 1800.0)
-    assert cluster.sent[2] == (
-        "node-a",
-        {"prompt": "# Blueprint Prompt: guard\n\nOnly real work.\n\n---\n\nreal task"},
-        1800.0,
-    )
+    assert cluster.sent[2] == ("node-a", {"prompt": "real task"}, 1800.0)
 
 
 @pytest.mark.asyncio
@@ -2215,11 +2256,17 @@ async def test_graph_runtime_reminds_idle_source_about_remaining_outgoing_target
     pending = runtime.pending_messages[reminders[0].payload["message_id"]]
     assert pending.queue_mode == "top"
     assert pending.body["type"] == "framework_outgoing_targets_reminder"
+    assert pending.body["reply_required"] is False
+    assert pending.body["reply_visibility"] == "framework_internal"
+    assert pending.body["framework_message_kind"] == "framework_outgoing_targets_reminder"
     assert pending.body["outgoing_targets"]["batch_id"] == "batch-1"
     envelope = pending.body["context"]["framework_context"]["message_envelope"]
     assert envelope["outgoing_batch_id"] == "batch-1"
     assert envelope["required_outgoing_targets"] == ["agent-b", "agent-c"]
     assert envelope["remaining_targets"] == ["agent-c"]
+    assert envelope["reply_required"] is False
+    assert envelope["reply_visibility"] == "framework_internal"
+    assert envelope["framework_message_kind"] == "framework_outgoing_targets_reminder"
 
     await runtime.tick()
     reminders = [
@@ -2333,9 +2380,62 @@ async def test_graph_runtime_reminds_idle_source_about_required_script_calls() -
     assert reminder.payload["required_script_calls"][0]["description"] == "Format the score payload."
     pending = runtime.pending_messages[reminder.payload["message_id"]]
     assert pending.body["type"] == "blueprint_script_call_reminder"
+    assert pending.body["reply_required"] is False
+    assert pending.body["reply_visibility"] == "framework_internal"
+    assert pending.body["framework_message_kind"] == "blueprint_script_call_reminder"
     envelope = pending.body["context"]["framework_context"]["message_envelope"]
     assert envelope["outgoing_batch_id"] == "batch-script"
     assert envelope["required_script_calls"][0]["script_node_id"] == "format"
+    assert envelope["reply_required"] is False
+    assert envelope["reply_visibility"] == "framework_internal"
+    assert envelope["framework_message_kind"] == "blueprint_script_call_reminder"
+
+
+def test_mcp_refresh_message_context_preserves_reply_policy() -> None:
+    mcp = RunMCPRuntimeHandle(
+        run_id="run-reply-policy",
+        runtime=object(),
+        control=object(),
+        graph=object(),
+        workspace_rpc_server=object(),
+        manager=object(),
+        workspace_run=object(),
+    )
+    scope = mcp.token_store.create_message_scope(
+        agent_node_id="planner",
+        agent_id="agent-planner",
+    )
+
+    mcp.refresh_message_context(
+        {
+            "node_id": "planner",
+            "agent_id": "agent-planner",
+            "message_id": "script-call-reminder-planner-1",
+            "timeout_sec": 30,
+            "body": {
+                "type": "blueprint_script_call_reminder",
+                "context": {
+                    "framework_context": {
+                        "message_envelope": {
+                            "outgoing_batch_id": "batch-1",
+                            "required_outgoing_targets": [],
+                            "reply_required": False,
+                            "reply_visibility": "framework_internal",
+                            "framework_message_kind": "blueprint_script_call_reminder",
+                        }
+                    }
+                },
+            },
+        }
+    )
+
+    assert scope.current_message_context is not None
+    safe = scope.current_message_context.to_safe_dict()
+    assert safe["current_message_id"] == "script-call-reminder-planner-1"
+    assert safe["outgoing_batch_id"] == "batch-1"
+    assert safe["reply_required"] is False
+    assert safe["reply_visibility"] == "framework_internal"
+    assert safe["framework_message_kind"] == "blueprint_script_call_reminder"
 
 
 @pytest.mark.asyncio
@@ -2985,18 +3085,63 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert "Upstream/source batch ids" in framework_rule
         assert "leaf work" in framework_rule
         assert "out-*` are not join ids" in framework_rule
-        assert (codex_home / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
-        framework_skill = (
-            codex_home / "skills" / "framework-agent-runtime" / "SKILL.md"
-        ).read_text(encoding="utf-8")
+        assert "planning-table fill" in framework_rule
+        assert "table_queue_service" in framework_rule
+        assert "blueprint_service_call" in framework_rule
+        assert "xltool" in framework_rule
+        assert "svn update" in framework_rule
+        assert "fill-completion report" in framework_rule
+        assert "svn commit" in framework_rule
+        assert "#771523" in framework_rule
+        assert "blueprint_query_excel_history" in framework_rule
+        assert "uncommitted reverts do not require a ticket" in framework_rule
+        assert "committed reverts require user confirmation, ticket" in framework_rule
+        assert "Do not restore workbook backups over current files" in framework_rule
+        assert "blueprint_revert_excel_changes" not in framework_rule
+        framework_skill_dir = codex_home / "skills" / "framework-agent-runtime"
+        framework_skill_path = framework_skill_dir / "SKILL.md"
+        assert framework_skill_path.is_file()
+        framework_skill = framework_skill_path.read_text(encoding="utf-8")
+        private_context = inst.node.adapter_options["execution_context"]["private_context"]
+        selected_skill_index = Path(private_context["selected_skill_index_path"])
+        assert selected_skill_index.is_file()
+        selected_skill_index_text = selected_skill_index.read_text(encoding="utf-8")
         assert "framework-private utterance record" in framework_skill
         assert "not a communication channel to other AgentNodes" in framework_skill
         assert "call `agent_context({})` with no explicit batch_id" in framework_skill
         assert "source/audit labels and must not be passed" in framework_skill
         assert "`framework_context.message_envelope.required_outgoing_targets` is empty" in framework_skill
         assert "Outgoing batch ids such as `out-*` are not join ids" in framework_skill
-        copied_skills = list((codex_home / "skills").glob(f"{rec.skill_hash}-biz-skill/SKILL.md"))
-        assert copied_skills
+        assert "planning_table_popo_workflow.md" in framework_skill
+        assert "svn update" in framework_skill
+        assert "fill-completion report" in framework_skill
+        assert "svn commit" in framework_skill
+        assert "query fill history first for revert requests" in framework_skill
+        assert "release without ticket/commit for uncommitted reverts" in framework_skill
+        assert "blueprint_revert_excel_changes" not in framework_skill
+        planning_table_workflow = framework_skill_dir / "planning_table_popo_workflow.md"
+        assert planning_table_workflow.is_file()
+        planning_table_workflow_text = planning_table_workflow.read_text(encoding="utf-8")
+        assert "planning-table-skill-index.md" in planning_table_workflow_text
+        assert "If the index has no suitable matching skill" in planning_table_workflow_text
+        assert "continue with the generic framework workflow or create/update a dedicated" in planning_table_workflow_text
+        assert "table_queue_service" in planning_table_workflow_text
+        assert "blueprint_service_call(\"xltool\"" in planning_table_workflow_text
+        assert "svn update" in planning_table_workflow_text
+        assert "fill-completion report" in planning_table_workflow_text
+        assert "svn commit" in planning_table_workflow_text
+        assert "#771523" in planning_table_workflow_text
+        assert "blueprint_query_excel_history" in planning_table_workflow_text
+        assert "If the original fill was not committed" in planning_table_workflow_text
+        assert "do not ask for a ticket and do not run" in planning_table_workflow_text
+        assert "If the original fill was committed" in planning_table_workflow_text
+        assert "Do not call automatic Excel rollback" in planning_table_workflow_text
+        assert "blueprint_revert_excel_changes" not in planning_table_workflow_text
+        assert "selected_skills_index.md" in framework_skill
+        assert "biz-skill" in selected_skill_index_text
+        assert "PRIVATE_RUNTIME_SKILL_DESCRIPTION" in selected_skill_index_text
+        assert str(rec.skill_md_path) in selected_skill_index_text
+        assert not list((codex_home / "skills").glob(f"{rec.skill_hash}-biz-skill/SKILL.md"))
         assert not (codex_home / "skills" / "biz-skill").exists()
         assert inst.node.adapter_options["sandbox"] == "workspace-write"
         assert inst.node.adapter_options["codex_home"] == str(codex_home)
@@ -3021,20 +3166,30 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert json.dumps(str(checkout), ensure_ascii=False)[1:-1] in merged_prompt
         assert json.dumps(str(project), ensure_ascii=False)[1:-1] in merged_prompt
         assert json.dumps(str(run.shared_dir.resolve()), ensure_ascii=False)[1:-1] in merged_prompt
-        assert "PRIVATE_RUNTIME_SKILL_DESCRIPTION" in merged_prompt
+        visible_selected_skill_index = private_context["selected_skill_index_path"]
+        assert json.dumps(visible_selected_skill_index, ensure_ascii=False)[1:-1] in merged_prompt
+        assert "PRIVATE_RUNTIME_SKILL_DESCRIPTION" not in merged_prompt
+        assert str(rec.skill_md_path) not in merged_prompt
         assert "outgoing_batch_id" in merged_prompt
         assert "out-1" in merged_prompt
-        private_context = inst.node.adapter_options["execution_context"]["private_context"]
         assert private_context["codex_home"] == str(codex_home)
+        assert private_context["selected_skill_index_path"] == str(selected_skill_index)
         assert private_context["rule_catalog"][0]["source"] == "framework"
         assert private_context["rule_catalog"][0]["rule_path"] == str(private / "rules" / "framework-agent-runtime.md")
+        assert any(
+            item.get("hash") == rec.skill_hash
+            and item.get("source") == "business"
+            and item.get("skill_md_path") == str(rec.skill_md_path)
+            for item in private_context["skill_catalog"]
+        )
         assert any(
             item.get("rule_path") == str(private / "rules" / "01-business-rule.md")
             and item.get("source") != "framework"
             for item in private_context["rule_catalog"]
         )
         prompt_context = inst.node.adapter_options["prompt_execution_context"]
-        assert "codex_home" not in prompt_context["private_context"]
+        assert prompt_context["private_context"]["selected_skill_index_path"] == str(selected_skill_index)
+        assert "skill_catalog" not in prompt_context["private_context"]
         assert "workspace_api" not in prompt_context
         assert prompt_context["code_workspace"]["project_context"] == str(project)
         assert prompt_context["code_workspace"]["checkout_path"] == str(checkout)
@@ -3052,6 +3207,20 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
     project = tmp_path / "project"
     (project / "src").mkdir(parents=True)
     (project / "src" / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    source_skill = tmp_path / "source-skills" / "full-agent-skill"
+    source_skill.mkdir(parents=True)
+    (source_skill / "SKILL.md").write_text(
+        "---\n"
+        "name: full-agent-skill\n"
+        "description: FULL_AGENT_SKILL_DESCRIPTION\n"
+        "---\n"
+        "# Full Agent Skill\n\n"
+        "FULL_AGENT_SKILL_BODY\n",
+        encoding="utf-8",
+    )
+    skill_space = SkillSpace.open_or_init(tmp_path / "skill-space")
+    rec = skill_space.add_skill_copy(source_skill)
+
     manager = DulwichWorkspaceManager.open_or_init(project)
     run = manager.create_run(run_id="run-full-agent")
     cluster = _RestartableCluster()
@@ -3071,6 +3240,7 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
         enforce_private_agent_context=True,
         private_context_manager=manager,
         private_context_run=run,
+        skill_space=skill_space,
         private_context_mcp_provider=mcp_provider,
     )
     node = AgentNode(
@@ -3079,6 +3249,7 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
         agent_id="agent-shell",
         cli_kind="codex",
         cwd=Path("."),
+        skill_selection={"mode": "selected", "skill_hashes": [rec.skill_hash]},
     )
 
     inst = await runtime.ensure_agent(node)
@@ -3088,8 +3259,23 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
     assert cluster.worker_cwds["agent-shell"] == project.resolve()
     assert not (run.agents_dir / "agent-shell").exists()
     support_dir = run.path / "runtime_agent_context" / "agent-shell"
+    framework_skill_dir = support_dir / "codex_home" / "skills" / "framework-agent-runtime"
+    private_context = inst.node.adapter_options["execution_context"]["private_context"]
+    selected_skill_index = Path(private_context["selected_skill_index_path"])
     assert (support_dir / "codex_home").is_dir()
-    assert (support_dir / "codex_home" / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
+    assert (framework_skill_dir / "SKILL.md").is_file()
+    assert selected_skill_index.is_file()
+    framework_skill = (framework_skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    selected_skill_index_text = selected_skill_index.read_text(encoding="utf-8")
+    assert "selected_skills_index.md" in framework_skill
+    assert "full-agent-skill" in selected_skill_index_text
+    assert "FULL_AGENT_SKILL_DESCRIPTION" in selected_skill_index_text
+    assert str(rec.skill_md_path) in selected_skill_index_text
+    assert not list(
+        (support_dir / "codex_home" / "skills").glob(
+            f"{rec.skill_hash}-full-agent-skill/SKILL.md"
+        )
+    )
     assert (support_dir / "rules" / "framework-agent-runtime.md").is_file()
     assert inst.node.workspace_id is None
     assert inst.node.workspace_root is None
@@ -3100,12 +3286,23 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
     assert inst.node.adapter_options["dangerous_access"] is True
     assert "--dangerously-bypass-approvals-and-sandbox" in inst.node.adapter_options["extra_args"]
     assert inst.node.adapter_options["execution_context"]["agent_access"]["workspace_tools"] is False
-    private_context = inst.node.adapter_options["execution_context"]["private_context"]
     assert private_context["support_dir"] == str(support_dir)
+    assert private_context["selected_skill_index_path"] == str(selected_skill_index)
     assert private_context["skill_catalog"][0]["source"] == "framework"
+    assert any(
+        item.get("hash") == rec.skill_hash
+        and item.get("source") == "business"
+        and item.get("skill_md_path") == str(rec.skill_md_path)
+        for item in private_context["skill_catalog"]
+    )
     assert private_context["rule_catalog"][0]["source"] == "framework"
     assert private_context["rule_catalog"][0]["rule_path"] == str(support_dir / "rules" / "framework-agent-runtime.md")
     assert "framework-agent-runtime.md" in inst.node.adapter_options["prompt_preamble"]
+    assert "FULL_AGENT_SKILL_DESCRIPTION" not in inst.node.adapter_options["prompt_preamble"]
+    assert str(rec.skill_md_path) not in inst.node.adapter_options["prompt_preamble"]
+    prompt_context = inst.node.adapter_options["prompt_execution_context"]
+    assert prompt_context["private_context"]["selected_skill_index_path"] == str(selected_skill_index)
+    assert "skill_catalog" not in prompt_context["private_context"]
     assert inst.node.adapter_options["execution_context"]["mcp"]["tools"] == [
         "agent_dispatch",
         "agent_context",
@@ -3114,6 +3311,75 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
     ]
     assert "MULTI_AGENT_WORKSPACE_CONTEXT" not in inst.node.extra_env
     assert inst.node.extra_env["MULTI_AGENT_MCP_ORDINARY_TOKEN"] == "message-token"
+
+
+def test_full_agent_indexes_heavy_business_skill_without_copying_payloads(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source_skill = tmp_path / "source-skills" / "heavy-skill"
+    (source_skill / "vendor" / ".svn" / "pristine").mkdir(parents=True)
+    (source_skill / "output").mkdir(parents=True)
+    (source_skill / "SKILL.md").write_text(
+        "---\n"
+        "name: heavy-skill\n"
+        "description: HEAVY_SKILL_DESCRIPTION\n"
+        "---\n"
+        "# Heavy Skill\n",
+        encoding="utf-8",
+    )
+    (source_skill / "vendor" / ".svn" / "pristine" / "payload.svn-base").write_text(
+        "do not copy runtime payload\n",
+        encoding="utf-8",
+    )
+    (source_skill / "output" / "generated.xlsx").write_text(
+        "do not copy generated output\n",
+        encoding="utf-8",
+    )
+    skill_space = SkillSpace.open_or_init(tmp_path / "skill-space")
+    rec = skill_space.add_skill_copy(source_skill)
+    run = SimpleNamespace(path=tmp_path / "run")
+    node = AgentNode(
+        node_id="agent-heavy",
+        node_type="agent",
+        agent_id="agent-heavy",
+        cli_kind="codex",
+        cwd=project,
+        skill_selection={"mode": "selected", "skill_hashes": [rec.skill_hash]},
+    )
+
+    launch_node = materialize_full_agent_context(
+        node,
+        project_root=project,
+        run=run,
+        skill_space=skill_space,
+    )
+
+    support_dir = run.path / "runtime_agent_context" / "agent-heavy"
+    codex_skills = support_dir / "codex_home" / "skills"
+    framework_skill_dir = codex_skills / "framework-agent-runtime"
+    assert (framework_skill_dir / "SKILL.md").is_file()
+    private_context = launch_node.adapter_options["execution_context"]["private_context"]
+    selected_skill_index = Path(private_context["selected_skill_index_path"])
+    assert selected_skill_index.is_file()
+    selected_skill_index_text = selected_skill_index.read_text(encoding="utf-8")
+    assert "heavy-skill" in selected_skill_index_text
+    assert "HEAVY_SKILL_DESCRIPTION" in selected_skill_index_text
+    assert str(rec.skill_md_path) in selected_skill_index_text
+    assert not list(codex_skills.glob(f"{rec.skill_hash}-heavy-skill/SKILL.md"))
+    assert not list(codex_skills.rglob(".svn"))
+    assert not list(codex_skills.rglob("generated.xlsx"))
+    assert private_context["selected_skill_index_path"] == str(selected_skill_index)
+    assert any(
+        item.get("hash") == rec.skill_hash
+        and item.get("source") == "business"
+        and item.get("skill_dir") == str(rec.skill_dir)
+        and item.get("skill_md_path") == str(rec.skill_md_path)
+        for item in private_context["skill_catalog"]
+    )
+    assert "HEAVY_SKILL_DESCRIPTION" not in launch_node.adapter_options["prompt_preamble"]
+    assert str(rec.skill_md_path) not in launch_node.adapter_options["prompt_preamble"]
 
 
 @pytest.mark.asyncio
@@ -3219,6 +3485,8 @@ async def test_full_agent_receives_standard_context_and_dispatches_via_message_m
             "agent_dispatch",
             "agent_context",
             "blueprint_script_call",
+            "blueprint_service_docs",
+            "blueprint_service_call",
             "agent_task_status",
             "join_contribute",
         ]
@@ -3376,11 +3644,10 @@ async def test_real_codex_cli_framework_private_checkout_submit_and_archive_flow
             "You are running as a real Codex CLI worker inside the framework private "
             "AgentNode context. Complete this exact flow and do not edit the project "
             "directory directly.\n\n"
-            "1. Read AGENTS.md and the Codex Execution Context catalog. Confirm the "
-            "injected skill catalog includes framework-agent-runtime and "
+            "1. Read AGENTS.md, the framework runtime skill, and its selected skill index. Confirm the "
+            "runtime skill/index includes framework-agent-runtime and "
             "framework-flow-skill, and the rule catalog includes Framework Flow Rule. "
-            "Do not open individual SKILL.md or rule files with shell commands; the "
-            "catalog is the required injected context for this test.\n"
+            "Only open the business skill SKILL.md through the selected skill index path.\n"
             "2. Run: python -m multi_agent_tcp.workspace_api checkout --path "
             "src/framework_probe.txt\n"
             "3. Modify only src/framework_probe.txt in your current private checkout. "
@@ -3441,8 +3708,20 @@ async def test_real_codex_cli_framework_private_checkout_submit_and_archive_flow
         checkout = private / "checkout"
         codex_home = private / "codex_home"
         assert (checkout / "AGENTS.md").is_file()
-        assert (codex_home / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
-        assert list((codex_home / "skills").glob(f"{rec.skill_hash}-framework-flow-skill/SKILL.md"))
+        framework_skill_dir = codex_home / "skills" / "framework-agent-runtime"
+        selected_skill_index = framework_skill_dir / "selected_skills_index.md"
+        assert (framework_skill_dir / "SKILL.md").is_file()
+        assert selected_skill_index.is_file()
+        assert str(rec.skill_md_path) in selected_skill_index.read_text(encoding="utf-8")
+        assert not list((codex_home / "skills").glob(f"{rec.skill_hash}-framework-flow-skill/SKILL.md"))
+        private_context = inst.node.adapter_options["execution_context"]["private_context"]
+        assert private_context["selected_skill_index_path"] == str(selected_skill_index)
+        assert any(
+            item.get("hash") == rec.skill_hash
+            and item.get("source") == "business"
+            and item.get("skill_md_path") == str(rec.skill_md_path)
+            for item in private_context["skill_catalog"]
+        )
         assert (private / "rules" / "01-framework-flow-rule.md").is_file()
 
         audit_commands = _workspace_api_audit_commands(run)
@@ -4373,13 +4652,9 @@ async def test_graph_executor_runs_minimal_blueprint_and_starts_agents() -> None
     assert cluster.started == ["a", "b"]
     assert cluster.sent[0] == ("a", {"prompt": "first"}, 12)
     assert cluster.sent[1][0] == "b"
-    assert cluster.sent[1][1]["prompt"] == "\n\n".join(
-        [
-            "# Blueprint Prompt: prompt-b",
-            "Follow B runtime notes.",
-            "---",
-            "second",
-        ]
+    assert cluster.sent[1][1]["prompt"] == "second"
+    assert cluster.worker_configs["b"].adapter_options["prompt_preamble"] == (
+        "# Blueprint Prompt: prompt-b\n\nFollow B runtime notes."
     )
     assert "context" in cluster.sent[1][1]
     assert [event.event_type for event in events] == [
@@ -4729,6 +5004,28 @@ async def test_super_agent_assigns_downstream_workdir_by_runtime_api(tmp_path: P
     assert cluster.started == ["worker-target"]
     assert cluster.restarted == ["worker-target"]
     assert cluster.worker_cwds["worker-target"] == assigned.resolve()
+
+
+@pytest.mark.asyncio
+async def test_session_reset_rebuilds_prompt_node_launch_preamble(tmp_path: Path) -> None:
+    cluster = _RestartableCluster()
+    node = AgentNode(node_id="target", agent_id="worker-target", cwd=tmp_path)
+    graph = GraphDefinition(
+        agent_nodes={"target": node},
+        prompt_nodes={"guard": PromptNode("guard", text="Reset runtime notes.", trigger="always")},
+        edges=[GraphEdge("guard", "target", output_port="out", input_port="prompt", edge_type="data")],
+    )
+
+    async with GraphRuntime(cluster) as runtime:
+        runtime.configure_completion_tracking(graph)
+        await runtime.ensure_agent(node)
+        result = await runtime.reset_started_agents_for_session(graph)
+
+    assert result["ok"] is True
+    assert cluster.restarted == ["worker-target"]
+    assert cluster.worker_configs["worker-target"].adapter_options["prompt_preamble"] == (
+        "# Blueprint Prompt: guard\n\nReset runtime notes."
+    )
 
 
 @pytest.mark.asyncio
