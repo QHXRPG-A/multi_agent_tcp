@@ -28,6 +28,7 @@ LOCAL_MCP_NO_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
 CODEX_DANGEROUS_BYPASS_ARG = "--dangerously-bypass-approvals-and-sandbox"
 FRAMEWORK_ASSETS_DIR = Path(__file__).resolve().parent / "framework_assets"
 FRAMEWORK_AGENT_RUNTIME_NAME = "framework-agent-runtime"
+FRAMEWORK_WORKER_RUNTIME_NAME = "framework-worker-runtime"
 FRAMEWORK_TOP_AGENT_RUNTIME_NAME = "framework-top-agent-runtime"
 SELECTED_SKILLS_INDEX_FILENAME = "selected_skills_index.md"
 PROXY_ENV_NAMES_BY_SCHEME = {
@@ -257,16 +258,40 @@ def workspace_api_doc() -> str:
     )
 
 
-def _framework_runtime_name(*, is_top_agent: bool) -> str:
-    return FRAMEWORK_TOP_AGENT_RUNTIME_NAME if is_top_agent else FRAMEWORK_AGENT_RUNTIME_NAME
+def _framework_runtime_name(*, is_top_agent: bool, is_worker_agent: bool = False) -> str:
+    if is_top_agent:
+        return FRAMEWORK_TOP_AGENT_RUNTIME_NAME
+    if is_worker_agent:
+        return FRAMEWORK_WORKER_RUNTIME_NAME
+    return FRAMEWORK_AGENT_RUNTIME_NAME
 
 
-def _framework_skill_dir(*, is_top_agent: bool) -> Path:
-    return FRAMEWORK_ASSETS_DIR / "skills" / _framework_runtime_name(is_top_agent=is_top_agent)
+def _framework_runtime_name_for_node(node: AgentNode) -> str:
+    return _framework_runtime_name(
+        is_top_agent=is_framework_top_agent_node(node),
+        is_worker_agent=str(getattr(node, "node_type", "worker_agent")) != "agent",
+    )
 
 
-def _framework_rule_path(*, is_top_agent: bool) -> Path:
-    return FRAMEWORK_ASSETS_DIR / "rules" / f"{_framework_runtime_name(is_top_agent=is_top_agent)}.md"
+def _framework_skill_dir(*, is_top_agent: bool, is_worker_agent: bool = False) -> Path:
+    return FRAMEWORK_ASSETS_DIR / "skills" / _framework_runtime_name(
+        is_top_agent=is_top_agent,
+        is_worker_agent=is_worker_agent,
+    )
+
+
+def _framework_skill_dir_for_name(framework_name: str) -> Path:
+    return FRAMEWORK_ASSETS_DIR / "skills" / framework_name
+
+
+def _framework_rule_path(*, is_top_agent: bool, is_worker_agent: bool = False) -> Path:
+    return FRAMEWORK_ASSETS_DIR / "rules" / (
+        f"{_framework_runtime_name(is_top_agent=is_top_agent, is_worker_agent=is_worker_agent)}.md"
+    )
+
+
+def _framework_rule_path_for_name(framework_name: str) -> Path:
+    return FRAMEWORK_ASSETS_DIR / "rules" / f"{framework_name}.md"
 
 
 def _read_framework_asset(path: Path) -> str:
@@ -280,12 +305,20 @@ def framework_agent_rules() -> str:
     return _read_framework_asset(_framework_rule_path(is_top_agent=False))
 
 
+def framework_worker_rules() -> str:
+    return _read_framework_asset(_framework_rule_path(is_top_agent=False, is_worker_agent=True))
+
+
 def framework_top_agent_rules() -> str:
     return _read_framework_asset(_framework_rule_path(is_top_agent=True))
 
 
 def framework_agent_skill() -> str:
     return _read_framework_asset(_framework_skill_dir(is_top_agent=False) / "SKILL.md")
+
+
+def framework_worker_skill() -> str:
+    return _read_framework_asset(_framework_skill_dir(is_top_agent=False, is_worker_agent=True) / "SKILL.md")
 
 
 def framework_top_agent_skill() -> str:
@@ -311,8 +344,8 @@ def copy_skill_dir_to_codex_home(source_skill_dir: Path, codex_home: Path, *, na
     skill_name = _safe_skill_dir_name(name or source.name)
     target = codex_home / "skills" / skill_name
     if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(source, target)
+        shutil.rmtree(_windows_long_path(target))
+    shutil.copytree(_windows_long_path(source), _windows_long_path(target))
     copied_md = target / "SKILL.md"
     content = copied_md.read_text(encoding="utf-8-sig")
     _write_text_no_bom(copied_md, content)
@@ -325,10 +358,9 @@ def copy_skill_dir_to_codex_home(source_skill_dir: Path, codex_home: Path, *, na
 
 
 def materialize_framework_skill(node: AgentNode, *, codex_home: Path) -> Dict[str, str]:
-    is_top_agent = is_framework_top_agent_node(node)
-    framework_name = _framework_runtime_name(is_top_agent=is_top_agent)
+    framework_name = _framework_runtime_name_for_node(node)
     copied = copy_skill_dir_to_codex_home(
-        _framework_skill_dir(is_top_agent=is_top_agent),
+        _framework_skill_dir_for_name(framework_name),
         codex_home,
         name=framework_name,
     )
@@ -453,9 +485,8 @@ def _markdown_title(text: str) -> str:
 
 
 def materialize_framework_rule(node: AgentNode, *, private_dir: Path) -> Dict[str, str]:
-    is_top_agent = is_framework_top_agent_node(node)
-    framework_name = _framework_runtime_name(is_top_agent=is_top_agent)
-    source = _framework_rule_path(is_top_agent=is_top_agent)
+    framework_name = _framework_runtime_name_for_node(node)
+    source = _framework_rule_path_for_name(framework_name)
     content = source.read_text(encoding="utf-8")
     rules_dir = private_dir / "rules"
     rules_dir.mkdir(parents=True, exist_ok=True)

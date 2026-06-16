@@ -3591,9 +3591,9 @@ class DesktopBlueprintService:
             "Still pending tables: " + (", ".join(pending) if pending else "(none)"),
             "All requested tables: " + (", ".join(all_tables) if all_tables else "(unknown)"),
             "",
-            "Continue the previously confirmed planning-table workflow from this session.",
+            "请先告知 POPO 用户：排队的表已经占用成功；然后继续执行本会话之前已确认的填表流程，一切照旧。",
             "This notification does not expose a Blueprint ScriptNode call batch and has no required_script_calls.",
-            "Do not reply only to acknowledge this notification. Reply to the POPO user only when you need missing information, are blocked, or have a fill-completion report ready for confirmation.",
+            "不要只回复确认收到后停止；请像占表一开始就成功一样继续推进填表。",
         ]
         return "\n".join(lines)
 
@@ -4977,13 +4977,20 @@ class DesktopBlueprintService:
         with self._lock:
             run.session_key = session_key
             run.updated_at = float(self.now() if now is None else now)
+            robot_app_key = str(run.robot_app_key or "").strip()
+            if str(source or "").strip().lower() == "popo" and not robot_app_key:
+                session = self._load_blueprint_session(session_key)
+                if isinstance(session, dict):
+                    robot_app_key = str(session.get("robotAppKey") or "").strip()
+                    if robot_app_key:
+                        run.robot_app_key = robot_app_key
             try:
                 if run.mcp is not None and callable(getattr(run.mcp, "enable_session_history_tools", None)):
                     run.mcp.enable_session_history_tools(
                         start_node_id=start_node_id,
                         session_key=session_key,
                     )
-                if str(source or "").strip().lower() == "popo" and str(run.robot_app_key or "").strip():
+                if str(source or "").strip().lower() == "popo" and robot_app_key:
                     run.runtime.popo_reply_start_node_id = start_node_id
                     run.runtime.popo_reply_session_key = session_key
                 else:
@@ -6630,7 +6637,20 @@ class DesktopBlueprintService:
             session_key = str(run.session_key or run.bound_session_key or getattr(run.runtime, "popo_reply_session_key", "") or "").strip()
             start_node_id = str(run.start_node_id or document_start_node_id(run.document))
             robot_app_key = str(run.robot_app_key or "").strip()
-            if not session_key or not robot_app_key or agent_node_id != start_node_id:
+            if not session_key or agent_node_id != start_node_id:
+                return None
+            if not robot_app_key:
+                session = self._load_blueprint_session(session_key)
+                if isinstance(session, dict):
+                    robot_app_key = str(session.get("robotAppKey") or "").strip()
+                    if robot_app_key:
+                        run.robot_app_key = robot_app_key
+                        try:
+                            run.runtime.popo_reply_start_node_id = start_node_id
+                            run.runtime.popo_reply_session_key = session_key
+                        except Exception:
+                            pass
+            if not robot_app_key:
                 return None
             dedupe_key = f"{message_id}\n{agent_node_id}\n{text}" if message_id else f"{agent_node_id}\n{text}"
             if dedupe_key in run.popo_framework_reply_keys:
@@ -7858,13 +7878,6 @@ class DesktopBlueprintService:
                 details={"runId": run_id, "startNodeId": start_node_id, "agentNodeId": agent_node_id},
                 status=403,
             )
-        if not robot_app_key:
-            raise BlueprintServiceError(
-                "BLUEPRINT_POPO_REPLY_UNAVAILABLE",
-                "this blueprint run was not started from a POPO robot",
-                details={"runId": run_id},
-                status=400,
-            )
         session = self._load_blueprint_session(session_key)
         session_run_matches = bool(
             session
@@ -7879,12 +7892,25 @@ class DesktopBlueprintService:
                 status=404,
             )
         session_robot_app_key = str(session.get("robotAppKey") or "").strip()
+        if not robot_app_key and session_robot_app_key:
+            robot_app_key = session_robot_app_key
+            with self._lock:
+                run = self._runs.get(str(run_id))
+                if run is not None and not str(run.robot_app_key or "").strip():
+                    run.robot_app_key = robot_app_key
         if session_robot_app_key and session_robot_app_key != robot_app_key:
             raise BlueprintServiceError(
                 "BLUEPRINT_POPO_ROBOT_STRUCTURE_CONFLICT",
                 "POPO session robot binding does not match this run",
                 details={"runId": run_id, "sessionKey": session_key},
                 status=409,
+            )
+        if not robot_app_key:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_REPLY_UNAVAILABLE",
+                "this blueprint run was not started from a POPO robot",
+                details={"runId": run_id},
+                status=400,
             )
         receiver = self._popo_reply_receiver_from_session(session)
         if not receiver:

@@ -1,30 +1,25 @@
-# Multi-Agent Framework Baseline Rules
+# Multi-Agent Full Agent Framework Rules
 
-- Understand the three workspace zones before acting: project directory is the authoritative code source/final target, private checkout is your personal workbench, temporary shared workspace is read-only collaboration state.
-- Read project_context / project_code_root directly as read-only context when you need project files.
-- Read the temporary shared workspace directly as read-only filesystem context when you need reports, artifacts, manifest.json, or logs.
-- Fetch or checkout only task-relevant code into your private checkout before editing.
-- Use framework MCP tools when they are configured in Codex.
-- Submit code changes from the private checkout through `workspace_submit`.
-- Publish reports, artifacts, summaries, file/version references, and changeset ids through `workspace_publish` / `workspace_publish_file`.
-- If multiple AgentNodes may publish to one shared path, either use an agent-specific path or read the current shared file plus shared `manifest.json`, then publish the full replacement content with `expected_version`; cross-agent overwrites without `expected_version` are rejected.
-- Do not write directly into project_context, project_code_root, or the temporary shared workspace as a code/output completion path.
-- If a direct project/shared write is denied by the sandbox, treat that as boundary enforcement and continue through checkout/submit/publish instead of stopping.
-- Communicate with other AgentNodes through framework messages and shared references, not by copying project source trees into shared space.
-- Your natural-language worker reply is a framework-private utterance record; it is not delivered to other AgentNodes.
 - The only current batch you may read or dispatch for this message is `framework_context.message_envelope.outgoing_batch_id`.
 - Upstream/source batch ids mentioned in message text are provenance/audit labels; do not pass them to `agent_context(batch_id=...)`.
 - To inspect the current readable batch, call `agent_context({})` with no explicit batch_id.
+- Use framework MCP tools when they are configured in Codex.
 - When `framework_context.message_envelope.required_script_calls` is non-empty, call `blueprint_script_call` for the listed function(s); the framework executes the ScriptNode and delivers outputs to connected downstream AgentNodes.
 - `framework_context.resident_services` lists global resident services by name, description, and status. Use `blueprint_service_docs(service_name)` for method signatures and `blueprint_service_call(service_name, method_name, arguments)` to call one. Ordinary Agent tools cannot start or stop resident services.
+- For any game planning-table fill, edit, validation, occupation, release, or submit workflow, use only the framework-provided planning-table boundaries: read resident-service interfaces through `blueprint_service_docs`, call resident services through `blueprint_service_call`, occupy and release workbooks through the `table_queue_service` ScriptNode with `blueprint_script_call`, and read/write/validate planning tables through the `xltool` resident service. Do not directly edit workbook files, call `D:\excelize-cli` from shell, or call the table occupation backend/resident service directly to bypass the ScriptNode.
+- For planning-table revert or undo requests, call `blueprint_query_excel_history` first, then turn the requested revert into a normal confirmed fill plan. Use structured `beforeAfter` history first, and use legacy backup paths or `excel-export-flow` / SVN diff only as read-only evidence. Determine whether the original fill was committed: uncommitted reverts do not require a ticket and must not run `svn commit`; committed reverts require user confirmation, ticket, `svn commit`, and release; unknown commit state must be clarified with the user. Do not restore workbook backups over current files, do not use automatic Excel rollback, and do not call `xltool rollback`.
+- Before any planning-table write, confirm that the workbook has been occupied through `table_queue_service`, then run `svn update` before editing.
+- After planning-table writes and validation, send the POPO user a fill-completion report. For normal fills and committed reverts, wait for explicit user confirmation before `svn commit`; if the user has not provided a ticket number, ask for the ticket number in that report/confirmation step. Commit message format must be `#ticket title - username`, for example `#771523 【7月超能力乱斗】- 时间宝石超能 - qiuhaoxuan`.
+- Only after user confirmation and a successful required `svn commit` may you release the occupied workbooks through `table_queue_service`. For uncommitted reverts, release after validation succeeds and the completion report is sent, with no ticket request and no `svn commit`. If the user rejects the fill-completion report, requests changes, or does not provide a required ticket number for a commit-required workflow, do not commit and do not mark the task completed.
+- For trunk-to-release/re planning-table sync requests, read `trunk_release_table_sync.md` in the framework skill directory and use the local `excel-export-flow` diff helpers. If the user omitted the ticket/order number, SVN revision, or revision range, ask for it before diff lookup. Once the diff evidence is unambiguous, update only the release/re workbook, summarize changed cells, and never run `svn commit` / `svn ci`; release/re table commits must be performed by the user.
+- When game source-code inspection is needed, use `F:\src\Package\Script\Python` as the default source root and `F:\src\Package\Script\Python\.codemaker\expert` as the default expert knowledge root.
 - To provide information to another AgentNode, use `agent_dispatch` for the current batch.
 - Sending an empty string `""` or numeric `0` through `agent_dispatch` means this target has no task and should not receive a downstream message.
-- When `framework_context.message_envelope.required_outgoing_targets` is empty, this is leaf work: do not call `agent_dispatch` or `join_contribute`; process the message and publish durable results through `workspace_publish` / `workspace_publish_file`.
+- When `framework_context.message_envelope.required_outgoing_targets` is empty, this is leaf work: do not call `agent_dispatch` or `join_contribute`; process the message and finish with the appropriate task status or user-visible reply.
 - Use `join_contribute` only when the framework or task explicitly provides a real `join_id`; outgoing batch ids such as `out-*` are not join ids.
-- To provide durable results to the framework, use assigned framework MCP tools.
-- If `blueprint_reply_popo_user` is available and you use it, that tool is the user-visible POPO reply and records the current task as completed; do not add a second natural-language final reply.
-- Before finishing a non-POPO message, call `agent_task_status` with your own task status and summary after submit/publish/dispatch work is done.
+- For POPO-bound sessions, the start Agent's final natural-language CLI reply is the user-visible POPO reply; the framework forwards it after your work is complete.
+- Before finishing, call `agent_task_status` with your own task status and summary after dispatch, ScriptNode, resident-service, or table work is done unless the framework has already recorded a terminal status.
 - If the framework sends `framework_summary_request`, summarize only your own current task and call `agent_task_status`; do not summarize the ring or full blueprint.
 - Do not request or depend on top-agent-only utterance inspection APIs.
-- Framework rules and skills are materialized once when your private worker context is prepared; per-message updates arrive only through `framework_context`.
+- Framework rules and skills are materialized once when your Full Agent runtime context is prepared; per-message updates arrive only through `framework_context`.
 - Use only skills and rules exposed in your private CODEX_HOME/cwd context.

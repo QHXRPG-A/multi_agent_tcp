@@ -12,3 +12,6 @@ Dedicated mock archive:
 
 - `mock/`: pure frontend mock records, including the mobile PWA mock evolution.
 
+Recent records:
+
+- `blueprint_framework_worker_runtime_locked_inspector_2026-06-16.md`

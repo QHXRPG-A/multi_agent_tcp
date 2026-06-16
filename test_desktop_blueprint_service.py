@@ -2450,7 +2450,8 @@ def test_table_queue_notification_consumer_delivers_to_active_session(
     assert captured[0]["queue_mode"] == "top"
     assert captured[0]["body"]["type"] == "framework_table_queue_notification"
     assert captured[0]["body"]["reply_required"] is True
-    assert "Do not reply only to acknowledge" in captured[0]["body"]["prompt"]
+    assert "请先告知 POPO 用户" in captured[0]["body"]["prompt"]
+    assert "一切照旧" in captured[0]["body"]["prompt"]
     processed = json.loads(service._table_queue_notification_processed_path().read_text(encoding="utf-8"))
     assert processed["processedNotificationIds"] == ["tqn-1"]
     transcript = (service.blueprint_sessions_dir() / session_key / "transcript.jsonl").read_text(encoding="utf-8")
@@ -4073,6 +4074,91 @@ def test_framework_popo_reply_sends_start_agent_utterance_to_saved_reply_target(
     assert "agent reply" in transcript
     assert control_requests[-1]["command"] == "agent.task_status"
     assert control_requests[-1]["args"]["metadata"]["source"] == "framework_popo_reply"
+
+
+def test_framework_popo_reply_recovers_robot_binding_from_active_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    service.save_popo_robot(_popo_entry("robot-1"))
+    document = _document(project)
+    runtime = SimpleNamespace(popo_reply_start_node_id="", popo_reply_session_key="")
+    run = DesktopBlueprintRun(
+        run_id="run-1",
+        project_dir=project,
+        blueprint_id="default",
+        document=document,
+        graph=object(),
+        runtime=runtime,
+        control=SimpleNamespace(handle_request=lambda request: {"ok": True}),
+        execution_mode="live",
+        created_at=1.0,
+        updated_at=1.0,
+        start_node_id="planner",
+        session_key="bps_popo_u1+default",
+        robot_app_key="",
+    )
+    service._runs[run.run_id] = run
+    service._save_blueprint_session(
+        {
+            "sessionKey": "bps_popo_u1+default",
+            "source": "popo",
+            "projectDir": str(project),
+            "blueprintId": "default",
+            "blueprintName": "Default Blueprint",
+            "blueprintStructureId": "structure-1",
+            "robotAppKey": "robot-1",
+            "popoUserId": "u1",
+            "popoSessionId": "s1",
+            "popoReplyTo": "reply-u1",
+            "popoSessionType": "1",
+            "status": "running",
+            "activeRunId": "run-1",
+            "lastRunId": "run-1",
+            "createdAt": 1.0,
+            "lastTouchedAt": 1.0,
+            "deleted": False,
+        }
+    )
+    sent: list[dict[str, Any]] = []
+
+    def fake_send_popo_message(*, receiver: str, content: str, robot_config: dict[str, Any]) -> dict[str, Any]:
+        sent.append(
+            {
+                "receiver": receiver,
+                "content": content,
+                "robotAppKey": robot_config["robot_app_key"],
+            }
+        )
+        return {"ok": True, "sent": True, "transport": "streaming_card", "messageId": "card-1"}
+
+    monkeypatch.setattr(service, "_send_popo_message", fake_send_popo_message)
+
+    result = service._forward_framework_popo_reply(
+        "run-1",
+        {
+            "said": "agent reply",
+            "node_id": "planner",
+            "agent_id": "agent-planner",
+            "message_id": "msg-framework-reply",
+        },
+    )
+
+    assert result is not None
+    assert result["ok"] is True
+    assert sent == [{"receiver": "reply-u1", "content": "agent reply", "robotAppKey": "robot-1"}]
+    assert run.robot_app_key == "robot-1"
+    assert runtime.popo_reply_start_node_id == "planner"
+    assert runtime.popo_reply_session_key == "bps_popo_u1+default"
+    transcript = (
+        service.blueprint_sessions_dir() / "bps_popo_u1+default" / "transcript.jsonl"
+    ).read_text(encoding="utf-8")
+    assert '"type": "agent_reply"' in transcript
+    assert '"type": "popo_reply_sent"' in transcript
+    assert '"robotAppKey": "robot-1"' in transcript
 
 
 def test_stream_notification_registers_framework_popo_reply_callback(tmp_path: Path) -> None:
@@ -9042,6 +9128,7 @@ def test_blueprint_service_live_mode_starts_start_agents_with_private_context(
         "command": "codex",
         "adapter_options": {"skip_git_repo_check": True},
     }
+    document["graph"]["edges"].append({"from": "planner", "to": "test-agent", "edge_type": "exec"})
     document["graph"]["edges"].append({"from": "planner", "to": "observer", "edge_type": "exec"})
     document["graph"]["agent_nodes"]["leaf"] = {
         "node_id": "leaf",
@@ -9063,12 +9150,7 @@ def test_blueprint_service_live_mode_starts_start_agents_with_private_context(
     plan["agent_descriptions"]["test-agent"] = "Test panel agent."
     plan["agent_descriptions"]["observer"] = "Observer receives the start node outgoing batch."
     plan["agent_descriptions"]["leaf"] = "Leaf should start lazily when scheduled later."
-    plan["start_nodes"] = ["planner", "test-agent"]
-    plan["tasks"]["test-agent"] = {
-        "goal": "Exercise the test panel agent.",
-        "expected_output": "A test panel response.",
-        "acceptance": "The test panel agent can start with private context.",
-    }
+    plan["start_nodes"] = ["planner"]
 
     service = DesktopBlueprintService()
     service.save_blueprint(project, document)
@@ -9090,69 +9172,93 @@ def test_blueprint_service_live_mode_starts_start_agents_with_private_context(
     assert set(backend.worker_configs) == {"agent-planner", "agent-test-agent", "agent-observer"}
     assert "agent-leaf" not in backend.worker_configs
 
+    run_root = project / ".multi_agent_workspace" / "runs" / "active" / started["runId"]
     for agent_id, worker in backend.worker_configs.items():
-        private = (
-            project
-            / ".multi_agent_workspace"
-            / "runs"
-            / "active"
-            / started["runId"]
-            / "agents"
-            / agent_id
-            / "private"
+        is_full_agent = agent_id == "agent-planner"
+        support_dir = (
+            run_root / "runtime_agent_context" / agent_id
+            if is_full_agent
+            else run_root / "agents" / agent_id / "private"
         )
-        assert worker.cwd == private / "checkout"
-        assert worker.adapter_options["codex_home"] == str(private / "codex_home")
-        assert worker.adapter_options["diagnostics_dir"] == str(private / "logs" / "codex")
+        codex_home = support_dir / "codex_home"
+        assert worker.adapter_options["codex_home"] == str(codex_home)
         assert "prompt_execution_context" in worker.adapter_options
         assert "workspace_api" not in worker.adapter_options["prompt_execution_context"]
-        assert "submit_command" not in worker.adapter_options["prompt_execution_context"]["code_workspace"]
-        assert "workspace_api" in worker.adapter_options["execution_context"]
-        assert "submit_command" in worker.adapter_options["execution_context"]["code_workspace"]
-        assert worker.extra_env["MULTI_AGENT_WORKSPACE_CONTEXT"] == str(
-            private / "workspace_api_context.json"
-        )
         assert "MULTI_AGENT_MCP_ORDINARY_TOKEN" in worker.extra_env
-        assert "127.0.0.1" in worker.extra_env["NO_PROXY"].split(",")
-        assert "localhost" in worker.extra_env["no_proxy"].split(",")
-        assert (private / "workspace_api_context.json").is_file()
-        assert (private / "checkout" / "AGENTS.md").is_file()
-        config_text = (private / "codex_home" / "config.toml").read_text(encoding="utf-8")
+        if is_full_agent:
+            assert worker.cwd == project.resolve()
+            assert worker.adapter_options["diagnostics_dir"] == str(support_dir / "logs" / "codex")
+            assert worker.adapter_options["execution_context"]["agent_access"]["node_type"] == "agent"
+            assert worker.adapter_options["execution_context"]["agent_access"]["workspace_tools"] is False
+            assert "MULTI_AGENT_WORKSPACE_CONTEXT" not in worker.extra_env
+        else:
+            assert worker.cwd == support_dir / "checkout"
+            assert worker.adapter_options["diagnostics_dir"] == str(support_dir / "logs" / "codex")
+            assert "submit_command" not in worker.adapter_options["prompt_execution_context"]["code_workspace"]
+            assert "workspace_api" in worker.adapter_options["execution_context"]
+            assert "submit_command" in worker.adapter_options["execution_context"]["code_workspace"]
+            assert worker.extra_env["MULTI_AGENT_WORKSPACE_CONTEXT"] == str(
+                support_dir / "workspace_api_context.json"
+            )
+            assert "127.0.0.1" in worker.extra_env["NO_PROXY"].split(",")
+            assert "localhost" in worker.extra_env["no_proxy"].split(",")
+            assert (support_dir / "workspace_api_context.json").is_file()
+            assert (support_dir / "checkout" / "AGENTS.md").is_file()
+        config_text = (codex_home / "config.toml").read_text(encoding="utf-8")
         assert "[mcp_servers.framework_ordinary]" in config_text
         assert "enabled = true" in config_text
         assert "bearer_token_env_var = \"MULTI_AGENT_MCP_ORDINARY_TOKEN\"" in config_text
-        assert '"workspace_checkout"' in config_text
         assert '"agent_dispatch"' in config_text
-        assert "[mcp_servers.framework_ordinary.tools.workspace_checkout]" in config_text
         assert "[mcp_servers.framework_ordinary.tools.agent_dispatch]" in config_text
+        if is_full_agent:
+            assert '"workspace_checkout"' not in config_text
+            assert "[mcp_servers.framework_ordinary.tools.workspace_checkout]" not in config_text
+        else:
+            assert '"workspace_checkout"' in config_text
+            assert "[mcp_servers.framework_ordinary.tools.workspace_checkout]" in config_text
         assert 'approval_mode = "approve"' in config_text
-        framework_skill = private / "codex_home" / "skills" / "framework-agent-runtime" / "SKILL.md"
+        runtime_name = "framework-agent-runtime" if is_full_agent else "framework-worker-runtime"
+        framework_skill = codex_home / "skills" / runtime_name / "SKILL.md"
         assert framework_skill.is_file()
         framework_skill_text = framework_skill.read_text(encoding="utf-8")
         assert "use those MCP tools first" in framework_skill_text
-        assert "query fill history first for revert requests" in framework_skill_text
-        assert "release without ticket/commit for uncommitted reverts" in framework_skill_text
         assert "blueprint_revert_excel_changes" not in framework_skill_text
-        planning_workflow_text = (
-            private
-            / "codex_home"
-            / "skills"
-            / "framework-agent-runtime"
-            / "planning_table_popo_workflow.md"
-        ).read_text(encoding="utf-8")
-        assert "blueprint_query_excel_history" in planning_workflow_text
-        assert "Do not call automatic Excel rollback" in planning_workflow_text
-        assert "If the original fill was not committed" in planning_workflow_text
-        assert "do not ask for a ticket and do not run" in planning_workflow_text
-        assert "If the original fill was committed" in planning_workflow_text
-        assert "blueprint_revert_excel_changes" not in planning_workflow_text
-        framework_rule = private / "rules" / "framework-agent-runtime.md"
+        if is_full_agent:
+            assert "query fill history first for revert requests" in framework_skill_text
+            assert "release without ticket/commit for uncommitted reverts" in framework_skill_text
+            assert "trunk_release_table_sync.md" in framework_skill_text
+            assert "F:\\src\\Package\\Script\\Python\\.codemaker\\expert" in framework_skill_text
+            assert "shared workspace" not in framework_skill_text
+            assert "workspace_submit" not in framework_skill_text
+        else:
+            assert "private checkout" in framework_skill_text
+            assert "workspace_submit" in framework_skill_text
+            assert "workspace_publish" in framework_skill_text
+            assert "trunk_release_table_sync.md" not in framework_skill_text
+            assert "F:\\src\\Package\\Script\\Python\\.codemaker\\expert" not in framework_skill_text
+        assert "blueprint_revert_excel_changes" not in framework_skill_text
+        planning_workflow = codex_home / "skills" / runtime_name / "planning_table_popo_workflow.md"
+        trunk_release_workflow = codex_home / "skills" / runtime_name / "trunk_release_table_sync.md"
+        if is_full_agent:
+            assert planning_workflow.name == "planning_table_popo_workflow.md"
+            assert trunk_release_workflow.name == "trunk_release_table_sync.md"
+        else:
+            assert not planning_workflow.exists()
+            assert not trunk_release_workflow.exists()
+        framework_rule = support_dir / "rules" / f"{runtime_name}.md"
         assert framework_rule.is_file()
         framework_rule_text = framework_rule.read_text(encoding="utf-8")
-        assert "Multi-Agent Framework Baseline Rules" in framework_rule_text
-        assert "blueprint_query_excel_history" in framework_rule_text
-        assert "uncommitted reverts do not require a ticket" in framework_rule_text
-        assert "Do not restore workbook backups over current files" in framework_rule_text
+        if is_full_agent:
+            assert "Multi-Agent Full Agent Framework Rules" in framework_rule_text
+            assert "blueprint_query_excel_history" in framework_rule_text
+            assert "uncommitted reverts do not require a ticket" in framework_rule_text
+            assert "Do not restore workbook backups over current files" in framework_rule_text
+            assert "three workspace zones" not in framework_rule_text
+        else:
+            assert "Multi-Agent Worker Framework Rules" in framework_rule_text
+            assert "three workspace zones" in framework_rule_text
+            assert "workspace_submit" in framework_rule_text
+            assert "blueprint_query_excel_history" not in framework_rule_text
         assert "blueprint_revert_excel_changes" not in framework_rule_text
         assert worker.adapter_options["execution_context"]["mcp"]["server_name"] == "framework_ordinary"
         prompt_mcp = worker.adapter_options["prompt_execution_context"]["mcp"]
@@ -9185,7 +9291,7 @@ def test_blueprint_service_live_mode_starts_start_agents_with_private_context(
         for item in private_context["skill_catalog"]
     )
     assert private_context["rule_catalog"][0]["source"] == "framework"
-    assert private_context["rule_catalog"][0]["name"] == "framework-agent-runtime"
+    assert private_context["rule_catalog"][0]["name"] == "framework-worker-runtime"
     assert Path(private_context["rule_catalog"][0]["rule_path"]).is_file()
     assert any(
         item.get("name") == "Business Rule" and Path(item.get("rule_path", "")).is_file()
@@ -9532,7 +9638,7 @@ def test_live_blueprint_mcp_workspace_dispatch_flow_with_agent_backend(
         assert "[mcp_servers.framework_ordinary.tools.workspace_checkout]" in config_text
         assert "[mcp_servers.framework_ordinary.tools.agent_dispatch]" in config_text
         assert 'approval_mode = "approve"' in config_text
-        assert (private / "codex_home" / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
+        assert (private / "codex_home" / "skills" / "framework-worker-runtime" / "SKILL.md").is_file()
         assert (private / "rules" / "01-policy.md").is_file()
         prompt_context = desktop_run.runtime._launch_nodes["planner"].adapter_options[
             "prompt_execution_context"
@@ -9795,7 +9901,7 @@ def test_real_codex_live_blueprint_uses_mcp_for_workspace_and_dispatch_flow(
         assert "[mcp_servers.framework_ordinary.tools.workspace_checkout]" in config_text
         assert "[mcp_servers.framework_ordinary.tools.agent_dispatch]" in config_text
         assert 'approval_mode = "approve"' in config_text
-        assert (private / "codex_home" / "skills" / "framework-agent-runtime" / "SKILL.md").is_file()
+        assert (private / "codex_home" / "skills" / "framework-worker-runtime" / "SKILL.md").is_file()
         assert (private / "rules" / "01-policy.md").is_file()
         prompt_context = desktop_run.runtime._launch_nodes["planner"].adapter_options[
             "prompt_execution_context"

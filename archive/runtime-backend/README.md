@@ -6,6 +6,10 @@ worker adapters.
 
 Current records:
 
+- `blueprint_framework_worker_runtime_split_restart_2026-06-16.md`
+- `blueprint_session_stop_command_2026-06-12.md`
+- `blueprint_popo_table_queue_internal_notifications_2026-06-12.md`
+- `blueprint_session_instances_slot_removal_plugin_restart_2026-06-11.md`
 - `blueprint_slot_termination_popo_direct_reply_new_session_2026-06-10.md`
 - `blueprint_agent_ring_runtime_workbench_2026-06-08.md`
 - `blueprint_resident_services_script_nodes_xltool_smoke_2026-06-08.md`

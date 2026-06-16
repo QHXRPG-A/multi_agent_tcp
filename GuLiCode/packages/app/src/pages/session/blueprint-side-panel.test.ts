@@ -5,6 +5,7 @@ type AgentPanelProjection = (
   events: Array<Record<string, unknown>>,
   userMessages?: Array<Record<string, unknown>>,
   sessionTimelineEvents?: Array<Record<string, unknown>>,
+  messageJournal?: Array<Record<string, unknown>>,
 ) => Array<Record<string, unknown>>
 
 async function loadAgentPanelProjection(): Promise<AgentPanelProjection> {
@@ -26,6 +27,56 @@ export { visibleAgentPanelEvents }
   const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(script)
   const module = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`)
   return module.visibleAgentPanelEvents as AgentPanelProjection
+}
+
+async function loadBlueprintSessionVisibleKey(): Promise<(session: Record<string, unknown>) => string> {
+  const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+  const helperStart = source.indexOf("function blueprintSessionVisibleKeySlug")
+  const helperEnd = source.indexOf("function normalizeBlueprintSessionSummary")
+  const helperSource = source.slice(helperStart, helperEnd)
+  const script = `
+${helperSource}
+export { blueprintSessionVisibleKey }
+`
+  const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(script)
+  const module = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`)
+  return module.blueprintSessionVisibleKey as (session: Record<string, unknown>) => string
+}
+
+async function loadExcelHistoryRecordDisplay(): Promise<(record: Record<string, unknown>) => Record<string, string>> {
+  const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+  const helperStart = source.indexOf("type ExcelHistoryRecordDisplay")
+  const helperEnd = source.indexOf("function normalizeScriptCatalogNodeFromJson")
+  const helperSource = source.slice(helperStart, helperEnd)
+  const script = `
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+function arrayOfRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(asRecord).filter(Boolean) as Record<string, unknown>[] : []
+}
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined
+}
+function numberValue(value: unknown): number {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : 0
+}
+function formatBlueprintSessionTimestamp(value: number) {
+  const date = new Date(value)
+  const pad = (part: number) => String(part).padStart(2, "0")
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join("-") + \` \${pad(date.getHours())}:\${pad(date.getMinutes())}:\${pad(date.getSeconds())}\`
+}
+${helperSource}
+export { excelHistoryRecordDisplay }
+`
+  const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(script)
+  const module = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`)
+  return module.excelHistoryRecordDisplay as (record: Record<string, unknown>) => Record<string, string>
 }
 
 describe("blueprint inspector source", () => {
@@ -53,10 +104,10 @@ describe("blueprint inspector source", () => {
     expect(agentBranch).not.toContain('onChange={(value) => updateAgentField("run_prompt", value)}')
     expect(agentBranch).toContain('label={language.t("blueprint.field.skills")}')
     expect(agentBranch).toContain('label={language.t("blueprint.field.rulePaths")}')
-    expect(agentBranch).toContain("lockedValues={[FRAMEWORK_AGENT_SKILL_OPTION.value]}")
-    expect(agentBranch).toContain("lockedOptions={[FRAMEWORK_AGENT_SKILL_OPTION]}")
-    expect(agentBranch).toContain("lockedValues={[FRAMEWORK_AGENT_RULE_OPTION.value]}")
-    expect(agentBranch).toContain("lockedOptions={[FRAMEWORK_AGENT_RULE_OPTION]}")
+    expect(agentBranch).toContain("lockedValues={[frameworkSkillOption().value]}")
+    expect(agentBranch).toContain("lockedOptions={[frameworkSkillOption()]}")
+    expect(agentBranch).toContain("lockedValues={[frameworkRuleOption().value]}")
+    expect(agentBranch).toContain("lockedOptions={[frameworkRuleOption()]}")
     expect(agentBranch).toContain('label={language.t("blueprint.field.adapterOptions")}')
     expect(agentBranch).toContain('props.selectedAgent?.node_type === "agent"')
     expect(agentBranch).toContain('label={language.t("blueprint.field.directProjectIo" as never)}')
@@ -70,10 +121,16 @@ describe("blueprint inspector source", () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
     const multiSelect = source.slice(source.indexOf("function MultiSelectField"), source.indexOf("function CheckboxField"))
 
-    expect(source).toContain("FRAMEWORK_AGENT_SKILL_OPTION")
+    expect(source).toContain("FRAMEWORK_FULL_AGENT_SKILL_OPTION")
     expect(source).toContain("framework_assets/skills/framework-agent-runtime/SKILL.md")
-    expect(source).toContain("FRAMEWORK_AGENT_RULE_OPTION")
+    expect(source).toContain("FRAMEWORK_WORKER_AGENT_SKILL_OPTION")
+    expect(source).toContain("framework_assets/skills/framework-worker-runtime/SKILL.md")
+    expect(source).toContain("FRAMEWORK_FULL_AGENT_RULE_OPTION")
     expect(source).toContain("framework_assets/rules/framework-agent-runtime.md")
+    expect(source).toContain("FRAMEWORK_WORKER_AGENT_RULE_OPTION")
+    expect(source).toContain("framework_assets/rules/framework-worker-runtime.md")
+    expect(source).toContain('props.selectedAgent?.node_type === "agent"')
+    expect(source).toContain("FRAMEWORK_WORKER_AGENT_RULE_OPTION")
     expect(multiSelect).toContain("lockedValues?: string[]")
     expect(multiSelect).toContain("lockedOptions?: BlueprintCatalogItem[]")
     expect(multiSelect).toContain("const locked = () => new Set(props.lockedValues ?? [])")
@@ -223,17 +280,171 @@ describe("blueprint inspector source", () => {
     expect(source).toContain("onSaveRobot={savePopoRobot}")
     expect(source).toContain("onDeleteRobot={deletePopoRobot}")
     expect(source).toContain("onToggleRobot={setPopoRobotEnabled}")
-    expect(source).toContain("<Show when={!blueprintControlOpen()}>")
-    expect(source).toContain('<BlueprintCollaborationAuthPanel defaultUsername="1" />')
+    expect(source).not.toContain("BlueprintCollaborationAuthPanel")
     expect(en).toContain('"blueprint.popoService.title": "POPO Callback Service"')
     expect(en).toContain('"blueprint.popoService.appKeyPlaceholder": "Robot AppKey"')
     expect(zh).toContain('"blueprint.popoService.title": "POPO 回调服务"')
+  })
+  test("renders planning form history in the Blueprint Control drawer", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const platform = await Bun.file(new URL("../../context/platform.tsx", import.meta.url)).text()
+    const entry = await Bun.file(new URL("../../entry.tsx", import.meta.url)).text()
+    const en = await Bun.file(new URL("../../i18n/en.ts", import.meta.url)).text()
+    const zh = await Bun.file(new URL("../../i18n/zh.ts", import.meta.url)).text()
+    const zht = await Bun.file(new URL("../../i18n/zht.ts", import.meta.url)).text()
+    const controlDrawer = source.slice(source.indexOf("function BlueprintControlDrawer"), source.indexOf("function BlueprintPopoServicePanel"))
+    const detailDialog = source.slice(source.indexOf("function BlueprintExcelHistoryDetailDialog"), source.indexOf("function BlueprintExcelHistoryRecordView"))
+    const recordView = source.slice(source.indexOf("function BlueprintExcelHistoryRecordView"), source.indexOf("function BlueprintPopoServicePanel"))
+
+    expect(platform).toContain("BlueprintSessionExcelHistorySummary")
+    expect(platform).toContain("BlueprintSessionExcelHistoryRecord")
+    expect(platform).toContain("BlueprintSessionExcelHistory")
+    expect(platform).toContain("listBlueprintSessionExcelHistory?")
+    expect(platform).toContain("blueprintSessionExcelHistory?")
+    expect(entry).toContain("listBlueprintSessionExcelHistory: async")
+    expect(entry).toContain("blueprintSessionExcelHistory: async")
+    expect(entry).toContain('"blueprint.sessions.excelHistoryList"')
+    expect(entry).toContain('"blueprint.sessions.excelHistory"')
+    expect(source).toContain("function BlueprintExcelHistoryPanel")
+    expect(source).toContain("function BlueprintExcelHistoryDetailDialog")
+    expect(source).toContain("function BlueprintExcelHistoryRecordView")
+    expect(detailDialog).toContain('size="x-large"')
+    expect(source).toContain("data-blueprint-excel-history-panel")
+    expect(source).toContain("data-blueprint-excel-history-session")
+    expect(source).toContain("data-blueprint-excel-history-dialog")
+    expect(source).toContain("data-blueprint-excel-history-table")
+    expect(source).toContain("data-blueprint-excel-history-header")
+    expect(source).toContain("data-blueprint-excel-history-record")
+    expect(source).toContain("refreshBlueprintExcelHistory({ silent: true })")
+    expect(source).toContain("onOpenExcelHistory={openBlueprintExcelHistoryDialog}")
+    expect(recordView).toContain("excelHistoryRecordDisplay")
+    expect(source).toContain("blueprint.excelHistory.time")
+    expect(source).toContain("blueprint.excelHistory.status")
+    expect(source).toContain("blueprint.excelHistory.command")
+    expect(source).toContain("blueprint.excelHistory.workbook")
+    expect(source).toContain("blueprint.excelHistory.location")
+    expect(recordView).not.toContain("userSummary")
+    expect(recordView).not.toContain("<pre")
+    expect(controlDrawer).toContain("BlueprintPopoServicePanel")
+    expect(controlDrawer).toContain("BlueprintExcelHistoryPanel")
+    expect(controlDrawer.indexOf("BlueprintPopoServicePanel")).toBeLessThan(controlDrawer.indexOf("BlueprintExcelHistoryPanel"))
+    expect(en).toContain('"blueprint.excelHistory.title": "Planning form records"')
+    expect(en).toContain('"blueprint.excelHistory.location": "Row / column"')
+    expect(zh).toContain('"blueprint.excelHistory.time"')
+    expect(zh).toContain('"blueprint.excelHistory.location"')
+    expect(zht).toContain('"blueprint.excelHistory.time"')
+    expect(zht).toContain('"blueprint.excelHistory.location"')
+    expect(zh).toContain('"blueprint.excelHistory.title": "策划填表记录"')
+    expect(zht).toContain('"blueprint.excelHistory.title": "策劃填表記錄"')
+  })
+})
+
+describe("blueprint session display helpers", () => {
+  test("shows POPO session keys with blueprint names instead of hash suffixes", async () => {
+    const visibleKey = await loadBlueprintSessionVisibleKey()
+    const originalKey = "bps_popo_qiuhaoxuan-corp.netease.com_25d80afe394bf1a3ef20066e"
+
+    expect(visibleKey({
+      sessionKey: originalKey,
+      source: "popo",
+      blueprintName: "fill planning form",
+    })).toBe("bps_popo_qiuhaoxuan-corp.netease.com_fill-planning-form")
+    expect(visibleKey({
+      sessionKey: originalKey,
+      source: "popo",
+      blueprintName: "",
+      blueprintId: "fallback blueprint",
+    })).toBe("bps_popo_qiuhaoxuan-corp.netease.com_fallback-blueprint")
+    expect(visibleKey({
+      sessionKey: originalKey,
+      source: "popo",
+      blueprintName: "填表 结构",
+    })).toBe("bps_popo_qiuhaoxuan-corp.netease.com_填表-结构")
+    expect(visibleKey({
+      sessionKey: originalKey,
+      source: "ui",
+      blueprintName: "fill planning form",
+    })).toBe(originalKey)
+    expect(visibleKey({
+      sessionKey: "main+fill-planning-form",
+      source: "ui",
+      blueprintName: "fill planning form",
+    })).toBe("main+fill-planning-form")
+    expect(visibleKey({
+      sessionKey: "bps_popo_qiuhaoxuan-corp.netease.com+fill-planning-form",
+      source: "popo",
+      blueprintName: "fill planning form",
+    })).toBe("bps_popo_qiuhaoxuan-corp.netease.com+fill-planning-form")
+  })
+
+  test("formats Excel history records into compact display rows", async () => {
+    const display = await loadExcelHistoryRecordDisplay()
+
+    expect(display({
+      time: "2026-06-12 15:31:41.667",
+      status: "succeeded",
+      serviceName: "xltool",
+      methodName: "run",
+      arguments: {
+        command: "read-row",
+        arguments: {
+          file: "F:\\src\\Package\\Script\\Python\\trunk\\策划表格\\15-0-图标表-18000+.xlsx",
+          sheet: "图标表",
+          row: 6752,
+        },
+      },
+    })).toMatchObject({
+      time: "2026-06-12 15:31:41",
+      status: "succeeded",
+      command: "read-row",
+      workbookLabel: "15-0-图标表-18000+.xlsx",
+      location: "图标表 row 6752",
+    })
+
+    expect(display({
+      status: "failed",
+      command: "set-cells",
+      beforeAfter: [
+        {
+          workbook: "C:\\tables\\15-0.xlsx",
+          sheet: "图标表",
+          cell: "F6751",
+          row: 6751,
+          column: "F",
+          field: "is_download",
+        },
+        {
+          workbook: "C:\\tables\\15-0.xlsx",
+          sheet: "图标表",
+          cell: "G6751",
+          row: 6751,
+          column: "G",
+          field: "default_icon_path",
+        },
+      ],
+    })).toMatchObject({
+      command: "set-cells",
+      workbookLabel: "15-0.xlsx",
+      location: "图标表 row 6751: is_download, default_icon_path",
+    })
+
+    expect(display({
+      category: "table_queue",
+      serviceName: "table_queue",
+      methodName: "release",
+      arguments: { tableNames: ["15-0-图标表-18000+.xlsx"] },
+    })).toMatchObject({
+      command: "table_queue.release",
+      workbookLabel: "15-0-图标表-18000+.xlsx",
+      location: "-",
+    })
   })
 })
 
 describe("blueprint project persistence source", () => {
   test("lists project blueprints, opens the selected document, and keeps local fallback", async () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const entry = await Bun.file(new URL("../../entry.tsx", import.meta.url)).text()
     const en = await Bun.file(new URL("../../i18n/en.ts", import.meta.url)).text()
     const zh = await Bun.file(new URL("../../i18n/zh.ts", import.meta.url)).text()
     const zht = await Bun.file(new URL("../../i18n/zht.ts", import.meta.url)).text()
@@ -244,15 +455,21 @@ describe("blueprint project persistence source", () => {
     expect(source).toContain("initialBlueprintId?: string")
     expect(source).toContain('const routeInitialBlueprintId = () => props.initialBlueprintId?.trim() || ""')
     expect(source).toContain("const requestedBlueprintId = initialBlueprintId()")
+    expect(source).toContain("blueprintWorkbenchProjectDirectory() || decode64(params.dir) || \"global\"")
     expect(source).toContain("await refreshProjectBlueprints(requestedBlueprintId)")
     expect(source).toContain("await loadProjectBlueprint(targetBlueprintId, targetBlueprintName)")
     expect(source).toContain("await openBlueprint(projectDirectory, blueprintId)")
     expect(source).toContain("toBlueprintDocument(next, currentBlueprintId(), currentBlueprintName())")
+    expect(source).toContain("saveDraftNow={(next) => void saveProjectDraft(next)}")
+    expect(source).toContain('if (field === "model") props.saveDraftNow?.(next)')
     expect(source).toContain("syncWorkbenchBlueprintRoute(documentId)")
     expect(source).toContain("syncWorkbenchBlueprintRoute(blueprintId)")
     expect(source).toContain("data-blueprint-document-select")
     expect(source).toContain("data-blueprint-document-create")
     expect(source).toContain("data-blueprint-document-delete")
+    expect(source).toContain("handleBlueprintDocumentItemSelect(event, item.id)")
+    expect(source).toContain("pendingBlueprintDocumentDeleteId === blueprintId")
+    expect(source).toContain("requestBlueprintDocumentDelete(item.id)")
     expect(source).toContain("BlueprintCreateDialog")
     expect(source).toContain("BlueprintDeleteDialog")
     expect(source).toContain("openDeleteBlueprintDialog")
@@ -266,6 +483,8 @@ describe("blueprint project persistence source", () => {
     expect(source).toContain("function BlueprintHeaderStatus")
     expect(source).toContain("data-blueprint-header-status-trigger")
     expect(source).toContain("data-blueprint-header-status-details")
+    expect(entry).toContain('location.pathname.match(/^\\/([^/]+)\\/blueprint-window')
+    expect(entry).toContain("location.pathname !== targetRoute")
     expect(en).toContain('"blueprint.document.delete": "Delete blueprint"')
     expect(en).toContain('"blueprint.document.deleteConfirm":')
     expect(zh).toContain('"blueprint.document.delete": "删除蓝图"')
@@ -292,19 +511,16 @@ describe("blueprint project persistence source", () => {
 })
 
 describe("blueprint runtime source", () => {
-  test("starts runtime through the configured BlueprintSession start node after saving the project document", async () => {
+  test("sends runtime input through the BlueprintSession message entrypoint", async () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
     const snapshotSource = source.slice(source.indexOf("function createDesktopBlueprintSnapshot"), source.indexOf("function desktopSnapshotNodeState"))
 
-    expect(source).toContain("BlueprintCollaborationAuthPanel")
-    expect(source).toContain('<BlueprintCollaborationAuthPanel defaultUsername="1" />')
+    expect(source).not.toContain("BlueprintCollaborationAuthPanel")
+    expect(source).toContain("postDesktopBlueprintSnapshot")
     expect(snapshotSource).toContain("const layout = draft.layout.nodes[id]")
     expect(snapshotSource).toContain("x: layout?.x")
     expect(snapshotSource).toContain("y: layout?.y")
-    expect(source).toContain("const startDraft = await ensureDetectedPythonPath()")
-    expect(source).toContain("validateBlueprintConfigForStart(startDraft)")
     expect(source).toContain("BlueprintConfigRequiredDialog")
-    expect(source).toContain("await persistProjectDraft(startDraft)")
     expect(source).toContain('if (external) return external')
     expect(source).not.toContain("buildBlueprintPlanningMessage")
     expect(source).not.toContain("props.onBlueprintPlanningSubmit")
@@ -321,17 +537,22 @@ describe("blueprint runtime source", () => {
     expect(source).not.toContain("submitBlueprintPlanningTask")
     expect(source).toContain("runtimeStartNodeId")
     expect(source).toContain('.filter(([, node]) => node.node_type === "agent")')
-    expect(source).toContain("platform.startBlueprintSlot")
-    expect(source).toContain("platform.sendBlueprintSlotMessage")
-    expect(source).not.toContain("createBlueprintStartPlan(startDraft")
+    expect(source).not.toContain("platform.startBlueprintSlot")
+    expect(source).not.toContain("platform.sendBlueprintSlotMessage")
+    expect(source).toContain("async function submitBlueprintSessionMessage(message: string)")
+    expect(source).toContain("platform.sendBlueprintSessionMessage")
+    expect(source).toContain("sessionKey: currentBlueprintSessionKey()")
+    expect(source).toContain('source: "ui"')
+    expect(source).not.toContain("createBlueprintStartPlan(")
     expect(source).not.toContain("platform.startBlueprintRun")
     expect(source).toContain("data-blueprint-runtime-start-node-select")
     expect(source).toContain("selectedStartNodeId")
     expect(source).toContain("onStartNodeSelect")
     expect(source).not.toContain("data-blueprint-runtime-task-input")
     expect(source).not.toContain("data-blueprint-runtime-plan-create")
-    expect(source).toContain("data-blueprint-runtime-confirm-run")
-    expect(source).toContain("data-blueprint-runtime-slot-message")
+    expect(source).not.toContain("data-blueprint-runtime-confirm-run")
+    expect(source).not.toContain("data-blueprint-runtime-slot-message")
+    expect(source).toContain("data-blueprint-runtime-session-message")
     expect(source).toContain("data-blueprint-runtime-toggle")
     expect(source).toContain("data-blueprint-runtime-panel-handle")
     expect(source).toContain("data-blueprint-runtime-panel-ghost")
@@ -343,9 +564,19 @@ describe("blueprint runtime source", () => {
     expect(source).toContain("platform.blueprintRecentEvents?.(runId, 50)")
     expect(source).toContain("selectPreferredRuntimeRun(runs, untrack(() => runtime().runId))")
     expect(source).toContain("platform.listBlueprintSessions")
+    expect(source).toContain("platform.restartBlueprintSessions")
+    expect(source).toContain("async function restartCurrentBlueprintSessions()")
     expect(source).toContain("data-blueprint-session-select")
     expect(source).toContain("data-blueprint-session-card")
+    expect(source).toContain("data-blueprint-session-restart")
     expect(source).toContain("data-blueprint-session-delete")
+    expect(source).toContain("const visibleKey = () => blueprintSessionVisibleKey(session)")
+    expect(source).toContain("title={visibleKey()}>{visibleKey()}")
+    expect(source).toContain("props.onSelect(session.sessionKey)")
+    expect(source).toContain("props.onRestart()")
+    expect(source).toContain("props.onDelete(session.sessionKey)")
+    expect(source).toContain("formatBlueprintSessionTimestamp(value())")
+    expect(source).toContain("function formatBlueprintSessionTimestamp")
     expect(source).toContain("runtimeRunIsActive(preferredRun)")
     expect(source).toContain("isTerminalRuntimeStatus(currentStatus)")
     expect(source).toContain("const interval = setInterval(syncRuns, 2000)")
@@ -383,6 +614,36 @@ describe("blueprint runtime source", () => {
     expect(source).toContain('isTerminalRuntimeStatus(status)')
     expect(source).toContain('setInterval(() =>')
     expect(source).toContain("platform.endBlueprintRun(runId, action, opts.reason ?? `blueprint UI ${action}`)")
+  })
+
+  test("clears the current session through a dedicated history-clear command", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const platform = await Bun.file(new URL("../../context/platform.tsx", import.meta.url)).text()
+    const entry = await Bun.file(new URL("../../entry.tsx", import.meta.url)).text()
+    const en = await Bun.file(new URL("../../i18n/en.ts", import.meta.url)).text()
+    const zh = await Bun.file(new URL("../../i18n/zh.ts", import.meta.url)).text()
+    const clearFunction = source.slice(
+      source.indexOf("async function clearCurrentBlueprintSession"),
+      source.indexOf("function openClearCurrentBlueprintSessionDialog"),
+    )
+    const runtimePanel = source.slice(source.indexOf("function BlueprintRuntimePanel"), source.indexOf("function RuntimeActionButton"))
+
+    expect(platform).toContain("clearBlueprintSession?")
+    expect(entry).toContain("clearBlueprintSession: async")
+    expect(entry).toContain('"blueprint.sessions.clear"')
+    expect(clearFunction).toContain("platform.clearBlueprintSession(sessionKey")
+    expect(clearFunction).toContain('action: "clear-session"')
+    expect(clearFunction).toContain("setBlueprintSessionTimeline({ sessionKey, events: [], loading: false })")
+    expect(clearFunction).not.toContain("terminateBlueprintSession")
+    expect(source).toContain("function openClearCurrentBlueprintSessionDialog")
+    expect(source).toContain("BlueprintSessionClearDialog")
+    expect(source).toContain("data-blueprint-session-clear-dialog")
+    expect(source).toContain("onClearSession={openClearCurrentBlueprintSessionDialog}")
+    expect(runtimePanel).toContain('"blueprint.runtime.clearSession"')
+    expect(runtimePanel).toContain('"blueprint.runtime.clearSessionDescription"')
+    expect(runtimePanel).toContain("disabled={!props.currentSession || props.state.loading || props.clearSessionDisabled}")
+    expect(en).toContain('"blueprint.runtime.clearSession": "Clear current session"')
+    expect(zh).toContain('"blueprint.runtime.clearSession": "清理当前会话"')
   })
 
   test("opens blueprint panels in an independent desktop window without redundant popout chrome", async () => {
@@ -942,7 +1203,7 @@ describe("blueprint runtime source", () => {
     expect(visibleEvents).toContain('kind === "part.delta" || kind === "message.completed"')
     expect(visibleEvents).toContain('"Agent 思考"')
     expect(visibleEvents).toContain("`工具调用")
-    expect(visibleEvents).toContain("agentPanelTimelineItems(events, userMessages, sessionTimelineEvents)")
+    expect(visibleEvents).toContain("agentPanelTimelineItems(events, userMessages, sessionTimelineEvents, messageJournal)")
     expect(visibleEvents).toContain("flushAgentPanelToolGroup()")
     expect(visibleEvents).toContain("agentPanelToolGroupDisplayEvent")
     expect(visibleEvents).toContain("mergeAdjacentAgentPanelToolGroups(")
@@ -966,6 +1227,10 @@ describe("blueprint runtime source", () => {
     expect(visibleEvents).toContain('"Agent 回复"')
     expect(visibleEvents).toContain("userMessages: AgentPanelUserMessage[] = []")
     expect(visibleEvents).toContain("sessionTimelineEvents: BlueprintSessionTimelineEvent[] = []")
+    expect(visibleEvents).toContain("messageJournal: Record<string, unknown>[] = []")
+    expect(visibleEvents).toContain("agentPanelDisplayEventFromMessageJournalUser")
+    expect(visibleEvents).toContain("agentPanelMessageJournalUserRecords(messageJournal)")
+    expect(visibleEvents).toContain("[Current POPO Message]")
     expect(visibleEvents).toContain("agentPanelDisplayEventFromSessionTimeline")
     expect(visibleEvents).toContain("sessionTimelineHasChat(sessionTimelineEvents)")
     expect(visibleEvents).toContain('tone: "user"')
@@ -1236,6 +1501,50 @@ describe("blueprint runtime source", () => {
     expect(projected[0]?.text).toBe("old POPO message")
   })
 
+  test("falls back to framework message journal user prompts when session timeline is unavailable", async () => {
+    const visibleAgentPanelEvents = await loadAgentPanelProjection()
+    const projected = visibleAgentPanelEvents(
+      [
+        {
+          kind: "message.completed",
+          seq: 3,
+          created_at: "2026-06-09T13:29:26.000Z",
+          message_id: "msg-1",
+          text: "agent reply",
+          status: "completed",
+        },
+      ],
+      [],
+      [],
+      [
+        {
+          id: "journal-queued-1",
+          recordType: "framework.message.queued",
+          time: "2026-06-09T13:29:01.000Z",
+          status: "queued",
+          messageId: "msg-1",
+          summary:
+            "[Recent BlueprintSession Messages]\nUser: older message\n\n[Current POPO Message]\n[popo_user] current POPO message",
+        },
+        {
+          id: "journal-sent-1",
+          recordType: "framework.message.sent",
+          time: "2026-06-09T13:29:02.000Z",
+          status: "dispatching",
+          messageId: "msg-1",
+          summary:
+            "# Blueprint Prompt: prompt\n\nruntime prompt\n\n---\n\n[Recent BlueprintSession Messages]\nUser: older message\n\n[Current POPO Message]\n[popo_user] current POPO message",
+        },
+      ],
+    )
+
+    expect(projected.map((event) => event.tone)).toEqual(["user", "reply"])
+    expect(projected[0]?.kind).toBe("POPO \u7528\u6237")
+    expect(projected[0]?.text).toBe("current POPO message")
+    expect(String(projected[0]?.text)).not.toContain("Recent BlueprintSession")
+    expect(projected[1]?.text).toBe("agent reply")
+  })
+
   test("ignores textless stream events before maintenance filtering", async () => {
     const visibleAgentPanelEvents = await loadAgentPanelProjection()
 
@@ -1358,8 +1667,8 @@ describe("blueprint runtime source", () => {
     expect(source).not.toContain('reason: AUTO_RUNTIME_COMPLETE_REASON')
     expect(source).toContain("const runtimeRunActive = createMemo")
     expect(source).toContain("const runtimeStarted = createMemo")
-    expect(source).toContain("const blueprintSlotRunCount = createMemo")
-    expect(source).toContain("const blueprintSlotCapacityFull = createMemo")
+    expect(source).not.toContain("blueprintSlotRunCount")
+    expect(source).not.toContain("blueprintSlotCapacityFull")
     expect(source).toContain("const runId = currentBlueprintSession()?.activeRunId || \"\"")
     expect(source).not.toContain("const runId = currentBlueprintSession()?.activeRunId || runtime().runId")
     expect(source).not.toContain("const runtimeSummaryLockActive = createMemo")

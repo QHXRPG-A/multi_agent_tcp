@@ -18,7 +18,7 @@ import { base64Encode } from "@opencode-ai/shared/util/encode"
 import { createStore, reconcile, type SetStoreFunction } from "solid-js/store"
 import { useLanguage } from "@/context/language"
 import { useLayout, type BlueprintFloatingRect } from "@/context/layout"
-import { BlueprintCollaborationAuthPanel, postDesktopBlueprintSnapshot, type DesktopBlueprintSnapshotPayload } from "@/components/collaboration-auth"
+import { postDesktopBlueprintSnapshot, type DesktopBlueprintSnapshotPayload } from "@/components/collaboration-auth"
 import { Persist, persisted } from "@/utils/persist"
 import { decode64 } from "@/utils/base64"
 import {
@@ -91,7 +91,9 @@ import {
   type BlueprintPopoRobot,
   type BlueprintRelocateConflictPolicy,
   type BlueprintRunEndAction,
-  type BlueprintSlotSummary,
+  type BlueprintSessionExcelHistory,
+  type BlueprintSessionExcelHistoryRecord,
+  type BlueprintSessionExcelHistorySummary,
   type BlueprintSessionSummary,
   type BlueprintSessionTimelineEvent,
   type BlueprintSummary,
@@ -105,15 +107,25 @@ const SCRIPT_NODE_PORT_ROW_HEIGHT = 22
 const SCRIPT_NODE_MIN_EXPANDED_HEIGHT = 102
 const COMMON_BRANCH_WIDTH = SCRIPT_NODE_WIDTH
 const COMMON_BRANCH_HEIGHT = SCRIPT_NODE_MIN_EXPANDED_HEIGHT
-const FRAMEWORK_AGENT_SKILL_OPTION: BlueprintCatalogItem = {
+const FRAMEWORK_FULL_AGENT_SKILL_OPTION: BlueprintCatalogItem = {
   value: "framework-agent-runtime",
   label: "framework-agent-runtime",
   description: "Framework-managed runtime skill. Stored in framework_assets/skills/framework-agent-runtime/SKILL.md.",
 }
-const FRAMEWORK_AGENT_RULE_OPTION: BlueprintCatalogItem = {
+const FRAMEWORK_WORKER_AGENT_SKILL_OPTION: BlueprintCatalogItem = {
+  value: "framework-worker-runtime",
+  label: "framework-worker-runtime",
+  description: "Framework-managed runtime skill. Stored in framework_assets/skills/framework-worker-runtime/SKILL.md.",
+}
+const FRAMEWORK_FULL_AGENT_RULE_OPTION: BlueprintCatalogItem = {
   value: "framework_assets/rules/framework-agent-runtime.md",
   label: "framework-agent-runtime.md",
   description: "Framework-managed runtime rule. Stored in framework_assets/rules/framework-agent-runtime.md.",
+}
+const FRAMEWORK_WORKER_AGENT_RULE_OPTION: BlueprintCatalogItem = {
+  value: "framework_assets/rules/framework-worker-runtime.md",
+  label: "framework-worker-runtime.md",
+  description: "Framework-managed runtime rule. Stored in framework_assets/rules/framework-worker-runtime.md.",
 }
 const PROMPT_NODE_WIDTH = 220
 const PROMPT_NODE_HEIGHT = 150
@@ -423,7 +435,6 @@ type RuntimePanelDragState = {
 type BlueprintRuntimeState = {
   runId?: string
   runs: Record<string, unknown>[]
-  slot?: BlueprintSlotSummary
   status?: Record<string, unknown>
   explanation?: Record<string, unknown>
   events: Record<string, unknown>[]
@@ -436,12 +447,19 @@ type BlueprintRuntimeState = {
 type BlueprintSessionState = {
   sessions: BlueprintSessionSummary[]
   loading: boolean
+  action?: string
   error?: string
 }
 
 type BlueprintSessionTimelineState = {
   sessionKey: string
   events: BlueprintSessionTimelineEvent[]
+  loading: boolean
+  error?: string
+}
+
+type BlueprintExcelHistoryState = {
+  sessions: BlueprintSessionExcelHistorySummary[]
   loading: boolean
   error?: string
 }
@@ -558,6 +576,7 @@ type AgentPanelUserMessage = {
 type AgentPanelTimelineItem =
   | { type: "user"; message: AgentPanelUserMessage; order: number; index: number }
   | { type: "session"; event: BlueprintSessionTimelineEvent; order: number; index: number }
+  | { type: "journalUser"; record: Record<string, unknown>; order: number; index: number }
   | { type: "event"; event: AgentStreamEvent; order: number; index: number }
 
 type AgentPanelToolGroup = {
@@ -943,6 +962,18 @@ type AddNodeOption =
 type RuntimeNodeVisualState = "idle" | "active" | "working"
 type BlueprintPanelLayoutView = Pick<ReturnType<ReturnType<typeof useLayout>["view"]>, "blueprintPanel">
 
+type BlueprintWorkbenchWindow = Window & {
+  __GULICODE_BP__?: {
+    projectDir?: string
+  }
+}
+
+function blueprintWorkbenchProjectDirectory() {
+  if (typeof window === "undefined") return ""
+  const value = (window as BlueprintWorkbenchWindow).__GULICODE_BP__?.projectDir
+  return typeof value === "string" ? value.trim() : ""
+}
+
 export function BlueprintSidePanel(props: {
   floating?: boolean
   initialBlueprintId?: string
@@ -977,7 +1008,7 @@ export function BlueprintSidePanel(props: {
     () =>
       layout?.view(sessionKey) ?? standaloneView,
   )
-  const projectDirectory = decode64(params.dir) ?? "global"
+  const projectDirectory = blueprintWorkbenchProjectDirectory() || decode64(params.dir) || "global"
   const routeInitialBlueprintId = () => props.initialBlueprintId?.trim() || ""
   const initialBlueprintId = () => routeInitialBlueprintId() || DEFAULT_BLUEPRINT_ID
   const initialBlueprintName = () =>
@@ -1082,18 +1113,16 @@ export function BlueprintSidePanel(props: {
     events: [],
     loading: false,
   })
+  const [blueprintExcelHistory, setBlueprintExcelHistory] = createSignal<BlueprintExcelHistoryState>({
+    sessions: [],
+    loading: false,
+  })
   const [activeBlueprintSessionKey, setActiveBlueprintSessionKey] = createSignal("")
   const defaultBlueprintSessionKey = createMemo(() => blueprintMainSessionKey(currentBlueprintId()))
   const currentBlueprintSessionKey = createMemo(() => activeBlueprintSessionKey() || defaultBlueprintSessionKey())
   const currentBlueprintSession = createMemo(() =>
     blueprintSessions().sessions.find((session) => session.sessionKey === currentBlueprintSessionKey()),
   )
-  const blueprintSlotRunCount = createMemo(() => {
-    const slot = runtime().slot
-    return Number(slot?.runningRunCount ?? slot?.runningRunIds?.length ?? slot?.runs?.length ?? 0)
-  })
-  const blueprintSlotMaxSessions = createMemo(() => Number(runtime().slot?.maxActiveSessions ?? 3) || 3)
-  const blueprintSlotCapacityFull = createMemo(() => blueprintSlotRunCount() >= blueprintSlotMaxSessions())
   let previousDefaultBlueprintSessionKey = ""
   createEffect(() => {
     const next = defaultBlueprintSessionKey()
@@ -2654,13 +2683,9 @@ export function BlueprintSidePanel(props: {
     let cancelled = false
     const blueprintId = currentBlueprintId()
     const listBlueprintRuns = platform.listBlueprintRuns
-    const blueprintSlotStatus = platform.blueprintSlotStatus
     const syncRuns = () => {
-      void Promise.all([
-        listBlueprintRuns(projectDirectory, blueprintId),
-        blueprintSlotStatus?.(projectDirectory, blueprintId).catch((error) => ({ error: readableError(error) })),
-      ])
-        .then(([runs, slot]) => {
+      void listBlueprintRuns(projectDirectory, blueprintId)
+        .then((runs) => {
           if (cancelled) return
           const preferredRun = selectPreferredRuntimeRun(runs, untrack(() => runtime().runId))
           const preferredRunId = stringValue(preferredRun?.runId)
@@ -2676,7 +2701,7 @@ export function BlueprintSidePanel(props: {
               (!current.runId || !currentRun || isTerminalRuntimeStatus(currentStatus))
             const nextRunId = shouldSwitch ? preferredRunId : current.runId ?? preferredRunId
             if (nextRunId && nextRunId !== current.runId) refreshRunId = nextRunId
-            return { ...current, runs, slot: normalizeBlueprintSlotSummary(slot), runId: nextRunId }
+            return { ...current, runs, runId: nextRunId }
           })
           if (refreshRunId) void refreshBlueprintRuntime(refreshRunId, { quiet: true })
         })
@@ -2815,6 +2840,12 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
+    if (!platform.listBlueprintSessionExcelHistory) return
+    if (!persistence().loaded || !blueprintControlOpen()) return
+    void refreshBlueprintExcelHistory({ silent: true })
+  })
+
+  createEffect(() => {
     const runId = runtime().runId
     const status = runtimeStatus(runtime().status)
     if (!runId || isTerminalRuntimeStatus(status) || !platform.blueprintAgentStreamToken) return
@@ -2911,24 +2942,25 @@ export function BlueprintSidePanel(props: {
     }
   }
 
-  async function refreshBlueprintSlotSummary(opts: { quiet?: boolean } = {}) {
-    if (!platform.blueprintSlotStatus) return
-    if (!opts.quiet) setRuntime((current) => ({ ...current, loading: true, error: undefined }))
+  async function refreshBlueprintExcelHistory(opts: { silent?: boolean } = {}) {
+    if (!platform.listBlueprintSessionExcelHistory) return
+    if (!opts.silent) setBlueprintExcelHistory((current) => ({ ...current, loading: true, error: undefined }))
     try {
-      const slot = await platform.blueprintSlotStatus(projectDirectory, currentBlueprintId())
-      setRuntime((current) => ({
-        ...current,
-        slot: normalizeBlueprintSlotSummary(slot),
-        loading: opts.quiet ? current.loading : false,
-        error: undefined,
-      }))
+      const sessions = await platform.listBlueprintSessionExcelHistory(projectDirectory, currentBlueprintId())
+      setBlueprintExcelHistory({ sessions, loading: false, error: undefined })
     } catch (error) {
-      setRuntime((current) => ({
-        ...current,
-        loading: opts.quiet ? current.loading : false,
-        error: readableError(error),
-      }))
+      setBlueprintExcelHistory((current) => ({ ...current, loading: false, error: readableError(error) }))
     }
+  }
+
+  function openBlueprintExcelHistoryDialog(summary: BlueprintSessionExcelHistorySummary) {
+    if (!platform.blueprintSessionExcelHistory) return
+    dialog.show(() => (
+      <BlueprintExcelHistoryDetailDialog
+        summary={summary}
+        onLoad={(limit) => platform.blueprintSessionExcelHistory!(summary.sessionKey, limit)}
+      />
+    ))
   }
 
   async function deleteBlueprintSession(sessionKey: string) {
@@ -2937,8 +2969,38 @@ export function BlueprintSidePanel(props: {
     try {
       await platform.deleteBlueprintSession(sessionKey)
       await refreshBlueprintSessions({ quiet: true })
+      await refreshBlueprintExcelHistory({ silent: true })
     } catch (error) {
       setBlueprintSessions((current) => ({ ...current, loading: false, error: readableError(error) }))
+    }
+  }
+
+  async function restartCurrentBlueprintSessions() {
+    if (!platform.restartBlueprintSessions) return
+    setBlueprintSessions((current) => ({ ...current, loading: true, action: "restart-blueprint", error: undefined }))
+    try {
+      await platform.restartBlueprintSessions(
+        projectDirectory,
+        currentBlueprintId(),
+        "requested from Blueprint session panel",
+      )
+      setActiveBlueprintSessionKey("")
+      setRuntime((current) => ({
+        ...current,
+        runId: undefined,
+        status: undefined,
+        events: [],
+        loading: false,
+        action: undefined,
+      }))
+      await refreshBlueprintSessions({ quiet: true })
+    } catch (error) {
+      setBlueprintSessions((current) => ({
+        ...current,
+        loading: false,
+        action: undefined,
+        error: readableError(error),
+      }))
     }
   }
 
@@ -2950,7 +3012,6 @@ export function BlueprintSidePanel(props: {
     try {
       await platform.terminateBlueprintSession(sessionKey, "requested from Blueprint runtime panel")
       await refreshBlueprintSessions({ quiet: true })
-      await refreshBlueprintSlotSummary({ quiet: true })
       const runId = runtime().runId
       if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
       setRuntime((current) => ({ ...current, loading: false, action: undefined }))
@@ -2959,19 +3020,42 @@ export function BlueprintSidePanel(props: {
     }
   }
 
-  async function terminateCurrentBlueprintSlot() {
-    if (!platform.terminateBlueprintSlot) return
-    setRuntime((current) => ({ ...current, loading: true, action: "terminate-slot", error: undefined }))
+  async function clearCurrentBlueprintSession(sessionKey: string) {
+    if (!platform.clearBlueprintSession) return
+    setRuntime((current) => ({ ...current, loading: true, action: "clear-session", error: undefined }))
     try {
-      await platform.terminateBlueprintSlot(projectDirectory, currentBlueprintId(), "requested from Blueprint runtime panel")
+      await platform.clearBlueprintSession(sessionKey, "requested from Blueprint runtime panel")
+      setBlueprintSessionTimeline({ sessionKey, events: [], loading: false })
       await refreshBlueprintSessions({ quiet: true })
-      await refreshBlueprintSlotSummary({ quiet: true })
-      const runId = runtime().runId
-      if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
-      setRuntime((current) => ({ ...current, loading: false, action: undefined }))
+      await refreshBlueprintExcelHistory({ silent: true })
+      setRuntime((current) => ({
+        ...current,
+        runId: undefined,
+        status: undefined,
+        explanation: undefined,
+        events: [],
+        loading: false,
+        action: undefined,
+        error: undefined,
+        lastUpdatedAt: Date.now(),
+      }))
     } catch (error) {
       setRuntime((current) => ({ ...current, loading: false, action: undefined, error: readableError(error) }))
     }
+  }
+
+  function openClearCurrentBlueprintSessionDialog() {
+    if (!platform.clearBlueprintSession) return
+    const sessionKey = currentBlueprintSessionKey()
+    if (!sessionKey) return
+    const session = currentBlueprintSession()
+    const sessionName = session?.sessionDisplayName || session?.blueprintName || sessionKey
+    dialog.show(() => (
+      <BlueprintSessionClearDialog
+        sessionName={sessionName}
+        onClear={() => clearCurrentBlueprintSession(sessionKey)}
+      />
+    ))
   }
 
   async function refreshBlueprintRunDiff(runId = runtime().runId, opts: { quiet?: boolean } = {}) {
@@ -3238,93 +3322,19 @@ export function BlueprintSidePanel(props: {
     setDraft("runtime", "start_node_id", nodeId)
   }
 
-  async function startBlueprintRunDirect() {
-    const startNodeId = runtimeStartNodeId()
-    if (!startNodeId) {
-      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.startNodeRequired" as never) }))
-      openRuntimePlanningPanel()
-      return
-    }
-    if (runtime().loading || persistence().saving) {
-      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.busy" as never) }))
-      return
-    }
-    if (blueprintSlotCapacityFull()) {
-      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.slotCapacityFull" as never) }))
-      return
-    }
-    if (!platform.saveBlueprint || !platform.startBlueprintSlot) {
-      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
-      return
-    }
-    const startDraft = await ensureDetectedPythonPath()
-    const configIssues = validateBlueprintConfigForStart(startDraft)
-    if (configIssues.length) {
-      setConfigIssues(configIssues)
-      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.configMissing" as never) }))
-      dialog.show(() => <BlueprintConfigRequiredDialog issues={configIssues} />)
-      return
-    }
-    if (!startDraft.runtime?.start_node_id?.trim()) {
-      setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.startNodeRequired" as never) }))
-      return
-    }
-    setConfigIssues([])
-    if (saveTimer) {
-      clearTimeout(saveTimer)
-      saveTimer = undefined
-    }
-    setPanelMode("runtime")
-    setPersistence((current) => ({ ...current, saving: true, error: undefined }))
-    setRuntime((current) => ({ ...current, loading: true, action: "start", error: undefined }))
-    try {
-      await platform.configureBlueprintRuntime?.(startDraft.config.python_path)
-      await persistProjectDraft(startDraft)
-      setPersistence({ loaded: true, loading: false, saving: false, source: "project" })
-      const started = await platform.startBlueprintSlot(projectDirectory, currentBlueprintId())
-      const status = asRecord(started.status)
-      const recentEvents = arrayOfRecords(status?.recent_events)
-      const runId = stringValue(started.runId) ?? stringValue(asRecord(started.run)?.runId) ?? stringValue(asRecord(status?.run)?.runId)
-      syncAgentPanelUserMessagesFromRuntimeEvents(recentEvents)
-      setRuntime((current) => ({
-        ...current,
-        runId,
-        runs: mergeRuntimeRunsWithStatus(current.runs, started),
-        status,
-        explanation: asRecord(started.explanation),
-        events: recentEvents,
-        loading: false,
-        action: undefined,
-        error: undefined,
-        lastUpdatedAt: Date.now(),
-      }))
-      scheduleOpenTestAgentPanelPersists()
-      void refreshBlueprintSessions({ quiet: true })
-      void refreshBlueprintSlotSummary({ quiet: true })
-      if (runId) void refreshBlueprintRuntime(runId, { quiet: true })
-    } catch (error) {
-      const message = readableError(error)
-      setPersistence((current) => ({ ...current, saving: false, error: message }))
-      setRuntime((current) => ({ ...current, loading: false, action: undefined, error: message }))
-    }
-  }
-
-  async function submitBlueprintSlotMessage(message: string) {
+  async function submitBlueprintSessionMessage(message: string) {
     const text = message.trim()
     if (!text) return
     const runId = currentBlueprintSession()?.activeRunId || ""
-    if (!platform.sendBlueprintSlotMessage) {
+    if (!platform.sendBlueprintSessionMessage) {
       setRuntime((current) => ({ ...current, error: language.t("blueprint.runtime.unavailable") }))
       return
     }
     setPanelMode("runtime")
     setRuntime((current) => ({ ...current, loading: true, action: "message", error: undefined }))
     try {
-      const sent = await platform.sendBlueprintSlotMessage(projectDirectory, text, {
+      const sent = await platform.sendBlueprintSessionMessage(projectDirectory, currentBlueprintId(), text, {
         source: "ui",
-        blueprintId: currentBlueprintId(),
-        runId: runId || undefined,
-        sourceIdentity: { uiSessionId: currentBlueprintId() },
         sessionKey: currentBlueprintSessionKey(),
       })
       const status = asRecord(sent.status)
@@ -3350,7 +3360,6 @@ export function BlueprintSidePanel(props: {
         lastUpdatedAt: Date.now(),
       }))
       void refreshBlueprintSessions({ quiet: true })
-      void refreshBlueprintSlotSummary({ quiet: true })
       if (nextRunId) void refreshBlueprintRuntime(nextRunId, { quiet: true })
     } catch (error) {
       const message = readableError(error)
@@ -4772,6 +4781,7 @@ export function BlueprintSidePanel(props: {
             disabled={!platform.listBlueprintSessions || persistence().loading || blueprintPicker().loading}
             onSelect={(sessionKey) => setActiveBlueprintSessionKey(sessionKey)}
             onRefresh={() => void refreshBlueprintSessions()}
+            onRestart={() => void restartCurrentBlueprintSessions()}
             onDelete={(sessionKey) => void deleteBlueprintSession(sessionKey)}
           />
           <Tooltip placement="bottom" value={language.t("blueprint.control.open" as never)}>
@@ -5011,11 +5021,15 @@ export function BlueprintSidePanel(props: {
           <BlueprintControlDrawer
             open={blueprintControlOpen()}
             state={popoService()}
+            excelHistory={blueprintExcelHistory()}
+            excelHistoryAvailable={!!platform.listBlueprintSessionExcelHistory && !!platform.blueprintSessionExcelHistory}
             onOpenChange={setBlueprintControlOpen}
             onRefresh={refreshPopoService}
             onSaveRobot={savePopoRobot}
             onDeleteRobot={deletePopoRobot}
             onToggleRobot={setPopoRobotEnabled}
+            onRefreshExcelHistory={refreshBlueprintExcelHistory}
+            onOpenExcelHistory={openBlueprintExcelHistoryDialog}
           />
           <div class="pointer-events-auto absolute left-3 top-3 z-30">
             <Tooltip placement="right" value={scriptCompileTooltip()}>
@@ -5378,11 +5392,6 @@ export function BlueprintSidePanel(props: {
               </div>
             </div>
           </Show>
-          <Show when={!blueprintControlOpen()}>
-            <div class="pointer-events-auto absolute bottom-4 left-4 z-30">
-              <BlueprintCollaborationAuthPanel defaultUsername="1" />
-            </div>
-          </Show>
           <Show when={runtimeRunActive()}>
             <div
               data-blueprint-runtime-frame
@@ -5454,27 +5463,22 @@ export function BlueprintSidePanel(props: {
                   startNodeOptions={runtimeStartNodeOptions()}
                   selectedStartNodeId={runtimeStartNodeId()}
                   startDisabled={runtimeBusy() || projectWorkdirRelocating() || !persistence().loaded}
-                  directRunDisabled={
+                  sessionMessageDisabled={
                     runtime().loading ||
-                    blueprintSlotCapacityFull() ||
                     projectWorkdirRelocating() ||
                     persistence().saving ||
                     blueprintPicker().loading ||
                     !persistence().loaded ||
                     !platform.saveBlueprint ||
-                    !platform.startBlueprintSlot ||
+                    !platform.sendBlueprintSessionMessage ||
                     !runtimeStartNodeId()
                   }
-                  slotMessageDisabled={
-                    runtime().loading ||
-                    !platform.sendBlueprintSlotMessage
-                  }
                   onStartNodeSelect={selectRuntimeStartNode}
-                  onDirectRun={() => void startBlueprintRunDirect()}
-                  onSlotMessage={(message) => void submitBlueprintSlotMessage(message)}
+                  onSessionMessage={(message) => void submitBlueprintSessionMessage(message)}
                   onRefresh={() => void refreshBlueprintRuntime()}
                   onTerminateSession={() => void terminateCurrentBlueprintSession()}
-                  onTerminateSlot={() => void terminateCurrentBlueprintSlot()}
+                  onClearSession={openClearCurrentBlueprintSessionDialog}
+                  clearSessionDisabled={!platform.clearBlueprintSession}
                   workspacePanelArea={workspacePanelArea()}
                   onWorkspaceAreaOpen={setWorkspacePanelArea}
                   onWorkspaceAreaOpenInExplorer={(area) => void openWorkspaceDirectory(area)}
@@ -5494,6 +5498,7 @@ export function BlueprintSidePanel(props: {
                   closeInspector={closeInspector}
                   setDraft={replaceDraft}
                   setStore={setDraft}
+                  saveDraftNow={(next) => void saveProjectDraft(next)}
                   config={currentConfig()}
                   catalog={catalog()}
                   modelCatalog={modelCatalog()}
@@ -5753,6 +5758,36 @@ function BlueprintDocumentSelect(props: {
   const language = useLanguage()
   const selectedItem = () => props.items.find((item) => item.id === props.selectedId)
   const label = () => selectedItem()?.name || props.selectedName || props.selectedId
+  let pendingBlueprintDocumentDeleteId = ""
+  let requestedBlueprintDocumentDeleteId = ""
+
+  const requestBlueprintDocumentDelete = (blueprintId: string) => {
+    if (!blueprintId || requestedBlueprintDocumentDeleteId === blueprintId) return
+    requestedBlueprintDocumentDeleteId = blueprintId
+    props.onDelete(blueprintId)
+    window.setTimeout(() => {
+      if (requestedBlueprintDocumentDeleteId === blueprintId) requestedBlueprintDocumentDeleteId = ""
+    }, 0)
+  }
+
+  const handleBlueprintDocumentItemSelect = (event: Event, blueprintId: string) => {
+    const target = event.target
+    const deleteTarget =
+      pendingBlueprintDocumentDeleteId === blueprintId ||
+      (target instanceof HTMLElement && Boolean(target.closest("[data-blueprint-document-delete]")))
+    if (deleteTarget) {
+      event.preventDefault()
+      pendingBlueprintDocumentDeleteId = ""
+      requestBlueprintDocumentDelete(blueprintId)
+      return
+    }
+    props.onSelect(blueprintId)
+  }
+
+  const handleBlueprintDocumentDeletePointer = (event: PointerEvent | MouseEvent, blueprintId: string) => {
+    pendingBlueprintDocumentDeleteId = blueprintId
+    event.stopPropagation()
+  }
 
   return (
     <DropdownMenu placement="bottom-start">
@@ -5778,7 +5813,7 @@ function BlueprintDocumentSelect(props: {
             <For each={props.items}>
               {(item) => (
                 <DropdownMenu.Item
-                  onSelect={() => props.onSelect(item.id)}
+                  onSelect={(event) => handleBlueprintDocumentItemSelect(event, item.id)}
                   class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 pr-1"
                 >
                   <Icon
@@ -5801,13 +5836,20 @@ function BlueprintDocumentSelect(props: {
                       aria-label={language.t("blueprint.document.delete" as never)}
                       title={language.t("blueprint.document.delete" as never)}
                       onPointerDown={(event) => {
+                        handleBlueprintDocumentDeletePointer(event, item.id)
+                      }}
+                      onMouseDown={(event) => {
+                        handleBlueprintDocumentDeletePointer(event, item.id)
+                      }}
+                      onPointerUp={(event) => {
                         event.preventDefault()
                         event.stopPropagation()
+                        requestBlueprintDocumentDelete(item.id)
                       }}
                       onClick={(event) => {
                         event.preventDefault()
                         event.stopPropagation()
-                        props.onDelete(item.id)
+                        requestBlueprintDocumentDelete(item.id)
                       }}
                     />
                   </Tooltip>
@@ -5834,6 +5876,7 @@ function BlueprintSessionSelect(props: {
   disabled: boolean
   onSelect: (sessionKey: string) => void
   onRefresh: () => void
+  onRestart: () => void
   onDelete: (sessionKey: string) => void
 }) {
   const language = useLanguage()
@@ -5869,18 +5912,37 @@ function BlueprintSessionSelect(props: {
         >
           <div class="flex items-center justify-between gap-2 px-2 py-2">
             <div class="min-w-0 truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.sessions.title" as never)}</div>
-            <IconButton
-              icon="reset"
-              variant="ghost"
-              size="small"
-              class="h-6 w-6"
-              disabled={props.loading}
-              aria-label={language.t("blueprint.sessions.refresh" as never)}
-              onClick={(event) => {
-                event.stopPropagation()
-                props.onRefresh()
-              }}
-            />
+            <div class="flex items-center gap-1">
+              <Tooltip placement="left" value={language.t("blueprint.sessions.restart" as never)}>
+                <IconButton
+                  data-blueprint-session-restart
+                  icon="reset"
+                  variant="ghost"
+                  size="small"
+                  class="h-6 w-6"
+                  disabled={props.disabled || props.loading}
+                  aria-label={language.t("blueprint.sessions.restart" as never)}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    props.onRestart()
+                  }}
+                />
+              </Tooltip>
+              <Tooltip placement="left" value={language.t("blueprint.sessions.refresh" as never)}>
+                <IconButton
+                  icon="reset"
+                  variant="ghost"
+                  size="small"
+                  class="h-6 w-6"
+                  disabled={props.loading}
+                  aria-label={language.t("blueprint.sessions.refresh" as never)}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    props.onRefresh()
+                  }}
+                />
+              </Tooltip>
+            </div>
           </div>
           <Show when={props.error}>
             {(error) => <div class="mx-2 mb-2 rounded-sm bg-[rgba(248,113,113,0.12)] px-2 py-1 text-11-regular text-[#fecaca]">{error()}</div>}
@@ -5895,6 +5957,7 @@ function BlueprintSessionSelect(props: {
                   const running = () => blueprintSessionRunning(session)
                   const selected = () => session.sessionKey === props.selectedSessionKey
                   const touchedAt = () => blueprintSessionTime(session.lastTouchedAt)
+                  const visibleKey = () => blueprintSessionVisibleKey(session)
                   const subtitle = () =>
                     session.sessionDisplayName ||
                     session.blueprintName ||
@@ -5920,14 +5983,14 @@ function BlueprintSessionSelect(props: {
                       }}
                     >
                       <div class="min-w-0">
-                        <div class="truncate font-mono text-11-medium text-[#67e8f9]" title={session.sessionKey}>{session.sessionKey}</div>
+                        <div class="truncate font-mono text-11-medium text-[#67e8f9]" title={visibleKey()}>{visibleKey()}</div>
                         <div class="mt-1 truncate text-12-medium text-[#f8fdff]">
                           {subtitle()}
                         </div>
                         <div class="mt-1 truncate text-10-regular text-[#95afc4]">
                           {running() ? language.t("blueprint.sessions.running" as never) : session.status || "idle"}
                           <Show when={touchedAt()}>
-                            {(value) => <> - {formatRuntimeTime(value())}</>}
+                            {(value) => <> - {formatBlueprintSessionTimestamp(value())}</>}
                           </Show>
                         </div>
                       </div>
@@ -6042,6 +6105,46 @@ function BlueprintDeleteDialog(props: {
           </Button>
           <Button variant="primary" size="large" disabled={deleting()} onClick={() => void submit()}>
             {language.t("blueprint.document.delete" as never)}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
+function BlueprintSessionClearDialog(props: {
+  sessionName: string
+  onClear: () => void | Promise<void>
+}) {
+  const language = useLanguage()
+  const dialog = useDialog()
+  const [clearing, setClearing] = createSignal(false)
+  const submit = async () => {
+    if (clearing()) return
+    setClearing(true)
+    try {
+      await props.onClear()
+      dialog.close()
+    } finally {
+      setClearing(false)
+    }
+  }
+
+  return (
+    <Dialog title={language.t("blueprint.runtime.clearSessionTitle" as never)} action={<span aria-hidden="true" />} fit>
+      <div data-blueprint-session-clear-dialog class="flex w-[440px] max-w-[calc(100vw-2rem)] flex-col gap-4 px-6 pb-4">
+        <div class="text-14-regular text-text-strong">
+          {language.t("blueprint.runtime.clearSessionConfirm" as never, { name: props.sessionName } as never)}
+        </div>
+        <div class="rounded-sm border border-[rgba(248,113,113,0.25)] bg-[rgba(248,113,113,0.10)] px-3 py-2 text-12-regular text-[#fecaca]">
+          {language.t("blueprint.runtime.clearSessionWarning" as never)}
+        </div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" size="large" disabled={clearing()} onClick={() => dialog.close()}>
+            {language.t("common.cancel")}
+          </Button>
+          <Button variant="primary" size="large" disabled={clearing()} onClick={() => void submit()}>
+            {language.t("blueprint.runtime.clearSession" as never)}
           </Button>
         </div>
       </div>
@@ -6170,11 +6273,15 @@ function BlueprintResidentServiceCreateDialog(props: {
 function BlueprintControlDrawer(props: {
   open: boolean
   state: PopoServiceState
+  excelHistory: BlueprintExcelHistoryState
+  excelHistoryAvailable: boolean
   onOpenChange: (open: boolean) => void
   onRefresh: (opts?: { silent?: boolean }) => Promise<void> | void
   onSaveRobot: (robot: BlueprintPopoRobot, previousRobotAppKey?: string) => Promise<void> | void
   onDeleteRobot: (robotAppKey: string) => Promise<void> | void
   onToggleRobot: (robotAppKey: string, enabled: boolean) => Promise<void> | void
+  onRefreshExcelHistory: (opts?: { silent?: boolean }) => Promise<void> | void
+  onOpenExcelHistory: (summary: BlueprintSessionExcelHistorySummary) => void
 }) {
   const language = useLanguage()
   const toggleLabel = () => language.t((props.open ? "blueprint.control.close" : "blueprint.control.open") as never)
@@ -6231,12 +6338,220 @@ function BlueprintControlDrawer(props: {
             onDeleteRobot={props.onDeleteRobot}
             onToggleRobot={props.onToggleRobot}
           />
-        </div>
-        <div class="shrink-0 border-t border-[rgba(103,232,249,0.18)] p-3">
-          <BlueprintCollaborationAuthPanel defaultUsername="1" />
+          <BlueprintExcelHistoryPanel
+            state={props.excelHistory}
+            available={props.excelHistoryAvailable}
+            onRefresh={props.onRefreshExcelHistory}
+            onOpenSession={props.onOpenExcelHistory}
+          />
         </div>
       </aside>
     </>
+  )
+}
+
+function BlueprintExcelHistoryPanel(props: {
+  state: BlueprintExcelHistoryState
+  available: boolean
+  onRefresh: (opts?: { silent?: boolean }) => Promise<void> | void
+  onOpenSession: (summary: BlueprintSessionExcelHistorySummary) => void
+}) {
+  const language = useLanguage()
+
+  return (
+    <section data-blueprint-excel-history-panel class="mt-3 flex flex-col gap-3 border-t border-[rgba(103,232,249,0.18)] pt-3">
+      <div class="flex min-w-0 items-center justify-between gap-2">
+        <div class="min-w-0">
+          <div class="truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.excelHistory.title" as never)}</div>
+          <div class="mt-0.5 line-clamp-2 text-11-regular leading-4 text-[#95afc4]">
+            {language.t("blueprint.excelHistory.subtitle" as never)}
+          </div>
+        </div>
+        <Tooltip value={language.t("blueprint.excelHistory.refresh" as never)} placement="left">
+          <IconButton
+            icon="reset"
+            variant="ghost"
+            size="small"
+            class="h-7 w-7 shrink-0"
+            disabled={!props.available || props.state.loading}
+            aria-label={language.t("blueprint.excelHistory.refresh" as never)}
+            onClick={() => void props.onRefresh()}
+          />
+        </Tooltip>
+      </div>
+      <Show when={props.state.error}>
+        {(error) => (
+          <div class="rounded-sm border border-[#ef4444]/30 bg-[#450a0a]/40 px-2 py-1.5 text-11-regular text-[#fecaca]">
+            {error()}
+          </div>
+        )}
+      </Show>
+      <Show
+        when={props.available}
+        fallback={<div class="rounded-sm border border-[rgba(103,232,249,0.14)] bg-[#020817]/64 px-2 py-3 text-12-regular text-[#95afc4]">{language.t("blueprint.excelHistory.unavailable" as never)}</div>}
+      >
+        <Show
+          when={props.state.sessions.length > 0}
+          fallback={
+            <div class="rounded-sm border border-[rgba(103,232,249,0.14)] bg-[#020817]/64 px-2 py-3 text-12-regular text-[#95afc4]">
+              {props.state.loading ? language.t("common.loading") : language.t("blueprint.excelHistory.empty" as never)}
+            </div>
+          }
+        >
+          <div data-blueprint-excel-history-list class="flex flex-col gap-2">
+            <For each={props.state.sessions}>
+              {(summary) => {
+                const title = () => excelHistorySessionTitle(summary)
+                const latestTime = () => excelHistorySummaryTime(summary)
+                return (
+                  <button
+                    data-blueprint-excel-history-session
+                    type="button"
+                    class="grid min-h-[88px] w-full grid-cols-[1fr_auto] gap-2 rounded-sm border border-[rgba(103,232,249,0.18)] bg-[#020817]/64 p-2 text-left outline-none transition-colors hover:border-[#67e8f9] focus:border-[#67e8f9]"
+                    onClick={() => props.onOpenSession(summary)}
+                  >
+                    <span class="min-w-0">
+                      <span class="block truncate text-12-medium text-[#f8fdff]" title={title()}>{title()}</span>
+                      <span class="mt-1 block truncate font-mono text-10-regular text-[#67e8f9]" title={summary.sessionKey}>
+                        {summary.sessionKey}
+                      </span>
+                      <span class="mt-1 block truncate text-10-regular text-[#95afc4]">
+                        {latestTime() || "-"} · {summary.source || "session"} · {summary.status || "idle"}
+                      </span>
+                      <span class="mt-1 block truncate text-10-regular text-[#dbeafe]" title={summary.latestWorkbook || ""}>
+                        {summary.latestWorkbook || "-"} {summary.latestCommand ? `· ${summary.latestCommand}` : ""}
+                      </span>
+                    </span>
+                    <span class="self-start rounded-sm border border-[rgba(103,232,249,0.28)] bg-[#071019] px-2 py-1 text-10-medium text-[#b8fff4]">
+                      {language.t("blueprint.excelHistory.recordCount" as never, { count: summary.recordCount } as never)}
+                    </span>
+                  </button>
+                )
+              }}
+            </For>
+          </div>
+        </Show>
+      </Show>
+    </section>
+  )
+}
+
+function BlueprintExcelHistoryDetailDialog(props: {
+  summary: BlueprintSessionExcelHistorySummary
+  onLoad: (limit: number) => Promise<BlueprintSessionExcelHistory>
+}) {
+  const language = useLanguage()
+  const dialog = useDialog()
+  const [state, setState] = createSignal<{
+    loading: boolean
+    records: BlueprintSessionExcelHistoryRecord[]
+    totalMatches?: number
+    truncated?: boolean
+    error?: string
+  }>({ loading: true, records: [] })
+  const title = () => excelHistorySessionTitle(props.summary)
+  const load = async () => {
+    setState((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      const result = await props.onLoad(200)
+      setState({
+        loading: false,
+        records: Array.isArray(result.records) ? result.records : [],
+        totalMatches: result.totalMatches,
+        truncated: result.truncated,
+      })
+    } catch (error) {
+      setState((current) => ({ ...current, loading: false, error: readableError(error) }))
+    }
+  }
+  onMount(() => void load())
+
+  return (
+    <Dialog title={language.t("blueprint.excelHistory.detailTitle" as never, { name: title() } as never)} action={<span aria-hidden="true" />} fit size="x-large">
+      <div data-blueprint-excel-history-dialog class="flex w-full min-w-0 flex-col gap-3 px-6 pb-4">
+        <div class="flex min-w-0 items-center justify-between gap-2">
+          <div class="min-w-0">
+            <div class="truncate font-mono text-11-regular text-text-weak" title={props.summary.sessionKey}>{props.summary.sessionKey}</div>
+            <div class="mt-1 text-12-regular text-text-weaker">
+              {language.t("blueprint.excelHistory.totalRecords" as never, { count: state().totalMatches ?? props.summary.recordCount } as never)}
+            </div>
+          </div>
+          <Button variant="ghost" size="small" icon="reset" disabled={state().loading} onClick={() => void load()}>
+            {language.t("blueprint.excelHistory.refresh" as never)}
+          </Button>
+        </div>
+        <Show when={state().error}>
+          {(error) => <div class="rounded-sm bg-[rgba(248,113,113,0.12)] px-2 py-1 text-12-regular text-[#fecaca]">{error()}</div>}
+        </Show>
+        <Show when={state().truncated}>
+          <div class="rounded-sm border border-[rgba(251,191,36,0.26)] bg-[rgba(251,191,36,0.10)] px-2 py-1 text-12-regular text-[#fde68a]">
+            {language.t("blueprint.excelHistory.truncated" as never)}
+          </div>
+        </Show>
+        <div class="max-h-[64vh] overflow-auto rounded-sm border border-border-weaker-base bg-background-base">
+          <Show
+            when={state().records.length > 0}
+            fallback={<div class="px-3 py-8 text-center text-13-regular text-text-weaker">{state().loading ? language.t("common.loading") : language.t("blueprint.excelHistory.noRecords" as never)}</div>}
+          >
+            <div data-blueprint-excel-history-table class="min-w-[820px]">
+              <div
+                data-blueprint-excel-history-header
+                class="sticky top-0 z-10 grid grid-cols-[150px_72px_120px_minmax(180px,1fr)_minmax(190px,1fr)] gap-3 border-b border-border-weaker-base bg-background-strong px-3 py-2 text-11-medium text-text-weaker"
+              >
+                <div>{language.t("blueprint.excelHistory.time" as never)}</div>
+                <div>{language.t("blueprint.excelHistory.status" as never)}</div>
+                <div>{language.t("blueprint.excelHistory.command" as never)}</div>
+                <div>{language.t("blueprint.excelHistory.workbook" as never)}</div>
+                <div>{language.t("blueprint.excelHistory.location" as never)}</div>
+              </div>
+              <For each={state().records}>
+                {(record) => <BlueprintExcelHistoryRecordView record={record} />}
+              </For>
+            </div>
+          </Show>
+        </div>
+        <div class="flex justify-end">
+          <Button variant="primary" size="large" onClick={() => dialog.close()}>
+            {language.t("common.close")}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
+function BlueprintExcelHistoryRecordView(props: { record: BlueprintSessionExcelHistoryRecord }) {
+  const language = useLanguage()
+  const display = () => excelHistoryRecordDisplay(props.record)
+  const statusKey = () => excelHistoryStatusKey(props.record.status)
+  const statusLabel = () => {
+    const key = statusKey()
+    if (key === "succeeded") return language.t("blueprint.excelHistory.statusSucceeded" as never)
+    if (key === "failed") return language.t("blueprint.excelHistory.statusFailed" as never)
+    return display().status
+  }
+
+  return (
+    <div
+      data-blueprint-excel-history-record
+      class="grid grid-cols-[150px_72px_120px_minmax(180px,1fr)_minmax(190px,1fr)] gap-3 border-b border-border-weaker-base px-3 py-2 text-12-regular last:border-b-0"
+    >
+      <div class="truncate font-mono text-text-strong" title={display().time}>{display().time}</div>
+      <div
+        class="truncate"
+        title={display().status}
+        classList={{
+          "text-[#bbf7d0]": statusKey() === "succeeded",
+          "text-[#fecaca]": statusKey() === "failed",
+          "text-text-weaker": statusKey() === "other",
+        }}
+      >
+        {statusLabel()}
+      </div>
+      <div class="truncate font-mono text-text-strong" title={display().command}>{display().command}</div>
+      <div class="truncate text-text-weak" title={display().workbookTitle}>{display().workbookLabel}</div>
+      <div class="truncate text-text-weak" title={display().locationTitle}>{display().location}</div>
+    </div>
   )
 }
 
@@ -6995,14 +7310,13 @@ function BlueprintRuntimePanel(props: {
   startNodeOptions: BlueprintRuntimeStartNodeOption[]
   selectedStartNodeId: string
   startDisabled: boolean
-  directRunDisabled: boolean
-  slotMessageDisabled: boolean
+  sessionMessageDisabled: boolean
   onStartNodeSelect: (nodeId: string) => void
-  onDirectRun: () => void
-  onSlotMessage: (message: string) => void
+  onSessionMessage: (message: string) => void
   onRefresh: () => void
   onTerminateSession: () => void
-  onTerminateSlot: () => void
+  onClearSession: () => void
+  clearSessionDisabled: boolean
   workspacePanelArea?: WorkspacePanelArea
   onWorkspaceAreaOpen: (area: WorkspacePanelArea) => void
   onWorkspaceAreaOpenInExplorer: (area: WorkspacePanelArea) => void
@@ -7027,18 +7341,12 @@ function BlueprintRuntimePanel(props: {
   const workspaceReports = createMemo(() => workspaceAreaItems(workspace(), "reports"))
   const explanation = createMemo(() => asRecord(props.state.explanation))
   const summary = createMemo(() => asRecord(explanation()?.summary))
-  const slotSummary = createMemo(() => props.state.slot)
   const sessionRunning = createMemo(() => blueprintSessionRunning(props.currentSession))
-  const slotRunCount = createMemo(() => Number(slotSummary()?.runningRunCount ?? slotSummary()?.runningRunIds?.length ?? slotSummary()?.runs?.length ?? 0))
-  const slotRunning = createMemo(() => slotSummary()?.status === "running" || slotRunCount() > 0 || Number(slotSummary()?.activeSessionCount ?? 0) > 0)
-  const activeSessionCount = createMemo(() => Number(slotSummary()?.activeSessionCount ?? 0))
-  const queuedSessionCount = createMemo(() => Number(slotSummary()?.queuedSessionCount ?? 0))
-  const maxActiveSessions = createMemo(() => Number(slotSummary()?.maxActiveSessions ?? 3) || 3)
   const [runtimePanelOrder, setRuntimePanelOrder] = createSignal<RuntimePanelId[]>([...DEFAULT_RUNTIME_PANEL_ORDER])
   const [draggedRuntimePanel, setDraggedRuntimePanel] = createSignal<RuntimePanelId>()
   const [runtimePanelDrag, setRuntimePanelDrag] = createSignal<RuntimePanelDragState>()
   const [runtimeEventsPanelHeight, setRuntimeEventsPanelHeight] = createSignal(240)
-  const [slotMessage, setSlotMessage] = createSignal("")
+  const [sessionMessage, setSessionMessage] = createSignal("")
   let runtimePanelListRef: HTMLDivElement | undefined
 
   const moveRuntimePanelAtPointer = (dragging: RuntimePanelId, clientY: number) => {
@@ -7113,11 +7421,11 @@ function BlueprintRuntimePanel(props: {
     })
   })
 
-  const submitSlotMessage = () => {
-    const text = slotMessage().trim()
-    if (!text || props.slotMessageDisabled) return
-    props.onSlotMessage(text)
-    setSlotMessage("")
+  const submitSessionMessage = () => {
+    const text = sessionMessage().trim()
+    if (!text || props.sessionMessageDisabled) return
+    props.onSessionMessage(text)
+    setSessionMessage("")
   }
 
   const runtimePanelShellProps = (id: RuntimePanelId) => ({
@@ -7159,44 +7467,32 @@ function BlueprintRuntimePanel(props: {
               disabled={props.startDisabled}
               onSelect={props.onStartNodeSelect}
             />
-            <div class="flex justify-end gap-2">
-              <Button
-                data-blueprint-runtime-confirm-run
-                size="small"
-                variant="secondary"
-                class="h-8 px-3"
-                disabled={props.directRunDisabled}
-                onClick={props.onDirectRun}
-              >
-                {language.t("blueprint.runtime.directRun" as never)}
-              </Button>
-            </div>
             <div class="flex min-w-0 flex-col gap-2">
               <textarea
-                data-blueprint-runtime-slot-message
+                data-blueprint-runtime-session-message
                 rows={3}
-                value={slotMessage()}
-                disabled={props.slotMessageDisabled}
-                placeholder={language.t("blueprint.runtime.slotMessagePlaceholder" as never)}
+                value={sessionMessage()}
+                disabled={props.sessionMessageDisabled}
+                placeholder={language.t("blueprint.runtime.sessionMessagePlaceholder" as never)}
                 class="min-h-16 w-full resize-y rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#06101a] px-2 py-1.5 text-12-regular text-[#f8fdff] outline-none transition-colors placeholder:text-[#5b7386] focus:border-[#67e8f9] disabled:cursor-not-allowed disabled:opacity-55"
-                onInput={(event) => setSlotMessage(event.currentTarget.value)}
+                onInput={(event) => setSessionMessage(event.currentTarget.value)}
                 onKeyDown={(event) => {
                   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                     event.preventDefault()
-                    submitSlotMessage()
+                    submitSessionMessage()
                   }
                 }}
               />
               <div class="flex justify-end">
                 <Button
-                  data-blueprint-runtime-slot-message-submit
+                  data-blueprint-runtime-session-message-submit
                   size="small"
                   variant="secondary"
                   class="h-8 px-3"
-                  disabled={props.slotMessageDisabled || !slotMessage().trim()}
-                  onClick={submitSlotMessage}
+                  disabled={props.sessionMessageDisabled || !sessionMessage().trim()}
+                  onClick={submitSessionMessage}
                 >
-                  {language.t("blueprint.runtime.slotMessageSubmit" as never)}
+                  {language.t("blueprint.runtime.sessionMessageSubmit" as never)}
                 </Button>
               </div>
             </div>
@@ -7210,14 +7506,6 @@ function BlueprintRuntimePanel(props: {
                 primary={props.currentSession?.sessionDisplayName || props.currentSession?.blueprintName || props.currentSessionKey}
                 secondary={props.currentSession?.activeRunId || language.t("blueprint.runtime.noRun")}
                 running={sessionRunning()}
-                runningLabel={language.t("blueprint.runtime.running" as never)}
-                idleLabel={language.t("blueprint.runtime.notRunning" as never)}
-              />
-              <RuntimeBinaryStatusBlock
-                title={language.t("blueprint.runtime.slotStatus" as never)}
-                primary={slotSummary()?.blueprintName || slotSummary()?.blueprintId || language.t("blueprint.runtime.planning" as never)}
-                secondary={`${language.t("blueprint.runtime.activeSessions" as never)} ${activeSessionCount()}/${maxActiveSessions()} - ${language.t("blueprint.runtime.runningSlots" as never)} ${slotRunCount()}/${maxActiveSessions()} - ${language.t("blueprint.runtime.queuedSessions" as never)} ${queuedSessionCount()}`}
-                running={slotRunning()}
                 runningLabel={language.t("blueprint.runtime.running" as never)}
                 idleLabel={language.t("blueprint.runtime.notRunning" as never)}
               />
@@ -7245,10 +7533,10 @@ function BlueprintRuntimePanel(props: {
                 onClick={props.onTerminateSession}
               />
               <RuntimeActionButton
-                label={language.t("blueprint.runtime.terminateSlot" as never)}
-                description={language.t("blueprint.runtime.terminateSlotDescription" as never)}
-                disabled={props.state.loading || (!slotRunning() && queuedSessionCount() === 0)}
-                onClick={props.onTerminateSlot}
+                label={language.t("blueprint.runtime.clearSession" as never)}
+                description={language.t("blueprint.runtime.clearSessionDescription" as never)}
+                disabled={!props.currentSession || props.state.loading || props.clearSessionDisabled}
+                onClick={props.onClearSession}
               />
             </div>
           </div>
@@ -7847,7 +8135,12 @@ function AgentInfoPanel(props: {
   const visibleEvents = createMemo<AgentPanelDisplayEvent[]>((previous) =>
     stabilizeAgentPanelDisplayEvents(
       previous,
-      visibleAgentPanelEvents(props.events, props.panel.userMessages ?? [], props.sessionTimelineEvents ?? []),
+      visibleAgentPanelEvents(
+        props.events,
+        props.panel.userMessages ?? [],
+        props.sessionTimelineEvents ?? [],
+        arrayOfRecords(asRecord(props.panel.info)?.messageJournal),
+      ),
     ),
   [])
   const statusDetails = createMemo(() =>
@@ -9028,6 +9321,7 @@ export function BlueprintInspector(props: {
   closeInspector: () => void
   setDraft: (draft: BlueprintDraft) => void
   setStore: SetStoreFunction<BlueprintDraft>
+  saveDraftNow?: (draft: BlueprintDraft) => void
   config: BlueprintConfig
   catalog: CatalogState
   modelCatalog: ModelCatalogState
@@ -9040,7 +9334,9 @@ export function BlueprintInspector(props: {
   const updateAgentField = <K extends keyof BlueprintAgentNode>(field: K, value: BlueprintAgentNode[K]) => {
     const id = props.selectedNodeId
     if (!id || !props.selectedAgent) return
-    props.setStore("graph", "agent_nodes", id, field, value as never)
+    const next = updateAgentNode(props.draft, id, { [field]: value } as Partial<BlueprintAgentNode>)
+    props.setDraft(next)
+    if (field === "model") props.saveDraftNow?.(next)
   }
 
   const updateAgentAccessPolicy = (field: keyof BlueprintAgentNode["access_policy"], value: boolean) => {
@@ -9062,6 +9358,14 @@ export function BlueprintInspector(props: {
 
   const selectedIsStartAgent = () => (props.selectedNodeId ?? "") === (props.draft.runtime?.start_node_id ?? "")
   const selectedPopoEntry = () => props.selectedAgent?.popo_entry ?? createDefaultPopoEntry()
+  const frameworkSkillOption = () =>
+    props.selectedAgent?.node_type === "agent"
+      ? FRAMEWORK_FULL_AGENT_SKILL_OPTION
+      : FRAMEWORK_WORKER_AGENT_SKILL_OPTION
+  const frameworkRuleOption = () =>
+    props.selectedAgent?.node_type === "agent"
+      ? FRAMEWORK_FULL_AGENT_RULE_OPTION
+      : FRAMEWORK_WORKER_AGENT_RULE_OPTION
   const otherEnabledPopoAgentId = () =>
     Object.entries(props.draft.graph.agent_nodes ?? {}).find(
       ([id, node]) =>
@@ -9348,8 +9652,8 @@ export function BlueprintInspector(props: {
                 label={language.t("blueprint.field.skills")}
                 values={props.selectedAgent?.skills ?? []}
                 options={props.catalog.skills}
-                lockedValues={[FRAMEWORK_AGENT_SKILL_OPTION.value]}
-                lockedOptions={[FRAMEWORK_AGENT_SKILL_OPTION]}
+                lockedValues={[frameworkSkillOption().value]}
+                lockedOptions={[frameworkSkillOption()]}
                 emptyLabel={props.catalog.skillError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.empty")}
                 onChange={updateAgentSkills}
               />
@@ -9358,8 +9662,8 @@ export function BlueprintInspector(props: {
                 label={language.t("blueprint.field.rulePaths")}
                 values={props.selectedAgent?.rule_paths ?? []}
                 options={props.catalog.rules}
-                lockedValues={[FRAMEWORK_AGENT_RULE_OPTION.value]}
-                lockedOptions={[FRAMEWORK_AGENT_RULE_OPTION]}
+                lockedValues={[frameworkRuleOption().value]}
+                lockedOptions={[frameworkRuleOption()]}
                 emptyLabel={props.catalog.ruleError ? language.t("blueprint.catalog.loadFailed") : language.t("blueprint.catalog.empty")}
                 onChange={(value) => updateAgentField("rule_paths", value)}
               />
@@ -10588,6 +10892,36 @@ function blueprintMainSessionKey(blueprintId: string) {
   return `main+${id}`
 }
 
+function blueprintSessionVisibleKeySlug(value?: string) {
+  const text = (value ?? "").trim()
+  if (!text) return ""
+  let result = ""
+  let pendingDash = false
+  for (const char of text) {
+    if (/\s/u.test(char)) {
+      pendingDash = result.length > 0
+      continue
+    }
+    if (!/[\p{L}\p{N}._-]/u.test(char)) continue
+    if (pendingDash && !result.endsWith("-")) result += "-"
+    result += char
+    pendingDash = false
+  }
+  return result.replace(/^-+|-+$/g, "")
+}
+
+function blueprintSessionVisibleKey(session: BlueprintSessionSummary) {
+  const sessionKey = session.sessionKey.trim()
+  const source = (session.source ?? "").trim().toLowerCase()
+  const match = sessionKey.match(/^(bps_popo_[A-Za-z0-9._-]{1,96})_[0-9a-f]{24}$/)
+  if (source !== "popo" || !match) return sessionKey
+  const structureName = blueprintSessionVisibleKeySlug(
+    session.blueprintName || session.blueprintId || session.blueprintStructureId,
+  )
+  if (!structureName) return sessionKey
+  return `${match[1]}_${structureName}`
+}
+
 function normalizeBlueprintSessionSummary(value: Record<string, unknown>): BlueprintSessionSummary {
   return {
     sessionKey: stringValue(value.sessionKey) ?? stringValue(value.session_key) ?? "",
@@ -10610,33 +10944,6 @@ function normalizeBlueprintSessionSummary(value: Record<string, unknown>): Bluep
   }
 }
 
-function normalizeBlueprintSlotSummary(value: unknown): BlueprintSlotSummary | undefined {
-  const record = asRecord(value)
-  if (!record || record.error) return undefined
-  const runningRunIdsSource = record.runningRunIds ?? record.running_run_ids
-  const runningRunIds = Array.isArray(runningRunIdsSource)
-    ? runningRunIdsSource.map((entry) => String(entry || "")).filter(Boolean)
-    : []
-  return {
-    ok: record.ok === true,
-    projectDir: stringValue(record.projectDir) ?? stringValue(record.project_dir),
-    blueprintId: stringValue(record.blueprintId) ?? stringValue(record.blueprint_id),
-    blueprintName: stringValue(record.blueprintName) ?? stringValue(record.blueprint_name),
-    blueprintStructureId: stringValue(record.blueprintStructureId) ?? stringValue(record.blueprint_structure_id),
-    poolKey: stringValue(record.poolKey) ?? stringValue(record.pool_key),
-    status: stringValue(record.status),
-    activeSessionCount: numberValue(record.activeSessionCount ?? record.active_session_count),
-    queuedSessionCount: numberValue(record.queuedSessionCount ?? record.queued_session_count),
-    idleSessionCount: numberValue(record.idleSessionCount ?? record.idle_session_count),
-    runningRunCount: numberValue(record.runningRunCount ?? record.running_run_count),
-    idleRunCount: numberValue(record.idleRunCount ?? record.idle_run_count),
-    maxActiveSessions: numberValue(record.maxActiveSessions ?? record.max_active_sessions) || 3,
-    runningRunIds,
-    runs: arrayOfRecords(record.runs),
-    sessions: arrayOfRecords(record.sessions).map(normalizeBlueprintSessionSummary),
-  }
-}
-
 function blueprintSessionRunning(session?: BlueprintSessionSummary) {
   if (!session) return false
   return Boolean(session.activeRunId) || session.status === "running"
@@ -10646,6 +10953,215 @@ function blueprintSessionTime(value: unknown): number | undefined {
   const numeric = numberValue(value)
   if (!numeric) return undefined
   return numeric < 10_000_000_000 ? numeric * 1000 : numeric
+}
+
+type ExcelHistoryRecordDisplay = {
+  time: string
+  status: string
+  command: string
+  workbookLabel: string
+  workbookTitle: string
+  location: string
+  locationTitle: string
+}
+
+function excelHistorySessionTitle(summary: BlueprintSessionExcelHistorySummary) {
+  return (
+    stringValue(summary.sessionDisplayName) ??
+    stringValue(summary.blueprintName) ??
+    stringValue(summary.blueprintId) ??
+    stringValue(summary.sessionKey) ??
+    "session"
+  )
+}
+
+function excelHistorySummaryTime(summary: BlueprintSessionExcelHistorySummary) {
+  const timestamp = numberValue(summary.latestTimestampMs)
+  if (timestamp) return formatBlueprintSessionTimestamp(timestamp)
+  return stringValue(summary.latestTime)
+}
+
+function excelHistoryRecordTime(record: BlueprintSessionExcelHistoryRecord) {
+  const timestamp = numberValue(record.timestampMs)
+  if (timestamp) return formatBlueprintSessionTimestamp(timestamp)
+  return excelHistoryTrimMillis(stringValue(record.time))
+}
+
+function excelHistoryRecordDisplay(record: BlueprintSessionExcelHistoryRecord): ExcelHistoryRecordDisplay {
+  const workbookTitle = excelHistoryRecordWorkbookText(record)
+  const location = excelHistoryRecordLocation(record)
+  return {
+    time: excelHistoryRecordTime(record) ?? "-",
+    status: stringValue(record.status) ?? "-",
+    command: excelHistoryRecordCommand(record),
+    workbookLabel: excelHistoryWorkbookLabel(workbookTitle),
+    workbookTitle: workbookTitle || "-",
+    location,
+    locationTitle: location,
+  }
+}
+
+function excelHistoryStatusKey(status: unknown): "succeeded" | "failed" | "other" {
+  const value = stringValue(status)?.toLowerCase()
+  if (value === "succeeded" || value === "success" || value === "ok") return "succeeded"
+  if (value === "failed" || value === "failure" || value === "error") return "failed"
+  return "other"
+}
+
+function excelHistoryRecordCommand(record: BlueprintSessionExcelHistoryRecord) {
+  const command = stringValue(record.command)
+  if (command) return command
+  const rawArguments = asRecord(record.arguments) ?? {}
+  const rawCommand = stringValue(rawArguments.command)
+  if (rawCommand) return rawCommand
+  const serviceMethod = [record.serviceName, record.methodName].map((item) => stringValue(item)).filter(Boolean).join(".")
+  return serviceMethod || stringValue(record.category) || "record"
+}
+
+function excelHistoryRecordWorkbookText(record: BlueprintSessionExcelHistoryRecord) {
+  for (const cell of arrayOfRecords(record.beforeAfter)) {
+    const workbook = stringValue(cell.workbook)
+    if (workbook) return workbook
+  }
+  const rawArguments = asRecord(record.arguments) ?? {}
+  const nestedArguments = excelHistoryNestedArguments(record)
+  const candidates = [
+    stringValue(record.workbook),
+    stringValue(nestedArguments.file),
+    stringValue(nestedArguments.workbook),
+    stringValue(rawArguments.file),
+    stringValue(rawArguments.workbook),
+  ]
+  for (const candidate of candidates) {
+    if (candidate) return candidate
+  }
+  const tableNames = [
+    ...excelHistoryTableNames(nestedArguments.tableNames ?? nestedArguments.tableName),
+    ...excelHistoryTableNames(rawArguments.tableNames ?? rawArguments.tableName),
+  ]
+  return excelHistoryUnique(tableNames).join(", ")
+}
+
+function excelHistoryRecordLocation(record: BlueprintSessionExcelHistoryRecord) {
+  if (stringValue(record.category)?.toLowerCase() === "table_queue") return "-"
+  const beforeAfterLocation = excelHistoryBeforeAfterLocation(arrayOfRecords(record.beforeAfter))
+  if (beforeAfterLocation) return beforeAfterLocation
+  return excelHistoryArgumentsLocation(excelHistoryNestedArguments(record))
+}
+
+function excelHistoryNestedArguments(record: BlueprintSessionExcelHistoryRecord): Record<string, unknown> {
+  const rawArguments = asRecord(record.arguments) ?? {}
+  return asRecord(rawArguments.arguments) ?? rawArguments
+}
+
+function excelHistoryBeforeAfterLocation(cells: Record<string, unknown>[]) {
+  if (!cells.length) return ""
+  if (cells.length === 1) return excelHistoryCellLocation(cells[0])
+  const firstRow = numberValue(cells[0]?.row)
+  const sameRow = firstRow > 0 && cells.every((cell) => numberValue(cell.row) === firstRow)
+  const sheets = excelHistoryUnique(cells.map((cell) => stringValue(cell.sheet)).filter(Boolean))
+  if (sameRow) {
+    const sheet = sheets.length === 1 ? `${sheets[0]} ` : ""
+    const fields = excelHistoryUnique(cells.map(excelHistoryCellFieldLabel).filter(Boolean))
+    const suffix = fields.length ? `: ${excelHistoryCompactList(fields)}` : ""
+    return `${sheet}row ${firstRow}${suffix}`
+  }
+  return excelHistoryCompactList(cells.map(excelHistoryCellLocation).filter(Boolean))
+}
+
+function excelHistoryCellLocation(cell: Record<string, unknown> | undefined) {
+  const value = cell ?? {}
+  const sheet = stringValue(value.sheet)
+  const cellName = stringValue(value.cell) ?? excelHistoryColumnRow(value)
+  if (cellName) return sheet ? `${sheet}!${cellName}` : cellName
+  const row = numberValue(value.row)
+  if (row) return sheet ? `${sheet} row ${row}` : `row ${row}`
+  return "-"
+}
+
+function excelHistoryCellFieldLabel(cell: Record<string, unknown>) {
+  return stringValue(cell.field) ?? stringValue(cell.cell) ?? stringValue(cell.column)
+}
+
+function excelHistoryColumnRow(value: Record<string, unknown>) {
+  const row = numberValue(value.row)
+  const column = stringValue(value.column) ?? stringValue(value.col_name)
+  if (row && column) return `${column}${row}`
+  return ""
+}
+
+function excelHistoryArgumentsLocation(argumentsRecord: Record<string, unknown>) {
+  const sheet = stringValue(argumentsRecord.sheet) ?? stringValue(argumentsRecord.sheetName) ?? stringValue(argumentsRecord.sheet_name)
+  const cell = stringValue(argumentsRecord.cell) ?? stringValue(argumentsRecord.coordinate)
+  if (cell) return sheet ? `${sheet}!${cell}` : cell
+  const range = stringValue(argumentsRecord.range)
+  if (range) return sheet ? `${sheet} ${range}` : range
+  const row = numberValue(argumentsRecord.row)
+  if (row) {
+    const fields = excelHistoryArgumentFields(argumentsRecord)
+    const suffix = fields.length ? `: ${excelHistoryCompactList(fields)}` : ""
+    return sheet ? `${sheet} row ${row}${suffix}` : `row ${row}${suffix}`
+  }
+  return "-"
+}
+
+function excelHistoryArgumentFields(argumentsRecord: Record<string, unknown>) {
+  const fields: string[] = []
+  const field = stringValue(argumentsRecord.field)
+  if (field) fields.push(field)
+  const values = asRecord(argumentsRecord.values)
+  if (values) fields.push(...Object.keys(values))
+  const rawFields = argumentsRecord.fields
+  if (Array.isArray(rawFields)) {
+    for (const item of rawFields) {
+      if (typeof item === "string" || typeof item === "number") fields.push(String(item))
+      const record = asRecord(item)
+      const name = record ? stringValue(record.field) ?? stringValue(record.internal) ?? stringValue(record.name) : undefined
+      if (name) fields.push(name)
+    }
+  }
+  return excelHistoryUnique(fields)
+}
+
+function excelHistoryWorkbookLabel(value: string) {
+  const text = stringValue(value)
+  if (!text) return "-"
+  return text.split(/\s*,\s*/).filter(Boolean).map(excelHistoryOneWorkbookLabel).join(", ")
+}
+
+function excelHistoryOneWorkbookLabel(value: string) {
+  const normalized = value.replace(/\\/g, "/")
+  return normalized.split("/").filter(Boolean).pop() ?? value
+}
+
+function excelHistoryTableNames(value: unknown) {
+  if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean)
+  if (Array.isArray(value)) return value.map((item) => stringValue(item)).filter(Boolean)
+  return []
+}
+
+function excelHistoryCompactList(values: string[], limit = 3) {
+  const unique = excelHistoryUnique(values)
+  if (!unique.length) return "-"
+  const head = unique.slice(0, limit).join(", ")
+  const remaining = unique.length - limit
+  return remaining > 0 ? `${head} +${remaining}` : head
+}
+
+function excelHistoryUnique(values: Array<string | undefined>) {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const text = stringValue(value)
+    if (!text || seen.has(text)) continue
+    seen.add(text)
+    result.push(text)
+  }
+  return result
+}
+
+function excelHistoryTrimMillis(value: string | undefined) {
+  return value?.replace(/(\d{2}:\d{2}:\d{2})\.\d+/, "$1")
 }
 
 function normalizeScriptCatalogNodeFromJson(text: string): BlueprintScriptCatalogNode | undefined {
@@ -11185,6 +11701,7 @@ function visibleAgentPanelEvents(
   events: AgentStreamEvent[],
   userMessages: AgentPanelUserMessage[] = [],
   sessionTimelineEvents: BlueprintSessionTimelineEvent[] = [],
+  messageJournal: Record<string, unknown>[] = [],
 ): AgentPanelDisplayEvent[] {
   const replies = new Map<string, AgentPanelDisplayEvent>()
   const reasoning = new Map<string, AgentPanelDisplayEvent>()
@@ -11213,7 +11730,7 @@ function visibleAgentPanelEvents(
     currentToolGroup.tools.push(entry)
   }
 
-  for (const item of agentPanelTimelineItems(events, userMessages, sessionTimelineEvents)) {
+  for (const item of agentPanelTimelineItems(events, userMessages, sessionTimelineEvents, messageJournal)) {
     if (item.type === "user") {
       flushAgentPanelToolGroup()
       display.push({
@@ -11232,6 +11749,14 @@ function visibleAgentPanelEvents(
       if (sessionEvent) {
         flushAgentPanelToolGroup()
         display.push(sessionEvent)
+      }
+      continue
+    }
+    if (item.type === "journalUser") {
+      const journalUser = agentPanelDisplayEventFromMessageJournalUser(item.record, item.order)
+      if (journalUser) {
+        flushAgentPanelToolGroup()
+        display.push(journalUser)
       }
       continue
     }
@@ -11343,12 +11868,18 @@ function agentPanelTimelineItems(
   events: AgentStreamEvent[],
   userMessages: AgentPanelUserMessage[],
   sessionTimelineEvents: BlueprintSessionTimelineEvent[] = [],
+  messageJournal: Record<string, unknown>[] = [],
 ): AgentPanelTimelineItem[] {
   const sessionChatEvents = agentPanelSessionChatTimelineEvents(sessionTimelineEvents)
   const hasSessionChat = sessionChatEvents.length > 0
   const panelUserMessages = hasSessionChat
     ? userMessages.filter((message) => !agentPanelSessionTimelineHasLocalUserMessage(sessionChatEvents, message))
     : userMessages
+  const journalUserRecords = agentPanelMessageJournalUserRecords(messageJournal).filter(
+    (record) =>
+      !agentPanelSessionTimelineHasJournalUserMessage(sessionChatEvents, record) &&
+      !agentPanelLocalUserMessagesHasJournalUserMessage(panelUserMessages, record),
+  )
   const timeline: AgentPanelTimelineItem[] = [
     ...panelUserMessages.map((message, index) => ({
       type: "user" as const,
@@ -11361,6 +11892,12 @@ function agentPanelTimelineItems(
       event,
       index,
       order: agentPanelSessionTimelineOrder(event, index),
+    })),
+    ...journalUserRecords.map((record, index) => ({
+      type: "journalUser" as const,
+      record,
+      index,
+      order: agentPanelMessageJournalUserOrder(record, index),
     })),
     ...events.map((event, index) => ({
       type: "event" as const,
@@ -11407,6 +11944,107 @@ function agentPanelDisplayEventFromSessionTimeline(
     }
   }
   return undefined
+}
+
+function agentPanelDisplayEventFromMessageJournalUser(
+  record: Record<string, unknown>,
+  order: number,
+): AgentPanelDisplayEvent | undefined {
+  const text = agentPanelMessageJournalUserText(record)
+  if (!text) return undefined
+  const id = stringValue(record.messageId) ?? stringValue(record.id) ?? `journal-user-${order}`
+  return {
+    id: `journal-user-${id}`,
+    kind: agentPanelMessageJournalUserKind(record),
+    status: userMessageStatusLabel(agentPanelMessageJournalUserStatus(record)),
+    text,
+    tone: "user",
+    order,
+  }
+}
+
+function agentPanelMessageJournalUserRecords(records: Record<string, unknown>[]) {
+  const byMessage = new Map<string, Record<string, unknown>>()
+  for (const record of records) {
+    const recordType = stringValue(record.recordType)
+    if (recordType !== "framework.message.queued" && recordType !== "framework.message.sent") continue
+    if (!agentPanelMessageJournalUserText(record)) continue
+    const key = stringValue(record.messageId) ?? stringValue(record.id)
+    if (!key) continue
+    const current = byMessage.get(key)
+    if (!current || recordType === "framework.message.queued") {
+      byMessage.set(key, record)
+    }
+  }
+  return [...byMessage.values()]
+}
+
+function agentPanelMessageJournalUserText(record: Record<string, unknown>) {
+  return agentPanelExtractCurrentUserMessage(stringValue(record.summary) ?? "")
+}
+
+function agentPanelExtractCurrentUserMessage(text: string) {
+  const raw = text.trim()
+  if (!raw) return undefined
+  const marker = agentPanelLastPromptMarker(raw, [
+    "[Current POPO Message]",
+    "[Current User Message]",
+    "[Current BlueprintSession Message]",
+    "[Current Message]",
+  ])
+  const currentSection = marker ? raw.slice(marker.index + marker.value.length).trim() : raw
+  const withoutPromptPrelude = currentSection.includes("\n---\n")
+    ? currentSection.slice(currentSection.lastIndexOf("\n---\n") + "\n---\n".length).trim()
+    : currentSection
+  const normalized = withoutPromptPrelude
+    .replace(/^\[(?:popo_user|user|desktop_user|local_user)\]\s*/i, "")
+    .trim()
+  return normalized || undefined
+}
+
+function agentPanelLastPromptMarker(text: string, markers: string[]) {
+  let best: { value: string; index: number } | undefined
+  for (const value of markers) {
+    const index = text.lastIndexOf(value)
+    if (index >= 0 && (!best || index > best.index)) best = { value, index }
+  }
+  return best
+}
+
+function agentPanelMessageJournalUserKind(record: Record<string, unknown>) {
+  const summary = stringValue(record.summary) ?? ""
+  if (summary.includes("[Current POPO Message]") || /^\s*\[popo_user\]/i.test(summary)) return "POPO \u7528\u6237"
+  return "\u7528\u6237"
+}
+
+function agentPanelMessageJournalUserStatus(record: Record<string, unknown>): AgentPanelUserMessage["status"] {
+  const status = stringValue(record.status)
+  if (status === "failed" || status === "cancelled") return "failed"
+  if (status === "dispatching") return "dispatching"
+  if (status === "completed") return "succeeded"
+  if (stringValue(record.recordType) === "framework.message.sent") return "dispatching"
+  return "sent"
+}
+
+function agentPanelSessionTimelineHasJournalUserMessage(
+  events: BlueprintSessionTimelineEvent[],
+  record: Record<string, unknown>,
+) {
+  const text = agentPanelMessageJournalUserText(record)
+  if (!text) return false
+  return events.some((event) => agentPanelSessionUserEventType(event.type) && agentPanelSessionEventText(event) === text)
+}
+
+function agentPanelLocalUserMessagesHasJournalUserMessage(
+  messages: AgentPanelUserMessage[],
+  record: Record<string, unknown>,
+) {
+  const messageId = stringValue(record.messageId)
+  const text = agentPanelMessageJournalUserText(record)
+  return messages.some((message) => {
+    if (messageId && message.runtimeMessageId === messageId) return true
+    return !!text && message.text === text
+  })
 }
 
 function agentPanelSessionChatTimelineEvents(events: BlueprintSessionTimelineEvent[]) {
@@ -11666,6 +12304,15 @@ function agentPanelSessionTimelineOrder(event: BlueprintSessionTimelineEvent, in
   return index
 }
 
+function agentPanelMessageJournalUserOrder(record: Record<string, unknown>, index: number) {
+  const time = stringValue(record.time)
+  if (time) {
+    const parsed = Date.parse(time)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return index
+}
+
 function agentPanelStreamEventOrder(event: AgentStreamEvent) {
   const createdAt = event.created_at
   if (typeof createdAt === "number" && Number.isFinite(createdAt)) return createdAt > 10_000_000_000 ? createdAt : createdAt * 1000
@@ -11797,6 +12444,16 @@ function formatAgentStreamEventTime(value: unknown) {
 
 function formatRuntimeTime(value: number) {
   return new Date(value).toLocaleTimeString()
+}
+
+function formatBlueprintSessionTimestamp(value: number) {
+  const date = new Date(value)
+  const pad = (part: number) => String(part).padStart(2, "0")
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join("-") + ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
 function edgePath(draft: BlueprintDraft, edge: BlueprintEdge) {

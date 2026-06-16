@@ -104,6 +104,12 @@ python -m multi_agent_tcp organization --graph path\to\graph.json
 .\start-gulicode-bp-plugin.cmd
 ```
 
+Clean one-step plugin restart:
+
+```powershell
+.\restart-gulicode-bp-plugin.cmd -NoOpen
+```
+
 该脚本会幂等检查并启动 Collaboration Server `127.0.0.1:8787`、`gulicode-bp` 蓝图工作台、GuLiCode app dev server `127.0.0.1:3040`、`http://127.0.0.1:3040/mobile` 与 `http://127.0.0.1:3040/console`，默认不启动 GuLiCode Electron 桌面壳。
 
 ### GuLiCode 桌面
@@ -193,6 +199,7 @@ bun run typecheck
 | `KM_docs/skills-snapshot/` | 当前 Codex skill 知识快照，记录近期架构方向、验证命令和交接状态。 |
 | `start-gulicode-debug.cmd` / `start-gulicode-debug.ps1` | 插件优先调试启动脚本，默认拉起 `gulicode-bp` 蓝图工作台、`/mobile` 和 `/console`，不启动 Electron 桌面壳。 |
 | `start-gulicode-bp-plugin.cmd` | 插件优先调试入口别名。 |
+| `restart-gulicode-bp-plugin.cmd` / `restart-gulicode-bp-plugin.ps1` | 一步清理并重启已安装的 `gulicode-bp` 插件 runtime。 |
 | `skill_list/` | 本地 Agent skill 目录，通常由 `python -m multi_agent_tcp.init_skill_list` 初始化。 |
 | `test_*.py` | Python runtime、workspace、desktop service、control-plane 和 Collaboration Server 的测试。 |
 

@@ -371,6 +371,7 @@ def test_agent_node_from_dict_and_worker_config() -> None:
         "unrestricted_commands": False,
         "disable_sandbox": False,
         "framework_message_tools": True,
+        "blueprint_monitor_tools": False,
     }
     assert worker.extra_env == {"A": "1"}
     assert node.read_scope == ["src"]
@@ -3076,29 +3077,22 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         agents_md = (checkout / "AGENTS.md").read_text(encoding="utf-8")
         assert "Business Review Rule" in agents_md
         assert "# Framework Rules" in agents_md
-        assert "framework-agent-runtime.md" in agents_md
+        assert "framework-worker-runtime.md" in agents_md
         assert "`framework_context.message_envelope.outgoing_batch_id`" not in agents_md
         assert (private / "rules" / "01-business-rule.md").is_file()
-        assert (private / "rules" / "framework-agent-runtime.md").is_file()
-        framework_rule = (private / "rules" / "framework-agent-runtime.md").read_text(encoding="utf-8")
+        assert (private / "rules" / "framework-worker-runtime.md").is_file()
+        framework_rule = (private / "rules" / "framework-worker-runtime.md").read_text(encoding="utf-8")
         assert "`framework_context.message_envelope.outgoing_batch_id`" in framework_rule
         assert "Upstream/source batch ids" in framework_rule
         assert "leaf work" in framework_rule
         assert "out-*` are not join ids" in framework_rule
-        assert "planning-table fill" in framework_rule
-        assert "table_queue_service" in framework_rule
-        assert "blueprint_service_call" in framework_rule
-        assert "xltool" in framework_rule
-        assert "svn update" in framework_rule
-        assert "fill-completion report" in framework_rule
-        assert "svn commit" in framework_rule
-        assert "#771523" in framework_rule
-        assert "blueprint_query_excel_history" in framework_rule
-        assert "uncommitted reverts do not require a ticket" in framework_rule
-        assert "committed reverts require user confirmation, ticket" in framework_rule
-        assert "Do not restore workbook backups over current files" in framework_rule
+        assert "three workspace zones" in framework_rule
+        assert "workspace_submit" in framework_rule
+        assert "workspace_publish" in framework_rule
+        assert "planning-table fill" not in framework_rule
+        assert "blueprint_query_excel_history" not in framework_rule
         assert "blueprint_revert_excel_changes" not in framework_rule
-        framework_skill_dir = codex_home / "skills" / "framework-agent-runtime"
+        framework_skill_dir = codex_home / "skills" / "framework-worker-runtime"
         framework_skill_path = framework_skill_dir / "SKILL.md"
         assert framework_skill_path.is_file()
         framework_skill = framework_skill_path.read_text(encoding="utf-8")
@@ -3112,31 +3106,18 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert "source/audit labels and must not be passed" in framework_skill
         assert "`framework_context.message_envelope.required_outgoing_targets` is empty" in framework_skill
         assert "Outgoing batch ids such as `out-*` are not join ids" in framework_skill
-        assert "planning_table_popo_workflow.md" in framework_skill
-        assert "svn update" in framework_skill
-        assert "fill-completion report" in framework_skill
-        assert "svn commit" in framework_skill
-        assert "query fill history first for revert requests" in framework_skill
-        assert "release without ticket/commit for uncommitted reverts" in framework_skill
+        assert "private checkout" in framework_skill
+        assert "workspace_checkout" in framework_skill
+        assert "workspace_submit" in framework_skill
+        assert "workspace_publish" in framework_skill
+        assert "planning_table_popo_workflow.md" not in framework_skill
+        assert "trunk_release_table_sync.md" not in framework_skill
+        assert "F:\\src\\Package\\Script\\Python\\.codemaker\\expert" not in framework_skill
         assert "blueprint_revert_excel_changes" not in framework_skill
         planning_table_workflow = framework_skill_dir / "planning_table_popo_workflow.md"
-        assert planning_table_workflow.is_file()
-        planning_table_workflow_text = planning_table_workflow.read_text(encoding="utf-8")
-        assert "planning-table-skill-index.md" in planning_table_workflow_text
-        assert "If the index has no suitable matching skill" in planning_table_workflow_text
-        assert "continue with the generic framework workflow or create/update a dedicated" in planning_table_workflow_text
-        assert "table_queue_service" in planning_table_workflow_text
-        assert "blueprint_service_call(\"xltool\"" in planning_table_workflow_text
-        assert "svn update" in planning_table_workflow_text
-        assert "fill-completion report" in planning_table_workflow_text
-        assert "svn commit" in planning_table_workflow_text
-        assert "#771523" in planning_table_workflow_text
-        assert "blueprint_query_excel_history" in planning_table_workflow_text
-        assert "If the original fill was not committed" in planning_table_workflow_text
-        assert "do not ask for a ticket and do not run" in planning_table_workflow_text
-        assert "If the original fill was committed" in planning_table_workflow_text
-        assert "Do not call automatic Excel rollback" in planning_table_workflow_text
-        assert "blueprint_revert_excel_changes" not in planning_table_workflow_text
+        assert not planning_table_workflow.exists()
+        trunk_release_workflow = framework_skill_dir / "trunk_release_table_sync.md"
+        assert not trunk_release_workflow.exists()
         assert "selected_skills_index.md" in framework_skill
         assert "biz-skill" in selected_skill_index_text
         assert "PRIVATE_RUNTIME_SKILL_DESCRIPTION" in selected_skill_index_text
@@ -3175,7 +3156,7 @@ async def test_graph_runtime_private_context_materializes_codex_skill_and_rules(
         assert private_context["codex_home"] == str(codex_home)
         assert private_context["selected_skill_index_path"] == str(selected_skill_index)
         assert private_context["rule_catalog"][0]["source"] == "framework"
-        assert private_context["rule_catalog"][0]["rule_path"] == str(private / "rules" / "framework-agent-runtime.md")
+        assert private_context["rule_catalog"][0]["rule_path"] == str(private / "rules" / "framework-worker-runtime.md")
         assert any(
             item.get("hash") == rec.skill_hash
             and item.get("source") == "business"
@@ -3266,8 +3247,19 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
     assert (framework_skill_dir / "SKILL.md").is_file()
     assert selected_skill_index.is_file()
     framework_skill = (framework_skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    framework_rule = (support_dir / "rules" / "framework-agent-runtime.md").read_text(encoding="utf-8")
     selected_skill_index_text = selected_skill_index.read_text(encoding="utf-8")
     assert "selected_skills_index.md" in framework_skill
+    assert "planning_table_popo_workflow.md" in framework_skill
+    assert "trunk_release_table_sync.md" in framework_skill
+    assert "shared workspace" not in framework_skill
+    assert "private checkout" not in framework_skill
+    assert "workspace_submit" not in framework_skill
+    assert "workspace_publish" not in framework_skill
+    assert "three workspace zones" not in framework_rule
+    assert "workspace_submit" not in framework_rule
+    assert "workspace_publish" not in framework_rule
+    assert "blueprint_query_excel_history" in framework_rule
     assert "full-agent-skill" in selected_skill_index_text
     assert "FULL_AGENT_SKILL_DESCRIPTION" in selected_skill_index_text
     assert str(rec.skill_md_path) in selected_skill_index_text
@@ -3645,7 +3637,7 @@ async def test_real_codex_cli_framework_private_checkout_submit_and_archive_flow
             "AgentNode context. Complete this exact flow and do not edit the project "
             "directory directly.\n\n"
             "1. Read AGENTS.md, the framework runtime skill, and its selected skill index. Confirm the "
-            "runtime skill/index includes framework-agent-runtime and "
+            "runtime skill/index includes framework-worker-runtime and "
             "framework-flow-skill, and the rule catalog includes Framework Flow Rule. "
             "Only open the business skill SKILL.md through the selected skill index path.\n"
             "2. Run: python -m multi_agent_tcp.workspace_api checkout --path "
@@ -3663,7 +3655,7 @@ async def test_real_codex_cli_framework_private_checkout_submit_and_archive_flow
             "REAL_CODEX_FRAMEWORK_FLOW_RULE_SEEN REAL_CODEX_FRAMEWORK_FLOW_SKILL_SEEN "
             "changeset submitted accepted\"\n\n"
             f"Final answer must include: {marker} REAL_CODEX_CONTEXT_OK "
-            "framework-agent-runtime framework-flow-skill Framework Flow Rule "
+            "framework-worker-runtime framework-flow-skill Framework Flow Rule "
             "changeset submitted accepted."
         )
 
@@ -3693,7 +3685,7 @@ async def test_real_codex_cli_framework_private_checkout_submit_and_archive_flow
         final_text = codex_result.get("final_text") or codex_result.get("last_message") or ""
         assert marker in final_text
         assert "REAL_CODEX_CONTEXT_OK" in final_text
-        assert "framework-agent-runtime" in final_text
+        assert "framework-worker-runtime" in final_text
         assert "framework-flow-skill" in final_text
         assert "changeset submitted accepted" in final_text
         utterance = runtime._record_agent_utterance(
@@ -3708,7 +3700,7 @@ async def test_real_codex_cli_framework_private_checkout_submit_and_archive_flow
         checkout = private / "checkout"
         codex_home = private / "codex_home"
         assert (checkout / "AGENTS.md").is_file()
-        framework_skill_dir = codex_home / "skills" / "framework-agent-runtime"
+        framework_skill_dir = codex_home / "skills" / "framework-worker-runtime"
         selected_skill_index = framework_skill_dir / "selected_skills_index.md"
         assert (framework_skill_dir / "SKILL.md").is_file()
         assert selected_skill_index.is_file()
