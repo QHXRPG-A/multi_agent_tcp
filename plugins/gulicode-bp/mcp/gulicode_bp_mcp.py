@@ -143,11 +143,16 @@ ALLOWED_COMMANDS = {
     "blueprint.runtime.setStartAgent",
     "blueprint.runtime.executePlan",
     "blueprint.sessions.list",
+    "blueprint.sessions.excelHistoryList",
+    "blueprint.sessions.excelHistory",
+    "blueprint.sessions.fileSendHistoryList",
+    "blueprint.sessions.fileSendHistory",
     "blueprint.sessions.delete",
     "blueprint.sessions.terminate",
+    "blueprint.sessions.clear",
+    "blueprint.sessions.processTableQueueNotifications",
+    "blueprint.sessions.processPlanningTableSkillUpdateNotifications",
     "blueprint.sessions.message",
-    "blueprint.slots.start",
-    "blueprint.slots.message",
     "blueprint.popo.config",
     "blueprint.listRuns",
     "blueprint.status",
@@ -176,6 +181,10 @@ WRITE_COMMANDS = {
     "blueprint.runtime.executePlan",
     "blueprint.sessions.delete",
     "blueprint.sessions.terminate",
+    "blueprint.sessions.clear",
+    "blueprint.sessions.processTableQueueNotifications",
+    "blueprint.sessions.processPlanningTableSkillUpdateNotifications",
+    "blueprint.sessions.message",
     "blueprint.startResidentService",
     "blueprint.stopResidentService",
     "blueprint.rollbackChangesets",
@@ -193,10 +202,6 @@ CONTROL_COMMANDS = {
 }
 
 INTERNAL_COMMANDS = {
-    "blueprint.slots.start",
-    "blueprint.slots.status",
-    "blueprint.slots.terminate",
-    "blueprint.slots.message",
     "blueprint.popo.config",
     "blueprint.popo.callbackConfig",
     "blueprint.popo.robots",
@@ -878,6 +883,9 @@ class WorkbenchServer:
 class PluginState:
     def __init__(self) -> None:
         self.service = DesktopBlueprintService(resident_services_data_dir=RUNTIME_DATA_DIR)
+        self.service.start_table_queue_notification_watcher()
+        self.service.start_planning_table_skill_update_notification_watcher()
+        self._start_resident_service_if_available("planning_table_skill_update")
         atexit.register(self._stop_resident_services_at_exit)
         self.lock = threading.RLock()
         self.workbench: WorkbenchServer | None = None
@@ -893,6 +901,33 @@ class PluginState:
         self._persistent_workbench_stderr: Any = None
         self.active_owner_thread_id: str | None = None
         self.owner_changed_at: float | None = None
+
+    def _start_resident_service_if_available(self, service_name: str) -> None:
+        if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("GULICODE_BP_AUTOSTART_RESIDENTS_IN_TESTS") != "1":
+            append_service_log(RUNTIME_DATA_DIR, "resident-service-autostart-skipped-test", serviceName=service_name)
+            return
+        try:
+            manager = self.service.resident_service_manager()
+            services = manager.discover().get("services", [])
+            if not any(isinstance(item, dict) and item.get("service_name") == service_name for item in services):
+                append_service_log(RUNTIME_DATA_DIR, "resident-service-autostart-missing", serviceName=service_name)
+                return
+            result = manager.start(service_name)
+            append_service_log(
+                RUNTIME_DATA_DIR,
+                "resident-service-autostart",
+                serviceName=service_name,
+                ok=bool(result.get("ok")),
+                alreadyRunning=bool(result.get("alreadyRunning")),
+            )
+        except Exception as exc:
+            append_service_log(
+                RUNTIME_DATA_DIR,
+                "resident-service-autostart-error",
+                serviceName=service_name,
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
 
     def _stop_resident_services_at_exit(self) -> None:
         try:
@@ -1252,6 +1287,10 @@ class PluginState:
 
     def close(self) -> None:
         with self.lock:
+            try:
+                self.service.close()
+            except Exception:
+                pass
             if self.workbench is not None:
                 self.workbench.close()
                 self.workbench = None

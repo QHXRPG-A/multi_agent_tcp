@@ -1,0 +1,14 @@
+{
+  "folders": [
+    {
+      "name": "Blueprint Resident Services",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "python.analysis.extraPaths": [
+      "."
+    ],
+    "python.defaultInterpreterPath": "C:\\Users\\qiuhaoxuan\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"
+  }
+}

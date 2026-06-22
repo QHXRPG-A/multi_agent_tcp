@@ -62,6 +62,7 @@ export type BlueprintSessionSummary = {
   lastRunId?: string
   startNodeId?: string
   messageCount?: number
+  usageCount?: number
   createdAt?: number
   lastTouchedAt?: number
 }
@@ -91,23 +92,101 @@ export type BlueprintSessionTimeline = {
   events: BlueprintSessionTimelineEvent[]
 }
 
-export type BlueprintSlotSummary = {
-  ok?: boolean
-  projectDir?: string
-  blueprintId?: string
+export type BlueprintSessionExcelHistorySummary = {
+  sessionKey: string
+  sessionDisplayName?: string
   blueprintName?: string
-  blueprintStructureId?: string
-  poolKey?: string
+  blueprintId?: string
+  source?: string
   status?: string
-  activeSessionCount?: number
-  queuedSessionCount?: number
-  idleSessionCount?: number
-  runningRunCount?: number
-  idleRunCount?: number
-  maxActiveSessions?: number
-  runningRunIds?: string[]
-  runs?: Record<string, unknown>[]
-  sessions?: BlueprintSessionSummary[]
+  lastTouchedAt?: number
+  usageCount?: number
+  recordCount: number
+  latestTimestampMs?: number
+  latestTime?: string
+  latestWorkbook?: string
+  latestCommand?: string
+  latestStatus?: string
+}
+
+export type BlueprintSessionExcelHistoryRecord = {
+  opId?: string
+  timestampMs?: number
+  time?: string
+  sourceNodeId?: string
+  scriptNodeId?: string
+  category?: string
+  serviceName?: string
+  methodName?: string
+  status?: string
+  workbook?: string
+  command?: string
+  arguments?: Record<string, unknown>
+  resultSummary?: string
+  beforeAfterStatus?: string
+  beforeAfter?: Record<string, unknown>[]
+  userSummary?: string
+}
+
+export type BlueprintSessionExcelHistory = {
+  ok?: boolean
+  sessionKey: string
+  session?: BlueprintSessionSummary
+  category?: string
+  limit?: number
+  totalMatches?: number
+  count?: number
+  truncated?: boolean
+  records: BlueprintSessionExcelHistoryRecord[]
+}
+
+export type BlueprintSessionFileSendHistorySummary = {
+  sessionKey: string
+  sessionDisplayName?: string
+  blueprintName?: string
+  blueprintId?: string
+  source?: string
+  status?: string
+  lastTouchedAt?: number
+  usageCount?: number
+  recordCount: number
+  latestTimestampMs?: number
+  latestTime?: string
+  latestFileName?: string
+  latestStatus?: string
+  latestMessageType?: string
+  latestPath?: string
+}
+
+export type BlueprintSessionFileSendHistoryRecord = {
+  recordId?: string
+  timestampMs?: number
+  time?: string
+  runId?: string
+  sourceNodeId?: string
+  agentId?: string
+  path?: string
+  fileName?: string
+  fileType?: string
+  sizeBytes?: number
+  messageType?: string
+  receiver?: string
+  robotAppKey?: string
+  status?: string
+  errcode?: unknown
+  errmsg?: string
+  fileKey?: string
+  error?: string
+}
+
+export type BlueprintSessionFileSendHistory = {
+  ok?: boolean
+  sessionKey: string
+  session?: BlueprintSessionSummary
+  totalMatches?: number
+  count?: number
+  truncated?: boolean
+  records: BlueprintSessionFileSendHistoryRecord[]
 }
 
 export type BlueprintPopoRobot = {
@@ -283,11 +362,35 @@ export type Platform = {
   /** Read one blueprint session transcript timeline (desktop only) */
   blueprintSessionTimeline?(sessionKey: string, limit?: number): Promise<BlueprintSessionTimeline>
 
+  /** List session-level planning-table fill history summaries for one blueprint. */
+  listBlueprintSessionExcelHistory?(
+    projectDir: string,
+    blueprintId: string,
+  ): Promise<BlueprintSessionExcelHistorySummary[]>
+
+  /** Read planning-table fill history for one blueprint session. */
+  blueprintSessionExcelHistory?(sessionKey: string, limit?: number): Promise<BlueprintSessionExcelHistory>
+
+  /** List session-level file/image send history summaries for one blueprint. */
+  listBlueprintSessionFileSendHistory?(
+    projectDir: string,
+    blueprintId: string,
+  ): Promise<BlueprintSessionFileSendHistorySummary[]>
+
+  /** Read file/image send history for one blueprint session. */
+  blueprintSessionFileSendHistory?(sessionKey: string, limit?: number): Promise<BlueprintSessionFileSendHistory>
+
   /** Soft-delete an idle blueprint session (desktop only) */
   deleteBlueprintSession?(sessionKey: string): Promise<Record<string, unknown>>
 
   /** Terminate one running or queued blueprint session without clearing its transcript. */
   terminateBlueprintSession?(sessionKey: string, reason?: string): Promise<Record<string, unknown>>
+
+  /** Terminate the selected session and clear its transcript and per-session audit history. */
+  clearBlueprintSession?(sessionKey: string, reason?: string): Promise<Record<string, unknown>>
+
+  /** Terminate and hide sessions for the selected blueprint so the next message uses the current structure. */
+  restartBlueprintSessions?(projectDir: string, blueprintId: string, reason?: string): Promise<Record<string, unknown>>
 
   /** Send one message into a blueprint session and start/queue work at the configured start node. */
   sendBlueprintSessionMessage?(
@@ -299,29 +402,6 @@ export type Platform = {
       popoUserId?: string
       popoSessionId?: string
       popoGroupId?: string
-      sessionKey?: string
-    },
-  ): Promise<Record<string, unknown>>
-
-  /** Manually start one idle blueprint run slot. */
-  startBlueprintSlot?(projectDir: string, blueprintId: string): Promise<Record<string, unknown>>
-
-  /** Read the structure-level blueprint slot summary. */
-  blueprintSlotStatus?(projectDir: string, blueprintId: string): Promise<BlueprintSlotSummary>
-
-  /** Terminate all running or queued sessions for the structure-level blueprint slot. */
-  terminateBlueprintSlot?(projectDir: string, blueprintId: string, reason?: string): Promise<Record<string, unknown>>
-
-  /** Send one message into an existing blueprint run slot. */
-  sendBlueprintSlotMessage?(
-    projectDir: string,
-    message: string,
-    input?: {
-      source?: string
-      blueprintId?: string
-      runId?: string
-      sourceIdentity?: Record<string, unknown>
-      sessionIdentity?: Record<string, unknown>
       sessionKey?: string
     },
   ): Promise<Record<string, unknown>>

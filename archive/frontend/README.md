@@ -14,4 +14,5 @@ Dedicated mock archive:
 
 Recent records:
 
+- `blueprint_file_send_history_panel_2026-06-17.md`
 - `blueprint_framework_worker_runtime_locked_inspector_2026-06-16.md`

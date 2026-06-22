@@ -1,5 +1,6 @@
 param(
     [string]$BlueprintId = "default",
+    [string]$ProjectDir = "",
     [switch]$NoOpen,
     [switch]$Install,
     [switch]$SkipWebBuild,
@@ -11,11 +12,23 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrWhiteSpace($ProjectDir)) {
+    $ProjectRoot = $Root
+} else {
+    $rawProjectDir = $ProjectDir
+    if (-not [System.IO.Path]::IsPathRooted($rawProjectDir)) {
+        $rawProjectDir = Join-Path $Root $rawProjectDir
+    }
+    if (-not (Test-Path -LiteralPath $rawProjectDir -PathType Container)) {
+        throw ("ProjectDir does not exist: {0}" -f $ProjectDir)
+    }
+    $ProjectRoot = (Resolve-Path -LiteralPath $rawProjectDir).Path
+}
 $PersonalPluginRoot = Join-Path $HOME "plugins\gulicode-bp"
 $StateDir = Join-Path $PersonalPluginRoot ".runtime\state"
 $StartScript = Join-Path $Root "start-gulicode-debug.ps1"
 $SyncFrameworkAssetsScript = Join-Path $Root "sync-gulicode-bp-framework-assets.ps1"
-$RepoReadyFile = Join-Path $Root "logs\gulicode-bp-workbench-ready.json"
+$RepoReadyFile = Join-Path $ProjectRoot "logs\gulicode-bp-workbench-ready.json"
 $LogDir = Join-Path $Root "logs"
 
 if ($HealthTimeoutSeconds -lt 1) {
@@ -104,17 +117,52 @@ function Test-RepoLocalStaleServiceProcess {
     )
 }
 
+function Test-PluginClusterProcess {
+    param([object]$ProcessInfo)
+
+    $commandLine = [string]$ProcessInfo.CommandLine
+    if ([string]::IsNullOrWhiteSpace($commandLine)) {
+        return $false
+    }
+
+    if (-not (Test-ContainsText $commandLine $PersonalPluginRoot)) {
+        return $false
+    }
+    if (-not (Test-ContainsText $commandLine "multi_agent_tcp_cluster")) {
+        return $false
+    }
+
+    return (
+        (Test-ContainsText $commandLine "-m multi_agent_tcp broker") -or
+        (Test-ContainsText $commandLine "-m multi_agent_tcp agent")
+    )
+}
+
+function Stop-ProcessTree {
+    param([int]$ProcessId)
+
+    if ($ProcessId -le 0 -or $ProcessId -eq $PID) {
+        return
+    }
+
+    if ($IsWindows -or $env:OS -eq "Windows_NT") {
+        & $env:ComSpec /d /c "taskkill.exe /PID $ProcessId /T /F >NUL 2>NUL"
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+    }
+
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
 function Stop-PluginProcesses {
     $targets = @()
     foreach ($process in Get-CimInstance Win32_Process) {
-        if ($process.Name -notlike "python*.exe") {
-            continue
-        }
-        if (Test-PluginProcess $process) {
-            $targets += $process
-            continue
-        }
-        if (Test-RepoLocalStaleServiceProcess $process) {
+        if ($process.Name -like "python*.exe" -and (
+            (Test-PluginProcess $process) -or
+            (Test-RepoLocalStaleServiceProcess $process) -or
+            (Test-PluginClusterProcess $process)
+        )) {
             $targets += $process
         }
     }
@@ -125,10 +173,23 @@ function Stop-PluginProcesses {
         return
     }
 
-    Write-Host ("[restart-gulicode-bp-plugin] stopping {0} plugin-owned Python process(es)" -f $targets.Count)
-    foreach ($target in ($targets | Sort-Object ProcessId -Descending)) {
-        Write-Host ("[restart-gulicode-bp-plugin] stop pid={0} {1}" -f $target.ProcessId, $target.Name)
-        Stop-Process -Id ([int]$target.ProcessId) -Force -ErrorAction SilentlyContinue
+    $targetByPid = @{}
+    foreach ($target in $targets) {
+        $targetByPid[[int]$target.ProcessId] = $true
+    }
+    $rootTargets = @()
+    foreach ($target in $targets) {
+        $parentPid = [int]($target.ParentProcessId -as [int])
+        if (-not $targetByPid.ContainsKey($parentPid)) {
+            $rootTargets += $target
+        }
+    }
+    $rootTargets = $rootTargets | Sort-Object ProcessId -Unique
+
+    Write-Host ("[restart-gulicode-bp-plugin] stopping {0} plugin-owned Python process(es), {1} root tree(s)" -f $targets.Count, $rootTargets.Count)
+    foreach ($target in ($rootTargets | Sort-Object ProcessId -Descending)) {
+        Write-Host ("[restart-gulicode-bp-plugin] stop tree pid={0} {1}" -f $target.ProcessId, $target.Name)
+        Stop-ProcessTree -ProcessId ([int]$target.ProcessId)
     }
 }
 
@@ -250,6 +311,7 @@ if (-not (Test-Path -LiteralPath $PersonalPluginRoot -PathType Container)) {
 }
 
 Write-Host ("[restart-gulicode-bp-plugin] root = {0}" -f $Root)
+Write-Host ("[restart-gulicode-bp-plugin] project = {0}" -f $ProjectRoot)
 Write-Host ("[restart-gulicode-bp-plugin] personal plugin = {0}" -f $PersonalPluginRoot)
 Write-Host ("[restart-gulicode-bp-plugin] log = {0}" -f $script:RestartLogFile)
 Write-Host ("[restart-gulicode-bp-plugin] health timeout = {0}s" -f $HealthTimeoutSeconds)
@@ -286,7 +348,9 @@ $startArgs = @(
     "-File",
     $StartScript,
     "-BlueprintId",
-    $BlueprintId
+    $BlueprintId,
+    "-ProjectDir",
+    $ProjectRoot
 )
 
 if ($NoOpen) {

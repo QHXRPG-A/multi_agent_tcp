@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,6 +115,20 @@ def test_resident_service_invalid_display_name_falls_back_to_file_stem(tmp_path:
         "table_queue_service.py",
         "xltool_service.py",
     ]
+
+
+def test_file_sender_resident_service_uses_chinese_catalog_metadata() -> None:
+    root = Path(__file__).resolve().parent
+    discovered = discover_resident_services(root / "framework_assets")
+
+    service = next(
+        item for item in discovered["services"] if item.get("module_path") == "file_sender_service.py"
+    )
+
+    assert service["service_name"] == "file_sender"
+    assert service["title"] == "传文件服务"
+    assert service["description"] == "将相关路径下的文件或图片传给当前会话的用户"
+    assert not [item for item in discovered["diagnostics"] if item.get("path") == "file_sender_service.py"]
 
 
 def _load_gulicode_bp_bootstrap_runtime_module():
@@ -624,7 +639,10 @@ def test_blueprint_session_message_persists_context_and_uses_stable_key(tmp_path
     transcript_path = service.blueprint_sessions_dir() / first["sessionKey"] / "transcript.jsonl"
     session = json.loads(session_path.read_text(encoding="utf-8"))
     transcript = transcript_path.read_text(encoding="utf-8")
+    assert first["usageCount"] == 1
+    assert second["usageCount"] == 2
     assert session["messageCount"] == 2
+    assert session["usageCount"] == 2
     assert session["activeRunId"] == "run-2"
     assert "第一条消息" in transcript
     assert "第二条消息" in transcript
@@ -690,6 +708,7 @@ def test_blueprint_session_message_starts_instance_without_structure_capacity_li
         "_runtime_status_snapshot_or_starting",
         lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
     )
+    monkeypatch.setattr(service, "_runtime_agent_busy_for_steer", lambda run, node_id: False)
 
     first = service.message_blueprint_session(
         project,
@@ -763,6 +782,9 @@ def test_blueprint_session_message_persists_context_and_uses_stable_key(tmp_path
     assert queued[0][:2] == ("run-session-1", "planner")
     assert "first message" in queued[0][2]
     assert "second message" in queued[1][2]
+    assert "[Recent BlueprintSession Messages]" in queued[0][2]
+    assert "[Recent BlueprintSession Messages]" not in queued[1][2]
+    assert "[Current POPO Message]" in queued[1][2]
     run = service._runs["run-session-1"]
     assert run.runtime.popo_termination_start_node_id == ""
     assert run.runtime.popo_termination_session_key == ""
@@ -772,10 +794,271 @@ def test_blueprint_session_message_persists_context_and_uses_stable_key(tmp_path
     transcript_path = service.blueprint_sessions_dir() / first["sessionKey"] / "transcript.jsonl"
     session = json.loads(session_path.read_text(encoding="utf-8"))
     transcript = transcript_path.read_text(encoding="utf-8")
+    assert first["usageCount"] == 1
+    assert second["usageCount"] == 2
     assert session["messageCount"] == 2
+    assert session["usageCount"] == 2
     assert session["activeRunId"] == "run-session-1"
     assert "first message" in transcript
     assert "second message" in transcript
+
+
+def test_popo_usage_count_accumulates_across_new_and_skips_direct_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    runs = _patch_fake_session_instances(monkeypatch, service)
+    queued: list[str] = []
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+
+    def fake_close(run_id: str, *, reason: str = "") -> str:
+        for run in runs:
+            if run.run_id == run_id:
+                run.session_key = ""
+                run.bound_session_key = ""
+        return ""
+
+    monkeypatch.setattr(service, "_close_blueprint_session_run_best_effort", fake_close)
+    monkeypatch.setattr(
+        service,
+        "queue_agent_message",
+        lambda run_id, node_id, text, *, mode="default", **kwargs: queued.append(text) or {"ok": True},
+    )
+
+    first = service.message_blueprint_session(
+        project,
+        "default",
+        "first",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+    second = service.message_blueprint_session(
+        project,
+        "default",
+        "second",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+    help_response = service.message_blueprint_session(
+        project,
+        "default",
+        "/help",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+    excel_response = service.message_blueprint_session(
+        project,
+        "default",
+        "/excel-log bad-range",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+    cleared = service.message_blueprint_session(
+        project,
+        "default",
+        "/new",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+    after_new = service.message_blueprint_session(
+        project,
+        "default",
+        "after new",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+    stopped = service.message_blueprint_session(
+        project,
+        "default",
+        "/stop",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+
+    assert first["usageCount"] == 1
+    assert second["usageCount"] == 2
+    assert help_response["help"] is True
+    assert excel_response["usageCount"] == 2
+    assert cleared["usageCount"] == 2
+    assert after_new["usageCount"] == 3
+    assert stopped["usageCount"] == 3
+    assert len(queued) == 3
+    session = service._load_blueprint_session(first["sessionKey"])
+    assert session is not None
+    assert session["messageCount"] == 1
+    assert session["usageCount"] == 3
+
+
+def test_popo_usage_count_initializes_from_legacy_message_count(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    session_key = blueprint_popo_named_session_key(
+        blueprint_name="Default Blueprint",
+        blueprint_id="default",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+    session_dir = service._blueprint_session_dir(session_key)
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "sessionKey": session_key,
+                "projectDir": str(project.resolve()),
+                "blueprintId": "default",
+                "blueprintName": "Default Blueprint",
+                "blueprintStructureId": "structure-1",
+                "source": "popo",
+                "popoUserId": "u1",
+                "popoSessionId": "s1",
+                "status": "idle",
+                "activeRunId": "",
+                "messageCount": 4,
+                "createdAt": 1.0,
+                "lastTouchedAt": 2.0,
+                "deleted": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sessions = service.list_blueprint_sessions(project, "default")
+
+    assert sessions[0]["usageCount"] == 4
+    saved = json.loads((session_dir / "session.json").read_text(encoding="utf-8"))
+    assert saved["usageCount"] == 4
+
+
+def test_popo_usage_count_initializes_from_transcript_when_higher(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    session_key = blueprint_popo_named_session_key(
+        blueprint_name="Default Blueprint",
+        blueprint_id="default",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+    session_dir = service._blueprint_session_dir(session_key)
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "sessionKey": session_key,
+                "projectDir": str(project.resolve()),
+                "blueprintId": "default",
+                "blueprintName": "Default Blueprint",
+                "blueprintStructureId": "structure-1",
+                "source": "popo",
+                "popoUserId": "u1",
+                "popoSessionId": "s1",
+                "status": "idle",
+                "activeRunId": "",
+                "messageCount": 1,
+                "createdAt": 1.0,
+                "lastTouchedAt": 2.0,
+                "deleted": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "transcript.jsonl").write_text(
+        "\n".join(
+            json.dumps({"type": event_type, "message": event_type})
+            for event_type in ("queued_message", "steered_message", "queued_message")
+        ),
+        encoding="utf-8",
+    )
+
+    sessions = service.list_blueprint_sessions(project, "default")
+
+    assert sessions[0]["usageCount"] == 3
+
+
+def test_blueprint_session_message_steers_busy_popo_agent_without_queueing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _patch_fake_session_instances(monkeypatch, service)
+    queued: list[str] = []
+    steered: list[str] = []
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+    monkeypatch.setattr(service, "_runtime_agent_busy_for_steer", lambda run, node_id: True)
+
+    def fake_queue(run_id, node_id, text, *, mode="default", **kwargs):
+        queued.append(text)
+        return {"ok": True}
+
+    def fake_steer(run, session, text, *, source, session_key, attachments=None):
+        steered.append(text)
+        return {
+            "ok": True,
+            "steered": True,
+            "conversationBackend": "codex_app_server",
+            "conversationId": "thr_1",
+            "activeTurnId": "turn_1",
+        }
+
+    monkeypatch.setattr(service, "queue_agent_message", fake_queue)
+    monkeypatch.setattr(service, "_steer_blueprint_session_message", fake_steer)
+
+    first = service.message_blueprint_session(
+        project,
+        "default",
+        "first message",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+    second = service.message_blueprint_session(
+        project,
+        "default",
+        "follow-up while busy",
+        source="popo",
+        popo_user_id="u1",
+        popo_session_id="s1",
+    )
+
+    assert first["queued"] is True
+    assert second["steered"] is True
+    assert second["queued"] is False
+    assert second["sameAgentSession"] is True
+    assert second["conversationBackend"] == "codex_app_server"
+    assert second["conversationId"] == "thr_1"
+    assert len(queued) == 1
+    assert steered == ["follow-up while busy"]
 
 
 def test_blueprint_session_stop_terminates_active_session_without_agent_dispatch(
@@ -961,6 +1244,9 @@ def test_blueprint_sessions_clear_terminates_and_deletes_only_current_history(
         excel_record = session_dir / "excel_ops" / "agent" / "record.json"
         excel_record.parent.mkdir(parents=True, exist_ok=True)
         excel_record.write_text("{}", encoding="utf-8")
+        file_send_record = session_dir / "file_sends" / "record.json"
+        file_send_record.parent.mkdir(parents=True, exist_ok=True)
+        file_send_record.write_text("{}", encoding="utf-8")
 
     closed: list[tuple[str, str]] = []
     monkeypatch.setattr(
@@ -986,6 +1272,7 @@ def test_blueprint_sessions_clear_terminates_and_deletes_only_current_history(
     assert result["historyCleared"] is True
     assert result["deleteErrors"] == []
     assert str(service._blueprint_session_dir(selected_key) / "excel_ops") in result["deletedPaths"]
+    assert str(service._blueprint_session_dir(selected_key) / "file_sends") in result["deletedPaths"]
     assert closed == [("run-selected", "test clear")]
     selected_session = service._load_blueprint_session(selected_key)
     assert selected_session is not None
@@ -998,8 +1285,10 @@ def test_blueprint_sessions_clear_terminates_and_deletes_only_current_history(
     assert selected_session["lastRunId"] == "run-selected"
     assert service._blueprint_session_transcript_path(selected_key).read_text(encoding="utf-8") == ""
     assert not (service._blueprint_session_dir(selected_key) / "excel_ops").exists()
+    assert not (service._blueprint_session_dir(selected_key) / "file_sends").exists()
     assert service._blueprint_session_transcript_path(other_key).read_text(encoding="utf-8") == "old transcript\n"
     assert (service._blueprint_session_dir(other_key) / "excel_ops" / "agent" / "record.json").is_file()
+    assert (service._blueprint_session_dir(other_key) / "file_sends" / "record.json").is_file()
 
 
 def test_blueprint_sessions_clear_idle_session_history_and_rejects_missing_session(tmp_path: Path) -> None:
@@ -1279,6 +1568,309 @@ def test_blueprint_session_excel_history_returns_details_and_rejects_missing_or_
                 }
             )
         assert exc.value.code == "BLUEPRINT_SESSION_NOT_FOUND"
+
+
+def _attach_file_send_run(
+    service: DesktopBlueprintService,
+    *,
+    project: Path,
+    session_key: str,
+    run_id: str = "run-file-1",
+    robot_app_key: str = "robot-1",
+) -> None:
+    document = _document(project)
+    document["runtime"] = {"start_node_id": "planner"}
+    run = DesktopBlueprintRun(
+        run_id=run_id,
+        project_dir=project,
+        blueprint_id="default",
+        document=document,
+        graph=SimpleNamespace(),
+        runtime=SimpleNamespace(popo_reply_session_key=session_key),
+        control=SimpleNamespace(),
+        execution_mode="live",
+        created_at=1.0,
+        updated_at=1.0,
+        session_key=session_key,
+        start_node_id="planner",
+        robot_app_key=robot_app_key,
+    )
+    with service._lock:
+        service._runs[run_id] = run
+
+
+def _save_file_send_session(
+    service: DesktopBlueprintService,
+    *,
+    project: Path,
+    session_key: str,
+    run_id: str = "run-file-1",
+    source: str = "popo",
+    robot_app_key: str = "robot-1",
+    popo_reply_to: str = "reply-u1",
+    status: str = "running",
+    deleted: bool = False,
+    superseded: bool = False,
+) -> None:
+    service._save_blueprint_session(
+        {
+            "sessionKey": session_key,
+            "projectDir": str(project),
+            "blueprintId": "default",
+            "blueprintName": "Default Blueprint",
+            "sessionDisplayName": f"Session {session_key}",
+            "source": source,
+            "status": status,
+            "activeRunId": run_id,
+            "robotAppKey": robot_app_key,
+            "popoReplyTo": popo_reply_to,
+            "popoUserId": "",
+            "popoSessionId": "",
+            "popoGroupId": "",
+            "createdAt": 1.0,
+            "lastTouchedAt": 1.0,
+            "deleted": deleted,
+            "superseded": superseded,
+        }
+    )
+
+
+def test_blueprint_send_popo_file_uploads_image_and_writes_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = (tmp_path / "project").resolve()
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    service.save_popo_robot(_popo_entry("robot-1"))
+    session_key = "bps_popo_u1+default"
+    _save_file_send_session(service, project=project, session_key=session_key)
+    _attach_file_send_run(service, project=project, session_key=session_key)
+    image_path = project / "preview.png"
+    image_path.write_bytes(b"image-bytes")
+    monkeypatch.setattr(service, "_get_popo_access_token", lambda robot_config: "token-1")
+    calls: list[dict[str, Any]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeHTTPResponse:
+        calls.append({"url": url, **kwargs})
+        if url.endswith("/open-apis/robots/v1/im/file"):
+            payload = kwargs["json"]
+            assert payload["fileType"] == "png"
+            assert payload["fileName"] == "preview.png"
+            assert payload["fileMd5"] == hashlib.md5(b"image-bytes").hexdigest()
+            return _FakeHTTPResponse({"errcode": 0, "data": {"fileKey": "file-key-1", "uploadUrl": "https://upload.example/file"}})
+        if url == "https://upload.example/file":
+            assert "files" in kwargs
+            assert kwargs["headers"] == {"Open-Access-Token": "token-1"}
+            return _FakeHTTPResponse({"errcode": 0})
+        if url.endswith("/open-apis/robots/v1/im/send-msg"):
+            payload = kwargs["json"]
+            assert payload == {
+                "receiver": "reply-u1",
+                "msgType": "image",
+                "message": {"fileKey": "file-key-1"},
+            }
+            return _FakeHTTPResponse({"errcode": 0, "data": {"msgInfo": {"reply-u1": "popo-msg-1"}}})
+        pytest.fail(f"unexpected POST url: {url}")
+
+    monkeypatch.setattr(desktop_blueprint_service_module.requests, "post", fake_post)
+
+    result = service._send_popo_file_from_mcp(
+        "run-file-1",
+        path=str(image_path),
+        agent_node_id="planner",
+        agent_id="agent-1",
+    )
+
+    assert result["ok"] is True
+    assert result["sent"] is True
+    assert [call["url"] for call in calls] == [
+        "https://open.popo.netease.com/open-apis/robots/v1/im/file",
+        "https://upload.example/file",
+        "https://open.popo.netease.com/open-apis/robots/v1/im/send-msg",
+    ]
+    record = result["record"]
+    assert record["status"] == "succeeded"
+    assert record["messageType"] == "image"
+    assert record["fileType"] == "png"
+    assert record["fileKey"] == "file-key-1"
+    assert record["receiver"] == "reply-u1"
+    assert record["sourceNodeId"] == "planner"
+    detail = service.handle_request(
+        {"command": "blueprint.sessions.fileSendHistory", "args": {"sessionKey": session_key}}
+    )
+    assert detail["ok"] is True
+    assert detail["count"] == 1
+    assert detail["records"][0]["fileName"] == "preview.png"
+    summary = service.handle_request(
+        {
+            "command": "blueprint.sessions.fileSendHistoryList",
+            "args": {"projectDir": str(project), "blueprintId": "default"},
+        }
+    )
+    assert [item["sessionKey"] for item in summary["sessions"]] == [session_key]
+    assert summary["sessions"][0]["latestFileName"] == "preview.png"
+    assert summary["sessions"][0]["latestMessageType"] == "image"
+
+
+def test_blueprint_send_popo_file_refreshes_token_when_upload_reports_expired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = (tmp_path / "project").resolve()
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    service.save_popo_robot(_popo_entry("robot-1"))
+    session_key = "bps_popo_u1+default"
+    _save_file_send_session(service, project=project, session_key=session_key)
+    _attach_file_send_run(service, project=project, session_key=session_key)
+    file_path = project / "check_rule.py"
+    file_path.write_text("print('ok')\n", encoding="utf-8")
+    with service._lock:
+        service._popo_token_cache["robot-1"] = {
+            "access_token": "stale-token",
+            "expired_at": int(time.time() * 1000) + 3_600_000,
+        }
+    calls: list[dict[str, Any]] = []
+    token_requests = 0
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeHTTPResponse:
+        nonlocal token_requests
+        calls.append({"url": url, **kwargs})
+        if url.endswith("/open-apis/robots/v1/token"):
+            token_requests += 1
+            return _FakeHTTPResponse(
+                {
+                    "errcode": 0,
+                    "data": {
+                        "accessToken": "fresh-token",
+                        "accessExpiredAt": int(time.time() * 1000) + 3_600_000,
+                    },
+                }
+            )
+        if url.endswith("/open-apis/robots/v1/im/file"):
+            token = kwargs["headers"]["Open-Access-Token"]
+            if token == "stale-token":
+                return _FakeHTTPResponse({"errcode": 0, "data": {"fileKey": "stale-file-key", "uploadUrl": "https://upload.example/stale"}})
+            assert token == "fresh-token"
+            return _FakeHTTPResponse({"errcode": 0, "data": {"fileKey": "fresh-file-key", "uploadUrl": "https://upload.example/fresh"}})
+        if url == "https://upload.example/stale":
+            assert kwargs["headers"] == {"Open-Access-Token": "stale-token"}
+            return _FakeHTTPResponse({"errcode": -1, "errmsg": "access token expired"})
+        if url == "https://upload.example/fresh":
+            assert kwargs["headers"] == {"Open-Access-Token": "fresh-token"}
+            return _FakeHTTPResponse({"errcode": 0})
+        if url.endswith("/open-apis/robots/v1/im/send-msg"):
+            assert kwargs["headers"]["Open-Access-Token"] == "fresh-token"
+            assert kwargs["json"]["message"] == {"fileKey": "fresh-file-key"}
+            return _FakeHTTPResponse({"errcode": 0, "data": {"msgInfo": {"reply-u1": "popo-msg-2"}}})
+        pytest.fail(f"unexpected POST url: {url}")
+
+    monkeypatch.setattr(desktop_blueprint_service_module.requests, "post", fake_post)
+
+    result = service._send_popo_file_from_mcp(
+        "run-file-1",
+        path=str(file_path),
+        agent_node_id="planner",
+        agent_id="agent-1",
+    )
+
+    assert result["ok"] is True
+    assert result["record"]["status"] == "succeeded"
+    assert result["record"]["fileKey"] == "fresh-file-key"
+    assert token_requests == 1
+    assert [call["url"] for call in calls] == [
+        "https://open.popo.netease.com/open-apis/robots/v1/im/file",
+        "https://upload.example/stale",
+        "https://open.popo.netease.com/open-apis/robots/v1/token",
+        "https://open.popo.netease.com/open-apis/robots/v1/im/file",
+        "https://upload.example/fresh",
+        "https://open.popo.netease.com/open-apis/robots/v1/im/send-msg",
+    ]
+
+
+def test_blueprint_send_popo_file_failures_are_recorded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = (tmp_path / "project").resolve()
+    project.mkdir()
+
+    def build_service(
+        session_key: str,
+        *,
+        source: str = "popo",
+        robot_app_key: str = "robot-1",
+        run_robot_app_key: str = "robot-1",
+        popo_reply_to: str = "reply-u1",
+        save_robot: bool = True,
+    ) -> tuple[DesktopBlueprintService, Path]:
+        service = DesktopBlueprintService(resident_services_data_dir=tmp_path / f"state-{session_key}")
+        if save_robot:
+            service.save_popo_robot(_popo_entry("robot-1"))
+        _save_file_send_session(
+            service,
+            project=project,
+            session_key=session_key,
+            source=source,
+            robot_app_key=robot_app_key,
+            popo_reply_to=popo_reply_to,
+        )
+        _attach_file_send_run(
+            service,
+            project=project,
+            session_key=session_key,
+            robot_app_key=run_robot_app_key,
+        )
+        file_path = project / f"{session_key.replace('+', '_')}.txt"
+        file_path.write_text("payload", encoding="utf-8")
+        return service, file_path
+
+    cases = [
+        ("main+ui", {"source": "ui"}, "BLUEPRINT_POPO_FILE_SESSION_REQUIRED"),
+        ("bps_popo_no-receiver+default", {"popo_reply_to": ""}, "BLUEPRINT_POPO_REPLY_TARGET_REQUIRED"),
+        ("bps_popo_no-robot+default", {"robot_app_key": "", "run_robot_app_key": ""}, "BLUEPRINT_POPO_REPLY_UNAVAILABLE"),
+        ("bps_popo_unbound-robot+default", {"save_robot": False}, "BLUEPRINT_POPO_ROBOT_NOT_BOUND"),
+    ]
+    for session_key, kwargs, expected_code in cases:
+        service, file_path = build_service(session_key, **kwargs)
+        result = service._send_popo_file_from_mcp("run-file-1", path=str(file_path), agent_node_id="planner")
+        assert result["ok"] is False
+        assert result["code"] == expected_code
+        detail = service.blueprint_session_file_send_history(session_key)
+        assert detail["count"] == 1
+        assert detail["records"][0]["status"] == "failed"
+        assert detail["records"][0]["code"] == expected_code
+
+    service, file_path = build_service("bps_popo_missing-path+default")
+    missing = service._send_popo_file_from_mcp("run-file-1", path=str(file_path.with_name("missing.txt")), agent_node_id="planner")
+    assert missing["ok"] is False
+    assert missing["code"] == "BLUEPRINT_POPO_FILE_NOT_FOUND"
+    assert service.blueprint_session_file_send_history("bps_popo_missing-path+default")["records"][0]["status"] == "failed"
+
+    service, large_path = build_service("bps_popo_large+default")
+    with large_path.open("wb") as file:
+        file.seek(20 * 1024 * 1024)
+        file.write(b"x")
+    too_large = service._send_popo_file_from_mcp("run-file-1", path=str(large_path), agent_node_id="planner")
+    assert too_large["ok"] is False
+    assert too_large["code"] == "BLUEPRINT_POPO_FILE_TOO_LARGE"
+
+    service, file_path = build_service("bps_popo_api-fail+default")
+    monkeypatch.setattr(service, "_get_popo_access_token", lambda robot_config: "token-1")
+
+    def fail_register(url: str, **kwargs: Any) -> _FakeHTTPResponse:
+        if url.endswith("/open-apis/robots/v1/im/file"):
+            return _FakeHTTPResponse({"errcode": 4001, "errmsg": "register failed"}, status_code=200)
+        pytest.fail(f"unexpected POST url: {url}")
+
+    monkeypatch.setattr(desktop_blueprint_service_module.requests, "post", fail_register)
+    api_fail = service._send_popo_file_from_mcp("run-file-1", path=str(file_path), agent_node_id="planner")
+    assert api_fail["ok"] is False
+    assert api_fail["code"] == "BLUEPRINT_POPO_FILE_REGISTER_FAILED"
+    api_records = service.blueprint_session_file_send_history("bps_popo_api-fail+default")["records"]
+    assert api_records[0]["status"] == "failed"
+    assert api_records[0]["errcode"] == 4001
 
 
 def test_popo_help_command_lists_direct_commands_without_binding_or_agent_dispatch(
@@ -1863,7 +2455,7 @@ def test_blueprint_list_runs_times_out_live_runtime_status(
     document = _document(project)
     document["runtime"] = _popo_runtime()
     service.save_blueprint(project, document)
-    _patch_fake_session_instances(monkeypatch, service)
+    _register_fake_slot(service, project, service.open_blueprint(project, "default"))
     timeouts: list[float | None] = []
 
     def timeout_runtime_call(active_run: DesktopBlueprintRun, fn, *, timeout=None):
@@ -2310,6 +2902,54 @@ def test_queue_agent_message_ensures_agent_before_queueing(tmp_path: Path) -> No
         assert runtime.agent_message_queues["planner"][0].message_id == queued["result"]["message_id"]
         body = runtime.agent_message_queues["planner"][0].body
         assert body["context"]["framework_context"]["agent_node_id"] == "planner"
+    finally:
+        asyncio.run(runtime.close())
+
+
+def test_queue_agent_message_includes_attachments_in_runtime_body(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    document = _document(project)
+    graph = desktop_blueprint_service_module.graph_definition_from_dict(document["graph"])
+    runtime = desktop_blueprint_service_module.GraphRuntime(DesktopBlueprintNoopBackend())
+    control = desktop_blueprint_service_module.GraphRuntimeControlPlane(runtime, graph)
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    image_path = tmp_path / "popo.png"
+    image_path.write_bytes(b"png")
+    run = DesktopBlueprintRun(
+        run_id="run-live-1",
+        project_dir=project,
+        blueprint_id="default",
+        document=document,
+        graph=graph,
+        runtime=runtime,
+        control=control,
+        execution_mode="live",
+        created_at=1.0,
+        updated_at=1.0,
+        backend=runtime.cluster,
+        start_node_id="planner",
+    )
+    service._runs[run.run_id] = run
+
+    try:
+        queued = service.queue_agent_message(
+            run.run_id,
+            "planner",
+            "inspect attachment",
+            mode="top",
+            attachments=[{"kind": "image", "path": str(image_path), "mime": "image/png"}],
+        )
+
+        assert queued["ok"] is True
+        body = runtime.agent_message_queues["planner"][0].body
+        assert body["attachments"] == [
+            {
+                "path": str(image_path),
+                "mime": "image/png",
+                "kind": "image",
+            }
+        ]
     finally:
         asyncio.run(runtime.close())
 
@@ -3000,6 +3640,83 @@ def test_popo_session_message_without_project_dir_routes_to_registered_blueprint
     assert queued[-1][0:2] == ("run-session-1", "planner")
     assert queued[-1][3] == "top"
     assert "hello from popo" in queued[-1][2]
+
+
+def test_popo_session_message_forwards_attachments_to_agent_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = DesktopBlueprintService(resident_services_data_dir=tmp_path / "state")
+    document = _document(project)
+    document["runtime"] = _popo_runtime()
+    service.save_blueprint(project, document)
+    _patch_fake_session_instances(monkeypatch, service)
+    queued: list[dict[str, Any]] = []
+    attachment_path = tmp_path / "popo.png"
+    attachment_path.write_bytes(b"png")
+    attachments = [
+        {
+            "kind": "image",
+            "path": str(attachment_path),
+            "name": "popo.png",
+            "mime": "image/png",
+            "size": 3,
+            "sourceKey": "imageUrl",
+        }
+    ]
+
+    monkeypatch.setattr(service, "_run_is_active", lambda run: True)
+    monkeypatch.setattr(
+        service,
+        "_runtime_status_snapshot_or_starting",
+        lambda run, graph=None: {"run": {"runId": run.run_id, "status": "running"}, "recent_events": []},
+    )
+
+    def fake_queue(run_id, node_id, text, *, mode="default", **kwargs):
+        queued.append(
+            {
+                "runId": run_id,
+                "nodeId": node_id,
+                "text": text,
+                "mode": mode,
+                "attachments": kwargs.get("attachments"),
+            }
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "queue_agent_message", fake_queue)
+
+    result = service.handle_request(
+        {
+            "command": "blueprint.sessions.message",
+            "args": {
+                "message": "[POPO attachment: image]",
+                "source": "popo",
+                "sourceIdentity": {"robotAppKey": "robot-1"},
+                "sessionIdentity": {
+                    "popoUserId": "u1",
+                    "popoSessionId": "s1",
+                    "popoReplyTo": "reply-u1",
+                    "popoSessionType": "1",
+                },
+                "attachments": attachments,
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert queued[-1]["runId"] == "run-session-1"
+    assert queued[-1]["nodeId"] == "planner"
+    assert queued[-1]["mode"] == "top"
+    assert queued[-1]["attachments"] == attachments
+    assert "[Current POPO Attachments]" in queued[-1]["text"]
+    assert f"path={attachment_path}" in queued[-1]["text"]
+    transcript = (
+        service.blueprint_sessions_dir() / result["sessionKey"] / "transcript.jsonl"
+    ).read_text(encoding="utf-8")
+    assert '"attachments"' in transcript
+    assert "popo.png" in transcript
 
 
 def test_blueprint_open_records_current_blueprint_without_internal_open(tmp_path: Path) -> None:
@@ -4496,7 +5213,7 @@ def test_popo_callback_health_and_p2p_event(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         popo,
         "_start_handler_thread",
-        lambda robot_config, reply_to, notify, sender, popo_session_id, popo_group_id="", session_type="": captured.append(
+        lambda robot_config, reply_to, notify, sender, popo_session_id, popo_group_id="", session_type="", attachments=None: captured.append(
             {
                 "robot": robot_config["robot_app_key"],
                 "replyTo": reply_to,
@@ -4578,7 +5295,7 @@ def test_popo_callback_ignores_duplicate_event_uuid(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         popo,
         "_start_handler_thread",
-        lambda robot_config, reply_to, notify, sender, popo_session_id, popo_group_id="", session_type="": captured.append(
+        lambda robot_config, reply_to, notify, sender, popo_session_id, popo_group_id="", session_type="", attachments=None: captured.append(
             notify
         ),
     )
@@ -5097,14 +5814,67 @@ def test_gulicode_bp_installer_installs_runtime_dependencies_and_validates(
 
     install_calls = [call for call in calls if call[1:4] == ["-m", "pip", "install"]]
     assert result == runtime_python
-    assert len(install_calls) == 1
-    install_call = install_calls[0]
-    assert "--upgrade" in install_call
-    assert "--force-reinstall" in install_call
-    assert "--no-deps" not in install_call
-    assert "--ignore-installed" not in install_call
-    assert install_call[-1] == str(wheel)
+    assert len(install_calls) == 2
+    dependency_call = install_calls[0]
+    refresh_call = install_calls[1]
+    assert "--upgrade" in dependency_call
+    assert "--force-reinstall" not in dependency_call
+    assert "--no-deps" not in dependency_call
+    assert dependency_call[-1] == str(wheel)
+    assert "--upgrade" in refresh_call
+    assert "--force-reinstall" in refresh_call
+    assert "--no-deps" in refresh_call
+    assert "--ignore-installed" not in refresh_call
+    assert refresh_call[-1] == str(wheel)
     assert validated == [(runtime_python, plugin_root)]
+
+
+def test_gulicode_bp_installer_skip_web_build_refuses_fallback_when_app_dist_missing(tmp_path: Path) -> None:
+    installer = _load_gulicode_bp_installer_module()
+    plugin_root = tmp_path / "plugins" / "gulicode-bp"
+    package_dir = tmp_path / "multi_agent_tcp"
+    app_root = package_dir / "GuLiCode" / "packages" / "app"
+    for path in [plugin_root / "web", app_root]:
+        path.mkdir(parents=True)
+    for name in ("index.html", "styles.css", "app.js"):
+        (plugin_root / "web" / name).write_text("fallback", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Refusing to install the fallback web UI"):
+        installer.copy_web_dist(plugin_root, package_dir, skip_build=True)
+
+    assert not (plugin_root / "web" / "dist" / "index.html").exists()
+
+
+def test_gulicode_bp_installer_build_installs_gulicode_dependencies_when_vite_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer = _load_gulicode_bp_installer_module()
+    workspace_root = tmp_path / "GuLiCode"
+    app_root = workspace_root / "packages" / "app"
+    app_root.mkdir(parents=True)
+    (workspace_root / "bun.lock").write_text("# lock\n", encoding="utf-8")
+    calls: list[tuple[list[str], Path]] = []
+
+    def fake_run(args, cwd, check):  # noqa: ANN001, ANN202
+        command = [str(item) for item in args]
+        cwd_path = Path(cwd)
+        calls.append((command, cwd_path))
+        if command == ["bun", "install"]:
+            vite = workspace_root / "node_modules" / ".bin" / "vite.exe"
+            vite.parent.mkdir(parents=True)
+            vite.write_text("", encoding="utf-8")
+        return installer.subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(installer.shutil, "which", lambda name: "bun" if name == "bun" else None)
+    monkeypatch.setattr(installer.subprocess, "run", fake_run)
+
+    installer.build_gulicode_app(app_root, skip_build=False)
+
+    assert calls == [
+        (["bun", "install"], workspace_root),
+        (["bun", "run", "build"], app_root),
+    ]
 
 
 def test_gulicode_bp_installer_syncs_codex_cache_mcp(tmp_path: Path) -> None:
@@ -5195,7 +5965,9 @@ def test_gulicode_bp_release_package_contains_bootstrap_runtime_wheel_and_web_di
         assert runtime_package == package_dir
         wheelhouse.mkdir(parents=True)
         wheel = wheelhouse / "multi_agent_tcp-0.5.0-py3-none-any.whl"
-        wheel.write_text("wheel", encoding="utf-8")
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for name in installer.RUNTIME_REQUIRED_WHEEL_MEMBERS:
+                archive.writestr(name, "# test\n")
         return wheel
 
     monkeypatch.setattr(installer, "copy_web_dist", fake_copy_web_dist)
@@ -6255,6 +7027,8 @@ def test_gulicode_bp_mcp_removes_planning_and_start_tools_but_keeps_session_comm
         '"blueprint.sessions.list"',
         '"blueprint.sessions.excelHistoryList"',
         '"blueprint.sessions.excelHistory"',
+        '"blueprint.sessions.fileSendHistoryList"',
+        '"blueprint.sessions.fileSendHistory"',
         '"blueprint.sessions.delete"',
         '"blueprint.sessions.clear"',
         '"blueprint.sessions.message"',
@@ -6270,6 +7044,8 @@ def test_gulicode_bp_mcp_removes_planning_and_start_tools_but_keeps_session_comm
     write_commands = source[source.index("WRITE_COMMANDS = {") : source.index("CONTROL_COMMANDS = {")]
     assert '"blueprint.sessions.excelHistoryList"' not in write_commands
     assert '"blueprint.sessions.excelHistory"' not in write_commands
+    assert '"blueprint.sessions.fileSendHistoryList"' not in write_commands
+    assert '"blueprint.sessions.fileSendHistory"' not in write_commands
 
     state = module.PluginState()
     try:
@@ -7743,6 +8519,7 @@ def test_run_mcp_provisions_full_agent_message_only_context(tmp_path: Path) -> N
         "blueprint_script_call",
         "blueprint_service_docs",
         "blueprint_service_call",
+        "blueprint_send_popo_file",
         "agent_task_status",
         "join_contribute",
     ]
@@ -7758,6 +8535,46 @@ def test_run_mcp_provisions_full_agent_message_only_context(tmp_path: Path) -> N
     assert scope.checkout_dir is None
     assert scope.private_dir is None
     assert scope.allowed_tools == context["tools"]
+
+
+def test_run_mcp_blueprint_send_popo_file_delegates_to_callback(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def send_callback(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {"ok": True, "sent": True, "sessionKey": "bps_popo_u1+default"}
+
+    handle = RunMCPRuntimeHandle(
+        run_id="run-1",
+        runtime=object(),
+        control=object(),
+        graph=object(),
+        workspace_rpc_server=object(),
+        manager=object(),
+        workspace_run=object(),
+        runtime_loop=None,
+        send_popo_file_callback=send_callback,
+    )
+    scope = MCPTokenScope(
+        token="token",
+        run_id="run-1",
+        server_kind="ordinary",
+        allowed_tools=["blueprint_send_popo_file"],
+        expires_at=999.0,
+        agent_node_id="planner",
+        agent_id="agent-planner",
+    )
+
+    result = asyncio.run(handle._ordinary_blueprint_send_popo_file(scope, path="C:\\tmp\\preview.png"))
+
+    assert result == {"ok": True, "sent": True, "sessionKey": "bps_popo_u1+default"}
+    assert calls == [
+        {
+            "path": "C:\\tmp\\preview.png",
+            "agent_node_id": "planner",
+            "agent_id": "agent-planner",
+        }
+    ]
 
 
 def test_run_mcp_session_termination_tool_is_not_exposed_to_agents(tmp_path: Path) -> None:
@@ -8251,6 +9068,7 @@ def test_run_mcp_streamable_http_tools_are_split_by_token(tmp_path: Path) -> Non
         "agent_dispatch",
         "agent_task_status",
         "blueprint_script_call",
+        "blueprint_send_popo_file",
         "blueprint_service_call",
         "blueprint_service_docs",
         "join_contribute",

@@ -254,24 +254,14 @@ export function registerIpcHandlers(deps: Deps) {
       deps.blueprintRuntime.terminateSession(sessionKey, reason),
   )
   ipcMain.handle(
-    "blueprint-start-slot",
-    (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string) =>
-      deps.blueprintRuntime.startSlot(projectDir, blueprintId),
-  )
-  ipcMain.handle(
-    "blueprint-slot-status",
-    (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string) =>
-      deps.blueprintRuntime.slotStatus(projectDir, blueprintId),
-  )
-  ipcMain.handle(
-    "blueprint-terminate-slot",
-    (_event: IpcMainInvokeEvent, projectDir: string, blueprintId: string, reason?: string) =>
-      deps.blueprintRuntime.terminateSlot(projectDir, blueprintId, reason),
-  )
-  ipcMain.handle(
-    "blueprint-slot-message",
-    (_event: IpcMainInvokeEvent, projectDir: string, message: string, input?: Record<string, unknown>) =>
-      deps.blueprintRuntime.slotMessage(projectDir, message, input),
+    "blueprint-session-message",
+    (
+      _event: IpcMainInvokeEvent,
+      projectDir: string,
+      blueprintId: string,
+      message: string,
+      input?: Record<string, unknown>,
+    ) => deps.blueprintRuntime.sessionMessage(projectDir, blueprintId, message, input),
   )
   ipcMain.handle(
     "blueprint-start",

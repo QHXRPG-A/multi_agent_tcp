@@ -214,10 +214,22 @@ const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkben
     (await blueprintRequest(config, "blueprint.sessions.list", { projectDir, blueprintId })).sessions ?? [],
   blueprintSessionTimeline: async (sessionKey: string, limit?: number) =>
     blueprintRequest(config, "blueprint.sessions.timeline", { sessionKey, limit }),
+  listBlueprintSessionExcelHistory: async (projectDir: string, blueprintId: string) =>
+    (await blueprintRequest(config, "blueprint.sessions.excelHistoryList", { projectDir, blueprintId, category: "all" })).sessions ?? [],
+  blueprintSessionExcelHistory: async (sessionKey: string, limit?: number) =>
+    blueprintRequest(config, "blueprint.sessions.excelHistory", { sessionKey, category: "all", limit }),
+  listBlueprintSessionFileSendHistory: async (projectDir: string, blueprintId: string) =>
+    (await blueprintRequest(config, "blueprint.sessions.fileSendHistoryList", { projectDir, blueprintId })).sessions ?? [],
+  blueprintSessionFileSendHistory: async (sessionKey: string, limit?: number) =>
+    blueprintRequest(config, "blueprint.sessions.fileSendHistory", { sessionKey, limit }),
   deleteBlueprintSession: async (sessionKey: string) =>
     blueprintRequest(config, "blueprint.sessions.delete", { sessionKey }),
   terminateBlueprintSession: async (sessionKey: string, reason?: string) =>
     blueprintRequest(config, "blueprint.sessions.terminate", { sessionKey, reason }),
+  clearBlueprintSession: async (sessionKey: string, reason?: string) =>
+    blueprintRequest(config, "blueprint.sessions.clear", { sessionKey, reason }),
+  restartBlueprintSessions: async (projectDir: string, blueprintId: string, reason?: string) =>
+    blueprintRequest(config, "blueprint.sessions.restartBlueprint", { projectDir, blueprintId, reason }),
   sendBlueprintSessionMessage: async (projectDir: string, blueprintId: string, message: string, input) =>
     blueprintRequest(config, "blueprint.sessions.message", {
       projectDir,
@@ -227,23 +239,6 @@ const withBlueprintWorkbenchPlatform = (base: Platform, config: BlueprintWorkben
       popoUserId: input?.popoUserId,
       popoSessionId: input?.popoSessionId,
       popoGroupId: input?.popoGroupId,
-      sessionKey: input?.sessionKey,
-    }),
-  startBlueprintSlot: async (projectDir: string, blueprintId: string) =>
-    blueprintRequest(config, "blueprint.slots.start", { projectDir, blueprintId }),
-  blueprintSlotStatus: async (projectDir: string, blueprintId: string) =>
-    blueprintRequest(config, "blueprint.slots.status", { projectDir, blueprintId }),
-  terminateBlueprintSlot: async (projectDir: string, blueprintId: string, reason?: string) =>
-    blueprintRequest(config, "blueprint.slots.terminate", { projectDir, blueprintId, reason }),
-  sendBlueprintSlotMessage: async (projectDir: string, message: string, input) =>
-    blueprintRequest(config, "blueprint.slots.message", {
-      projectDir,
-      message,
-      source: input?.source,
-      blueprintId: input?.blueprintId,
-      runId: input?.runId,
-      sourceIdentity: input?.sourceIdentity,
-      sessionIdentity: input?.sessionIdentity,
       sessionKey: input?.sessionKey,
     }),
   listBlueprintRuns: async (projectDir?: string, blueprintId?: string) =>
@@ -276,8 +271,10 @@ const ensureBlueprintWorkbenchRoute = (config: BlueprintWorkbenchConfig) => {
   const projectDir = config.projectDir?.trim() || "global"
   const session = config.blueprintId?.trim() || "codex"
   const route = `/${base64Encode(projectDir)}/blueprint-window/${session}`
-  if (location.pathname === "/" || location.pathname === "/index.html") {
-    history.replaceState(null, "", `${route}${location.search}${location.hash}`)
+  const routeMatch = location.pathname.match(/^\/([^/]+)\/blueprint-window(?:\/([^/?#]+))?/)
+  const targetRoute = routeMatch ? `/${base64Encode(projectDir)}/blueprint-window/${routeMatch[2] || session}` : route
+  if (location.pathname === "/" || location.pathname === "/index.html" || (routeMatch && location.pathname !== targetRoute)) {
+    history.replaceState(null, "", `${targetRoute}${location.search}${location.hash}`)
   }
 }
 

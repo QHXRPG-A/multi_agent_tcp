@@ -14,9 +14,10 @@ import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence
 from urllib.parse import urlparse
 
+from .excel_audit import finalize_service_call_audit, prepare_service_call_audit
 from .graph_runtime import (
     AgentNode,
     BlueprintTerminalNode,
@@ -460,12 +461,16 @@ class GraphRuntimeControlPlane:
         top_agent: Optional[GuLiCodeTopAgentProfile] = None,
         script_root: Optional[Path] = None,
         resident_services: Optional[Any] = None,
+        excel_audit_context_provider: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+        file_sender_callback: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.runtime = runtime
         self.graph = graph
         self.top_agent = top_agent or GuLiCodeTopAgentProfile()
         self.script_root = script_root
         self.resident_services = resident_services
+        self.excel_audit_context_provider = excel_audit_context_provider
+        self.file_sender_callback = file_sender_callback
         if resident_services is not None and callable(getattr(resident_services, "summary", None)):
             setattr(self.runtime, "resident_services_provider", resident_services.summary)
 
@@ -766,12 +771,14 @@ class GraphRuntimeControlPlane:
             node = self.graph.agent_nodes[node_id]
             await self.runtime.ensure_agent(node)
             downstream = self.runtime.active_framework_connections(self.graph, node_id)
+            direct_scripts = self.runtime.active_direct_script_connections(self.graph, node_id)
             batch = None
-            if downstream:
+            if downstream or direct_scripts:
                 batch = await self.runtime.create_outgoing_batch_from_graph(
                     self.graph,
                     node_id,
                     required_target_node_ids=downstream,
+                    required_script_node_ids=direct_scripts,
                     route_id=route_id,
                 )
             pending = self.runtime.queue_agent_message(
@@ -889,7 +896,15 @@ class GraphRuntimeControlPlane:
             script_node_id=script_node_id,
         )
         node = self.graph.script_nodes[record["script_node_id"]]
-        if str(record.get("status") or "") in {"completed", "delivered", "feedback_delivered"}:
+        repeatable_direct_call = (
+            bool(record.get("direct_call"))
+            and bool(record.get("feedback_only", False))
+            and not [str(item) for item in record.get("required_target_node_ids", [])]
+        )
+        if (
+            str(record.get("status") or "") in {"completed", "delivered", "feedback_delivered"}
+            and not repeatable_direct_call
+        ):
             reveal_result = bool(record.get("feedback_only", False))
             return GraphControlResponse(
                 True,
@@ -998,16 +1013,24 @@ class GraphRuntimeControlPlane:
             )
         )
         delivery = await self._deliver_completed_script_targets(batch)
+        dispatch_result = None
+        pending_scripts = [
+            item
+            for item in batch.script_calls.values()
+            if isinstance(item, dict) and str(item.get("status") or "pending") == "pending"
+        ]
+        if batch.status == "staging" and not batch.remaining_targets and not pending_scripts:
+            dispatch_result = self.runtime.dispatch_outgoing_batch(batch.batch_id)
         reveal_result = bool(node.feedback_only)
-        return GraphControlResponse(
-            True,
-            {
-                "script_call": _script_call_response_record(record, reveal_result=reveal_result),
-                "result": dict(result) if reveal_result else None,
-                "delivery": delivery,
-                "batch": _script_batch_response(batch, reveal_script_node_id=node.node_id if reveal_result else None),
-            },
-        ).to_dict()
+        response = {
+            "script_call": _script_call_response_record(record, reveal_result=reveal_result),
+            "result": dict(result) if reveal_result else None,
+            "delivery": delivery,
+            "batch": _script_batch_response(batch, reveal_script_node_id=node.node_id if reveal_result else None),
+        }
+        if dispatch_result is not None:
+            response["dispatch"] = dict(dispatch_result)
+        return GraphControlResponse(True, response).to_dict()
 
     def resident_service_docs(self, service_name: str) -> Dict[str, Any]:
         if self.resident_services is None or not callable(getattr(self.resident_services, "docs", None)):
@@ -1026,6 +1049,8 @@ class GraphRuntimeControlPlane:
         service_name: str,
         method_name: str,
         arguments: Dict[str, Any],
+        *,
+        queue_result: bool = True,
     ) -> Dict[str, Any]:
         source_node_id = str(source_node_id).strip()
         if source_node_id not in self.graph.agent_nodes:
@@ -1039,12 +1064,21 @@ class GraphRuntimeControlPlane:
             payload={"service_name": str(service_name), "method_name": str(method_name)},
         )
         try:
-            result = self._call_resident_service_result(
-                service_name,
-                method_name,
-                arguments,
-                allow_script_only=False,
-            )
+            if str(service_name) == "file_sender" and str(method_name) == "send":
+                result = self._call_file_sender_service_result(source_node_id, arguments)
+            else:
+                result = self._call_resident_service_result(
+                    service_name,
+                    method_name,
+                    arguments,
+                    allow_script_only=False,
+                    audit_context=self._excel_audit_context(
+                        source_node_id=source_node_id,
+                        service_name=service_name,
+                        method_name=method_name,
+                        arguments=arguments,
+                    ),
+                )
         except Exception as exc:
             self.runtime.end_runtime_activity(activity_id, status="failed", error=str(exc))
             raise
@@ -1063,13 +1097,15 @@ class GraphRuntimeControlPlane:
                 },
             ).to_dict()
 
-        queued = self._queue_resident_service_result(
-            source_node_id,
-            service_name=str(result.get("service_name") or service_name),
-            method_name=str(result.get("method_name") or method_name),
-            arguments=dict(arguments),
-            result=dict(result),
-        )
+        queued = None
+        if queue_result:
+            queued = self._queue_resident_service_result(
+                source_node_id,
+                service_name=str(result.get("service_name") or service_name),
+                method_name=str(result.get("method_name") or method_name),
+                arguments=dict(arguments),
+                result=dict(result),
+            )
         return GraphControlResponse(
             bool(result.get("ok")),
             {
@@ -1079,6 +1115,34 @@ class GraphRuntimeControlPlane:
             },
         ).to_dict()
 
+    def _call_file_sender_service_result(
+        self,
+        source_node_id: str,
+        arguments: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        callback = self.file_sender_callback
+        if callback is None:
+            return {
+                "ok": False,
+                "code": "FILE_SENDER_UNAVAILABLE",
+                "error": "file sender is not connected to this blueprint run",
+                "service_name": "file_sender",
+                "method_name": "send",
+                "result": None,
+            }
+        path = str(arguments.get("path") or "").strip()
+        result = callback(path=path, agent_node_id=str(source_node_id or ""), agent_id="")
+        if not isinstance(result, dict):
+            result = {"ok": True, "result": result}
+        return {
+            "ok": bool(result.get("ok")),
+            "code": str(result.get("code") or ""),
+            "error": str(result.get("error") or ""),
+            "service_name": "file_sender",
+            "method_name": "send",
+            "result": dict(result),
+        }
+
     def _call_resident_service_result(
         self,
         service_name: str,
@@ -1086,6 +1150,7 @@ class GraphRuntimeControlPlane:
         arguments: Dict[str, Any],
         *,
         allow_script_only: bool,
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         service = str(service_name)
         method = str(method_name)
@@ -1100,24 +1165,44 @@ class GraphRuntimeControlPlane:
                 "service_name": service,
                 "method_name": method,
             }
+        prepared_audit = prepare_service_call_audit(audit_context, service, method, dict(arguments))
         if self.resident_services is None or not callable(getattr(self.resident_services, "call", None)):
-            return {
+            result = {
                 "ok": False,
                 "code": "RESIDENT_SERVICES_UNAVAILABLE",
                 "error": "resident service manager is not configured",
                 "service_name": service,
                 "method_name": method,
             }
-        result = self.resident_services.call(service, method, dict(arguments))
+            finalize_service_call_audit(prepared_audit, result)
+            return result
+        try:
+            result = self.resident_services.call(service, method, dict(arguments))
+        except Exception as exc:
+            finalize_service_call_audit(
+                prepared_audit,
+                {
+                    "ok": False,
+                    "code": "RESIDENT_SERVICE_EXCEPTION",
+                    "error": str(exc),
+                    "service_name": service,
+                    "method_name": method,
+                },
+            )
+            raise
         if isinstance(result, dict):
-            return dict(result)
-        return {
+            clean_result = dict(result)
+            finalize_service_call_audit(prepared_audit, clean_result)
+            return clean_result
+        bad_result = {
             "ok": False,
             "code": "RESIDENT_SERVICE_BAD_RESPONSE",
             "error": "resident service call returned a non-object response",
             "service_name": service,
             "method_name": method,
         }
+        finalize_service_call_audit(prepared_audit, bad_result)
+        return bad_result
 
     def _call_script_resident_service_result(
         self,
@@ -1145,6 +1230,14 @@ class GraphRuntimeControlPlane:
                 method_name,
                 arguments,
                 allow_script_only=True,
+                audit_context=self._excel_audit_context(
+                    source_node_id=str((payload or {}).get("source_node_id") or ""),
+                    script_node_id=str(script_node_id or ""),
+                    batch_id=str((payload or {}).get("batch_id") or ""),
+                    service_name=service_name,
+                    method_name=method_name,
+                    arguments=arguments,
+                ),
             )
         except Exception as exc:
             self.runtime.end_runtime_activity(activity_id, status="failed", error=str(exc))
@@ -1155,6 +1248,32 @@ class GraphRuntimeControlPlane:
             error=str(result.get("error") or ""),
         )
         return result
+
+    def _excel_audit_context(
+        self,
+        *,
+        source_node_id: str,
+        service_name: str,
+        method_name: str,
+        arguments: Dict[str, Any],
+        script_node_id: str = "",
+        batch_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        provider = self.excel_audit_context_provider
+        if provider is None:
+            return None
+        try:
+            result = provider(
+                source_node_id=str(source_node_id or ""),
+                script_node_id=str(script_node_id or ""),
+                batch_id=str(batch_id or ""),
+                service_name=str(service_name or ""),
+                method_name=str(method_name or ""),
+                arguments=dict(arguments or {}),
+            )
+        except Exception:
+            return None
+        return dict(result) if isinstance(result, dict) else None
 
     def _queue_resident_service_result(
         self,
@@ -1255,11 +1374,13 @@ class GraphRuntimeControlPlane:
             downstream_batch = None
             fan_in_target = self.runtime.target_uses_live_fan_in(self.graph, target_node_id)
             downstream = self.runtime.active_framework_connections(self.graph, target_node_id)
-            if downstream and not fan_in_target:
+            direct_scripts = self.runtime.active_direct_script_connections(self.graph, target_node_id)
+            if (downstream or direct_scripts) and not fan_in_target:
                 downstream_batch = await self.runtime.create_outgoing_batch_from_graph(
                     self.graph,
                     target_node_id,
                     required_target_node_ids=downstream,
+                    required_script_node_ids=direct_scripts,
                     route_id=batch.route_id,
                 )
             raw_body = self._script_delivery_body(batch, target_node_id, path)
@@ -1437,11 +1558,17 @@ class GraphRuntimeControlPlane:
             if is_no_op or not target_is_agent or fan_in_target
             else self.runtime.active_framework_connections(self.graph, target_node_id)
         )
-        if downstream:
+        direct_scripts = (
+            []
+            if is_no_op or not target_is_agent or fan_in_target
+            else self.runtime.active_direct_script_connections(self.graph, target_node_id)
+        )
+        if downstream or direct_scripts:
             downstream_batch = await self.runtime.create_outgoing_batch_from_graph(
                 self.graph,
                 target_node_id,
                 required_target_node_ids=downstream,
+                required_script_node_ids=direct_scripts,
                 route_id=batch.route_id,
             )
 

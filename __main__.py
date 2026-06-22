@@ -151,16 +151,26 @@ async def _agent_loop_listen(client: AgentTCPClient) -> None:
 async def _agent_loop_adapter(client: AgentTCPClient, adapter: CLIAdapter) -> None:
     aid = client.agent_id
     await adapter.start()
-    async for msg in client.incoming():
+    active_task: Optional[asyncio.Task[None]] = None
+
+    async def _send_reply(sender: Any, reply: Dict[str, Any], gid: Optional[str]) -> None:
+        if not isinstance(sender, str) or not sender:
+            return
+        try:
+            log.info(
+                "[chain] agent=%s -> broker SEND reply to=%s gather_reply=%s reply_keys=%s",
+                aid,
+                sender,
+                gid,
+                list(reply.keys()) if isinstance(reply, dict) else type(reply).__name__,
+            )
+            await client.send_to(sender, reply, gather_reply=gid)
+        except (ConnectionError, OSError, RuntimeError) as e:
+            log.warning("[chain] agent=%s reply send_to FAILED: %s", aid, e)
+
+    async def _run_message(msg: Dict[str, Any]) -> None:
+        nonlocal active_task
         t = msg.get("type")
-        if t == "error":
-            log.warning("broker error: %s", msg)
-            continue
-        if t in ("ping", "pong"):
-            continue
-        if t not in ("message", "broadcast"):
-            log.info("recv %s", msg)
-            continue
         sender = msg.get("from")
         body = msg.get("body")
         gid = _gather_reply_id(msg)
@@ -168,6 +178,8 @@ async def _agent_loop_adapter(client: AgentTCPClient, adapter: CLIAdapter) -> No
             message = body_to_agent_message(body)
             if isinstance(msg.get("meta"), dict):
                 message.metadata = dict(msg["meta"])
+            if gid:
+                message.metadata.setdefault("message_id", gid)
             if not message.prompt:
                 raise ValueError("empty prompt")
             log.info(
@@ -181,6 +193,7 @@ async def _agent_loop_adapter(client: AgentTCPClient, adapter: CLIAdapter) -> No
                 adapter.cli_kind,
             )
             log.info("[chain] agent=%s -> adapter.send_message START", aid)
+
             async def stream_callback(event: dict[str, object]) -> None:
                 if isinstance(sender, str) and sender:
                     await client.send_to(sender, {"type": "agent.stream", "event": event})
@@ -196,18 +209,65 @@ async def _agent_loop_adapter(client: AgentTCPClient, adapter: CLIAdapter) -> No
         except (FileNotFoundError, ValueError, OSError, RuntimeError) as e:
             log.error("[chain] agent=%s adapter FAILED: %s", aid, e)
             reply = {"ok": False, "error": str(e), "via": t}
-        if isinstance(sender, str) and sender:
+        await _send_reply(sender, reply, gid)
+        active_task = None
+
+    async def _handle_control(msg: Dict[str, Any]) -> None:
+        sender = msg.get("from")
+        control_id = str(msg.get("id") or "").strip()
+        control = str(msg.get("control") or "").strip()
+        body = msg.get("body")
+        if control != "turn/steer":
+            result_payload = {"ok": False, "error": f"unsupported control: {control}"}
+        else:
             try:
-                log.info(
-                    "[chain] agent=%s -> broker SEND reply to=%s gather_reply=%s reply_keys=%s",
-                    aid,
-                    sender,
-                    gid,
-                    list(reply.keys()) if isinstance(reply, dict) else type(reply).__name__,
-                )
-                await client.send_to(sender, reply, gather_reply=gid)
+                message = body_to_agent_message(body)
+                metadata = dict(msg["meta"]) if isinstance(msg.get("meta"), dict) else {}
+                if control_id:
+                    metadata.setdefault("message_id", control_id)
+                if not message.prompt:
+                    raise ValueError("empty prompt")
+                result = await adapter.steer_message(message, metadata=metadata)
+                result_payload = {**result.payload, "control": control, "status": result.status}
+            except (FileNotFoundError, ValueError, OSError, RuntimeError) as e:
+                result_payload = {"ok": False, "control": control, "error": str(e), "status": "error"}
+        if isinstance(sender, str) and sender and control_id:
+            try:
+                await client.send_control_result(sender, control_id, result_payload)
             except (ConnectionError, OSError, RuntimeError) as e:
-                log.warning("[chain] agent=%s reply send_to FAILED: %s", aid, e)
+                log.warning("[chain] agent=%s control_result FAILED: %s", aid, e)
+
+    async for msg in client.incoming():
+        t = msg.get("type")
+        if t == "error":
+            log.warning("broker error: %s", msg)
+            continue
+        if t in ("ping", "pong"):
+            continue
+        if t == "control":
+            await _handle_control(msg)
+            continue
+        if t not in ("message", "broadcast"):
+            log.info("recv %s", msg)
+            continue
+        if active_task is not None and not active_task.done():
+            await _send_reply(
+                msg.get("from"),
+                {
+                    "ok": False,
+                    "error": "agent is busy; use control turn/steer or queue the message",
+                    "via": t,
+                },
+                _gather_reply_id(msg),
+            )
+            continue
+        active_task = asyncio.create_task(_run_message(msg), name=f"agent-message-{aid}")
+    if active_task is not None and not active_task.done():
+        active_task.cancel()
+        try:
+            await active_task
+        except asyncio.CancelledError:
+            pass
     await adapter.close()
 
 
@@ -1115,6 +1175,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     p_collab.add_argument("--secure-cookies", action="store_true")
     p_collab.add_argument("--log-dir", type=Path, default=Path("logs"))
     p_collab.add_argument("--log-level", default="INFO")
+    p_hyskills = sub.add_parser(
+        "hyskills-service",
+        help="run the local hyskills search/read HTTP API",
+    )
+    p_hyskills.add_argument("--host", default="127.0.0.1")
+    p_hyskills.add_argument("--port", type=int, default=8795)
+    p_hyskills.add_argument("--base-url", default="https://hyskills.netease.com")
+    p_hyskills.add_argument("--cache-ttl-sec", type=float, default=300.0)
+    p_hyskills.add_argument("--token")
 
     # -- show-registry / dispatch (recommended LLM flow) ---------------------
     p_sr = sub.add_parser(
@@ -1425,6 +1494,23 @@ def main(argv: Optional[List[str]] = None) -> None:
             service_args.append("--secure-cookies")
         service_args.extend(["--log-dir", str(args.log_dir), "--log-level", str(args.log_level)])
         _serve_collaboration(service_args)
+        return
+
+    if args.cmd == "hyskills-service":
+        from .hyskills_service import serve_forever as _serve_hyskills
+        service_args = [
+            "--host",
+            args.host,
+            "--port",
+            str(args.port),
+            "--base-url",
+            args.base_url,
+            "--cache-ttl-sec",
+            str(args.cache_ttl_sec),
+        ]
+        if args.token:
+            service_args.extend(["--token", args.token])
+        _serve_hyskills(service_args)
         return
 
     if args.cmd == "doctor":

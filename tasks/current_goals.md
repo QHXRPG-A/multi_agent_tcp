@@ -1,11 +1,11 @@
 # Current Goals
 
-Date: 2026-06-05
+Date: 2026-06-11
 
 ## Active Focus
 
 The current product focus is the `gulicode-bp` Codex plugin and POPO-triggered
-Blueprint execution path.
+Blueprint execution path after the run-slot model removal.
 
 Temporarily deprioritize GuLiCode desktop shell, mobile `/mobile`, console
 `/console`, and hosted/server product work unless the user explicitly asks for
@@ -14,22 +14,25 @@ the default implementation direction.
 
 ## Priority Work
 
-1. Make the installed `gulicode-bp` plugin reliable as the primary Blueprint
+1. Keep the installed `gulicode-bp` plugin reliable as the primary Blueprint
    workbench and runtime entrypoint.
-2. Finish the POPO robot callback path from external message to
-   `blueprint.slots.message`.
-3. Harden Blueprint session and run-slot routing:
+2. Keep the POPO robot callback path routed through
+   `blueprint.sessions.message`.
+3. Harden Blueprint session instance routing:
    - stable session keys
    - one saved start AgentNode per blueprint
-   - no implicit run creation from POPO or UI messages
-   - clear no-slot, busy, timeout, and terminal replies
+   - one Blueprint session maps to one live run instance
+   - the same session reuses its active run
+   - a new POPO/UI session creates a new run instance without a framework slot
+     capacity limit
+   - clear ambiguous-Blueprint, timeout, and terminal replies
 4. Keep Codex desktop control split into two explicit actions:
    - set the saved start AgentNode
    - execute a caller-provided plan against that saved start AgentNode
 5. Preserve MCP boundaries:
    - public Codex tools may inspect, monitor, set start Agent, and execute an
      explicit plan
-   - slot start/message and POPO config remain internal service/workbench/POPO
+   - session message and POPO config remain internal service/workbench/POPO
      paths
 6. Validate packaged-plugin behavior after source changes:
    - rebuild the GuLiCode app bundle when frontend source changes
@@ -38,10 +41,10 @@ the default implementation direction.
 
 ## Near-Term Test Focus
 
-- Backend tests for session persistence, slot assignment, POPO routing, and MCP
-  public/internal command boundaries.
-- Workbench browser smoke for plugin-served Blueprint run-slot UI and session
-  dropdown.
+- Backend tests for session persistence, session-instance routing, POPO routing,
+  idle termination, and MCP public/internal command boundaries.
+- Workbench browser smoke for plugin-served Blueprint session UI and session
+  message entrypoint.
 - POPO bot smoke for p2p/group identity mapping and failure messages.
 - Installed-plugin smoke after singleton restart.
 

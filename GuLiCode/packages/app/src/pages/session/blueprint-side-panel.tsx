@@ -94,6 +94,9 @@ import {
   type BlueprintSessionExcelHistory,
   type BlueprintSessionExcelHistoryRecord,
   type BlueprintSessionExcelHistorySummary,
+  type BlueprintSessionFileSendHistory,
+  type BlueprintSessionFileSendHistoryRecord,
+  type BlueprintSessionFileSendHistorySummary,
   type BlueprintSessionSummary,
   type BlueprintSessionTimelineEvent,
   type BlueprintSummary,
@@ -460,6 +463,12 @@ type BlueprintSessionTimelineState = {
 
 type BlueprintExcelHistoryState = {
   sessions: BlueprintSessionExcelHistorySummary[]
+  loading: boolean
+  error?: string
+}
+
+type BlueprintFileSendHistoryState = {
+  sessions: BlueprintSessionFileSendHistorySummary[]
   loading: boolean
   error?: string
 }
@@ -1114,6 +1123,10 @@ export function BlueprintSidePanel(props: {
     loading: false,
   })
   const [blueprintExcelHistory, setBlueprintExcelHistory] = createSignal<BlueprintExcelHistoryState>({
+    sessions: [],
+    loading: false,
+  })
+  const [blueprintFileSendHistory, setBlueprintFileSendHistory] = createSignal<BlueprintFileSendHistoryState>({
     sessions: [],
     loading: false,
   })
@@ -2846,6 +2859,12 @@ export function BlueprintSidePanel(props: {
   })
 
   createEffect(() => {
+    if (!platform.listBlueprintSessionFileSendHistory) return
+    if (!persistence().loaded || !blueprintControlOpen()) return
+    void refreshBlueprintFileSendHistory({ silent: true })
+  })
+
+  createEffect(() => {
     const runId = runtime().runId
     const status = runtimeStatus(runtime().status)
     if (!runId || isTerminalRuntimeStatus(status) || !platform.blueprintAgentStreamToken) return
@@ -2963,6 +2982,27 @@ export function BlueprintSidePanel(props: {
     ))
   }
 
+  async function refreshBlueprintFileSendHistory(opts: { silent?: boolean } = {}) {
+    if (!platform.listBlueprintSessionFileSendHistory) return
+    if (!opts.silent) setBlueprintFileSendHistory((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      const sessions = await platform.listBlueprintSessionFileSendHistory(projectDirectory, currentBlueprintId())
+      setBlueprintFileSendHistory({ sessions, loading: false, error: undefined })
+    } catch (error) {
+      setBlueprintFileSendHistory((current) => ({ ...current, loading: false, error: readableError(error) }))
+    }
+  }
+
+  function openBlueprintFileSendHistoryDialog(summary: BlueprintSessionFileSendHistorySummary) {
+    if (!platform.blueprintSessionFileSendHistory) return
+    dialog.show(() => (
+      <BlueprintFileSendHistoryDetailDialog
+        summary={summary}
+        onLoad={(limit) => platform.blueprintSessionFileSendHistory!(summary.sessionKey, limit)}
+      />
+    ))
+  }
+
   async function deleteBlueprintSession(sessionKey: string) {
     if (!platform.deleteBlueprintSession) return
     setBlueprintSessions((current) => ({ ...current, loading: true, error: undefined }))
@@ -2970,6 +3010,7 @@ export function BlueprintSidePanel(props: {
       await platform.deleteBlueprintSession(sessionKey)
       await refreshBlueprintSessions({ quiet: true })
       await refreshBlueprintExcelHistory({ silent: true })
+      await refreshBlueprintFileSendHistory({ silent: true })
     } catch (error) {
       setBlueprintSessions((current) => ({ ...current, loading: false, error: readableError(error) }))
     }
@@ -2994,6 +3035,7 @@ export function BlueprintSidePanel(props: {
         action: undefined,
       }))
       await refreshBlueprintSessions({ quiet: true })
+      await refreshBlueprintFileSendHistory({ silent: true })
     } catch (error) {
       setBlueprintSessions((current) => ({
         ...current,
@@ -3028,6 +3070,7 @@ export function BlueprintSidePanel(props: {
       setBlueprintSessionTimeline({ sessionKey, events: [], loading: false })
       await refreshBlueprintSessions({ quiet: true })
       await refreshBlueprintExcelHistory({ silent: true })
+      await refreshBlueprintFileSendHistory({ silent: true })
       setRuntime((current) => ({
         ...current,
         runId: undefined,
@@ -5023,6 +5066,8 @@ export function BlueprintSidePanel(props: {
             state={popoService()}
             excelHistory={blueprintExcelHistory()}
             excelHistoryAvailable={!!platform.listBlueprintSessionExcelHistory && !!platform.blueprintSessionExcelHistory}
+            fileSendHistory={blueprintFileSendHistory()}
+            fileSendHistoryAvailable={!!platform.listBlueprintSessionFileSendHistory && !!platform.blueprintSessionFileSendHistory}
             onOpenChange={setBlueprintControlOpen}
             onRefresh={refreshPopoService}
             onSaveRobot={savePopoRobot}
@@ -5030,6 +5075,8 @@ export function BlueprintSidePanel(props: {
             onToggleRobot={setPopoRobotEnabled}
             onRefreshExcelHistory={refreshBlueprintExcelHistory}
             onOpenExcelHistory={openBlueprintExcelHistoryDialog}
+            onRefreshFileSendHistory={refreshBlueprintFileSendHistory}
+            onOpenFileSendHistory={openBlueprintFileSendHistoryDialog}
           />
           <div class="pointer-events-auto absolute left-3 top-3 z-30">
             <Tooltip placement="right" value={scriptCompileTooltip()}>
@@ -5770,13 +5817,8 @@ function BlueprintDocumentSelect(props: {
     }, 0)
   }
 
-  const handleBlueprintDocumentItemSelect = (event: Event, blueprintId: string) => {
-    const target = event.target
-    const deleteTarget =
-      pendingBlueprintDocumentDeleteId === blueprintId ||
-      (target instanceof HTMLElement && Boolean(target.closest("[data-blueprint-document-delete]")))
-    if (deleteTarget) {
-      event.preventDefault()
+  const handleBlueprintDocumentItemSelect = (blueprintId: string) => {
+    if (pendingBlueprintDocumentDeleteId === blueprintId) {
       pendingBlueprintDocumentDeleteId = ""
       requestBlueprintDocumentDelete(blueprintId)
       return
@@ -5813,7 +5855,7 @@ function BlueprintDocumentSelect(props: {
             <For each={props.items}>
               {(item) => (
                 <DropdownMenu.Item
-                  onSelect={(event) => handleBlueprintDocumentItemSelect(event, item.id)}
+                  onSelect={() => handleBlueprintDocumentItemSelect(item.id)}
                   class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 pr-1"
                 >
                   <Icon
@@ -6275,6 +6317,8 @@ function BlueprintControlDrawer(props: {
   state: PopoServiceState
   excelHistory: BlueprintExcelHistoryState
   excelHistoryAvailable: boolean
+  fileSendHistory: BlueprintFileSendHistoryState
+  fileSendHistoryAvailable: boolean
   onOpenChange: (open: boolean) => void
   onRefresh: (opts?: { silent?: boolean }) => Promise<void> | void
   onSaveRobot: (robot: BlueprintPopoRobot, previousRobotAppKey?: string) => Promise<void> | void
@@ -6282,6 +6326,8 @@ function BlueprintControlDrawer(props: {
   onToggleRobot: (robotAppKey: string, enabled: boolean) => Promise<void> | void
   onRefreshExcelHistory: (opts?: { silent?: boolean }) => Promise<void> | void
   onOpenExcelHistory: (summary: BlueprintSessionExcelHistorySummary) => void
+  onRefreshFileSendHistory: (opts?: { silent?: boolean }) => Promise<void> | void
+  onOpenFileSendHistory: (summary: BlueprintSessionFileSendHistorySummary) => void
 }) {
   const language = useLanguage()
   const toggleLabel = () => language.t((props.open ? "blueprint.control.close" : "blueprint.control.open") as never)
@@ -6343,6 +6389,12 @@ function BlueprintControlDrawer(props: {
             available={props.excelHistoryAvailable}
             onRefresh={props.onRefreshExcelHistory}
             onOpenSession={props.onOpenExcelHistory}
+          />
+          <BlueprintFileSendHistoryPanel
+            state={props.fileSendHistory}
+            available={props.fileSendHistoryAvailable}
+            onRefresh={props.onRefreshFileSendHistory}
+            onOpenSession={props.onOpenFileSendHistory}
           />
         </div>
       </aside>
@@ -6551,6 +6603,215 @@ function BlueprintExcelHistoryRecordView(props: { record: BlueprintSessionExcelH
       <div class="truncate font-mono text-text-strong" title={display().command}>{display().command}</div>
       <div class="truncate text-text-weak" title={display().workbookTitle}>{display().workbookLabel}</div>
       <div class="truncate text-text-weak" title={display().locationTitle}>{display().location}</div>
+    </div>
+  )
+}
+
+function BlueprintFileSendHistoryPanel(props: {
+  state: BlueprintFileSendHistoryState
+  available: boolean
+  onRefresh: (opts?: { silent?: boolean }) => Promise<void> | void
+  onOpenSession: (summary: BlueprintSessionFileSendHistorySummary) => void
+}) {
+  const language = useLanguage()
+
+  return (
+    <section data-blueprint-file-send-history-panel class="mt-3 flex flex-col gap-3 border-t border-[rgba(103,232,249,0.18)] pt-3">
+      <div class="flex min-w-0 items-center justify-between gap-2">
+        <div class="min-w-0">
+          <div class="truncate text-12-medium text-[#f8fdff]">{language.t("blueprint.fileSendHistory.title" as never)}</div>
+          <div class="mt-0.5 line-clamp-2 text-11-regular leading-4 text-[#95afc4]">
+            {language.t("blueprint.fileSendHistory.subtitle" as never)}
+          </div>
+        </div>
+        <Tooltip value={language.t("blueprint.fileSendHistory.refresh" as never)} placement="left">
+          <IconButton
+            icon="reset"
+            variant="ghost"
+            size="small"
+            class="h-7 w-7 shrink-0"
+            disabled={!props.available || props.state.loading}
+            aria-label={language.t("blueprint.fileSendHistory.refresh" as never)}
+            onClick={() => void props.onRefresh()}
+          />
+        </Tooltip>
+      </div>
+      <Show when={props.state.error}>
+        {(error) => (
+          <div class="rounded-sm border border-[#ef4444]/30 bg-[#450a0a]/40 px-2 py-1.5 text-11-regular text-[#fecaca]">
+            {error()}
+          </div>
+        )}
+      </Show>
+      <Show
+        when={props.available}
+        fallback={<div class="rounded-sm border border-[rgba(103,232,249,0.14)] bg-[#020817]/64 px-2 py-3 text-12-regular text-[#95afc4]">{language.t("blueprint.fileSendHistory.unavailable" as never)}</div>}
+      >
+        <Show
+          when={props.state.sessions.length > 0}
+          fallback={
+            <div class="rounded-sm border border-[rgba(103,232,249,0.14)] bg-[#020817]/64 px-2 py-3 text-12-regular text-[#95afc4]">
+              {props.state.loading ? language.t("common.loading") : language.t("blueprint.fileSendHistory.empty" as never)}
+            </div>
+          }
+        >
+          <div data-blueprint-file-send-history-list class="flex flex-col gap-2">
+            <For each={props.state.sessions}>
+              {(summary) => {
+                const title = () => fileSendHistorySessionTitle(summary)
+                const latestTime = () => fileSendHistorySummaryTime(summary)
+                return (
+                  <button
+                    data-blueprint-file-send-history-session
+                    type="button"
+                    class="grid min-h-[88px] w-full grid-cols-[1fr_auto] gap-2 rounded-sm border border-[rgba(103,232,249,0.18)] bg-[#020817]/64 p-2 text-left outline-none transition-colors hover:border-[#67e8f9] focus:border-[#67e8f9]"
+                    onClick={() => props.onOpenSession(summary)}
+                  >
+                    <span class="min-w-0">
+                      <span class="block truncate text-12-medium text-[#f8fdff]" title={title()}>{title()}</span>
+                      <span class="mt-1 block truncate font-mono text-10-regular text-[#67e8f9]" title={summary.sessionKey}>
+                        {summary.sessionKey}
+                      </span>
+                      <span class="mt-1 block truncate text-10-regular text-[#95afc4]">
+                        {latestTime() || "-"} / {summary.latestMessageType || "file"} / {summary.latestStatus || "-"}
+                      </span>
+                      <span class="mt-1 block truncate text-10-regular text-[#dbeafe]" title={summary.latestPath || ""}>
+                        {summary.latestFileName || fileSendHistoryFileName(summary.latestPath) || "-"}
+                      </span>
+                    </span>
+                    <span class="self-start rounded-sm border border-[rgba(103,232,249,0.28)] bg-[#071019] px-2 py-1 text-10-medium text-[#b8fff4]">
+                      {language.t("blueprint.fileSendHistory.recordCount" as never, { count: summary.recordCount } as never)}
+                    </span>
+                  </button>
+                )
+              }}
+            </For>
+          </div>
+        </Show>
+      </Show>
+    </section>
+  )
+}
+
+function BlueprintFileSendHistoryDetailDialog(props: {
+  summary: BlueprintSessionFileSendHistorySummary
+  onLoad: (limit: number) => Promise<BlueprintSessionFileSendHistory>
+}) {
+  const language = useLanguage()
+  const dialog = useDialog()
+  const [state, setState] = createSignal<{
+    loading: boolean
+    records: BlueprintSessionFileSendHistoryRecord[]
+    totalMatches?: number
+    truncated?: boolean
+    error?: string
+  }>({ loading: true, records: [] })
+  const title = () => fileSendHistorySessionTitle(props.summary)
+  const load = async () => {
+    setState((current) => ({ ...current, loading: true, error: undefined }))
+    try {
+      const result = await props.onLoad(200)
+      setState({
+        loading: false,
+        records: Array.isArray(result.records) ? result.records : [],
+        totalMatches: result.totalMatches,
+        truncated: result.truncated,
+      })
+    } catch (error) {
+      setState((current) => ({ ...current, loading: false, error: readableError(error) }))
+    }
+  }
+  onMount(() => void load())
+
+  return (
+    <Dialog title={language.t("blueprint.fileSendHistory.detailTitle" as never, { name: title() } as never)} action={<span aria-hidden="true" />} fit size="x-large">
+      <div data-blueprint-file-send-history-dialog class="flex w-full min-w-0 flex-col gap-3 px-6 pb-4">
+        <div class="flex min-w-0 items-center justify-between gap-2">
+          <div class="min-w-0">
+            <div class="truncate font-mono text-11-regular text-text-weak" title={props.summary.sessionKey}>{props.summary.sessionKey}</div>
+            <div class="mt-1 text-12-regular text-text-weaker">
+              {language.t("blueprint.fileSendHistory.totalRecords" as never, { count: state().totalMatches ?? props.summary.recordCount } as never)}
+            </div>
+          </div>
+          <Button variant="ghost" size="small" icon="reset" disabled={state().loading} onClick={() => void load()}>
+            {language.t("blueprint.fileSendHistory.refresh" as never)}
+          </Button>
+        </div>
+        <Show when={state().error}>
+          {(error) => <div class="rounded-sm bg-[rgba(248,113,113,0.12)] px-2 py-1 text-12-regular text-[#fecaca]">{error()}</div>}
+        </Show>
+        <Show when={state().truncated}>
+          <div class="rounded-sm border border-[rgba(251,191,36,0.26)] bg-[rgba(251,191,36,0.10)] px-2 py-1 text-12-regular text-[#fde68a]">
+            {language.t("blueprint.fileSendHistory.truncated" as never)}
+          </div>
+        </Show>
+        <div class="max-h-[64vh] overflow-auto rounded-sm border border-border-weaker-base bg-background-base">
+          <Show
+            when={state().records.length > 0}
+            fallback={<div class="px-3 py-8 text-center text-13-regular text-text-weaker">{state().loading ? language.t("common.loading") : language.t("blueprint.fileSendHistory.noRecords" as never)}</div>}
+          >
+            <div data-blueprint-file-send-history-table class="min-w-[980px]">
+              <div
+                data-blueprint-file-send-history-header
+                class="sticky top-0 z-10 grid grid-cols-[150px_72px_72px_minmax(170px,1fr)_88px_minmax(140px,0.8fr)_minmax(240px,1.2fr)] gap-3 border-b border-border-weaker-base bg-background-strong px-3 py-2 text-11-medium text-text-weaker"
+              >
+                <div>{language.t("blueprint.fileSendHistory.time" as never)}</div>
+                <div>{language.t("blueprint.fileSendHistory.type" as never)}</div>
+                <div>{language.t("blueprint.fileSendHistory.status" as never)}</div>
+                <div>{language.t("blueprint.fileSendHistory.fileName" as never)}</div>
+                <div>{language.t("blueprint.fileSendHistory.size" as never)}</div>
+                <div>{language.t("blueprint.fileSendHistory.receiver" as never)}</div>
+                <div>{language.t("blueprint.fileSendHistory.path" as never)}</div>
+              </div>
+              <For each={state().records}>
+                {(record) => <BlueprintFileSendHistoryRecordView record={record} />}
+              </For>
+            </div>
+          </Show>
+        </div>
+        <div class="flex justify-end">
+          <Button variant="primary" size="large" onClick={() => dialog.close()}>
+            {language.t("common.close")}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
+
+function BlueprintFileSendHistoryRecordView(props: { record: BlueprintSessionFileSendHistoryRecord }) {
+  const language = useLanguage()
+  const display = () => fileSendHistoryRecordDisplay(props.record)
+  const statusKey = () => excelHistoryStatusKey(props.record.status)
+  const statusLabel = () => {
+    const key = statusKey()
+    if (key === "succeeded") return language.t("blueprint.fileSendHistory.statusSucceeded" as never)
+    if (key === "failed") return language.t("blueprint.fileSendHistory.statusFailed" as never)
+    return display().status
+  }
+
+  return (
+    <div
+      data-blueprint-file-send-history-record
+      class="grid grid-cols-[150px_72px_72px_minmax(170px,1fr)_88px_minmax(140px,0.8fr)_minmax(240px,1.2fr)] gap-3 border-b border-border-weaker-base px-3 py-2 text-12-regular last:border-b-0"
+    >
+      <div class="truncate font-mono text-text-strong" title={display().time}>{display().time}</div>
+      <div class="truncate font-mono text-text-strong" title={display().type}>{display().type}</div>
+      <div
+        class="truncate"
+        title={display().status}
+        classList={{
+          "text-[#bbf7d0]": statusKey() === "succeeded",
+          "text-[#fecaca]": statusKey() === "failed",
+          "text-text-weaker": statusKey() === "other",
+        }}
+      >
+        {statusLabel()}
+      </div>
+      <div class="truncate text-text-strong" title={display().fileName}>{display().fileName}</div>
+      <div class="truncate font-mono text-text-weak" title={display().size}>{display().size}</div>
+      <div class="truncate font-mono text-text-weak" title={display().receiver}>{display().receiver}</div>
+      <div class="truncate text-text-weak" title={display().path}>{display().path}</div>
     </div>
   )
 }
@@ -10428,6 +10689,8 @@ function MultiSelectField(props: {
   emptyLabel: string
   onChange: (values: string[]) => void
 }) {
+  const language = useLanguage()
+  const [searchQuery, setSearchQuery] = createSignal("")
   const locked = () => new Set(props.lockedValues ?? [])
   const editableValues = () => props.values.filter((value) => !locked().has(value))
   const selected = () => new Set([...(props.lockedValues ?? []), ...editableValues()])
@@ -10442,6 +10705,15 @@ function MultiSelectField(props: {
     }
     return Array.from(byValue.values())
   }
+  const normalizedSearchQuery = () => searchQuery().trim().toLowerCase()
+  const visibleOptions = () => {
+    const query = normalizedSearchQuery()
+    if (!query) return options()
+    return options().filter((option) =>
+      [option.value, option.label, option.description ?? ""].join(" ").toLowerCase().includes(query),
+    )
+  }
+  const emptyOptionsLabel = () => (options().length > 0 && normalizedSearchQuery() ? language.t("palette.empty" as never) : props.emptyLabel)
   const label = () => {
     const values = [...(props.lockedValues ?? []), ...editableValues()]
     if (values.length === 0) return props.emptyLabel
@@ -10466,14 +10738,25 @@ function MultiSelectField(props: {
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content
-            class="max-h-64 w-72 overflow-y-auto border-[rgba(103,232,249,0.26)] bg-[#101a28] text-[#f8fdff] shadow-[0_18px_48px_rgba(0,0,0,0.42)] [&_[data-slot=dropdown-menu-checkbox-item]]:items-start"
+            class="max-h-72 w-72 overflow-y-auto border-[rgba(103,232,249,0.26)] bg-[#101a28] text-[#f8fdff] shadow-[0_18px_48px_rgba(0,0,0,0.42)] [&_[data-slot=dropdown-menu-checkbox-item]]:items-start"
             style={BLUEPRINT_THEME}
           >
+            <div class="sticky top-0 z-10 border-b border-[rgba(103,232,249,0.14)] bg-[#101a28] p-2">
+              <input
+                data-blueprint-multiselect-search
+                type="search"
+                class="h-8 w-full rounded-sm border border-[rgba(103,232,249,0.22)] bg-[#020817]/82 px-2 text-12-regular text-[#f8fdff] outline-none placeholder:text-[#6b879c] focus:border-[rgba(103,232,249,0.56)]"
+                value={searchQuery()}
+                placeholder={language.t("common.search.placeholder" as never)}
+                onInput={(event) => setSearchQuery(event.currentTarget.value)}
+                onKeyDown={(event) => event.stopPropagation()}
+              />
+            </div>
             <Show
-              when={options().length > 0}
-              fallback={<div class="px-2 py-2 text-12-regular text-[#95afc4]">{props.emptyLabel}</div>}
+              when={visibleOptions().length > 0}
+              fallback={<div class="px-2 py-2 text-12-regular text-[#95afc4]">{emptyOptionsLabel()}</div>}
             >
-              <For each={options()}>
+              <For each={visibleOptions()}>
                 {(option) => (
                   <DropdownMenu.CheckboxItem
                     checked={selected().has(option.value)}
@@ -10939,6 +11222,7 @@ function normalizeBlueprintSessionSummary(value: Record<string, unknown>): Bluep
     lastRunId: stringValue(value.lastRunId) ?? stringValue(value.last_run_id),
     startNodeId: stringValue(value.startNodeId) ?? stringValue(value.start_node_id),
     messageCount: numberValue(value.messageCount ?? value.message_count),
+    usageCount: numberValue(value.usageCount ?? value.usage_count),
     createdAt: numberValue(value.createdAt ?? value.created_at) || undefined,
     lastTouchedAt: numberValue(value.lastTouchedAt ?? value.last_touched_at) || undefined,
   }
@@ -10963,6 +11247,16 @@ type ExcelHistoryRecordDisplay = {
   workbookTitle: string
   location: string
   locationTitle: string
+}
+
+type FileSendHistoryRecordDisplay = {
+  time: string
+  type: string
+  status: string
+  fileName: string
+  size: string
+  receiver: string
+  path: string
 }
 
 function excelHistorySessionTitle(summary: BlueprintSessionExcelHistorySummary) {
@@ -10999,6 +11293,81 @@ function excelHistoryRecordDisplay(record: BlueprintSessionExcelHistoryRecord): 
     location,
     locationTitle: location,
   }
+}
+
+function fileSendHistorySessionTitle(summary: BlueprintSessionFileSendHistorySummary) {
+  return (
+    stringValue(summary.sessionDisplayName) ??
+    stringValue(summary.blueprintName) ??
+    stringValue(summary.blueprintId) ??
+    stringValue(summary.sessionKey) ??
+    "session"
+  )
+}
+
+function fileSendHistorySummaryTime(summary: BlueprintSessionFileSendHistorySummary) {
+  const timestamp = numberValue(summary.latestTimestampMs)
+  if (timestamp) return formatBlueprintSessionTimestamp(timestamp)
+  return stringValue(summary.latestTime)
+}
+
+function fileSendHistoryRecordTime(record: BlueprintSessionFileSendHistoryRecord) {
+  const timestamp = numberValue(record.timestampMs)
+  if (timestamp) return formatBlueprintSessionTimestamp(timestamp)
+  return excelHistoryTrimMillis(stringValue(record.time))
+}
+
+function fileSendHistoryRecordDisplay(record: BlueprintSessionFileSendHistoryRecord): FileSendHistoryRecordDisplay {
+  const fullPath = stringValue(record.path) ?? ""
+  return {
+    time: fileSendHistoryRecordTime(record) ?? "-",
+    type: fileSendHistoryTypeLabel(record),
+    status: stringValue(record.status) ?? "-",
+    fileName: stringValue(record.fileName) ?? (fileSendHistoryFileName(fullPath) || "-"),
+    size: fileSendHistoryFormatSize(record.sizeBytes === undefined ? Number.NaN : numberValue(record.sizeBytes)),
+    receiver: stringValue(record.receiver) ?? "-",
+    path: fileSendHistoryCompactPath(fullPath),
+  }
+}
+
+function fileSendHistoryTypeLabel(record: BlueprintSessionFileSendHistoryRecord) {
+  const messageType = stringValue(record.messageType)
+  const fileType = stringValue(record.fileType)
+  if (messageType && fileType) return `${messageType}/${fileType}`
+  return messageType ?? fileType ?? "file"
+}
+
+function fileSendHistoryFileName(value: unknown) {
+  const text = stringValue(value)
+  if (!text) return ""
+  const normalized = text.replace(/\\/g, "/")
+  return normalized.split("/").filter(Boolean).pop() ?? text
+}
+
+function fileSendHistoryCompactPath(value: unknown, limit = 92) {
+  const text = stringValue(value)
+  if (!text) return "-"
+  if (text.length <= limit) return text
+  const normalized = text.replace(/\\/g, "/")
+  const fileName = fileSendHistoryFileName(normalized)
+  if (fileName && fileName.length + 8 < limit) {
+    return `${normalized.slice(0, Math.max(12, limit - fileName.length - 5))}.../${fileName}`
+  }
+  return `${text.slice(0, limit - 3)}...`
+}
+
+function fileSendHistoryFormatSize(value: number) {
+  if (!Number.isFinite(value) || value < 0) return "-"
+  if (value < 1024) return `${Math.round(value)} B`
+  const kb = value / 1024
+  if (kb < 1024) return `${formatOneDecimal(kb)} KB`
+  const mb = kb / 1024
+  if (mb < 1024) return `${formatOneDecimal(mb)} MB`
+  return `${formatOneDecimal(mb / 1024)} GB`
+}
+
+function formatOneDecimal(value: number) {
+  return value >= 10 ? value.toFixed(0) : value.toFixed(1)
 }
 
 function excelHistoryStatusKey(status: unknown): "succeeded" | "failed" | "other" {

@@ -112,6 +112,10 @@ PLANNING_TABLE_SKILL_UPDATE_WATCH_INTERVAL_SECONDS = 5.0
 BLUEPRINT_PROJECT_REGISTRY_FILENAME = "blueprint_projects.json"
 POPO_ROBOT_ROUTES_FILENAME = "popo_robot_routes.json"
 POPO_API_BASE = "https://open.popo.netease.com"
+POPO_FILE_SEND_DIRNAME = "file_sends"
+POPO_FILE_SEND_SCHEMA_VERSION = 1
+POPO_FILE_SEND_MAX_BYTES = 20 * 1024 * 1024
+POPO_IMAGE_FILE_TYPES = {"jpg", "jpeg", "gif", "png", "bmp"}
 POPO_STREAMING_CARD_TEMPLATE_UUID = "series_5564199"
 POPO_STREAMING_CARD_KEY = "resultStream"
 POPO_STREAMING_CARD_LAST_MESSAGE = "AI正在回复..."
@@ -679,6 +683,7 @@ class DesktopBlueprintRun:
     live_start_error: str = ""
     planning_status_mismatch_keys: set[str] = field(default_factory=set, repr=False)
     popo_framework_reply_keys: set[str] = field(default_factory=set, repr=False)
+    session_history_context_injected: bool = False
     stream_condition: Any = field(default_factory=threading.Condition)
 
     def summary(self) -> Dict[str, Any]:
@@ -1240,6 +1245,18 @@ class DesktopBlueprintService:
                 category=str(args.get("category", "all") or "all"),
                 limit=int(args.get("limit", 200) or 200),
             )
+        if command == "blueprint.sessions.fileSendHistoryList":
+            project_dir = args.get("projectDir")
+            blueprint_id = args.get("blueprintId")
+            return self.list_blueprint_session_file_send_history(
+                Path(project_dir) if isinstance(project_dir, str) and project_dir.strip() else None,
+                str(blueprint_id) if blueprint_id is not None else None,
+            )
+        if command == "blueprint.sessions.fileSendHistory":
+            return self.blueprint_session_file_send_history(
+                str(args.get("sessionKey", "")).strip(),
+                limit=int(args.get("limit", 200) or 200),
+            )
         if command == "blueprint.sessions.timeline":
             return self.blueprint_session_timeline(
                 str(args.get("sessionKey", "")).strip(),
@@ -1275,6 +1292,7 @@ class DesktopBlueprintService:
             raw_project_dir = args.get("projectDir")
             source_identity = args.get("sourceIdentity")
             session_identity = args.get("sessionIdentity")
+            attachments = normalize_blueprint_message_attachments(args.get("attachments"))
             source = str(args.get("source", "ui"))
             if not isinstance(source_identity, dict):
                 source_identity = {"robotAppKey": str(args.get("popoRobotAppKey", "") or "")}
@@ -1296,6 +1314,7 @@ class DesktopBlueprintService:
                     source_identity=source_identity,
                     session_identity=session_identity,
                     session_key=str(args.get("sessionKey", "") or "").strip() or None,
+                    attachments=attachments,
                 )
             project_dir = request_project_dir(args)
             return self.message_blueprint_session(
@@ -1306,6 +1325,7 @@ class DesktopBlueprintService:
                 source_identity=source_identity,
                 session_identity=session_identity,
                 session_key=str(args.get("sessionKey", "") or "").strip() or None,
+                attachments=attachments,
             )
         if command == "blueprint.popo.config":
             robot_app_key = str(args.get("robotAppKey", "") or args.get("robot_app_key", "") or "").strip()
@@ -1404,6 +1424,7 @@ class DesktopBlueprintService:
                 str(args.get("nodeId", "")).strip(),
                 str(args.get("text", "")),
                 mode=str(args.get("mode", "default")),
+                attachments=normalize_blueprint_message_attachments(args.get("attachments")),
             )
         if command == "blueprint.agentStreamToken":
             return self.agent_stream_token(
@@ -1709,12 +1730,35 @@ class DesktopBlueprintService:
             "Open-Access-Token": token,
         }
 
+    def _invalidate_popo_access_token(self, robot_config: Dict[str, Any]) -> None:
+        app_key = str(robot_config.get("robot_app_key") or "").strip()
+        if not app_key:
+            return
+        with self._lock:
+            self._popo_token_cache.pop(app_key, None)
+
     def _safe_popo_response_json(self, response: Any) -> Dict[str, Any]:
         try:
             data = response.json()
         except Exception:
             return {}
         return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _is_popo_access_token_expired_error(exc: Exception) -> bool:
+        if not isinstance(exc, BlueprintServiceError):
+            return False
+        details = exc.details if isinstance(exc.details, dict) else {}
+        text = " ".join(
+            str(value or "").lower()
+            for value in (
+                exc.code,
+                str(exc),
+                details.get("errmsg"),
+                details.get("error"),
+            )
+        )
+        return "token" in text and "expired" in text
 
     def _summarize_popo_send_error(self, exc: Exception) -> str:
         if isinstance(exc, BlueprintServiceError):
@@ -1771,6 +1815,174 @@ class DesktopBlueprintService:
                 status=502,
             )
         return {"ok": True, "sent": True, "errcode": data.get("errcode")}
+
+    @staticmethod
+    def _popo_file_type_for_path(file_path: Path) -> str:
+        file_type = str(file_path.suffix or "").strip().lower().lstrip(".")
+        return file_type or "bin"
+
+    @staticmethod
+    def _popo_message_type_for_file_type(file_type: str) -> str:
+        return "image" if str(file_type or "").strip().lower() in POPO_IMAGE_FILE_TYPES else "file"
+
+    @staticmethod
+    def _file_md5_hex(file_path: Path) -> str:
+        digest = hashlib.md5()
+        with file_path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _popo_message_id_from_send_data(data: Dict[str, Any], receiver: str) -> str:
+        payload = data.get("data")
+        msg_info = payload.get("msgInfo") if isinstance(payload, dict) else None
+        if not isinstance(msg_info, dict):
+            return ""
+        message_id = str(msg_info.get(str(receiver or "")) or "").strip()
+        if message_id:
+            return message_id
+        for value in msg_info.values():
+            message_id = str(value or "").strip()
+            if message_id:
+                return message_id
+        return ""
+
+    def _register_popo_robot_file(
+        self,
+        *,
+        file_path: Path,
+        file_type: str,
+        token: str,
+    ) -> Dict[str, Any]:
+        try:
+            response = requests.post(
+                f"{POPO_API_BASE}/open-apis/robots/v1/im/file",
+                json={
+                    "fileType": file_type,
+                    "fileName": file_path.name,
+                    "fileMd5": self._file_md5_hex(file_path),
+                },
+                headers=self._popo_api_headers(token),
+                timeout=20,
+            )
+            data = self._safe_popo_response_json(response)
+        except Exception as exc:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_FILE_REGISTER_FAILED",
+                "failed to register POPO robot file",
+                details={"error": str(exc), "fileName": file_path.name},
+                status=502,
+            ) from exc
+        payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+        file_key = str(payload.get("fileKey") or "").strip()
+        upload_url = str(payload.get("uploadUrl") or "").strip()
+        if response.status_code >= 400 or data.get("errcode") != 0 or not file_key or not upload_url:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_FILE_REGISTER_FAILED",
+                "POPO robot file register request failed",
+                details={
+                    "statusCode": response.status_code,
+                    "errcode": data.get("errcode"),
+                    "errmsg": data.get("errmsg"),
+                    "fileName": file_path.name,
+                    "hasFileKey": bool(file_key),
+                    "hasUploadUrl": bool(upload_url),
+                },
+                status=502,
+            )
+        return {
+            "ok": True,
+            "fileKey": file_key,
+            "uploadUrl": upload_url,
+            "errcode": data.get("errcode"),
+        }
+
+    def _upload_popo_robot_file(self, *, file_path: Path, upload_url: str, token: str) -> Dict[str, Any]:
+        try:
+            with file_path.open("rb") as file:
+                response = requests.post(
+                    str(upload_url),
+                    files={"file": (file_path.name, file)},
+                    headers={"Open-Access-Token": token},
+                    timeout=120,
+                )
+            data = self._safe_popo_response_json(response)
+        except Exception as exc:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_FILE_UPLOAD_FAILED",
+                "failed to upload POPO robot file bytes",
+                details={"error": str(exc), "fileName": file_path.name},
+                status=502,
+            ) from exc
+        errcode = data.get("errcode") if data else None
+        if response.status_code >= 400 or (errcode is not None and errcode != 0):
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_FILE_UPLOAD_FAILED",
+                "POPO robot file upload request failed",
+                details={
+                    "statusCode": response.status_code,
+                    "errcode": errcode,
+                    "errmsg": data.get("errmsg") if isinstance(data, dict) else None,
+                    "fileName": file_path.name,
+                },
+                status=502,
+            )
+        return {"ok": True, "uploaded": True, "errcode": errcode}
+
+    def _send_popo_file_key_message(
+        self,
+        *,
+        receiver: str,
+        message_type: str,
+        file_key: str,
+        token: str,
+    ) -> Dict[str, Any]:
+        target = str(receiver or "").strip()
+        msg_type = str(message_type or "").strip()
+        key = str(file_key or "").strip()
+        if not target:
+            raise BlueprintServiceError("BLUEPRINT_POPO_REPLY_TARGET_REQUIRED", "POPO reply receiver is missing", status=400)
+        if msg_type not in {"image", "file"}:
+            raise BlueprintServiceError("BAD_REQUEST", "POPO file message type must be image or file", status=400)
+        if not key:
+            raise BlueprintServiceError("BLUEPRINT_POPO_FILE_KEY_REQUIRED", "POPO fileKey is missing", status=400)
+        try:
+            response = requests.post(
+                f"{POPO_API_BASE}/open-apis/robots/v1/im/send-msg",
+                json={
+                    "receiver": target,
+                    "msgType": msg_type,
+                    "message": {"fileKey": key},
+                },
+                headers=self._popo_api_headers(token),
+                timeout=10,
+            )
+            data = self._safe_popo_response_json(response)
+        except Exception as exc:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_FILE_SEND_FAILED",
+                "failed to send POPO robot file message",
+                details={"error": str(exc)},
+                status=502,
+            ) from exc
+        if response.status_code >= 400 or data.get("errcode") != 0:
+            raise BlueprintServiceError(
+                "BLUEPRINT_POPO_FILE_SEND_FAILED",
+                "POPO send-msg file request failed",
+                details={
+                    "statusCode": response.status_code,
+                    "errcode": data.get("errcode"),
+                    "errmsg": data.get("errmsg"),
+                },
+                status=502,
+            )
+        return {
+            "ok": True,
+            "sent": True,
+            "errcode": data.get("errcode"),
+            "messageId": self._popo_message_id_from_send_data(data, target),
+        }
 
     def _create_popo_streaming_card(
         self,
@@ -2915,9 +3127,77 @@ class DesktopBlueprintService:
         session_key = blueprint_session_key_path_component(str(session.get("sessionKey", "")))
         directory = self._blueprint_session_dir(session_key)
         directory.mkdir(parents=True, exist_ok=True)
-        payload = dict(session)
+        payload = self._with_popo_session_usage_count(dict(session), session_key=session_key)
         payload["schemaVersion"] = BLUEPRINT_SESSION_SCHEMA_VERSION
         self._atomic_write_json(directory / "session.json", payload)
+
+    @staticmethod
+    def _non_negative_int(value: Any) -> int:
+        if isinstance(value, bool):
+            return int(value)
+        try:
+            if value is None or str(value).strip() == "":
+                return 0
+            return max(0, int(float(str(value).strip())))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def _blueprint_session_transcript_usage_count(self, session_key: str) -> int:
+        path = self._blueprint_session_transcript_path(session_key)
+        if not path.is_file():
+            return 0
+        user_message_count = 0
+        queued_or_steered_count = 0
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return 0
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            event_type = str(item.get("type") or "")
+            if event_type == "user_message":
+                user_message_count += 1
+            elif event_type in {"queued_message", "steered_message"}:
+                queued_or_steered_count += 1
+        return max(user_message_count, queued_or_steered_count)
+
+    def _popo_session_usage_count(self, session: Dict[str, Any], *, session_key: str = "") -> int:
+        if str(session.get("source") or "").strip().lower() != "popo":
+            return 0
+        normalized_key = str(session_key or session.get("sessionKey") or "").strip()
+        candidates = [
+            self._non_negative_int(session.get("usageCount", session.get("usage_count"))),
+            self._non_negative_int(session.get("messageCount", session.get("message_count"))),
+        ]
+        if normalized_key:
+            path = self._blueprint_session_path(normalized_key)
+            if path.is_file():
+                try:
+                    existing = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    existing = None
+                if isinstance(existing, dict):
+                    candidates.extend(
+                        [
+                            self._non_negative_int(existing.get("usageCount", existing.get("usage_count"))),
+                            self._non_negative_int(existing.get("messageCount", existing.get("message_count"))),
+                        ]
+                    )
+            candidates.append(self._blueprint_session_transcript_usage_count(normalized_key))
+        return max(candidates or [0])
+
+    def _with_popo_session_usage_count(self, session: Dict[str, Any], *, session_key: str = "") -> Dict[str, Any]:
+        if str(session.get("source") or "").strip().lower() != "popo":
+            return session
+        next_session = dict(session)
+        next_session["usageCount"] = self._popo_session_usage_count(next_session, session_key=session_key)
+        next_session.pop("usage_count", None)
+        return next_session
 
     def _with_popo_session_display_name(self, session: Dict[str, Any]) -> Dict[str, Any]:
         if str(session.get("source") or "").strip().lower() != "popo":
@@ -3067,10 +3347,16 @@ class DesktopBlueprintService:
 
     def _excel_log_response_for_session(self, session_key: str, expression: str) -> Dict[str, Any]:
         normalized_key = blueprint_session_key_path_component(session_key)
+        session = self._load_blueprint_session(normalized_key)
+        usage_count = (
+            self._popo_session_usage_count(session, session_key=normalized_key)
+            if isinstance(session, dict)
+            else 0
+        )
         try:
             start_ms, end_ms = parse_time_range(expression)
             text = render_user_log(self._blueprint_session_dir(normalized_key), start_ms, end_ms)
-            return {
+            response = {
                 "ok": True,
                 "excelLog": True,
                 "sessionKey": normalized_key,
@@ -3078,8 +3364,11 @@ class DesktopBlueprintService:
                 "endMs": end_ms,
                 "message": text,
             }
+            if usage_count:
+                response["usageCount"] = usage_count
+            return response
         except Exception as exc:
-            return {
+            response = {
                 "ok": False,
                 "excelLog": True,
                 "sessionKey": normalized_key,
@@ -3090,6 +3379,9 @@ class DesktopBlueprintService:
                     "/excel-log YYYY M D H M S [ms]-YYYY M D H M S [ms]"
                 ),
             }
+            if usage_count:
+                response["usageCount"] = usage_count
+            return response
 
     def _record_blueprint_session_terminator(
         self,
@@ -3190,6 +3482,11 @@ class DesktopBlueprintService:
         session = self._load_blueprint_session(normalized_key)
         if session is None and not self._blueprint_session_transcript_path(normalized_key).is_file():
             raise BlueprintServiceError("BLUEPRINT_SESSION_NOT_FOUND", "blueprint session was not found", status=404)
+        if session is not None:
+            normalized_session = self._with_popo_session_usage_count(session, session_key=normalized_key)
+            if normalized_session != session:
+                session = normalized_session
+                self._save_blueprint_session(session)
         return {
             "ok": True,
             "sessionKey": normalized_key,
@@ -3229,6 +3526,7 @@ class DesktopBlueprintService:
                         "source": str(session.get("source") or ""),
                         "status": str(session.get("status") or ""),
                         "lastTouchedAt": session.get("lastTouchedAt"),
+                        "usageCount": session.get("usageCount"),
                         "recordCount": int(history.get("totalMatches") or len(records)),
                         "latestTimestampMs": int(latest.get("timestampMs") or 0),
                         "latestTime": str(latest.get("time") or ""),
@@ -3265,6 +3563,10 @@ class DesktopBlueprintService:
         session = self._load_blueprint_session(normalized_key)
         if not session or session.get("deleted") or session.get("superseded"):
             raise BlueprintServiceError("BLUEPRINT_SESSION_NOT_FOUND", "blueprint session was not found", status=404)
+        normalized_session = self._with_popo_session_usage_count(session, session_key=normalized_key)
+        if normalized_session != session:
+            session = normalized_session
+            self._save_blueprint_session(session)
         try:
             result = query_excel_history(
                 self._blueprint_session_dir(normalized_key),
@@ -3277,10 +3579,148 @@ class DesktopBlueprintService:
         result["session"] = session
         return result
 
+    def _blueprint_session_file_sends_dir(self, session_key: str) -> Path:
+        return self._blueprint_session_dir(session_key) / POPO_FILE_SEND_DIRNAME
+
+    def _write_blueprint_session_file_send_record(
+        self,
+        session_key: str,
+        record: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized_key = blueprint_session_key_path_component(session_key)
+        now_value = float(self.now())
+        timestamp_ms = int(record.get("timestampMs") or now_value * 1000)
+        record_id = str(record.get("recordId") or uuid.uuid4().hex).strip()
+        payload = {
+            "schemaVersion": POPO_FILE_SEND_SCHEMA_VERSION,
+            "recordId": record_id,
+            "time": str(record.get("time") or _iso_time(timestamp_ms / 1000.0) or ""),
+            "timestampMs": timestamp_ms,
+            "sessionKey": normalized_key,
+            **dict(record),
+        }
+        payload["recordId"] = record_id
+        payload["sessionKey"] = normalized_key
+        payload["timestampMs"] = timestamp_ms
+        if not payload.get("time"):
+            payload["time"] = _iso_time(timestamp_ms / 1000.0)
+        safe_name = f"{timestamp_ms:013d}_{record_id[:12]}.json"
+        directory = self._blueprint_session_file_sends_dir(normalized_key)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / safe_name
+        self._atomic_write_json(path, payload)
+        return payload
+
+    def _read_blueprint_session_file_send_records(
+        self,
+        session_key: str,
+        *,
+        limit: int = 200,
+    ) -> tuple[list[Dict[str, Any]], int]:
+        normalized_key = blueprint_session_key_path_component(session_key)
+        directory = self._blueprint_session_file_sends_dir(normalized_key)
+        if not directory.is_dir():
+            return [], 0
+        records: list[Dict[str, Any]] = []
+        for path in directory.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            item = dict(data)
+            item["sessionKey"] = normalized_key
+            item.setdefault("recordId", path.stem)
+            records.append(item)
+        records.sort(
+            key=lambda item: (
+                int(item.get("timestampMs") or 0),
+                str(item.get("time") or ""),
+                str(item.get("recordId") or ""),
+            ),
+            reverse=True,
+        )
+        total = len(records)
+        max_rows = max(1, min(int(limit or 200), 1000))
+        return records[:max_rows], total
+
+    def list_blueprint_session_file_send_history(
+        self,
+        project_dir: Optional[Path] = None,
+        blueprint_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        summaries: list[Dict[str, Any]] = []
+        try:
+            sessions = self.list_blueprint_sessions(project_dir, blueprint_id)
+            for session in sessions:
+                session_key = str(session.get("sessionKey") or "").strip()
+                if not session_key:
+                    continue
+                records, total = self._read_blueprint_session_file_send_records(session_key, limit=1)
+                if not records:
+                    continue
+                latest = records[0]
+                summaries.append(
+                    {
+                        "sessionKey": session_key,
+                        "sessionDisplayName": str(session.get("sessionDisplayName") or ""),
+                        "blueprintName": str(session.get("blueprintName") or ""),
+                        "blueprintId": str(session.get("blueprintId") or ""),
+                        "source": str(session.get("source") or ""),
+                        "status": str(session.get("status") or ""),
+                        "lastTouchedAt": session.get("lastTouchedAt"),
+                        "usageCount": session.get("usageCount"),
+                        "recordCount": total,
+                        "latestTimestampMs": int(latest.get("timestampMs") or 0),
+                        "latestTime": str(latest.get("time") or ""),
+                        "latestFileName": str(latest.get("fileName") or ""),
+                        "latestStatus": str(latest.get("status") or ""),
+                        "latestMessageType": str(latest.get("messageType") or ""),
+                        "latestPath": str(latest.get("path") or ""),
+                    }
+                )
+        except ValueError as exc:
+            raise BlueprintServiceError("BAD_REQUEST", str(exc), status=400) from exc
+        summaries.sort(
+            key=lambda item: (
+                int(item.get("latestTimestampMs") or 0),
+                float(item.get("lastTouchedAt") or 0),
+                str(item.get("sessionKey") or ""),
+            ),
+            reverse=True,
+        )
+        return {"ok": True, "count": len(summaries), "sessions": summaries}
+
+    def blueprint_session_file_send_history(
+        self,
+        session_key: str,
+        *,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        normalized_key = blueprint_session_key_path_component(session_key)
+        session = self._load_blueprint_session(normalized_key)
+        if not session or session.get("deleted") or session.get("superseded"):
+            raise BlueprintServiceError("BLUEPRINT_SESSION_NOT_FOUND", "blueprint session was not found", status=404)
+        normalized_session = self._with_popo_session_usage_count(session, session_key=normalized_key)
+        if normalized_session != session:
+            session = normalized_session
+            self._save_blueprint_session(session)
+        records, total = self._read_blueprint_session_file_send_records(normalized_key, limit=limit)
+        return {
+            "ok": True,
+            "sessionKey": normalized_key,
+            "session": session,
+            "records": records,
+            "count": len(records),
+            "totalMatches": total,
+            "truncated": total > len(records),
+        }
+
     def _atomic_write_json(self, path: Path, payload: Dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(
-            f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+            f".tmp-{uuid.uuid4().hex[:12]}.json"
         )
         temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
         try:
@@ -4005,8 +4445,15 @@ class DesktopBlueprintService:
         )
         return queued
 
-    def _build_blueprint_session_context(self, session: Dict[str, Any], current_message: str) -> str:
+    def _build_blueprint_session_context(
+        self,
+        session: Dict[str, Any],
+        current_message: str,
+        *,
+        attachments: Optional[Sequence[Any]] = None,
+    ) -> str:
         lines: list[str] = []
+        clean_attachments = normalize_blueprint_message_attachments(attachments)
         session_key = str(session.get("sessionKey") or "").strip()
         if session_key:
             lines.append("[BlueprintSession]")
@@ -4037,6 +4484,88 @@ class DesktopBlueprintService:
             lines.append("")
         lines.append("[Current POPO Message]")
         lines.append(f"[popo_user] {str(current_message).strip()}")
+        if clean_attachments:
+            lines.append("")
+            lines.append("[Current POPO Attachments]")
+            for index, attachment in enumerate(clean_attachments, start=1):
+                kind = str(attachment.get("kind") or "file").strip() or "file"
+                name = str(attachment.get("name") or "").strip()
+                mime = str(attachment.get("mime") or "").strip()
+                path = str(attachment.get("path") or "").strip()
+                url = str(attachment.get("url") or "").strip()
+                identifier = str(attachment.get("id") or "").strip()
+                size = attachment.get("size")
+                parts = [f"{index}. kind={kind}"]
+                if name:
+                    parts.append(f"name={name}")
+                if mime:
+                    parts.append(f"mime={mime}")
+                if isinstance(size, int) and size >= 0:
+                    parts.append(f"size={size}")
+                if path:
+                    parts.append(f"path={path}")
+                elif url:
+                    parts.append(f"url={url}")
+                if identifier:
+                    parts.append(f"id={identifier}")
+                if attachment.get("unresolved"):
+                    parts.append("unresolved=true")
+                error = str(attachment.get("error") or "").strip()
+                if error:
+                    parts.append(f"error={error}")
+                lines.append(" ".join(parts))
+        context = "\n".join(lines).strip()
+        if len(context) <= BLUEPRINT_SESSION_CONTEXT_CHAR_LIMIT:
+            return context
+        return context[-BLUEPRINT_SESSION_CONTEXT_CHAR_LIMIT:]
+
+    def _build_blueprint_session_current_message_context(
+        self,
+        session: Dict[str, Any],
+        current_message: str,
+        *,
+        attachments: Optional[Sequence[Any]] = None,
+    ) -> str:
+        lines: list[str] = []
+        clean_attachments = normalize_blueprint_message_attachments(attachments)
+        session_key = str(session.get("sessionKey") or "").strip()
+        if session_key:
+            lines.append("[BlueprintSession]")
+            lines.append(f"sessionKey: {session_key}")
+            lines.append(f"source: {str(session.get('source') or '').strip() or 'unknown'}")
+            lines.append("")
+        lines.append("[Current POPO Message]")
+        lines.append(f"[popo_user] {str(current_message).strip()}")
+        if clean_attachments:
+            lines.append("")
+            lines.append("[Current POPO Attachments]")
+            for index, attachment in enumerate(clean_attachments, start=1):
+                kind = str(attachment.get("kind") or "file").strip() or "file"
+                name = str(attachment.get("name") or "").strip()
+                mime = str(attachment.get("mime") or "").strip()
+                path = str(attachment.get("path") or "").strip()
+                url = str(attachment.get("url") or "").strip()
+                identifier = str(attachment.get("id") or "").strip()
+                size = attachment.get("size")
+                parts = [f"{index}. kind={kind}"]
+                if name:
+                    parts.append(f"name={name}")
+                if mime:
+                    parts.append(f"mime={mime}")
+                if isinstance(size, int) and size >= 0:
+                    parts.append(f"size={size}")
+                if path:
+                    parts.append(f"path={path}")
+                elif url:
+                    parts.append(f"url={url}")
+                if identifier:
+                    parts.append(f"id={identifier}")
+                if attachment.get("unresolved"):
+                    parts.append("unresolved=true")
+                error = str(attachment.get("error") or "").strip()
+                if error:
+                    parts.append(f"error={error}")
+                lines.append(" ".join(parts))
         context = "\n".join(lines).strip()
         if len(context) <= BLUEPRINT_SESSION_CONTEXT_CHAR_LIMIT:
             return context
@@ -4067,6 +4596,13 @@ class DesktopBlueprintService:
             session = self._maybe_upgrade_popo_session_key(session)
             if session.get("deleted") or session.get("superseded"):
                 continue
+            normalized_session = self._with_popo_session_usage_count(
+                session,
+                session_key=str(session.get("sessionKey") or ""),
+            )
+            if normalized_session != session:
+                session = normalized_session
+                self._save_blueprint_session(session)
             active_run_id = str(session.get("activeRunId") or "")
             if active_run_id:
                 with self._lock:
@@ -4128,6 +4664,13 @@ class DesktopBlueprintService:
             session = self._maybe_upgrade_popo_session_key(session)
             if session.get("deleted") or session.get("superseded"):
                 continue
+            normalized_session = self._with_popo_session_usage_count(
+                session,
+                session_key=str(session.get("sessionKey") or ""),
+            )
+            if normalized_session != session:
+                session = normalized_session
+                self._save_blueprint_session(session)
             sessions.append(dict(session))
         return sorted(
             sessions,
@@ -4175,6 +4718,7 @@ class DesktopBlueprintService:
         session["queuedMessages"] = []
         session["lastTouchedAt"] = now
         self._record_blueprint_session_terminator(session, actor=actor)
+        session = self._with_popo_session_usage_count(session, session_key=normalized_key)
         self._save_blueprint_session(session)
         self._append_blueprint_session_event(
             normalized_key,
@@ -4185,13 +4729,16 @@ class DesktopBlueprintService:
                 "previousStatus": previous_status,
             },
         )
-        return {
+        response = {
             "ok": True,
             "sessionKey": normalized_key,
             "terminated": True,
             "previousStatus": previous_status,
             "session": session,
         }
+        if str(session.get("source") or "").strip().lower() == "popo":
+            response["usageCount"] = self._non_negative_int(session.get("usageCount"))
+        return response
 
     def terminate_blueprint_session(
         self,
@@ -4456,11 +5003,12 @@ class DesktopBlueprintService:
         session["status"] = "idle"
         session["deleted"] = False
         session["lastTouchedAt"] = now
+        session = self._with_popo_session_usage_count(session, session_key=normalized_key)
         self._save_blueprint_session(session)
         transcript_path = self._blueprint_session_transcript_path(normalized_key)
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_path.write_text("", encoding="utf-8")
-        return {
+        response = {
             "ok": True,
             "sessionKey": normalized_key,
             "cleared": True,
@@ -4469,31 +5017,35 @@ class DesktopBlueprintService:
             "resetPending": False,
             "session": session,
         }
+        if str(session.get("source") or "").strip().lower() == "popo":
+            response["usageCount"] = self._non_negative_int(session.get("usageCount"))
+        return response
 
     def _delete_blueprint_session_history_paths(self, session_key: str) -> tuple[list[str], list[Dict[str, str]]]:
         normalized_key = blueprint_session_key_path_component(session_key)
         session_dir = self._blueprint_session_dir(normalized_key)
         deleted_paths: list[str] = []
         delete_errors: list[Dict[str, str]] = []
-        excel_ops_dir = session_dir / "excel_ops"
-        if not excel_ops_dir.exists():
-            return deleted_paths, delete_errors
-        try:
-            resolved_session_dir = session_dir.resolve()
-            resolved_excel_ops_dir = excel_ops_dir.resolve()
-            if resolved_excel_ops_dir == resolved_session_dir or resolved_session_dir not in resolved_excel_ops_dir.parents:
-                raise BlueprintServiceError(
-                    "BLUEPRINT_SESSION_HISTORY_PATH_INVALID",
-                    "refusing to delete a path outside the blueprint session directory",
-                    details={"sessionKey": normalized_key, "path": str(excel_ops_dir)},
-                )
-            if excel_ops_dir.is_dir():
-                shutil.rmtree(excel_ops_dir)
-            else:
-                excel_ops_dir.unlink()
-            deleted_paths.append(str(excel_ops_dir))
-        except Exception as exc:
-            delete_errors.append({"path": str(excel_ops_dir), "error": str(exc)})
+        for child_name in ("excel_ops", POPO_FILE_SEND_DIRNAME):
+            history_dir = session_dir / child_name
+            if not history_dir.exists():
+                continue
+            try:
+                resolved_session_dir = session_dir.resolve()
+                resolved_history_dir = history_dir.resolve()
+                if resolved_history_dir == resolved_session_dir or resolved_session_dir not in resolved_history_dir.parents:
+                    raise BlueprintServiceError(
+                        "BLUEPRINT_SESSION_HISTORY_PATH_INVALID",
+                        "refusing to delete a path outside the blueprint session directory",
+                        details={"sessionKey": normalized_key, "path": str(history_dir)},
+                    )
+                if history_dir.is_dir():
+                    shutil.rmtree(history_dir)
+                else:
+                    history_dir.unlink()
+                deleted_paths.append(str(history_dir))
+            except Exception as exc:
+                delete_errors.append({"path": str(history_dir), "error": str(exc)})
         return deleted_paths, delete_errors
 
     def clear_blueprint_session_history(
@@ -4677,7 +5229,7 @@ class DesktopBlueprintService:
         popo_group_id = str(identity.get("popoGroupId") or identity.get("sourceGroupId") or "").strip()
         if not (popo_user_id or popo_session_id or popo_group_id):
             return None
-        matches: list[tuple[int, float, str, str, Dict[str, Any]]] = []
+        matches: list[tuple[int, float, str, int, str, Dict[str, Any]]] = []
         for binding in bindings:
             pool_key = self._popo_binding_pool_key(binding, robot_app_key)
             if not pool_key:
@@ -4719,18 +5271,20 @@ class DesktopBlueprintService:
                 if session_robot and binding_robot and session_robot != binding_robot:
                     continue
                 exact_blueprint = int(str(session.get("blueprintId") or "") == str(binding.get("blueprintId") or ""))
+                saved_named_binding = int(named_session_key and not str(binding.get("activeRunId") or "").strip())
                 matches.append(
                     (
                         exact_blueprint,
                         float(session.get("lastTouchedAt") or session.get("createdAt") or 0.0),
                         str(session.get("sessionKey") or key),
+                        saved_named_binding,
                         str(binding.get("blueprintStructureId") or ""),
                         binding,
                     )
                 )
         if not matches:
             return None
-        return sorted(matches, key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)[0][4]
+        return sorted(matches, key=lambda item: (item[0], item[1], item[2], item[3], item[4]), reverse=True)[0][5]
 
     def _current_open_popo_binding(self, bindings: list[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         registry = self._read_blueprint_project_registry()
@@ -4895,6 +5449,7 @@ class DesktopBlueprintService:
         source_identity: Optional[Dict[str, Any]] = None,
         session_identity: Optional[Dict[str, Any]] = None,
         session_key: Optional[str] = None,
+        attachments: Optional[Sequence[Any]] = None,
     ) -> Dict[str, Any]:
         if _is_blueprint_session_help_command(message):
             return _blueprint_session_direct_command_help_response(session_key or "")
@@ -4913,6 +5468,7 @@ class DesktopBlueprintService:
             session_identity=session_identity or {},
             session_key=session_key,
             popo_binding=binding,
+            attachments=attachments,
         )
 
     def _queue_blueprint_session_message(
@@ -4923,19 +5479,133 @@ class DesktopBlueprintService:
         *,
         source: str,
         session_key: str,
-        ) -> Dict[str, Any]:
+        attachments: Optional[Sequence[Any]] = None,
+        include_history_context: bool = True,
+        fallback_reason: str = "",
+    ) -> Dict[str, Any]:
         start_node_id = str(run.start_node_id or document_start_node_id(run.document))
         current_text = str(text or "").strip()
         dispatch_text = current_text
-        task_text = self._build_blueprint_session_context(session, current_text)
+        clean_attachments = normalize_blueprint_message_attachments(attachments)
+        task_text = (
+            self._build_blueprint_session_context(session, current_text, attachments=clean_attachments)
+            if include_history_context
+            else self._build_blueprint_session_current_message_context(
+                session,
+                current_text,
+                attachments=clean_attachments,
+            )
+        )
         queued = self.queue_agent_message(
             run.run_id,
             start_node_id,
             task_text,
             mode="top",
-            merge_key=f"blueprint-session:{session_key}:{start_node_id}",
+            merge_key=None if clean_attachments else f"blueprint-session:{session_key}:{start_node_id}",
             merge_append_text=dispatch_text or current_text,
+            attachments=clean_attachments,
         )
+        now = float(self.now())
+        self._configure_run_session_tools(
+            run,
+            source=source,
+            session_key=session_key,
+            start_node_id=start_node_id,
+            now=now,
+        )
+        if include_history_context:
+            with self._lock:
+                run.session_history_context_injected = True
+        session["status"] = "running"
+        session["activeRunId"] = run.run_id
+        session["lastRunId"] = run.run_id
+        session["assignedBlueprintId"] = run.blueprint_id
+        session["startNodeId"] = start_node_id
+        session["queuedMessages"] = []
+        session["queuedMessageCount"] = 0
+        session["lastTouchedAt"] = now
+        self._save_blueprint_session(session)
+        self._append_blueprint_session_event(
+            session_key,
+            {
+                "type": "queued_message",
+                "source": source,
+                "message": dispatch_text or current_text,
+                "attachments": clean_attachments,
+                "runId": run.run_id,
+                "startNodeId": start_node_id,
+                "historyContextInjected": bool(include_history_context),
+                "conversationBackend": self._conversation_backend_for_node(run, start_node_id),
+                **({"fallbackReason": fallback_reason} if fallback_reason else {}),
+            },
+        )
+        return queued
+
+    def _conversation_backend_for_node(self, run: DesktopBlueprintRun, node_id: str) -> str:
+        graph = getattr(run, "graph", None)
+        node = graph.agent_nodes.get(node_id) if hasattr(graph, "agent_nodes") else None
+        adapter_options = dict(getattr(node, "adapter_options", {}) or {}) if node is not None else {}
+        popo_entry = dict(getattr(node, "popo_entry", {}) or {}) if node is not None else {}
+        if bool(popo_entry.get("enabled")):
+            return "codex_app_server"
+        value = (
+            adapter_options.get("conversation_backend")
+            or adapter_options.get("codex_backend")
+            or adapter_options.get("backend")
+            or "exec"
+        )
+        normalized = str(value or "exec").strip().lower().replace("-", "_")
+        return "codex_app_server" if normalized in {"app_server", "codex_app_server"} else "exec"
+
+    def _runtime_agent_busy_for_steer(self, run: DesktopBlueprintRun, node_id: str) -> bool:
+        try:
+            status = self._runtime_call(
+                run,
+                lambda: run.runtime.status_snapshot(graph=run.graph, recent_events_limit=0),
+                timeout=LIVE_RUNTIME_STATUS_TIMEOUT_SECONDS,
+            )
+            agents = status.get("agents") if isinstance(status, dict) else {}
+            info = agents.get(node_id) if isinstance(agents, dict) else None
+            if not isinstance(info, dict):
+                return False
+            state = str(info.get("state") or "").strip()
+            busy_count = int(info.get("busy_count") or 0)
+            return busy_count > 0 and state not in {"idle", "queued", "timed_out"}
+        except Exception:
+            return True
+
+    def _steer_blueprint_session_message(
+        self,
+        run: DesktopBlueprintRun,
+        session: Dict[str, Any],
+        text: str,
+        *,
+        source: str,
+        session_key: str,
+        attachments: Optional[Sequence[Any]] = None,
+    ) -> Dict[str, Any]:
+        start_node_id = str(run.start_node_id or document_start_node_id(run.document))
+        node = run.graph.agent_nodes.get(start_node_id)
+        if node is None:
+            return {"ok": False, "steered": False, "fallbackReason": "start_node_not_found"}
+        current_text = str(text or "").strip()
+        clean_attachments = normalize_blueprint_message_attachments(attachments)
+        task_text = self._build_blueprint_session_current_message_context(
+            session,
+            current_text,
+            attachments=clean_attachments,
+        )
+        result = self._async_loop.run(
+            self._steer_agent_message_for_runtime(
+                run,
+                node,
+                task_text,
+                attachments=clean_attachments,
+            ),
+            timeout=20,
+        )
+        if not bool(result.get("ok")):
+            return result
         now = float(self.now())
         self._configure_run_session_tools(
             run,
@@ -4956,14 +5626,18 @@ class DesktopBlueprintService:
         self._append_blueprint_session_event(
             session_key,
             {
-                "type": "queued_message",
+                "type": "steered_message",
                 "source": source,
-                "message": dispatch_text or current_text,
+                "message": current_text,
+                "attachments": clean_attachments,
                 "runId": run.run_id,
                 "startNodeId": start_node_id,
+                "conversationBackend": result.get("conversationBackend") or self._conversation_backend_for_node(run, start_node_id),
+                "conversationId": result.get("conversationId") or "",
+                "activeTurnId": result.get("activeTurnId") or "",
             },
         )
-        return queued
+        return result
 
     def _configure_run_session_tools(
         self,
@@ -5088,8 +5762,12 @@ class DesktopBlueprintService:
         session_identity: Optional[Dict[str, Any]] = None,
         session_key: Optional[str] = None,
         popo_binding: Optional[Dict[str, Any]] = None,
+        attachments: Optional[Sequence[Any]] = None,
     ) -> Dict[str, Any]:
         text = str(message or "").strip()
+        clean_attachments = normalize_blueprint_message_attachments(attachments)
+        if not text and clean_attachments:
+            text = "[attachment]"
         if not text:
             raise BlueprintServiceError("BAD_REQUEST", "message must be a non-empty string")
         if _is_blueprint_session_help_command(text):
@@ -5206,86 +5884,153 @@ class DesktopBlueprintService:
             if normalized_source == "popo"
             else ""
         )
-        loaded_session = self._load_blueprint_session(normalized_key)
-        if loaded_session and loaded_session.get("superseded"):
-            loaded_session = None
-        session = loaded_session or {
-            "sessionKey": normalized_key,
-            "sessionDisplayName": session_display_name,
-            "projectDir": str(validate_project_dir(project_dir)),
-            "sessionScopeKey": pool_key,
-            "robotAppKey": robot_app_key,
-            "blueprintId": assigned_blueprint_id,
-            "assignedBlueprintId": "",
-            "blueprintName": blueprint_name,
-            "blueprintStructureId": structure_id,
-            "source": normalized_source,
-            "popoUserId": str(popo_user_id or ""),
-            "popoSessionId": str(popo_session_id or ""),
-            "popoGroupId": str(popo_group_id or ""),
-            "popoReplyTo": str(popo_reply_to or ""),
-            "popoSessionType": str(popo_session_type or ""),
-            "status": "idle",
-            "activeRunId": "",
-            "lastRunId": "",
-            "contextSummary": "",
-            "messageCount": 0,
-            "createdAt": now,
-            "lastTouchedAt": now,
-            "deleted": False,
-        }
-        session.update(
-            {
+        with self._lock:
+            loaded_session = self._load_blueprint_session(normalized_key)
+            if loaded_session and loaded_session.get("superseded"):
+                loaded_session = None
+            session = loaded_session or {
+                "sessionKey": normalized_key,
+                "sessionDisplayName": session_display_name,
                 "projectDir": str(validate_project_dir(project_dir)),
-                "sessionScopeKey": str(session.get("sessionScopeKey") or pool_key),
-                "robotAppKey": str(session.get("robotAppKey") or robot_app_key),
-                "sessionDisplayName": str(session_display_name or session.get("sessionDisplayName") or ""),
-                "blueprintId": str(session.get("blueprintId") or assigned_blueprint_id),
-                "blueprintName": str(session.get("blueprintName") or blueprint_name),
+                "sessionScopeKey": pool_key,
+                "robotAppKey": robot_app_key,
+                "blueprintId": assigned_blueprint_id,
+                "assignedBlueprintId": "",
+                "blueprintName": blueprint_name,
                 "blueprintStructureId": structure_id,
                 "source": normalized_source,
-                "popoUserId": str(popo_user_id or session.get("popoUserId") or ""),
-                "popoSessionId": str(popo_session_id or session.get("popoSessionId") or ""),
-                "popoGroupId": str(popo_group_id or session.get("popoGroupId") or ""),
-                "popoReplyTo": str(popo_reply_to or session.get("popoReplyTo") or ""),
-                "popoSessionType": str(popo_session_type or session.get("popoSessionType") or ""),
-                "startNodeId": start_node_id,
-                "deleted": False,
+                "popoUserId": str(popo_user_id or ""),
+                "popoSessionId": str(popo_session_id or ""),
+                "popoGroupId": str(popo_group_id or ""),
+                "popoReplyTo": str(popo_reply_to or ""),
+                "popoSessionType": str(popo_session_type or ""),
+                "status": "idle",
+                "activeRunId": "",
+                "lastRunId": "",
+                "contextSummary": "",
+                "messageCount": 0,
+                "createdAt": now,
                 "lastTouchedAt": now,
-                "messageCount": int(session.get("messageCount") or 0) + 1,
+                "deleted": False,
             }
-        )
-        self._save_blueprint_session(session)
-        self._append_blueprint_session_event(
-            normalized_key,
-            {
-                "type": "user_message",
-                "source": normalized_source,
-                "message": text,
-                "startNodeId": start_node_id,
-                "replyTo": popo_reply_to,
-                "sessionType": popo_session_type,
-            },
-        )
+            usage_count = self._popo_session_usage_count(session, session_key=normalized_key)
+            session.update(
+                {
+                    "projectDir": str(validate_project_dir(project_dir)),
+                    "sessionScopeKey": str(session.get("sessionScopeKey") or pool_key),
+                    "robotAppKey": str(session.get("robotAppKey") or robot_app_key),
+                    "sessionDisplayName": str(session_display_name or session.get("sessionDisplayName") or ""),
+                    "blueprintId": str(session.get("blueprintId") or assigned_blueprint_id),
+                    "blueprintName": str(session.get("blueprintName") or blueprint_name),
+                    "blueprintStructureId": structure_id,
+                    "source": normalized_source,
+                    "popoUserId": str(popo_user_id or session.get("popoUserId") or ""),
+                    "popoSessionId": str(popo_session_id or session.get("popoSessionId") or ""),
+                    "popoGroupId": str(popo_group_id or session.get("popoGroupId") or ""),
+                    "popoReplyTo": str(popo_reply_to or session.get("popoReplyTo") or ""),
+                    "popoSessionType": str(popo_session_type or session.get("popoSessionType") or ""),
+                    "startNodeId": start_node_id,
+                    "deleted": False,
+                    "lastTouchedAt": now,
+                    "messageCount": int(session.get("messageCount") or 0) + 1,
+                }
+            )
+            if normalized_source == "popo":
+                session["usageCount"] = usage_count + 1
+            self._save_blueprint_session(session)
+            session = self._with_popo_session_usage_count(session, session_key=normalized_key)
+            self._append_blueprint_session_event(
+                normalized_key,
+                {
+                    "type": "user_message",
+                    "source": normalized_source,
+                    "message": text,
+                    "attachments": clean_attachments,
+                    "startNodeId": start_node_id,
+                    "replyTo": popo_reply_to,
+                    "sessionType": popo_session_type,
+                },
+            )
 
         active_run = self._active_run_for_session(normalized_key)
         if active_run is not None:
             if normalized_source == "popo":
                 self._begin_popo_progress_card_for_session(active_run, session)
+            include_history_context = not bool(active_run.session_history_context_injected)
+            conversation_backend = self._conversation_backend_for_node(active_run, start_node_id)
+            steer_result: Dict[str, Any] = {}
+            fallback_reason = ""
+            if (
+                normalized_source == "popo"
+                and conversation_backend == "codex_app_server"
+                and not include_history_context
+                and self._runtime_agent_busy_for_steer(active_run, start_node_id)
+            ):
+                try:
+                    steer_result = self._steer_blueprint_session_message(
+                        active_run,
+                        session,
+                        text,
+                        source=normalized_source,
+                        session_key=normalized_key,
+                        attachments=clean_attachments,
+                    )
+                except FutureTimeoutError:
+                    steer_result = {
+                        "ok": False,
+                        "steered": False,
+                        "fallbackReason": "steer_timeout",
+                    }
+                except Exception as exc:
+                    steer_result = {
+                        "ok": False,
+                        "steered": False,
+                        "fallbackReason": str(exc) or exc.__class__.__name__,
+                    }
+                if bool(steer_result.get("ok")):
+                    return {
+                        "ok": True,
+                        "queued": False,
+                        "steered": True,
+                        "sameAgentSession": True,
+                        "session": dict(session),
+                        "sessionKey": normalized_key,
+                        **({"usageCount": self._non_negative_int(session.get("usageCount"))} if normalized_source == "popo" else {}),
+                        "runId": active_run.run_id,
+                        "conversationBackend": steer_result.get("conversationBackend") or conversation_backend,
+                        "conversationId": steer_result.get("conversationId") or "",
+                        "activeTurnId": steer_result.get("activeTurnId") or "",
+                        "fallbackReason": "",
+                        "steer": steer_result,
+                    }
+                fallback_reason = str(
+                    steer_result.get("fallbackReason")
+                    or steer_result.get("error")
+                    or "steer_rejected"
+                )
             queued = self._queue_blueprint_session_message(
                 active_run,
                 session,
                 text,
                 source=normalized_source,
                 session_key=normalized_key,
+                attachments=clean_attachments,
+                include_history_context=include_history_context,
+                fallback_reason=fallback_reason,
             )
             return {
                 "ok": True,
                 "queued": True,
-                "session": session,
+                "steered": False,
+                "sameAgentSession": True,
+                "session": dict(session),
                 "sessionKey": normalized_key,
+                **({"usageCount": self._non_negative_int(session.get("usageCount"))} if normalized_source == "popo" else {}),
                 "runId": active_run.run_id,
                 "queue": queued,
+                "conversationBackend": conversation_backend,
+                "conversationId": "",
+                "fallbackReason": fallback_reason,
             }
 
         preflight = self._blueprint_session_preflight(project_dir, assigned_blueprint_id)
@@ -5319,6 +6064,8 @@ class DesktopBlueprintService:
             text,
             source=normalized_source,
             session_key=normalized_key,
+            attachments=clean_attachments,
+            include_history_context=True,
         )
         self._append_blueprint_session_event(
             normalized_key,
@@ -5331,11 +6078,17 @@ class DesktopBlueprintService:
         return {
             "ok": True,
             "queued": True,
-            "session": session,
+            "steered": False,
+            "sameAgentSession": False,
+            "session": dict(session),
             "sessionKey": normalized_key,
+            **({"usageCount": self._non_negative_int(session.get("usageCount"))} if normalized_source == "popo" else {}),
             "runId": target_run.run_id,
             "run": target_run.summary(),
             "queue": queued,
+            "conversationBackend": self._conversation_backend_for_node(target_run, start_node_id),
+            "conversationId": "",
+            "fallbackReason": "",
             "startPending": bool(started.get("pending")),
             "validation": started.get("validation"),
             "startManifest": started.get("start_manifest", {}),
@@ -5502,6 +6255,7 @@ class DesktopBlueprintService:
                 excel_audit_context_provider=(
                     lambda **kwargs: self._excel_audit_context_for_run(run_id, **kwargs)
                 ),
+                file_sender_callback=lambda **kwargs: self._send_popo_file_from_mcp(run_id, **kwargs),
             )
             mcp = None
             runtime.agent_stream_run_id = run_id
@@ -5927,6 +6681,7 @@ class DesktopBlueprintService:
                 excel_audit_context_provider=(
                     lambda **kwargs: self._excel_audit_context_for_run(run_id, **kwargs)
                 ),
+                file_sender_callback=lambda **kwargs: self._send_popo_file_from_mcp(run_id, **kwargs),
             )
             mcp = RunMCPRuntimeHandle(
                 run_id=run_id,
@@ -5942,6 +6697,7 @@ class DesktopBlueprintService:
                 close_run_callback=lambda **kwargs: self._end_live_run_from_mcp(run_id, **kwargs),
                 terminate_session_callback=lambda **kwargs: self._terminate_blueprint_session_from_mcp(run_id, **kwargs),
                 query_excel_history_callback=lambda **kwargs: self._query_excel_history_from_mcp(run_id, **kwargs),
+                send_popo_file_callback=lambda **kwargs: self._send_popo_file_from_mcp(run_id, **kwargs),
             )
             start_node_id = document_start_node_id(document)
             popo_entry = document_popo_entry(document)
@@ -6179,11 +6935,13 @@ class DesktopBlueprintService:
         mode: str = "default",
         merge_key: Optional[str] = None,
         merge_append_text: Optional[str] = None,
+        attachments: Optional[Sequence[Any]] = None,
     ) -> Dict[str, Any]:
         if not node_id:
             raise BlueprintServiceError("BAD_REQUEST", "nodeId must be a non-empty string")
         if not text.strip():
             raise BlueprintServiceError("BAD_REQUEST", "text must be a non-empty string")
+        clean_attachments = normalize_blueprint_message_attachments(attachments)
         normalized_mode = str(mode or "default").strip().lower()
         if normalized_mode not in {"default", "top"}:
             raise BlueprintServiceError(
@@ -6211,8 +6969,9 @@ class DesktopBlueprintService:
                 node,
                 text.strip(),
                 queue_mode=normalized_mode,
-                merge_key=merge_key,
+                merge_key=None if clean_attachments else merge_key,
                 merge_append_text=merge_append_text,
+                attachments=clean_attachments,
             )
         )
         with self._lock:
@@ -6235,6 +6994,7 @@ class DesktopBlueprintService:
         queue_mode: str,
         merge_key: Optional[str] = None,
         merge_append_text: Optional[str] = None,
+        attachments: Optional[Sequence[Any]] = None,
     ) -> Dict[str, Any]:
         await run.runtime.ensure_agent(node)
         route_id = f"route-{secrets.token_hex(6)}"
@@ -6249,8 +7009,12 @@ class DesktopBlueprintService:
                 required_script_node_ids=direct_scripts,
                 route_id=route_id,
             )
+        clean_attachments = normalize_blueprint_message_attachments(attachments)
+        body_payload: Dict[str, Any] = {"prompt": text, "type": "user_message"}
+        if clean_attachments:
+            body_payload["attachments"] = clean_attachments
         body = inject_framework_context(
-            {"prompt": text, "type": "user_message"},
+            body_payload,
             ordinary_agent_framework_context(
                 run.graph,
                 node.node_id,
@@ -6267,6 +7031,42 @@ class DesktopBlueprintService:
             merge_key=merge_key,
             merge_append_text=merge_append_text,
         ).to_dict()
+
+    async def _steer_agent_message_for_runtime(
+        self,
+        run: DesktopBlueprintRun,
+        node: Any,
+        text: str,
+        *,
+        attachments: Optional[Sequence[Any]] = None,
+    ) -> Dict[str, Any]:
+        clean_attachments = normalize_blueprint_message_attachments(attachments)
+        route_id = f"steer-{secrets.token_hex(6)}"
+        body_payload: Dict[str, Any] = {
+            "prompt": text,
+            "type": "user_message",
+            "framework_message_kind": "popo_turn_steer",
+            "reply_required": False,
+            "reply_visibility": "session_event",
+        }
+        if clean_attachments:
+            body_payload["attachments"] = clean_attachments
+        body = inject_framework_context(
+            body_payload,
+            ordinary_agent_framework_context(
+                run.graph,
+                node.node_id,
+                batch=None,
+                runtime=run.runtime,
+                route_id=route_id,
+            ),
+        )
+        return await run.runtime.steer_agent_message(
+            node,
+            body,
+            timeout_sec=15.0,
+            message_id=f"popo-steer-{node.node_id}-{secrets.token_hex(4)}",
+        )
 
     async def _queue_framework_notification_for_runtime(
         self,
@@ -7699,6 +8499,7 @@ class DesktopBlueprintService:
                     agent_node_id=agent_node_id,
                     agent_id=agent_id,
                 )
+            session = self._with_popo_session_usage_count(session, session_key=session_key)
             self._save_blueprint_session(session)
             if save_history:
                 self._append_blueprint_session_event(
@@ -7723,7 +8524,7 @@ class DesktopBlueprintService:
             run_id,
             reason=reason or "blueprint session terminated",
         )
-        return {
+        response = {
             "ok": True,
             "runId": run_id,
             "sessionKey": session_key,
@@ -7733,6 +8534,9 @@ class DesktopBlueprintService:
             "closeError": close_error,
             "session": session,
         }
+        if isinstance(session, dict) and str(session.get("source") or "").strip().lower() == "popo":
+            response["usageCount"] = self._non_negative_int(session.get("usageCount"))
+        return response
 
     def _terminate_blueprint_session_from_mcp(
         self,
@@ -7838,6 +8642,371 @@ class DesktopBlueprintService:
         result["sessionKey"] = active_session_key
         result["runId"] = run_id
         return result
+
+    def _resolve_popo_file_send_path(self, run: DesktopBlueprintRun, path: str) -> Path:
+        text = str(path or "").strip().strip('"').strip("'")
+        if not text:
+            raise BlueprintServiceError("BAD_REQUEST", "path must be a non-empty string", status=400)
+        candidate = Path(os.path.expandvars(text)).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(run.project_dir) / candidate
+        try:
+            return candidate.resolve()
+        except OSError:
+            return candidate.absolute()
+
+    def _popo_file_send_failure_result(
+        self,
+        *,
+        run_id: str,
+        session_key: str,
+        source_node_id: str,
+        agent_id: str,
+        path: str,
+        file_path: Optional[Path] = None,
+        file_type: str = "",
+        message_type: str = "",
+        size_bytes: Optional[int] = None,
+        receiver: str = "",
+        robot_app_key: str = "",
+        code: str,
+        error: str,
+        details: Optional[Dict[str, Any]] = None,
+        file_key: str = "",
+    ) -> Dict[str, Any]:
+        details = dict(details or {})
+        record_path = str(file_path) if file_path is not None else str(path or "")
+        file_name = file_path.name if file_path is not None else Path(str(path or "")).name
+        record: Dict[str, Any] = {
+            "runId": str(run_id or ""),
+            "sourceNodeId": str(source_node_id or ""),
+            "agentId": str(agent_id or ""),
+            "path": record_path,
+            "fileName": file_name,
+            "fileType": str(file_type or ""),
+            "sizeBytes": size_bytes if size_bytes is not None else None,
+            "messageType": str(message_type or ""),
+            "receiver": str(receiver or ""),
+            "robotAppKey": str(robot_app_key or ""),
+            "status": "failed",
+            "code": str(code or ""),
+            "errcode": details.get("errcode"),
+            "errmsg": details.get("errmsg"),
+            "fileKey": str(file_key or ""),
+            "error": str(error or ""),
+        }
+        written_record = dict(record)
+        if str(session_key or "").strip():
+            try:
+                written_record = self._write_blueprint_session_file_send_record(session_key, record)
+            except Exception:
+                log.exception("failed to persist POPO file send failure record")
+        return {
+            "ok": False,
+            "sent": False,
+            "runId": str(run_id or ""),
+            "sessionKey": str(session_key or ""),
+            "code": str(code or ""),
+            "error": str(error or ""),
+            "record": written_record,
+        }
+
+    def _send_popo_file_from_mcp(
+        self,
+        run_id: str,
+        *,
+        path: str,
+        agent_node_id: str = "",
+        agent_id: str = "",
+    ) -> Dict[str, Any]:
+        with self._lock:
+            run = self._get_run(run_id)
+            session_key = str(
+                run.session_key
+                or run.bound_session_key
+                or getattr(run.runtime, "popo_reply_session_key", "")
+                or ""
+            ).strip()
+            run_robot_app_key = str(run.robot_app_key or "").strip()
+        if not session_key:
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key="",
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                code="BLUEPRINT_POPO_FILE_SESSION_REQUIRED",
+                error="blueprint run is not bound to a POPO session",
+            )
+
+        session = self._load_blueprint_session(session_key)
+        if not session:
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                code="BLUEPRINT_SESSION_NOT_FOUND",
+                error="active blueprint session was not found for this run",
+            )
+
+        if str(session.get("source") or "").strip().lower() != "popo":
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                code="BLUEPRINT_POPO_FILE_SESSION_REQUIRED",
+                error="file sending is only available for POPO-bound blueprint sessions",
+            )
+
+        if str(session.get("status") or "") != "running" or str(session.get("activeRunId") or "") != str(run_id):
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                code="BLUEPRINT_SESSION_NOT_FOUND",
+                error="active POPO blueprint session was not found for this run",
+            )
+
+        try:
+            file_path = self._resolve_popo_file_send_path(run, path)
+        except BlueprintServiceError as exc:
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                code=exc.code,
+                error=str(exc),
+                details=exc.details,
+            )
+        file_type = self._popo_file_type_for_path(file_path)
+        message_type = self._popo_message_type_for_file_type(file_type)
+
+        if not file_path.exists() or not file_path.is_file():
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                file_path=file_path,
+                file_type=file_type,
+                message_type=message_type,
+                code="BLUEPRINT_POPO_FILE_NOT_FOUND",
+                error="path must exist and point to a file",
+            )
+        try:
+            size_bytes = int(file_path.stat().st_size)
+        except OSError as exc:
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                file_path=file_path,
+                file_type=file_type,
+                message_type=message_type,
+                code="BLUEPRINT_POPO_FILE_STAT_FAILED",
+                error=str(exc),
+            )
+        if size_bytes > POPO_FILE_SEND_MAX_BYTES:
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                file_path=file_path,
+                file_type=file_type,
+                message_type=message_type,
+                size_bytes=size_bytes,
+                code="BLUEPRINT_POPO_FILE_TOO_LARGE",
+                error="POPO robot file messages are limited to 20MB",
+            )
+
+        session_robot_app_key = str(session.get("robotAppKey") or "").strip()
+        robot_app_key = run_robot_app_key or session_robot_app_key
+        if session_robot_app_key and robot_app_key and session_robot_app_key != robot_app_key:
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                file_path=file_path,
+                file_type=file_type,
+                message_type=message_type,
+                size_bytes=size_bytes,
+                robot_app_key=robot_app_key,
+                code="BLUEPRINT_POPO_ROBOT_STRUCTURE_CONFLICT",
+                error="POPO session robot binding does not match this run",
+            )
+        if not robot_app_key:
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                file_path=file_path,
+                file_type=file_type,
+                message_type=message_type,
+                size_bytes=size_bytes,
+                code="BLUEPRINT_POPO_REPLY_UNAVAILABLE",
+                error="this blueprint run was not started from a POPO robot",
+            )
+        receiver = self._popo_reply_receiver_from_session(session)
+        if not receiver:
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                file_path=file_path,
+                file_type=file_type,
+                message_type=message_type,
+                size_bytes=size_bytes,
+                robot_app_key=robot_app_key,
+                code="BLUEPRINT_POPO_REPLY_TARGET_REQUIRED",
+                error="POPO reply receiver is missing from the active session",
+            )
+
+        file_key = ""
+        try:
+            robot = self._resolve_popo_callback_robot(robot_app_key)
+            missing = popo_callback_robot_missing_fields(robot)
+            if missing:
+                raise BlueprintServiceError(
+                    "BLUEPRINT_POPO_ENTRY_REQUIRED",
+                    "enabled POPO callback robot is incomplete",
+                    details={"robotAppKey": robot_app_key, "missing": missing},
+                    status=400,
+                )
+            send_result: Dict[str, Any] = {}
+            for attempt in range(2):
+                try:
+                    token = self._get_popo_access_token(robot)
+                    register_result = self._register_popo_robot_file(
+                        file_path=file_path,
+                        file_type=file_type,
+                        token=token,
+                    )
+                    file_key = str(register_result.get("fileKey") or "").strip()
+                    self._upload_popo_robot_file(
+                        file_path=file_path,
+                        upload_url=str(register_result.get("uploadUrl") or ""),
+                        token=token,
+                    )
+                    send_result = self._send_popo_file_key_message(
+                        receiver=receiver,
+                        message_type=message_type,
+                        file_key=file_key,
+                        token=token,
+                    )
+                    break
+                except BlueprintServiceError as exc:
+                    if attempt == 0 and self._is_popo_access_token_expired_error(exc):
+                        self._invalidate_popo_access_token(robot)
+                        file_key = ""
+                        continue
+                    raise
+        except BlueprintServiceError as exc:
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                file_path=file_path,
+                file_type=file_type,
+                message_type=message_type,
+                size_bytes=size_bytes,
+                receiver=receiver,
+                robot_app_key=robot_app_key,
+                code=exc.code,
+                error=str(exc),
+                details=exc.details,
+                file_key=file_key,
+            )
+        except Exception as exc:
+            return self._popo_file_send_failure_result(
+                run_id=run_id,
+                session_key=session_key,
+                source_node_id=agent_node_id,
+                agent_id=agent_id,
+                path=path,
+                file_path=file_path,
+                file_type=file_type,
+                message_type=message_type,
+                size_bytes=size_bytes,
+                receiver=receiver,
+                robot_app_key=robot_app_key,
+                code="BLUEPRINT_POPO_FILE_SEND_FAILED",
+                error=str(exc),
+                file_key=file_key,
+            )
+
+        record = self._write_blueprint_session_file_send_record(
+            session_key,
+            {
+                "runId": str(run_id or ""),
+                "sourceNodeId": str(agent_node_id or ""),
+                "agentId": str(agent_id or ""),
+                "path": str(file_path),
+                "fileName": file_path.name,
+                "fileType": file_type,
+                "sizeBytes": size_bytes,
+                "messageType": message_type,
+                "receiver": receiver,
+                "robotAppKey": robot_app_key,
+                "status": "succeeded",
+                "errcode": send_result.get("errcode"),
+                "errmsg": send_result.get("errmsg"),
+                "fileKey": file_key,
+                "messageId": str(send_result.get("messageId") or ""),
+                "error": "",
+            },
+        )
+        now = float(self.now())
+        session["lastTouchedAt"] = now
+        session["lastFileSendAt"] = now
+        session["lastFileSendByNodeId"] = str(agent_node_id or "")
+        session["lastFileSendByAgentId"] = str(agent_id or "")
+        self._save_blueprint_session(session)
+        self._append_blueprint_session_event(
+            session_key,
+            {
+                "type": "popo_file_sent",
+                "source": "framework_popo_file_send",
+                "runId": run_id,
+                "agentNodeId": str(agent_node_id or ""),
+                "agentId": str(agent_id or ""),
+                "path": str(file_path),
+                "fileName": file_path.name,
+                "messageType": message_type,
+                "sizeBytes": size_bytes,
+                "robotAppKey": robot_app_key,
+                "receiver": receiver,
+                "fileKey": file_key,
+                "messageId": str(send_result.get("messageId") or ""),
+            },
+        )
+        return {
+            "ok": True,
+            "sent": True,
+            "runId": run_id,
+            "sessionKey": session_key,
+            "record": record,
+        }
 
     def _reply_popo_user_from_framework(
         self,
@@ -8736,6 +9905,89 @@ def blueprint_session_key_path_component(session_key: str) -> str:
         "sessionKey must match bps_[0-9a-f]{24}, bps_popo_<label>_<hash>, bps_popo_<label>+<blueprintName>, or main+<blueprintId>",
     )
     return value
+
+
+def normalize_blueprint_message_attachments(value: Any) -> list[Dict[str, Any]]:
+    if value is None or value == "":
+        return []
+    raw_items = value if isinstance(value, list) else [value]
+    attachments: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def text_from(raw: Any) -> str:
+        if isinstance(raw, (str, int, float, bool)):
+            return str(raw).strip()
+        return ""
+
+    def pick(raw: Dict[str, Any], *keys: str) -> str:
+        for key in keys:
+            if key in raw:
+                value = text_from(raw.get(key))
+                if value:
+                    return value
+        return ""
+
+    def infer_kind(raw: Dict[str, Any]) -> str:
+        kind = str(raw.get("kind") or "").strip().lower()
+        mime = str(raw.get("mime") or "").strip().lower()
+        name = str(raw.get("name") or raw.get("path") or raw.get("url") or "").strip().lower()
+        if kind in {"image", "file", "video", "audio"}:
+            return kind
+        if mime.startswith("image/") or Path(name).suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+            return "image"
+        if mime.startswith("video/"):
+            return "video"
+        if mime.startswith("audio/"):
+            return "audio"
+        return "file"
+
+    primitive_extra_keys = {
+        "sourceKey",
+        "source_key",
+        "msgType",
+        "messageType",
+        "unresolved",
+        "error",
+    }
+    for item in raw_items:
+        out: Dict[str, Any] = {}
+        if isinstance(item, (str, Path)):
+            path = str(item).strip()
+            if path:
+                out["path"] = path
+                out["name"] = Path(path).name
+        elif isinstance(item, dict):
+            out["path"] = pick(item, "path", "file", "file_path", "filePath", "localPath", "local_path")
+            out["url"] = pick(item, "url", "downloadUrl", "download_url", "fileUrl", "file_url")
+            out["name"] = pick(item, "name", "fileName", "file_name", "filename")
+            out["mime"] = pick(item, "mime", "mimeType", "mimetype", "contentType", "content_type")
+            out["id"] = pick(item, "id", "fileId", "file_id", "resourceId", "resource_id", "mediaId", "media_id")
+            raw_size = item.get("size", item.get("fileSize", item.get("file_size")))
+            try:
+                if raw_size is not None and str(raw_size).strip() != "":
+                    out["size"] = int(raw_size)
+            except (TypeError, ValueError):
+                pass
+            for key in primitive_extra_keys:
+                if key not in item:
+                    continue
+                value_for_key = item.get(key)
+                if isinstance(value_for_key, (str, int, float, bool)) or value_for_key is None:
+                    normalized_key = "sourceKey" if key == "source_key" else key
+                    out[normalized_key] = value_for_key
+        else:
+            continue
+
+        out = {key: value for key, value in out.items() if value not in ("", None)}
+        if not out:
+            continue
+        out["kind"] = infer_kind(out)
+        signature = json.dumps(out, ensure_ascii=False, sort_keys=True, default=str)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        attachments.append(out)
+    return attachments
 
 
 def blueprint_main_session_key(blueprint_id: str) -> str:

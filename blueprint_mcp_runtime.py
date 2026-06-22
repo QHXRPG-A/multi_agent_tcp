@@ -41,14 +41,24 @@ class MCPCurrentMessageContext:
     outgoing_batch_id: Optional[str]
     required_outgoing_targets: list[str]
     expires_at: float
+    reply_required: Optional[bool] = None
+    reply_visibility: Optional[str] = None
+    framework_message_kind: Optional[str] = None
 
     def to_safe_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "current_message_id": self.current_message_id,
             "outgoing_batch_id": self.outgoing_batch_id,
             "required_outgoing_targets": list(self.required_outgoing_targets),
             "expires_at": self.expires_at,
         }
+        if self.reply_required is not None:
+            data["reply_required"] = self.reply_required
+        if self.reply_visibility is not None:
+            data["reply_visibility"] = self.reply_visibility
+        if self.framework_message_kind is not None:
+            data["framework_message_kind"] = self.framework_message_kind
+        return data
 
 
 @dataclass
@@ -262,6 +272,9 @@ class RunMCPTokenStore:
         outgoing_batch_id: Optional[str],
         required_outgoing_targets: Sequence[str],
         timeout_sec: Optional[float],
+        reply_required: Optional[bool] = None,
+        reply_visibility: Optional[str] = None,
+        framework_message_kind: Optional[str] = None,
     ) -> None:
         with self._lock:
             token = self._ordinary_token_by_node.get(agent_node_id)
@@ -276,6 +289,13 @@ class RunMCPTokenStore:
                 outgoing_batch_id=outgoing_batch_id,
                 required_outgoing_targets=[str(item) for item in required_outgoing_targets],
                 expires_at=float(self.now()) + max(ttl, 0.0) + 30.0,
+                reply_required=reply_required,
+                reply_visibility=str(reply_visibility).strip() if reply_visibility is not None else None,
+                framework_message_kind=(
+                    str(framework_message_kind).strip()
+                    if framework_message_kind is not None
+                    else None
+                ),
             )
 
     def summary(self) -> Dict[str, Any]:
@@ -496,7 +516,8 @@ class RunMCPRuntimeHandle:
         top_agent_id: Optional[str] = None,
         close_run_callback: Optional[Callable[..., Any]] = None,
         terminate_session_callback: Optional[Callable[..., Any]] = None,
-        reply_popo_user_callback: Optional[Callable[..., Any]] = None,
+        query_excel_history_callback: Optional[Callable[..., Any]] = None,
+        send_popo_file_callback: Optional[Callable[..., Any]] = None,
         request_user_input_callback: Optional[Callable[[list[dict[str, Any]]], Any]] = None,
         stage_start_plan_callback: Optional[Callable[[dict[str, Any], str], Any]] = None,
         control_command_callback: Optional[Callable[..., Any]] = None,
@@ -518,13 +539,14 @@ class RunMCPRuntimeHandle:
         self.top_agent_id = top_agent_id
         self.close_run_callback = close_run_callback
         self.terminate_session_callback = terminate_session_callback
-        self.reply_popo_user_callback = reply_popo_user_callback
+        self.query_excel_history_callback = query_excel_history_callback
+        self.send_popo_file_callback = send_popo_file_callback
         self.session_termination_start_node_id = ""
         self.session_termination_session_key = ""
         self.popo_termination_start_node_id = ""
         self.popo_termination_session_key = ""
-        self.popo_reply_start_node_id = ""
-        self.popo_reply_session_key = ""
+        self.session_history_tools_start_node_id = ""
+        self.session_history_tools_session_key = ""
         self.request_user_input_callback = request_user_input_callback
         self.stage_start_plan_callback = stage_start_plan_callback
         self.control_command_callback = control_command_callback
@@ -560,20 +582,20 @@ class RunMCPRuntimeHandle:
     def enable_popo_session_termination(self, *, start_node_id: str, session_key: str) -> None:
         self.enable_blueprint_session_termination(start_node_id=start_node_id, session_key=session_key)
 
-    def enable_popo_user_reply(self, *, start_node_id: str, session_key: str) -> None:
-        self.popo_reply_start_node_id = str(start_node_id or "").strip()
-        self.popo_reply_session_key = str(session_key or "").strip()
+    def enable_session_history_tools(self, *, start_node_id: str, session_key: str) -> None:
+        self.session_history_tools_start_node_id = str(start_node_id or "").strip()
+        self.session_history_tools_session_key = str(session_key or "").strip()
         self.token_store.enable_tool_for_agent(
-            self.popo_reply_start_node_id,
-            "blueprint_reply_popo_user",
+            self.session_history_tools_start_node_id,
+            "blueprint_query_excel_history",
         )
 
-    def clear_popo_user_reply(self) -> None:
-        start_node_id = str(self.popo_reply_start_node_id or "").strip()
+    def clear_session_history_tools(self) -> None:
+        start_node_id = str(self.session_history_tools_start_node_id or "").strip()
         if start_node_id:
-            self.token_store.disable_tool_for_agent(start_node_id, "blueprint_reply_popo_user")
-        self.popo_reply_start_node_id = ""
-        self.popo_reply_session_key = ""
+            self.token_store.disable_tool_for_agent(start_node_id, "blueprint_query_excel_history")
+        self.session_history_tools_start_node_id = ""
+        self.session_history_tools_session_key = ""
 
     @property
     def base_url(self) -> str:
@@ -689,8 +711,8 @@ class RunMCPRuntimeHandle:
             allowed_tools = list(ORDINARY_MESSAGE_TOOL_NAMES)
             if isinstance(access_policy, dict) and access_policy.get("blueprint_monitor_tools") is True:
                 allowed_tools.extend(ORDINARY_MONITOR_TOOL_NAMES)
-            if node_id == self.popo_reply_start_node_id and self.popo_reply_session_key:
-                allowed_tools.append("blueprint_reply_popo_user")
+            if node_id == self.session_history_tools_start_node_id and self.session_history_tools_session_key:
+                allowed_tools.append("blueprint_query_excel_history")
             scope = self.token_store.create_message_scope(
                 agent_node_id=node_id,
                 agent_id=agent_id,
@@ -752,6 +774,15 @@ class RunMCPRuntimeHandle:
         envelope = framework_context.get("message_envelope") if isinstance(framework_context, dict) else {}
         if not isinstance(envelope, dict):
             envelope = {}
+        reply_required = envelope.get("reply_required")
+        if reply_required is None and isinstance(body, dict):
+            reply_required = body.get("reply_required")
+        reply_visibility = envelope.get("reply_visibility")
+        if reply_visibility is None and isinstance(body, dict):
+            reply_visibility = body.get("reply_visibility")
+        framework_message_kind = envelope.get("framework_message_kind")
+        if framework_message_kind is None and isinstance(body, dict):
+            framework_message_kind = body.get("framework_message_kind")
         self.token_store.update_message_context(
             agent_node_id=str(event.get("node_id") or ""),
             agent_id=str(event.get("agent_id") or ""),
@@ -765,6 +796,13 @@ class RunMCPRuntimeHandle:
                 str(item) for item in envelope.get("required_outgoing_targets", [])
             ] if isinstance(envelope.get("required_outgoing_targets"), list) else [],
             timeout_sec=event.get("timeout_sec"),
+            reply_required=reply_required if isinstance(reply_required, bool) else None,
+            reply_visibility=str(reply_visibility).strip() if reply_visibility is not None else None,
+            framework_message_kind=(
+                str(framework_message_kind).strip()
+                if framework_message_kind is not None
+                else None
+            ),
         )
 
     def _is_control_node(self, node_id: str, agent_id: str) -> bool:
@@ -1012,6 +1050,14 @@ class RunMCPRuntimeHandle:
             )
 
         @mcp.tool()
+        async def blueprint_send_popo_file(path: str) -> Dict[str, Any]:
+            scope = _require_scope("ordinary", "blueprint_send_popo_file")
+            return await self._ordinary_blueprint_send_popo_file(
+                scope,
+                path=path,
+            )
+
+        @mcp.tool()
         async def agent_task_status(
             status: str,
             summary: str = "",
@@ -1038,11 +1084,23 @@ class RunMCPRuntimeHandle:
             )
 
         @mcp.tool()
-        async def blueprint_reply_popo_user(content: str) -> Dict[str, Any]:
-            scope = _require_scope("ordinary", "blueprint_reply_popo_user")
-            return await self._ordinary_blueprint_reply_popo_user(
+        async def blueprint_query_excel_history(
+            start_time: str = "",
+            end_time: str = "",
+            workbook: str = "",
+            field: str = "",
+            category: str = "xltool",
+            limit: int = 50,
+        ) -> Dict[str, Any]:
+            scope = _require_scope("ordinary", "blueprint_query_excel_history")
+            return await self._ordinary_blueprint_query_excel_history(
                 scope,
-                content=content,
+                start_time=start_time,
+                end_time=end_time,
+                workbook=workbook,
+                field=field,
+                category=category,
+                limit=limit,
             )
 
         @mcp.tool()
@@ -1786,70 +1844,86 @@ class RunMCPRuntimeHandle:
                 str(service_name),
                 str(method_name),
                 dict(arguments or {}),
+                queue_result=False,
             )
         )
 
-    async def _ordinary_blueprint_reply_popo_user(
+    async def _ordinary_blueprint_query_excel_history(
         self,
         scope: MCPTokenScope,
         *,
-        content: str,
+        start_time: str = "",
+        end_time: str = "",
+        workbook: str = "",
+        field: str = "",
+        category: str = "xltool",
+        limit: int = 50,
     ) -> Dict[str, Any]:
         if scope.agent_node_id is None:
             raise PermissionError("ordinary MCP token is not bound to an AgentNode")
-        _require_allowed_tool(scope, "blueprint_reply_popo_user")
-        start_node_id = str(self.popo_reply_start_node_id or "").strip()
+        _require_allowed_tool(scope, "blueprint_query_excel_history")
+        start_node_id = str(self.session_history_tools_start_node_id or "").strip()
         if not start_node_id or str(scope.agent_node_id) != start_node_id:
-            raise PermissionError("blueprint_reply_popo_user is only enabled for the POPO start AgentNode")
-        session_key = str(self.popo_reply_session_key or "").strip()
+            raise PermissionError("blueprint_query_excel_history is only enabled for the session start AgentNode")
+        session_key = str(self.session_history_tools_session_key or "").strip()
         if not session_key:
-            raise PermissionError("blueprint_reply_popo_user requires an active POPO blueprint session")
-        text = str(content or "").strip()
-        if not text:
-            raise ValueError("content must be a non-empty string")
+            raise PermissionError("blueprint_query_excel_history requires an active blueprint session")
+        start_text = str(start_time or "").strip()
+        end_text = str(end_time or "").strip()
         args = {
-            "content": text,
+            "start_time": start_text,
+            "end_time": end_text,
+            "workbook": str(workbook or ""),
+            "field": str(field or ""),
+            "category": str(category or "xltool"),
+            "limit": int(limit or 50),
             "session_key": session_key,
         }
-        self._record_mcp_tool_call(scope, "blueprint_reply_popo_user", args)
-        callback = self.reply_popo_user_callback
+        self._record_mcp_tool_call(scope, "blueprint_query_excel_history", args)
+        callback = self.query_excel_history_callback
         if callback is None:
-            raise PermissionError("blueprint_reply_popo_user is not connected to a POPO reply callback")
-        message_context = scope.current_message_context
+            raise PermissionError("blueprint_query_excel_history is not connected to an Excel history callback")
         result = callback(
-            content=text,
+            start_time=start_text,
+            end_time=end_text,
+            workbook=str(workbook or ""),
+            field=str(field or ""),
+            category=str(category or "xltool"),
+            limit=int(limit or 50),
             session_key=session_key,
             agent_node_id=scope.agent_node_id,
             agent_id=scope.agent_id,
-            message_id=message_context.current_message_id if message_context is not None else "",
         )
         if asyncio.iscoroutine(result):
             result = await result
-        await self._auto_complete_popo_reply_task_status(scope)
         return dict(result) if isinstance(result, dict) else {"ok": True, "result": result}
 
-    async def _auto_complete_popo_reply_task_status(self, scope: MCPTokenScope) -> None:
+    async def _ordinary_blueprint_send_popo_file(
+        self,
+        scope: MCPTokenScope,
+        *,
+        path: str,
+    ) -> Dict[str, Any]:
+        if scope.agent_node_id is None:
+            raise PermissionError("ordinary MCP token is not bound to an AgentNode")
+        _require_allowed_tool(scope, "blueprint_send_popo_file")
         context = scope.current_message_context
-        args = {
-            "node_id": scope.agent_node_id,
-            "agent_id": scope.agent_id,
-            "status": "completed",
-            "summary": "Replied to the POPO user.",
-            "message_id": context.current_message_id if context is not None else None,
-            "batch_id": context.outgoing_batch_id if context is not None else None,
-            "reports": [],
-            "artifacts": [],
-            "changesets": [],
-            "next_actions": [],
-            "metadata": {
-                "framework_auto": True,
-                "source_tool": "blueprint_reply_popo_user",
-            },
-        }
-        try:
-            await self._runtime_call(lambda: self.control.handle_request({"command": "agent.task_status", "args": args}))
-        except Exception:
-            return
+        if context is not None and context.expires_at < float(self.token_store.now()):
+            raise PermissionError("active message context has expired")
+        clean_path = str(path or "").strip()
+        args = {"path": clean_path}
+        self._record_mcp_tool_call(scope, "blueprint_send_popo_file", args)
+        callback = self.send_popo_file_callback
+        if callback is None:
+            raise PermissionError("blueprint_send_popo_file is not connected to a POPO file sender")
+        result = callback(
+            path=clean_path,
+            agent_node_id=scope.agent_node_id,
+            agent_id=scope.agent_id,
+        )
+        if asyncio.iscoroutine(result):
+            result = await result
+        return dict(result) if isinstance(result, dict) else {"ok": True, "result": result}
 
     async def _ordinary_agent_task_status(
         self,
@@ -2079,6 +2153,7 @@ ORDINARY_MESSAGE_TOOL_NAMES = [
     "blueprint_script_call",
     "blueprint_service_docs",
     "blueprint_service_call",
+    "blueprint_send_popo_file",
     "agent_task_status",
     "join_contribute",
 ]

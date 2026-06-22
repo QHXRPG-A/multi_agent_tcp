@@ -1,6 +1,7 @@
 param(
     [switch]$NoOpen,
     [string]$BlueprintId = "default",
+    [string]$ProjectDir = "",
     [switch]$SkipPluginInstall,
     [switch]$SkipWebBuild
 )
@@ -8,6 +9,18 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrWhiteSpace($ProjectDir)) {
+    $ProjectRoot = $Root
+} else {
+    $rawProjectDir = $ProjectDir
+    if (-not [System.IO.Path]::IsPathRooted($rawProjectDir)) {
+        $rawProjectDir = Join-Path $Root $rawProjectDir
+    }
+    if (-not (Test-Path -LiteralPath $rawProjectDir -PathType Container)) {
+        throw ("ProjectDir does not exist: {0}" -f $ProjectDir)
+    }
+    $ProjectRoot = (Resolve-Path -LiteralPath $rawProjectDir).Path
+}
 $AppDir = Join-Path $Root "GuLiCode\packages\app"
 $PluginRoot = Join-Path $Root "plugins\gulicode-bp"
 $PersonalPluginRoot = Join-Path $HOME "plugins\gulicode-bp"
@@ -15,7 +28,7 @@ $PluginInstaller = Join-Path $PluginRoot "scripts\install_personal_plugin.py"
 $WorkbenchScript = Join-Path $PluginRoot "scripts\start_workbench.py"
 $PersonalWorkbenchScript = Join-Path $PersonalPluginRoot "scripts\start_workbench.py"
 $SeedConfig = Join-Path $Root "examples\collaboration_server_debug_seed.json"
-$LogDir = Join-Path $Root "logs"
+$LogDir = Join-Path $ProjectRoot "logs"
 $ReadyFile = Join-Path $LogDir "gulicode-bp-workbench-ready.json"
 $WorkbenchOut = Join-Path $LogDir "gulicode-bp-workbench.out.log"
 $WorkbenchErr = Join-Path $LogDir "gulicode-bp-workbench.err.log"
@@ -109,6 +122,72 @@ function Wait-Http {
     return $false
 }
 
+function Get-WorkbenchOrigin {
+    param([string]$Url)
+    $uri = [Uri]$Url
+    if ($uri.Port -gt 0) {
+        return ("{0}://{1}:{2}" -f $uri.Scheme, $uri.Host, $uri.Port)
+    }
+    return ("{0}://{1}" -f $uri.Scheme, $uri.Host)
+}
+
+function ConvertTo-NormalizedPath {
+    param([string]$Path)
+    return ([System.IO.Path]::GetFullPath($Path)).TrimEnd("\", "/")
+}
+
+function Assert-WorkbenchBinding {
+    param(
+        [string]$Url,
+        [string]$ExpectedProjectDir,
+        [string]$ExpectedBlueprintId
+    )
+
+    $origin = Get-WorkbenchOrigin $Url
+    $configUrl = Join-Url $origin "config.js"
+    $configScript = Invoke-WebRequest -Uri $configUrl -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty Content
+    $match = [regex]::Match($configScript, "window\.__GULICODE_BP__\s*=\s*(\{.*\});", [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    if (-not $match.Success) {
+        throw ("Workbench config.js has an unexpected shape: {0}" -f $configUrl)
+    }
+    $config = $match.Groups[1].Value | ConvertFrom-Json
+    $actualProjectDir = ConvertTo-NormalizedPath ([string]$config.projectDir)
+    $expectedProjectDir = ConvertTo-NormalizedPath $ExpectedProjectDir
+    if ($actualProjectDir -ne $expectedProjectDir) {
+        throw ("Workbench projectDir mismatch. expected={0} actual={1}" -f $expectedProjectDir, $actualProjectDir)
+    }
+    if ([string]$config.blueprintId -ne $ExpectedBlueprintId) {
+        throw ("Workbench blueprintId mismatch. expected={0} actual={1}" -f $ExpectedBlueprintId, $config.blueprintId)
+    }
+
+    $page = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty Content
+    if (($page -like '*<main class="shell">*') -or ($page -notlike '*assets/index-*')) {
+        throw (
+            "Workbench is serving the fallback web UI instead of the built GuLiCode app. " +
+            "Rebuild GuLiCode/packages/app or rerun plugin install without a stale --skip-web-build dist."
+        )
+    }
+
+    $body = @{
+        token = [string]$config.token
+        command = "blueprint.list"
+        args = @{ projectDir = $expectedProjectDir }
+    } | ConvertTo-Json -Depth 6
+    $listResult = Invoke-RestMethod -Uri (Join-Url $origin "api/blueprint") -Method Post -ContentType "application/json" -Body $body -TimeoutSec 10
+    if ($listResult.ok -ne $true) {
+        throw ("Workbench blueprint.list verification failed for {0}" -f $expectedProjectDir)
+    }
+    return $listResult
+}
+
+function Join-Url {
+    param(
+        [string]$BaseUrl,
+        [string]$Path
+    )
+    return ("{0}/{1}" -f $BaseUrl.TrimEnd("/"), $Path.TrimStart("/"))
+}
+
 function Wait-WorkbenchReady {
     param(
         [string]$Path,
@@ -150,6 +229,7 @@ function Invoke-Checked {
 }
 
 Write-Host ("[start-gulicode-debug] root = {0}" -f $Root)
+Write-Host ("[start-gulicode-debug] project = {0}" -f $ProjectRoot)
 Write-Host "[start-gulicode-debug] mode = plugin workbench + mobile + console; Electron desktop is not started"
 
 if (-not (Test-Path $PluginInstaller)) {
@@ -203,7 +283,7 @@ $workbenchArgs = @(
     "-u",
     $WorkbenchScript,
     "--project-dir",
-    $Root,
+    $ProjectRoot,
     "--blueprint-id",
     $BlueprintId,
     "--ready-file",
@@ -217,9 +297,11 @@ $healthOk = Wait-Http "http://127.0.0.1:8787/api/health" 30
 $mobileOk = Wait-Http "http://127.0.0.1:3040/mobile" 45
 $consoleOk = Wait-Http "http://127.0.0.1:3040/console" 45
 $workbenchOk = Wait-Http $workbench.url 45
+$blueprintList = Assert-WorkbenchBinding -Url $workbench.url -ExpectedProjectDir $ProjectRoot -ExpectedBlueprintId $BlueprintId
 
 Write-Host ("[start-gulicode-debug] health    = {0}" -f $healthOk)
 Write-Host ("[start-gulicode-debug] workbench = {0} {1}" -f $workbenchOk, $workbench.url)
+Write-Host ("[start-gulicode-debug] blueprints = {0}" -f @($blueprintList.blueprints).Count)
 Write-Host ("[start-gulicode-debug] mobile    = {0} http://127.0.0.1:3040/mobile" -f $mobileOk)
 Write-Host ("[start-gulicode-debug] console   = {0} http://127.0.0.1:3040/console" -f $consoleOk)
 Write-Host "[start-gulicode-debug] desktop   = skipped"

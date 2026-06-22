@@ -8,11 +8,13 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
 from pathlib import Path
 from socketserver import ThreadingMixIn
+from urllib.parse import quote, unquote, urlparse
 from typing import Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
@@ -31,12 +33,15 @@ BLUEPRINT_CALLBACK_CONFIG_TIMEOUT = float(os.environ.get("POPO_BLUEPRINT_CALLBAC
 POPO_EVENT_DEDUP_TTL = float(os.environ.get("POPO_EVENT_DEDUP_TTL", "600"))
 POPO_CALLBACK_HOST = os.environ.get("POPO_CALLBACK_HOST", "0.0.0.0").strip() or "0.0.0.0"
 POPO_CALLBACK_PORT = int(os.environ.get("POPO_CALLBACK_PORT", "3100"))
+POPO_TEXT_CHUNK_LIMIT = max(500, int(os.environ.get("POPO_TEXT_CHUNK_LIMIT", "1800")))
+POPO_ATTACHMENT_MAX_BYTES = max(1_000_000, int(os.environ.get("POPO_ATTACHMENT_MAX_BYTES", str(25 * 1024 * 1024))))
 
 REPO_ROOT = Path(__file__).resolve().parent
 PLUGIN_ROOT = Path(os.environ.get("GULICODE_BP_PLUGIN_ROOT") or REPO_ROOT / "plugins" / "gulicode-bp").resolve()
 RUNTIME_HOME = Path(os.environ.get("GULICODE_BP_RUNTIME_HOME") or PLUGIN_ROOT / ".runtime").resolve()
 RUNTIME_DATA_DIR = Path(os.environ.get("GULICODE_BP_DATA_DIR") or RUNTIME_HOME / "state").resolve()
 POPO_ROBOT_ROUTES_PATH = RUNTIME_DATA_DIR / "popo_robot_routes.json"
+POPO_ATTACHMENTS_DIR = RUNTIME_DATA_DIR / "popo_attachments"
 MCP_DIR = PLUGIN_ROOT / "mcp"
 if str(MCP_DIR) not in sys.path:
     sys.path.insert(0, str(MCP_DIR))
@@ -50,9 +55,11 @@ _service_lock = threading.Lock()
 _config_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _event_cache: dict[str, float] = {}
 _token_cache: dict[str, dict[str, Any]] = {}
+_pending_file_cache: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = {}
 _config_lock = threading.Lock()
 _event_lock = threading.Lock()
 _token_lock = threading.Lock()
+_pending_file_lock = threading.Lock()
 
 
 class ThreadingCallbackServer(ThreadingMixIn, WSGIServer):
@@ -271,7 +278,14 @@ def get_access_token(robot_config: dict[str, Any]):
             timeout=10,
         )
         data = resp.json()
-        print(f"[TOKEN] response: {json.dumps(data, ensure_ascii=False)}", flush=True)
+        log_data = dict(data) if isinstance(data, dict) else data
+        if isinstance(log_data, dict) and isinstance(log_data.get("data"), dict):
+            log_data = dict(log_data)
+            log_data["data"] = {
+                key: ("<redacted>" if "token" in key.lower() else value)
+                for key, value in log_data["data"].items()
+            }
+        print(f"[TOKEN] response: {json.dumps(log_data, ensure_ascii=False)}", flush=True)
 
         if data.get("errcode") == 0 and data.get("data"):
             _token_cache[app_key] = {
@@ -284,13 +298,456 @@ def get_access_token(robot_config: dict[str, Any]):
         return None
 
 
-def send_message(receiver, content, robot_config: dict[str, Any]):
-    token = get_access_token(robot_config)
-    if not token:
-        print("[SEND] no access token; send skipped", flush=True)
-        return
+def _split_text_for_popo(content: str, *, limit: int = POPO_TEXT_CHUNK_LIMIT) -> list[str]:
+    text = str(content or "")
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
 
-    url = f"{POPO_API_BASE}/open-apis/robots/v1/im/send-msg"
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if len(line) > limit:
+            if current:
+                chunks.append(current.rstrip("\n"))
+                current = ""
+            for start in range(0, len(line), limit):
+                chunks.append(line[start : start + limit].rstrip("\n"))
+            continue
+        if current and len(current) + len(line) > limit:
+            chunks.append(current.rstrip("\n"))
+            current = line
+        else:
+            current += line
+    if current:
+        chunks.append(current.rstrip("\n"))
+    return chunks
+
+
+def _safe_attachment_filename(name: str, *, fallback: str = "attachment") -> str:
+    cleaned = unquote(str(name or "")).strip().replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = re.sub(r"[^A-Za-z0-9._() -]+", "_", cleaned).strip(" ._")
+    if not cleaned:
+        cleaned = fallback
+    if "." not in cleaned and "." in fallback:
+        cleaned = f"{cleaned}{Path(fallback).suffix}"
+    return cleaned[:120]
+
+
+def _attachment_kind_from_value(value: Any, *, msg_type: Any = None, mime: str = "", name: str = "") -> str:
+    text = " ".join(str(item or "").lower() for item in (value, msg_type, mime, name))
+    if "image/" in text or any(token in text for token in ("image", "img", "pic", "picture", ".png", ".jpg", ".jpeg", ".webp", ".gif")):
+        return "image"
+    return "file"
+
+
+def _collect_popo_attachment_candidates(event_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collect likely attachment records from a POPO callback eventData object.
+
+    POPO's public examples only show text messages, but real non-text callbacks
+    may expose media fields under different names. Keep this permissive and
+    preserve unresolved identifiers so a live sample is still actionable.
+    """
+    if not isinstance(event_data, dict):
+        return []
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    msg_type = event_data.get("msgType")
+
+    def add(raw: Any, *, source_key: str = "") -> None:
+        if raw is None:
+            return
+        if isinstance(raw, list):
+            for index, item in enumerate(raw):
+                add(item, source_key=f"{source_key}[{index}]" if source_key else str(index))
+            return
+        if isinstance(raw, dict):
+            lowered = {str(key).lower(): value for key, value in raw.items()}
+            url = next(
+                (
+                    str(lowered[key]).strip()
+                    for key in (
+                        "url",
+                        "downloadurl",
+                        "download_url",
+                        "fileurl",
+                        "file_url",
+                        "imageurl",
+                        "image_url",
+                        "picurl",
+                        "pic_url",
+                        "thumburl",
+                        "thumb_url",
+                    )
+                    if isinstance(lowered.get(key), str) and str(lowered[key]).strip()
+                ),
+                "",
+            )
+            name = next(
+                (
+                    str(lowered[key]).strip()
+                    for key in ("name", "filename", "file_name", "title")
+                    if isinstance(lowered.get(key), str) and str(lowered[key]).strip()
+                ),
+                "",
+            )
+            mime = next(
+                (
+                    str(lowered[key]).strip()
+                    for key in ("mime", "mimetype", "mime_type", "contenttype", "content_type")
+                    if isinstance(lowered.get(key), str) and str(lowered[key]).strip()
+                ),
+                "",
+            )
+            identifier = next(
+                (
+                    str(lowered[key]).strip()
+                    for key in ("fileid", "file_id", "mediaid", "media_id", "resourceid", "resource_id", "id")
+                    if isinstance(lowered.get(key), (str, int, float)) and str(lowered[key]).strip()
+                ),
+                "",
+            )
+            raw_size = next(
+                (lowered[key] for key in ("size", "filesize", "file_size") if key in lowered),
+                None,
+            )
+            md5 = next(
+                (
+                    str(lowered[key]).strip()
+                    for key in ("md5", "filemd5", "file_md5")
+                    if isinstance(lowered.get(key), str) and str(lowered[key]).strip()
+                ),
+                "",
+            )
+            if url or identifier or name or mime:
+                signature = json.dumps({"url": url, "id": identifier, "name": name, "source": source_key}, ensure_ascii=False, sort_keys=True)
+                if signature not in seen:
+                    seen.add(signature)
+                    size = None
+                    try:
+                        if raw_size is not None and str(raw_size).strip():
+                            size = int(raw_size)
+                    except (TypeError, ValueError):
+                        size = None
+                    candidates.append(
+                        {
+                            "kind": _attachment_kind_from_value(source_key, msg_type=msg_type, mime=mime, name=name or url),
+                            "url": url,
+                            "name": name,
+                            "mime": mime,
+                            "id": identifier,
+                            "size": size,
+                            "md5": md5,
+                            "sourceKey": source_key,
+                            "raw": raw,
+                        }
+                    )
+            return
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return
+            if text.startswith(("http://", "https://")):
+                signature = f"{source_key}:{text}"
+                if signature not in seen:
+                    seen.add(signature)
+                    candidates.append(
+                        {
+                            "kind": _attachment_kind_from_value(source_key, msg_type=msg_type, name=text),
+                            "url": text,
+                            "name": "",
+                            "mime": "",
+                            "id": "",
+                            "sourceKey": source_key,
+                        }
+                    )
+
+    for key, value in event_data.items():
+        lower = str(key).lower()
+        if any(token in lower for token in ("file", "image", "img", "pic", "media", "attachment", "resource", "url", "download")):
+            add(value, source_key=str(key))
+
+    if candidates:
+        return candidates
+
+    if str(msg_type or "").strip() not in {"", "1", "text"}:
+        candidates.append(
+            {
+                "kind": _attachment_kind_from_value("", msg_type=msg_type),
+                "url": "",
+                "name": "",
+                "mime": "",
+                "id": "",
+                "sourceKey": "msgType",
+                "raw": dict(event_data),
+                "unresolved": True,
+            }
+        )
+    return candidates
+
+
+def _popo_download_url_from_payload(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("downloadUrl", "download_url", "url", "fileUrl", "file_url"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return _popo_download_url_from_payload(data)
+    return ""
+
+
+def _resolve_popo_attachment_download_url(file_id: str, robot_config: dict[str, Any], *, token: str = "") -> str:
+    identifier = str(file_id or "").strip()
+    if not identifier:
+        return ""
+    access_token = token or get_access_token(robot_config)
+    if not access_token:
+        raise RuntimeError("POPO access token is unavailable")
+    response = requests.get(
+        f"{POPO_API_BASE}/open-apis/robots/v1/im/file/{quote(identifier, safe='')}/download",
+        headers={"Open-Access-Token": access_token},
+        timeout=10,
+    )
+    data = response.json()
+    download_url = _popo_download_url_from_payload(data)
+    if response.status_code >= 400 or data.get("errcode") != 0 or not download_url:
+        raise RuntimeError(
+            "POPO file download-url request failed: "
+            + json.dumps(
+                {
+                    "statusCode": response.status_code,
+                    "errcode": data.get("errcode") if isinstance(data, dict) else None,
+                    "errmsg": data.get("errmsg") if isinstance(data, dict) else None,
+                    "hasDownloadUrl": bool(download_url),
+                },
+                ensure_ascii=False,
+            )
+        )
+    return download_url
+
+
+def _download_popo_attachment(candidate: dict[str, Any], robot_config: dict[str, Any]) -> dict[str, Any]:
+    url = str(candidate.get("url") or "").strip()
+    attachment = {key: value for key, value in candidate.items() if key != "raw"}
+    token = get_access_token(robot_config)
+    if not url:
+        file_id = str(candidate.get("id") or "").strip()
+        if file_id:
+            url = _resolve_popo_attachment_download_url(file_id, robot_config, token=token or "")
+    if not url.startswith(("http://", "https://")):
+        attachment["unresolved"] = True
+        return attachment
+
+    parsed = urlparse(url)
+    fallback_name = Path(parsed.path).name or f"popo-{int(time.time() * 1000)}"
+    name = _safe_attachment_filename(str(candidate.get("name") or fallback_name), fallback=fallback_name)
+    target_dir = POPO_ATTACHMENTS_DIR / time.strftime("%Y%m%d")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{int(time.time() * 1000)}_{name}"
+
+    headers: dict[str, str] = {}
+    if token:
+        headers["Open-Access-Token"] = token
+    with requests.get(url, headers=headers, stream=True, timeout=20) as response:
+        response.raise_for_status()
+        content_type = str(response.headers.get("Content-Type") or candidate.get("mime") or "").split(";", 1)[0].strip()
+        total = 0
+        with target.open("wb") as fh:
+            for chunk in response.iter_content(chunk_size=1024 * 64):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > POPO_ATTACHMENT_MAX_BYTES:
+                    raise ValueError(f"POPO attachment exceeds max bytes: {POPO_ATTACHMENT_MAX_BYTES}")
+                fh.write(chunk)
+    attachment.update(
+        {
+            "path": str(target.resolve()),
+            "name": name,
+            "mime": content_type or str(candidate.get("mime") or ""),
+            "size": target.stat().st_size,
+            "unresolved": False,
+        }
+    )
+    attachment["kind"] = _attachment_kind_from_value(
+        attachment.get("sourceKey"),
+        msg_type=attachment.get("msgType"),
+        mime=str(attachment.get("mime") or ""),
+        name=name,
+    )
+    return attachment
+
+
+def extract_popo_message_and_attachments(event_data: dict[str, Any], robot_config: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    if not isinstance(event_data, dict):
+        return "", []
+    notify = str(event_data.get("notify") or "").strip()
+    attachments: list[dict[str, Any]] = []
+    for candidate in _collect_popo_attachment_candidates(event_data):
+        try:
+            attachments.append(_download_popo_attachment(candidate, robot_config))
+        except Exception as exc:
+            unresolved = {key: value for key, value in candidate.items() if key != "raw"}
+            unresolved["unresolved"] = True
+            unresolved["error"] = str(exc)
+            attachments.append(unresolved)
+            print(f"[POPO_ATTACHMENT] failed to download {candidate.get('sourceKey')}: {exc}", flush=True)
+    if not notify and attachments:
+        kinds = ", ".join(sorted({str(item.get("kind") or "file") for item in attachments}))
+        notify = f"[POPO attachment: {kinds}]"
+    return notify, attachments
+
+
+def _pending_file_cache_key(
+    *,
+    robot_config: dict[str, Any],
+    reply_to: str,
+    sender: str,
+    popo_session_id: str,
+    popo_group_id: str = "",
+    session_type: Any = "",
+) -> tuple[str, str, str, str, str, str]:
+    return (
+        str(robot_config.get("robot_app_key") or ""),
+        str(sender or ""),
+        str(popo_session_id or ""),
+        str(popo_group_id or ""),
+        str(reply_to or ""),
+        str(session_type or ""),
+    )
+
+
+def _popo_direct_command_name(text: str) -> str:
+    parts = str(text or "").strip().split(maxsplit=1)
+    if not parts:
+        return ""
+    command = parts[0].lower()
+    if command in {"/help", "/new", "/stop", "/excel-log"}:
+        return command
+    return ""
+
+
+def _attachments_are_all_files(attachments: list[dict[str, Any]] | None) -> bool:
+    clean = [item for item in attachments or [] if isinstance(item, dict)]
+    return bool(clean) and all(str(item.get("kind") or "file").strip().lower() == "file" for item in clean)
+
+
+def _popo_file_only_label(value: Any) -> str:
+    text = str(value or "").strip().strip('"').strip("'").replace("\\", "/")
+    if not text:
+        return ""
+    return text.rsplit("/", 1)[-1].lower()
+
+
+def _popo_file_attachment_labels(attachments: list[dict[str, Any]]) -> list[str]:
+    labels: list[str] = []
+    for item in attachments:
+        label = _popo_file_only_label(item.get("name") or item.get("path") or item.get("url") or item.get("id"))
+        if label:
+            labels.append(label)
+    return labels
+
+
+def _raw_notify_is_file_only_message(
+    raw_text: str,
+    attachments: list[dict[str, Any]],
+    robot_config: dict[str, Any],
+) -> bool:
+    if not _attachments_are_all_files(attachments):
+        return False
+    text = str(raw_text or "").strip()
+    if not text:
+        return True
+    robot_name = str(robot_config.get("robot_name") or robot_config.get("robotName") or "").strip()
+    text_variants = {text}
+    if robot_name:
+        text_variants.add(text.replace(f"@{robot_name}", "").strip())
+    labels = _popo_file_attachment_labels(attachments)
+    if not labels:
+        return False
+    for variant in text_variants:
+        label = _popo_file_only_label(variant)
+        if len(labels) == 1 and label == labels[0]:
+            return True
+        parts = [_popo_file_only_label(part) for part in re.split(r"[\r\n,，]+", variant) if part.strip()]
+        if parts and parts == labels:
+            return True
+    return False
+
+
+def _clear_pending_popo_files(key: tuple[str, str, str, str, str, str]) -> None:
+    with _pending_file_lock:
+        _pending_file_cache.pop(key, None)
+
+
+def _append_pending_popo_files(key: tuple[str, str, str, str, str, str], attachments: list[dict[str, Any]]) -> int:
+    with _pending_file_lock:
+        pending = _pending_file_cache.setdefault(key, [])
+        pending.extend(dict(item) for item in attachments if isinstance(item, dict))
+        return len(pending)
+
+
+def _pop_pending_popo_files(key: tuple[str, str, str, str, str, str]) -> list[dict[str, Any]]:
+    with _pending_file_lock:
+        pending = _pending_file_cache.pop(key, [])
+    return [dict(item) for item in pending if isinstance(item, dict)]
+
+
+def _prepare_popo_callback_delivery(
+    *,
+    robot_config: dict[str, Any],
+    reply_to: str,
+    notify: str,
+    raw_notify: str,
+    sender: str,
+    popo_session_id: str,
+    popo_group_id: str = "",
+    session_type: Any = "",
+    attachments: list[dict[str, Any]] | None = None,
+) -> tuple[bool, list[dict[str, Any]]]:
+    clean_attachments = [dict(item) for item in attachments or [] if isinstance(item, dict)]
+    pending_key = _pending_file_cache_key(
+        robot_config=robot_config,
+        reply_to=reply_to,
+        sender=sender,
+        popo_session_id=popo_session_id,
+        popo_group_id=popo_group_id,
+        session_type=session_type,
+    )
+    raw_text = str(raw_notify or "").strip()
+    command = _popo_direct_command_name(raw_text)
+    if command in {"/new", "/stop"}:
+        _clear_pending_popo_files(pending_key)
+        return True, clean_attachments
+    if command in {"/help", "/excel-log"}:
+        return True, clean_attachments
+
+    if _raw_notify_is_file_only_message(raw_text, clean_attachments, robot_config):
+        total = _append_pending_popo_files(pending_key, clean_attachments)
+        print(
+            f"[POPO_ATTACHMENT] cached pending files={len(clean_attachments)} total={total} "
+            f"sender={sender} session={popo_session_id} group={popo_group_id}",
+            flush=True,
+        )
+        return False, []
+
+    if raw_text:
+        pending_files = _pop_pending_popo_files(pending_key)
+        if pending_files:
+            print(
+                f"[POPO_ATTACHMENT] attaching pending files={len(pending_files)} "
+                f"sender={sender} session={popo_session_id} group={popo_group_id}",
+                flush=True,
+            )
+            return True, [*pending_files, *clean_attachments]
+    return True, clean_attachments
+
+
+def _send_message_payload(url: str, receiver: str, content: str, headers: dict[str, str]) -> dict[str, Any]:
     payload = {
         "receiver": receiver,
         "msgType": "text",
@@ -298,16 +755,35 @@ def send_message(receiver, content, robot_config: dict[str, Any]):
             "content": content,
         },
     }
+    resp = requests.post(url, json=payload, headers=headers, timeout=10)
+    result = resp.json()
+    print(f"[SEND] -> {receiver}: {content[:100]}...", flush=True)
+    print(f"[SEND] response: {json.dumps(result, ensure_ascii=False)}", flush=True)
+    return result
+
+
+def send_message(receiver, content, robot_config: dict[str, Any]):
+    token = get_access_token(robot_config)
+    if not token:
+        print("[SEND] no access token; send skipped", flush=True)
+        return
+
+    url = f"{POPO_API_BASE}/open-apis/robots/v1/im/send-msg"
     headers = {
         "Content-Type": "application/json",
         "Open-Access-Token": token,
     }
 
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=10)
-        result = resp.json()
-        print(f"[SEND] -> {receiver}: {content[:100]}...", flush=True)
-        print(f"[SEND] response: {json.dumps(result, ensure_ascii=False)}", flush=True)
+        chunks = _split_text_for_popo(str(content or ""))
+        if not chunks:
+            return
+        if len(chunks) == 1:
+            _send_message_payload(url, receiver, chunks[0], headers)
+            return
+        total = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
+            _send_message_payload(url, receiver, f"[{index}/{total}]\n{chunk}", headers)
     except Exception as exc:
         print(f"[SEND] exception: {exc}", flush=True)
 
@@ -341,6 +817,7 @@ def call_blueprint(
     popo_group_id: str = "",
     reply_to: str = "",
     session_type: Any = "",
+    attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     print(
         f"[BLUEPRINT] message: {user_message} (robot={robot_app_key}, sender={sender}, session={popo_session_id}, group={popo_group_id})",
@@ -359,10 +836,12 @@ def call_blueprint(
                 "popoSessionType": str(session_type or ""),
             },
         }
+        if attachments:
+            request_args["attachments"] = attachments
         if BLUEPRINT_PROJECT_DIR:
             request_args["projectDir"] = BLUEPRINT_PROJECT_DIR
         started = blueprint_request(
-            "blueprint.slots.message",
+            "blueprint.sessions.message",
             request_args,
             request_kind="internal",
             timeout=90,
@@ -370,10 +849,6 @@ def call_blueprint(
     except SingletonServiceError as exc:
         print(f"[BLUEPRINT] service error: {exc}", flush=True)
         code = str(getattr(exc, "code", "") or "")
-        if code == "BLUEPRINT_SLOT_NOT_FOUND":
-            return "当前没有可用的蓝图运行槽，请先在蓝图面板手动启动运行槽。"
-        if code == "BLUEPRINT_SLOT_BUSY":
-            return "当前蓝图运行槽都在处理任务，请稍后再试或启动新的运行槽。"
         if code == "BLUEPRINT_POPO_ROBOT_NOT_BOUND":
             return "这个 POPO 机器人还没有绑定到可用的蓝图结构。"
         if code == "BLUEPRINT_POPO_ENTRY_REQUIRED":
@@ -389,6 +864,12 @@ def call_blueprint(
     run_id = str(started.get("runId") or "")
     if started.get("cleared"):
         return "已开启新会话"
+    if started.get("help"):
+        return str(started.get("message") or "")
+    if started.get("stopped") or started.get("terminated"):
+        return str(started.get("message") or "已结束当前会话")
+    if started.get("excelLog"):
+        return str(started.get("message") or started.get("log") or "")
     if started.get("queued"):
         return ""
     if not run_id:
@@ -414,7 +895,12 @@ def call_blueprint(
                 return summary
             return f"蓝图运行已结束：{last_status}\n会话：{session_key}\n运行：{run_id}"
         time.sleep(BLUEPRINT_POLL_INTERVAL)
-    return f"蓝图运行仍在处理中。\n会话：{session_key}\n运行：{run_id}\n状态：{last_status or 'starting'}"
+    print(
+        f"[BLUEPRINT] run still active after callback wait; no direct POPO status reply "
+        f"session={session_key} run={run_id} status={last_status or 'starting'}",
+        flush=True,
+    )
+    return ""
 
 
 class AESCipher:
@@ -488,9 +974,9 @@ def handle_and_reply(
     popo_session_id: str = "",
     popo_group_id: str = "",
     session_type: Any = "",
+    attachments: list[dict[str, Any]] | None = None,
 ) -> None:
     try:
-        send_message(reply_to, "思考中....", robot_config)
         reply = call_blueprint(
             user_message,
             robot_app_key=str(robot_config.get("robot_app_key") or ""),
@@ -499,6 +985,7 @@ def handle_and_reply(
             popo_group_id=popo_group_id,
             reply_to=reply_to,
             session_type=session_type,
+            attachments=attachments,
         )
         if reply:
             send_message(reply_to, reply, robot_config)
@@ -507,7 +994,16 @@ def handle_and_reply(
         send_message(reply_to, f"处理消息时出错：{str(exc)}", robot_config)
 
 
-def _start_handler_thread(robot_config, reply_to, notify, sender, popo_session_id, popo_group_id="", session_type=""):
+def _start_handler_thread(
+    robot_config,
+    reply_to,
+    notify,
+    sender,
+    popo_session_id,
+    popo_group_id="",
+    session_type="",
+    attachments=None,
+):
     threading.Thread(
         target=handle_and_reply,
         kwargs={
@@ -518,6 +1014,7 @@ def _start_handler_thread(robot_config, reply_to, notify, sender, popo_session_i
             "popo_session_id": popo_session_id,
             "popo_group_id": popo_group_id,
             "session_type": session_type,
+            "attachments": attachments or [],
         },
         daemon=True,
     ).start()
@@ -601,8 +1098,15 @@ def popo_callback(robot_app_key=None):
 
     if event_type == "MSG_SEND":
         event_data = event_json.get("eventData", {})
+        if not isinstance(event_data, dict):
+            event_data = {}
+        event_id = _popo_event_id(event_json)
+        if not _mark_popo_event_seen(event_id):
+            print(f"[INFO] duplicate POPO event ignored: {event_id}", flush=True)
+            return _success_response(aes)
         sender = event_data.get("from", "")
-        notify = event_data.get("notify", "")
+        raw_notify = str(event_data.get("notify") or "").strip()
+        notify, attachments = extract_popo_message_and_attachments(event_data, robot_config)
         session_type = event_data.get("sessionType")
         session_id = event_data.get("sessionId", "")
         print(
@@ -610,50 +1114,97 @@ def popo_callback(robot_app_key=None):
             flush=True,
         )
         print(f"[MSG] content={notify}", flush=True)
+        if attachments:
+            print(f"[MSG] attachments={len(attachments)}", flush=True)
 
-        event_id = _popo_event_id(event_json)
-        if not _mark_popo_event_seen(event_id):
-            print(f"[INFO] duplicate POPO event ignored: {event_id}", flush=True)
-            return _success_response(aes)
         reply_to = sender if session_type == 1 else session_id
         group_id = session_id if session_type == 3 else ""
-        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, group_id, session_type)
+        should_dispatch, delivery_attachments = _prepare_popo_callback_delivery(
+            robot_config=robot_config,
+            reply_to=reply_to,
+            notify=notify,
+            raw_notify=raw_notify,
+            sender=sender,
+            popo_session_id=session_id,
+            popo_group_id=group_id,
+            session_type=session_type,
+            attachments=attachments,
+        )
+        if not should_dispatch:
+            return _success_response(aes)
+        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, group_id, session_type, attachments=delivery_attachments)
         return _success_response(aes)
 
     if event_type == "IM_P2P_TO_ROBOT_MSG":
         event_data = event_json.get("eventData", {})
-        sender = event_data.get("from", "")
-        notify = event_data.get("notify", "")
-        session_id = event_data.get("sessionId", "")
-        session_type = event_data.get("sessionType", "")
-        print(f"[MSG] user {sender} p2p: {notify}", flush=True)
-
+        if not isinstance(event_data, dict):
+            event_data = {}
         event_id = _popo_event_id(event_json)
         if not _mark_popo_event_seen(event_id):
             print(f"[INFO] duplicate POPO event ignored: {event_id}", flush=True)
             return _success_response(aes)
+        sender = event_data.get("from", "")
+        raw_notify = str(event_data.get("notify") or "").strip()
+        notify, attachments = extract_popo_message_and_attachments(event_data, robot_config)
+        session_id = event_data.get("sessionId", "")
+        session_type = event_data.get("sessionType", "")
+        print(f"[MSG] user {sender} p2p: {notify}", flush=True)
+        if attachments:
+            print(f"[MSG] p2p attachments={len(attachments)}", flush=True)
+
         reply_to = sender or session_id
-        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, "", session_type)
+        should_dispatch, delivery_attachments = _prepare_popo_callback_delivery(
+            robot_config=robot_config,
+            reply_to=reply_to,
+            notify=notify,
+            raw_notify=raw_notify,
+            sender=sender,
+            popo_session_id=session_id,
+            popo_group_id="",
+            session_type=session_type,
+            attachments=attachments,
+        )
+        if not should_dispatch:
+            return _success_response(aes)
+        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, "", session_type, attachments=delivery_attachments)
         return _success_response(aes)
 
     if event_type == "IM_CHAT_TO_ROBOT_AT_MSG":
         event_data = event_json.get("eventData", {})
+        if not isinstance(event_data, dict):
+            event_data = {}
+        event_id = _popo_event_id(event_json)
+        if not _mark_popo_event_seen(event_id):
+            print(f"[INFO] duplicate POPO event ignored: {event_id}", flush=True)
+            return _success_response(aes)
         sender = event_data.get("from", "")
-        notify = event_data.get("notify", "")
+        raw_notify = str(event_data.get("notify") or "").strip()
+        notify, attachments = extract_popo_message_and_attachments(event_data, robot_config)
         session_id = event_data.get("sessionId", "")
         session_type = event_data.get("sessionType")
         print(
             f"[MSG] user {sender} in group {session_id} at robot: {notify}",
             flush=True,
         )
+        if attachments:
+            print(f"[MSG] group attachments={len(attachments)}", flush=True)
 
-        event_id = _popo_event_id(event_json)
-        if not _mark_popo_event_seen(event_id):
-            print(f"[INFO] duplicate POPO event ignored: {event_id}", flush=True)
-            return _success_response(aes)
         reply_to = session_id if session_type == 3 else sender
         group_id = session_id if session_type == 3 else ""
-        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, group_id, session_type)
+        should_dispatch, delivery_attachments = _prepare_popo_callback_delivery(
+            robot_config=robot_config,
+            reply_to=reply_to,
+            notify=notify,
+            raw_notify=raw_notify,
+            sender=sender,
+            popo_session_id=session_id,
+            popo_group_id=group_id,
+            session_type=session_type,
+            attachments=attachments,
+        )
+        if not should_dispatch:
+            return _success_response(aes)
+        _start_handler_thread(robot_config, reply_to, notify, sender, session_id, group_id, session_type, attachments=delivery_attachments)
         return _success_response(aes)
 
     print(f"[INFO] ignored event: {event_type}", flush=True)

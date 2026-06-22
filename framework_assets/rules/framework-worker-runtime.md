@@ -1,5 +1,7 @@
 # Multi-Agent Worker Framework Rules
 
+- Assume every user talking to you is remote and cannot see local code changes or runtime effects. Unless the current task explicitly asks to change, fix, implement, or submit code, do not edit code; provide analysis, findings, or actionable instructions instead.
+- When the current task explicitly asks for a code change, local edits alone are not a completed result because remote users cannot see them. For SVN-backed game, export, hotfix, reload, or toolchain code, complete the work with the required `svn commit` unless the user explicitly says not to commit. If a ticket number, commit message, approval, or other required submit detail is missing, ask for it and do not mark the task completed.
 - Understand the three workspace zones before acting: project directory is the authoritative code source/final target, private checkout is your personal workbench, temporary shared workspace is read-only collaboration state.
 - Read project_context / project_code_root directly as read-only context when you need project files.
 - Read the temporary shared workspace directly as read-only filesystem context when you need reports, artifacts, manifest.json, or logs.
@@ -7,6 +9,12 @@
 - Use framework MCP tools when they are configured in Codex.
 - Submit code changes from the private checkout through `workspace_submit`.
 - Publish reports, artifacts, summaries, file/version references, and changeset ids through `workspace_publish` / `workspace_publish_file`.
+- Treat Excel export pipeline issues and game source-code questions as read-only analysis by default. Do not modify Excel export flow/toolchain code, game source, hotfix/reload code, or related project scripts unless the current task explicitly asks for that code change.
+- When the current task explicitly asks for an Excel export pipeline code change, do not run the full Excel export/TOP export flow as verification. Use code review, syntax checks, or targeted tests where practical, and report that remote end-to-end export behavior was not locally verified.
+- When a planning-table, source-data, or revision diagnosis uses row-level diff evidence, treat the diff as a pointer, not proof. Read the current HEAD file/table row/cell and exact field before concluding whether a value is present or missing; for generated fields, verify the generator/source list and do not assume an upstream reward/source table is scanned unless the code proves it.
+- When passing non-ASCII Windows paths or localized text through PowerShell into Python or search tools, verify it did not become `???`. Prefer a Python Unicode literal, `-LiteralPath`, a temp file, or another structured argument that preserves Unicode.
+- When searching revision diffs with `rg` from PowerShell, avoid embedded escaped double quotes in the pattern or command string. Prefer simple single-quoted patterns, `--fixed-strings`, or `-e`; if results are surprising, first validate PowerShell argument parsing before trusting an absence of matches.
+- For client debugging scripts or telnet/REPL snippets that cross PowerShell, JSON, and client command layers, do not inline fragile quoted code. Use stdin/file-based script input or base64-decoded script transfer, then verify from stdout/logs that the client actually executed the intended logic before reasoning from the result. Start with read-only snapshots unless side effects are explicitly requested.
 - If multiple AgentNodes may publish to one shared path, either use an agent-specific path or read the current shared file plus shared `manifest.json`, then publish the full replacement content with `expected_version`; cross-agent overwrites without `expected_version` are rejected.
 - Do not write directly into project_context, project_code_root, or the temporary shared workspace as a code/output completion path.
 - If a direct project/shared write is denied by the sandbox, treat that as boundary enforcement and continue through checkout/submit/publish instead of stopping.
@@ -17,6 +25,7 @@
 - To inspect the current readable batch, call `agent_context({})` with no explicit batch_id.
 - When `framework_context.message_envelope.required_script_calls` is non-empty, call `blueprint_script_call` for the listed function(s); the framework executes the ScriptNode and delivers outputs to connected downstream AgentNodes.
 - `framework_context.resident_services` lists global resident services by name, description, and status. Use `blueprint_service_docs(service_name)` for method signatures and `blueprint_service_call(service_name, method_name, arguments)` to call one. Ordinary Agent tools cannot start or stop resident services.
+- For POPO-bound sessions, send local images or files to the current POPO user with `blueprint_send_popo_file(path)` and pass only the local file path.
 - To provide information to another AgentNode, use `agent_dispatch` for the current batch.
 - Sending an empty string `""` or numeric `0` through `agent_dispatch` means this target has no task and should not receive a downstream message.
 - When `framework_context.message_envelope.required_outgoing_targets` is empty, this is leaf work: do not call `agent_dispatch` or `join_contribute`; process the message and publish durable results through `workspace_publish` / `workspace_publish_file`.

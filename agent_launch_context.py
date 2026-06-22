@@ -344,8 +344,19 @@ def copy_skill_dir_to_codex_home(source_skill_dir: Path, codex_home: Path, *, na
     skill_name = _safe_skill_dir_name(name or source.name)
     target = codex_home / "skills" / skill_name
     if target.exists():
-        shutil.rmtree(_windows_long_path(target))
-    shutil.copytree(_windows_long_path(source), _windows_long_path(target))
+        try:
+            shutil.rmtree(target)
+        except OSError:
+            shutil.rmtree(_windows_long_path(target))
+    try:
+        shutil.copytree(source, target)
+    except OSError:
+        if target.exists():
+            try:
+                shutil.rmtree(target)
+            except OSError:
+                shutil.rmtree(_windows_long_path(target))
+        shutil.copytree(_windows_long_path(source), _windows_long_path(target))
     copied_md = target / "SKILL.md"
     content = copied_md.read_text(encoding="utf-8-sig")
     _write_text_no_bom(copied_md, content)
@@ -957,6 +968,7 @@ def materialize_full_agent_context(
 
     adapter_options = dict(data.get("adapter_options", {}))
     access_policy = dict(getattr(node, "access_policy", {}) or {})
+    popo_entry = dict(getattr(node, "popo_entry", {}) or {})
     mcp_context: Optional[Dict[str, Any]] = None
     codex_home = support_dir / "codex_home"
     skill_catalog: list[Dict[str, str]] = []
@@ -973,6 +985,9 @@ def materialize_full_agent_context(
         adapter_options.setdefault("codex_home", str(codex_home))
         adapter_options.setdefault("diagnostics_dir", str(support_dir / "logs" / "codex"))
         adapter_options.setdefault("skip_git_repo_check", True)
+        if bool(popo_entry.get("enabled")):
+            adapter_options.setdefault("codex_backend", "app_server")
+            adapter_options.setdefault("conversation_backend", "codex_app_server")
         if bool(access_policy.get("disable_sandbox", True)):
             adapter_options["sandbox"] = "danger-full-access"
             adapter_options["dangerous_access"] = True

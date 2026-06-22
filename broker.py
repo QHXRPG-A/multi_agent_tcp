@@ -573,6 +573,113 @@ class Broker:
                         log.warning("forward failed to=%s: %s", to, e)
                     continue
 
+                if mtype == "control":
+                    to = msg.get("to")
+                    control_id = msg.get("id")
+                    control = msg.get("control")
+                    body = msg.get("body")
+                    if not isinstance(to, str) or not to.strip():
+                        await self._safe_write_frame(
+                            writer,
+                            {"type": "error", "code": "bad_control", "message": "field 'to' must be non-empty str"},
+                        )
+                        continue
+                    if not isinstance(control_id, str) or not control_id.strip():
+                        await self._safe_write_frame(
+                            writer,
+                            {"type": "error", "code": "bad_control", "message": "field 'id' must be non-empty str"},
+                        )
+                        continue
+                    if not isinstance(control, str) or not control.strip():
+                        await self._safe_write_frame(
+                            writer,
+                            {"type": "control_result", "id": control_id, "ok": False, "body": {"ok": False, "error": "field 'control' must be non-empty str"}},
+                        )
+                        continue
+                    to = to.strip()
+                    control_id = control_id.strip()
+                    async with self._lock:
+                        target = self._agents.get(to)
+                    if target is None or target.is_closing():
+                        await self._safe_write_frame(
+                            writer,
+                            {
+                                "type": "control_result",
+                                "id": control_id,
+                                "from": to,
+                                "ok": False,
+                                "body": {"ok": False, "error": f"no active agent: {to}", "code": "unknown_target"},
+                            },
+                        )
+                        continue
+                    out = {
+                        "type": "control",
+                        "id": control_id,
+                        "from": agent_id,
+                        "control": control.strip(),
+                        "body": body,
+                    }
+                    if isinstance(msg.get("meta"), dict):
+                        out["meta"] = dict(msg["meta"])
+                    try:
+                        await self._safe_write_frame(target, out)
+                    except (ConnectionError, OSError) as e:
+                        await self._safe_write_frame(
+                            writer,
+                            {
+                                "type": "control_result",
+                                "id": control_id,
+                                "from": to,
+                                "ok": False,
+                                "body": {"ok": False, "error": str(e), "code": "dispatch_failed"},
+                            },
+                        )
+                    continue
+
+                if mtype == "control_result":
+                    to = msg.get("to")
+                    control_id = msg.get("id")
+                    body = msg.get("body")
+                    if not isinstance(to, str) or not to.strip():
+                        await self._safe_write_frame(
+                            writer,
+                            {"type": "error", "code": "bad_control_result", "message": "field 'to' must be non-empty str"},
+                        )
+                        continue
+                    if not isinstance(control_id, str) or not control_id.strip():
+                        await self._safe_write_frame(
+                            writer,
+                            {"type": "error", "code": "bad_control_result", "message": "field 'id' must be non-empty str"},
+                        )
+                        continue
+                    to = to.strip()
+                    async with self._lock:
+                        target = self._agents.get(to)
+                    if target is None or target.is_closing():
+                        await self._safe_write_frame(
+                            writer,
+                            {
+                                "type": "error",
+                                "code": "unknown_target",
+                                "message": f"no active agent: {to}",
+                            },
+                        )
+                        continue
+                    try:
+                        await self._safe_write_frame(
+                            target,
+                            {
+                                "type": "control_result",
+                                "id": control_id.strip(),
+                                "from": agent_id,
+                                "body": body,
+                                "ok": bool(isinstance(body, dict) and body.get("ok")),
+                            },
+                        )
+                    except (ConnectionError, OSError) as e:
+                        log.warning("control_result forward failed to=%s: %s", to, e)
+                    continue
+
                 if mtype == "broadcast":
                     body = msg.get("body")
                     exclude = msg.get("exclude")

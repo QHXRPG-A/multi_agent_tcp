@@ -79,12 +79,8 @@ const api: ElectronAPI = {
   blueprintDeleteSession: (sessionKey) => ipcRenderer.invoke("blueprint-delete-session", sessionKey),
   blueprintTerminateSession: (sessionKey, reason) =>
     ipcRenderer.invoke("blueprint-terminate-session", sessionKey, reason),
-  blueprintStartSlot: (projectDir, blueprintId) => ipcRenderer.invoke("blueprint-start-slot", projectDir, blueprintId),
-  blueprintSlotStatus: (projectDir, blueprintId) => ipcRenderer.invoke("blueprint-slot-status", projectDir, blueprintId),
-  blueprintTerminateSlot: (projectDir, blueprintId, reason) =>
-    ipcRenderer.invoke("blueprint-terminate-slot", projectDir, blueprintId, reason),
-  blueprintSlotMessage: (projectDir, message, input) =>
-    ipcRenderer.invoke("blueprint-slot-message", projectDir, message, input),
+  blueprintSessionMessage: (projectDir, blueprintId, message, input) =>
+    ipcRenderer.invoke("blueprint-session-message", projectDir, blueprintId, message, input),
   blueprintStart: (projectDir, blueprintId, plan, executionMode) =>
     ipcRenderer.invoke("blueprint-start", projectDir, blueprintId, plan, executionMode),
   blueprintStatus: (runId) => ipcRenderer.invoke("blueprint-status", runId),

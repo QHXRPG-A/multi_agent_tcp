@@ -79,6 +79,42 @@ export { excelHistoryRecordDisplay }
   return module.excelHistoryRecordDisplay as (record: Record<string, unknown>) => Record<string, string>
 }
 
+async function loadFileSendHistoryRecordDisplay(): Promise<(record: Record<string, unknown>) => Record<string, string>> {
+  const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+  const helperStart = source.indexOf("type ExcelHistoryRecordDisplay")
+  const helperEnd = source.indexOf("function normalizeScriptCatalogNodeFromJson")
+  const helperSource = source.slice(helperStart, helperEnd)
+  const script = `
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+function arrayOfRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(asRecord).filter(Boolean) as Record<string, unknown>[] : []
+}
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined
+}
+function numberValue(value: unknown): number {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : 0
+}
+function formatBlueprintSessionTimestamp(value: number) {
+  const date = new Date(value)
+  const pad = (part: number) => String(part).padStart(2, "0")
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join("-") + \` \${pad(date.getHours())}:\${pad(date.getMinutes())}:\${pad(date.getSeconds())}\`
+}
+${helperSource}
+export { fileSendHistoryRecordDisplay }
+`
+  const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(script)
+  const module = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`)
+  return module.fileSendHistoryRecordDisplay as (record: Record<string, unknown>) => Record<string, string>
+}
+
 describe("blueprint inspector source", () => {
   test("does not render framework-managed agent fields as editable inspector controls", async () => {
     const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
@@ -138,6 +174,20 @@ describe("blueprint inspector source", () => {
     expect(multiSelect).toContain("if (locked().has(value)) return")
     expect(multiSelect).toContain("const next = new Set(editableValues())")
     expect(multiSelect).toContain("disabled={locked().has(option.value)}")
+  })
+
+  test("adds local search to long skill and rule dropdowns", async () => {
+    const source = await Bun.file(new URL("./blueprint-side-panel.tsx", import.meta.url)).text()
+    const multiSelect = source.slice(source.indexOf("function MultiSelectField"), source.indexOf("function CheckboxField"))
+
+    expect(multiSelect).toContain('const [searchQuery, setSearchQuery] = createSignal("")')
+    expect(multiSelect).toContain("const visibleOptions = () =>")
+    expect(multiSelect).toContain('[option.value, option.label, option.description ?? ""]')
+    expect(multiSelect).toContain("data-blueprint-multiselect-search")
+    expect(multiSelect).toContain('placeholder={language.t("common.search.placeholder" as never)}')
+    expect(multiSelect).toContain("onKeyDown={(event) => event.stopPropagation()}")
+    expect(multiSelect).toContain("language.t(\"palette.empty\" as never)")
+    expect(multiSelect).toContain("<For each={visibleOptions()}>")
   })
 
   test("uses separate copy for agent description and Prompt node help", async () => {
@@ -295,47 +345,88 @@ describe("blueprint inspector source", () => {
     const controlDrawer = source.slice(source.indexOf("function BlueprintControlDrawer"), source.indexOf("function BlueprintPopoServicePanel"))
     const detailDialog = source.slice(source.indexOf("function BlueprintExcelHistoryDetailDialog"), source.indexOf("function BlueprintExcelHistoryRecordView"))
     const recordView = source.slice(source.indexOf("function BlueprintExcelHistoryRecordView"), source.indexOf("function BlueprintPopoServicePanel"))
+    const fileDetailDialog = source.slice(source.indexOf("function BlueprintFileSendHistoryDetailDialog"), source.indexOf("function BlueprintFileSendHistoryRecordView"))
+    const fileRecordView = source.slice(source.indexOf("function BlueprintFileSendHistoryRecordView"), source.indexOf("function BlueprintPopoServicePanel"))
 
     expect(platform).toContain("BlueprintSessionExcelHistorySummary")
     expect(platform).toContain("BlueprintSessionExcelHistoryRecord")
     expect(platform).toContain("BlueprintSessionExcelHistory")
     expect(platform).toContain("listBlueprintSessionExcelHistory?")
     expect(platform).toContain("blueprintSessionExcelHistory?")
+    expect(platform).toContain("BlueprintSessionFileSendHistorySummary")
+    expect(platform).toContain("BlueprintSessionFileSendHistoryRecord")
+    expect(platform).toContain("BlueprintSessionFileSendHistory")
+    expect(platform).toContain("listBlueprintSessionFileSendHistory?")
+    expect(platform).toContain("blueprintSessionFileSendHistory?")
     expect(entry).toContain("listBlueprintSessionExcelHistory: async")
     expect(entry).toContain("blueprintSessionExcelHistory: async")
     expect(entry).toContain('"blueprint.sessions.excelHistoryList"')
     expect(entry).toContain('"blueprint.sessions.excelHistory"')
+    expect(entry).toContain("listBlueprintSessionFileSendHistory: async")
+    expect(entry).toContain("blueprintSessionFileSendHistory: async")
+    expect(entry).toContain('"blueprint.sessions.fileSendHistoryList"')
+    expect(entry).toContain('"blueprint.sessions.fileSendHistory"')
     expect(source).toContain("function BlueprintExcelHistoryPanel")
     expect(source).toContain("function BlueprintExcelHistoryDetailDialog")
     expect(source).toContain("function BlueprintExcelHistoryRecordView")
+    expect(source).toContain("function BlueprintFileSendHistoryPanel")
+    expect(source).toContain("function BlueprintFileSendHistoryDetailDialog")
+    expect(source).toContain("function BlueprintFileSendHistoryRecordView")
     expect(detailDialog).toContain('size="x-large"')
+    expect(fileDetailDialog).toContain('size="x-large"')
     expect(source).toContain("data-blueprint-excel-history-panel")
     expect(source).toContain("data-blueprint-excel-history-session")
     expect(source).toContain("data-blueprint-excel-history-dialog")
     expect(source).toContain("data-blueprint-excel-history-table")
     expect(source).toContain("data-blueprint-excel-history-header")
     expect(source).toContain("data-blueprint-excel-history-record")
+    expect(source).toContain("data-blueprint-file-send-history-panel")
+    expect(source).toContain("data-blueprint-file-send-history-session")
+    expect(source).toContain("data-blueprint-file-send-history-dialog")
+    expect(source).toContain("data-blueprint-file-send-history-table")
+    expect(source).toContain("data-blueprint-file-send-history-header")
+    expect(source).toContain("data-blueprint-file-send-history-record")
     expect(source).toContain("refreshBlueprintExcelHistory({ silent: true })")
+    expect(source).toContain("refreshBlueprintFileSendHistory({ silent: true })")
     expect(source).toContain("onOpenExcelHistory={openBlueprintExcelHistoryDialog}")
+    expect(source).toContain("onOpenFileSendHistory={openBlueprintFileSendHistoryDialog}")
     expect(recordView).toContain("excelHistoryRecordDisplay")
+    expect(fileRecordView).toContain("fileSendHistoryRecordDisplay")
     expect(source).toContain("blueprint.excelHistory.time")
     expect(source).toContain("blueprint.excelHistory.status")
     expect(source).toContain("blueprint.excelHistory.command")
     expect(source).toContain("blueprint.excelHistory.workbook")
     expect(source).toContain("blueprint.excelHistory.location")
+    expect(source).toContain("blueprint.fileSendHistory.time")
+    expect(source).toContain("blueprint.fileSendHistory.type")
+    expect(source).toContain("blueprint.fileSendHistory.status")
+    expect(source).toContain("blueprint.fileSendHistory.fileName")
+    expect(source).toContain("blueprint.fileSendHistory.size")
+    expect(source).toContain("blueprint.fileSendHistory.receiver")
+    expect(source).toContain("blueprint.fileSendHistory.path")
     expect(recordView).not.toContain("userSummary")
     expect(recordView).not.toContain("<pre")
     expect(controlDrawer).toContain("BlueprintPopoServicePanel")
     expect(controlDrawer).toContain("BlueprintExcelHistoryPanel")
+    expect(controlDrawer).toContain("BlueprintFileSendHistoryPanel")
     expect(controlDrawer.indexOf("BlueprintPopoServicePanel")).toBeLessThan(controlDrawer.indexOf("BlueprintExcelHistoryPanel"))
+    expect(controlDrawer.indexOf("BlueprintExcelHistoryPanel")).toBeLessThan(controlDrawer.indexOf("BlueprintFileSendHistoryPanel"))
     expect(en).toContain('"blueprint.excelHistory.title": "Planning form records"')
     expect(en).toContain('"blueprint.excelHistory.location": "Row / column"')
+    expect(en).toContain('"blueprint.fileSendHistory.title": "File and image send records"')
+    expect(en).toContain('"blueprint.fileSendHistory.path": "Path"')
     expect(zh).toContain('"blueprint.excelHistory.time"')
     expect(zh).toContain('"blueprint.excelHistory.location"')
+    expect(zh).toContain('"blueprint.fileSendHistory.time"')
+    expect(zh).toContain('"blueprint.fileSendHistory.path"')
     expect(zht).toContain('"blueprint.excelHistory.time"')
     expect(zht).toContain('"blueprint.excelHistory.location"')
+    expect(zht).toContain('"blueprint.fileSendHistory.time"')
+    expect(zht).toContain('"blueprint.fileSendHistory.path"')
     expect(zh).toContain('"blueprint.excelHistory.title": "策划填表记录"')
     expect(zht).toContain('"blueprint.excelHistory.title": "策劃填表記錄"')
+    expect(zh).toContain('"blueprint.fileSendHistory.title": "文件图片发送记录"')
+    expect(zht).toContain('"blueprint.fileSendHistory.title": "檔案圖片發送記錄"')
   })
 })
 
@@ -439,6 +530,53 @@ describe("blueprint session display helpers", () => {
       location: "-",
     })
   })
+
+  test("formats file send history records into compact display rows", async () => {
+    const display = await loadFileSendHistoryRecordDisplay()
+
+    expect(display({
+      time: "2026-06-17T09:10:11.123Z",
+      status: "succeeded",
+      messageType: "image",
+      fileType: "png",
+      fileName: "preview.png",
+      sizeBytes: 1536,
+      receiver: "qiuhaoxuan",
+      path: "C:\\Users\\qiuhaoxuan\\Desktop\\preview.png",
+    })).toMatchObject({
+      time: "2026-06-17T09:10:11Z",
+      type: "image/png",
+      status: "succeeded",
+      fileName: "preview.png",
+      size: "1.5 KB",
+      receiver: "qiuhaoxuan",
+      path: "C:\\Users\\qiuhaoxuan\\Desktop\\preview.png",
+    })
+
+    const failed = display({
+      status: "failed",
+      messageType: "file",
+      fileType: "zip",
+      sizeBytes: 22 * 1024 * 1024,
+      receiver: "group-1",
+      path: "F:\\very\\long\\workspace\\path\\with\\many\\folders\\that\\should\\be\\trimmed\\artifact.zip",
+    })
+    expect(failed).toMatchObject({
+      type: "file/zip",
+      status: "failed",
+      fileName: "artifact.zip",
+      size: "22 MB",
+      receiver: "group-1",
+    })
+    expect(failed.path.length).toBeLessThanOrEqual(92)
+    expect(failed.path).toContain("artifact.zip")
+
+    expect(display({ status: "failed", messageType: "file", path: "" })).toMatchObject({
+      fileName: "-",
+      size: "-",
+      path: "-",
+    })
+  })
 })
 
 describe("blueprint project persistence source", () => {
@@ -467,7 +605,7 @@ describe("blueprint project persistence source", () => {
     expect(source).toContain("data-blueprint-document-select")
     expect(source).toContain("data-blueprint-document-create")
     expect(source).toContain("data-blueprint-document-delete")
-    expect(source).toContain("handleBlueprintDocumentItemSelect(event, item.id)")
+    expect(source).toContain("handleBlueprintDocumentItemSelect(item.id)")
     expect(source).toContain("pendingBlueprintDocumentDeleteId === blueprintId")
     expect(source).toContain("requestBlueprintDocumentDelete(item.id)")
     expect(source).toContain("BlueprintCreateDialog")

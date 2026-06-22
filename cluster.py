@@ -936,6 +936,25 @@ class CLIWorkerBackend:
         )
         return reply
 
+    async def steer_single(
+        self,
+        worker_id: str,
+        body: Any,
+        *,
+        timeout_sec: float = 30.0,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Send a control message to a running worker turn and wait for acknowledgement."""
+        client = await self._ensure_client()
+        log.info("steer_single worker=%s timeout_sec=%s", worker_id, timeout_sec)
+        return await client.send_control(
+            worker_id,
+            "turn/steer",
+            body,
+            timeout_sec=float(timeout_sec),
+            meta=meta,
+        )
+
     async def run_chain(
         self,
         tasks: List[Tuple[str, Any]],

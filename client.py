@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from contextlib import suppress
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -25,6 +26,7 @@ class AgentTCPClient:
         self._read_closed = False
         self._reader_task: Optional[asyncio.Task] = None
         self._gather_futures: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
+        self._control_futures: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
 
     async def connect(self) -> None:
         self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
@@ -61,6 +63,13 @@ class AgentTCPClient:
                             if fut is not None and not fut.done():
                                 fut.set_result(msg)
                                 continue
+                    if mtype == "control_result":
+                        cid = msg.get("id")
+                        if isinstance(cid, str):
+                            fut = self._control_futures.get(cid)
+                            if fut is not None and not fut.done():
+                                fut.set_result(msg)
+                                continue
                     await self._enqueue_received(msg)
             except (asyncio.IncompleteReadError, EOFError, ConnectionError, OSError) as e:
                 log.debug("recv pump end: %s", e)
@@ -69,6 +78,10 @@ class AgentTCPClient:
                     if not fut.done():
                         fut.set_exception(ConnectionError("connection closed during batch_gather"))
                 self._gather_futures.clear()
+                for fut in self._control_futures.values():
+                    if not fut.done():
+                        fut.set_exception(ConnectionError("connection closed during control request"))
+                self._control_futures.clear()
                 async with self._inbox_changed:
                     self._read_closed = True
                     self._inbox_changed.notify_all()
@@ -113,6 +126,57 @@ class AgentTCPClient:
         if meta:
             payload["meta"] = dict(meta)
         await write_frame(self._writer, payload)
+
+    async def send_control(
+        self,
+        to_agent_id: str,
+        control: str,
+        body: Any,
+        *,
+        control_id: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        timeout_sec: float = 30.0,
+    ) -> Dict[str, Any]:
+        if not self._writer:
+            raise RuntimeError("not connected")
+        cid = str(control_id or f"ctl-{uuid.uuid4().hex[:12]}").strip()
+        if not cid:
+            raise ValueError("control_id must be non-empty")
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[Dict[str, Any]] = loop.create_future()
+        self._control_futures[cid] = fut
+        payload: Dict[str, Any] = {
+            "type": "control",
+            "id": cid,
+            "to": to_agent_id.strip(),
+            "control": str(control).strip(),
+            "body": body,
+        }
+        if meta:
+            payload["meta"] = dict(meta)
+        try:
+            await write_frame(self._writer, payload)
+            return await asyncio.wait_for(fut, timeout=float(timeout_sec))
+        finally:
+            self._control_futures.pop(cid, None)
+
+    async def send_control_result(
+        self,
+        to_agent_id: str,
+        control_id: str,
+        body: Any,
+    ) -> None:
+        if not self._writer:
+            raise RuntimeError("not connected")
+        await write_frame(
+            self._writer,
+            {
+                "type": "control_result",
+                "to": to_agent_id.strip(),
+                "id": str(control_id).strip(),
+                "body": body,
+            },
+        )
 
     async def broadcast(self, body: Any, exclude_self: bool = True) -> None:
         if not self._writer:
@@ -267,7 +331,7 @@ class AgentTCPClient:
     ) -> Optional[int]:
         for idx, msg in enumerate(self._inbox):
             t = msg.get("type")
-            if t in ("error", "ping", "pong", "gather_result"):
+            if t in ("error", "ping", "pong", "gather_result", "control_result"):
                 return idx
             if t == "message" and (expect_from is None or msg.get("from") == expect_from):
                 return idx

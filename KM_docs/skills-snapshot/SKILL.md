@@ -22,6 +22,80 @@ This file is intentionally short so Codex can discover the skill reliably.
 Detailed context lives in the files listed below. Load only the relevant files
 for the current task.
 
+## Most Important Local Command
+
+When the user asks to reinstall, refresh, reload, or restart the installed
+`gulicode-bp` plugin after Python/runtime/framework changes, prefer this
+one-step command from the repo root:
+
+```powershell
+F:\src\Package\Script\Python\multi_agent_tcp\restart-gulicode-bp-plugin.cmd -Install -SkipWebBuild -SyncFrameworkAssets -NoOpen -ProjectDir F:\src\Package\Script\Python\multi_agent_tcp
+```
+
+This command reinstalls/refreshes the personal plugin package, refreshes the
+plugin runtime Python package, syncs framework assets, and restarts the plugin
+service. If startup is slow or a previous run returned a health-check false
+negative, add a wider health window:
+
+```powershell
+F:\src\Package\Script\Python\multi_agent_tcp\restart-gulicode-bp-plugin.cmd -Install -SkipWebBuild -SyncFrameworkAssets -NoOpen -ProjectDir F:\src\Package\Script\Python\multi_agent_tcp -HealthTimeoutSeconds 90
+```
+
+Use `-SkipWebBuild` only when
+`F:\src\Package\Script\Python\multi_agent_tcp\GuLiCode\packages\app\dist\index.html`
+exists and `dist\assets\` is present. If the dist is missing or stale, rerun
+without `-SkipWebBuild`; the installer can run `bun install` and build the app.
+Never accept the fallback `plugins\gulicode-bp\web\index.html` page as the
+Workbench.
+
+If the one-step restart command returns exit code `1`, do not treat that as a
+failure by itself, but only ignore it after checking that the installed plugin
+service, POPO callback service, and MCP status are running and the Workbench
+URL passes these checks:
+
+- `<origin>/config.js` has `projectDir` equal to the requested project,
+  normally `F:\src\Package\Script\Python\multi_agent_tcp`.
+- The Workbench HTML is the built GuLiCode app, not the fallback page with
+  `<main class="shell">`.
+- `POST <origin>/api/blueprint` with the config token and
+  `blueprint.list(projectDir)` returns the expected Blueprint list.
+
+If the log says `command not found: vite`, `GuLiCode app dist is missing`, or
+`fallback web UI`, that exit code `1` is a real install/build failure: install
+or build the GuLiCode app first, then rerun the restart.
+
+The script writes restart logs under:
+
+```text
+F:\src\Package\Script\Python\multi_agent_tcp\logs\restart-gulicode-bp-plugin-*.log
+```
+
+After it finishes, verify the useful health endpoints first:
+
+```text
+http://127.0.0.1:8787/api/health
+http://127.0.0.1:3100/health
+```
+
+After a successful reinstall/restart, open or query the installed plugin
+Workbench through `start_blueprint_workbench` or the installed script:
+
+```powershell
+C:\Users\qiuhaoxuan\plugins\gulicode-bp\.runtime\venv\Scripts\python.exe C:\Users\qiuhaoxuan\plugins\gulicode-bp\scripts\start_workbench.py --project-dir <project-dir> --blueprint-id <blueprint-id> --ready-file <ready-json>
+```
+
+For this machine's main Blueprint project, use
+`F:\src\Package\Script\Python\multi_agent_tcp` as `<project-dir>`. Do not give
+a Workbench URL whose decoded route or `config.js` points at a temporary Codex
+worktree such as `C:\Users\qiuhaoxuan\.codex\worktrees\...` unless the user
+explicitly asked to debug that worktree.
+
+When the user asked for one-click reinstall/restart and did not ask for logs or
+diagnostics, the final response should default to only the plugin Workbench URL
+as a Markdown link. Do not include POPO callback URLs, health URLs, process
+details, or restart-log summaries unless the restart failed or the user asks for
+those details.
+
 ## Current Center
 
 The active product direction is:
@@ -29,7 +103,7 @@ The active product direction is:
 ```text
 gulicode-bp Codex plugin
   -> local Blueprint web workbench
-  -> POPO callback and Blueprint run-slot message entry
+  -> POPO callback and Blueprint session message entry
   -> GraphRuntimeControlPlane
   -> GraphRuntime
   -> AgentNode queues, outgoing batches, joins, workspace state, events
@@ -97,15 +171,83 @@ Read these first based on the task:
 
 ## Recent Handoff
 
+For the latest persistent POPO start-Agent session, Codex app-server thread
+reuse, in-flight `turn/steer` injection, callback timeout silence, and restart
+orphan worker cleanup from 2026-06-18:
+
+- Runtime/backend POPO-bound saved start full Agents now use a
+  `codex_app_server` backend by default, keep one Codex thread for the active
+  POPO `sessionKey`, inject transcript history only on activation/re-activation,
+  steer in-flight POPO messages into the active Codex turn when possible, and
+  fall back to the existing Agent queue when steer is rejected:
+  `archive/runtime-backend/blueprint_popo_persistent_codex_session_steer_cleanup_2026-06-18.md`
+- The POPO callback no longer sends `蓝图运行仍在处理中` for a still-running
+  persistent run, and `restart-gulicode-bp-plugin.ps1` now kills plugin-owned
+  `multi_agent_tcp_cluster` broker/agent process trees so child
+  `codex app-server --listen stdio://` processes cannot survive restart as
+  orphans:
+  `archive/runtime-backend/blueprint_popo_persistent_codex_session_steer_cleanup_2026-06-18.md`
+
+Use this file when the user reports:
+
+- POPO messages within 10 minutes do not reach the same Agent/Codex thread.
+- later active-run POPO messages repeat `[Recent BlueprintSession Messages]`.
+- a busy Agent ignores or fails to receive an in-flight POPO steer message.
+- POPO users receive the framework status text `蓝图运行仍在处理中`.
+- plugin restart leaves `multi_agent_tcp_cluster` or `codex app-server`
+  processes behind.
+
+For the latest POPO file-only attachment delay, fileId download, and POPO
+file-send token refresh from 2026-06-17:
+
+- Runtime/backend POPO callback now downloads `fileInfo.fileId` attachments to
+  absolute local paths, caches non-image file-only messages until the user's
+  next ordinary text message, accumulates multiple files in order, keeps images
+  immediate, clears pending files on `/new` and `/stop`, and fixes
+  `blueprint_send_popo_file` / `file_sender.send(path)` upload failures by
+  sending `Open-Access-Token` to `uploadUrl` and retrying once after token
+  expiry:
+  `archive/runtime-backend/blueprint_popo_file_attachment_delay_token_refresh_2026-06-17.md`
+
+Use this file when the user reports:
+
+- a POPO file-only message reaches the Agent before the next text message.
+- a POPO file attachment is unresolved or lacks an absolute path.
+- a POPO callback has `fileInfo.fileId` but no direct file URL.
+- multiple uploaded POPO files should be delivered with one later text message.
+- `/new`, `/stop`, `/help`, or `/excel-log` consumes pending files incorrectly.
+- `blueprint_send_popo_file` or `file_sender.send(path)` fails with
+  `access token expired` while the local file exists.
+
+For the latest one-click reinstall/restart script hardening, Workbench
+`ProjectDir` binding, fallback web UI refusal, and exit-code-1 diagnosis from
+2026-06-17:
+
+- Installer/runtime script changes ensure `--skip-web-build` cannot silently
+  install the fallback Workbench, missing `vite` triggers `bun install`, restart
+  scripts pass and verify the target `ProjectDir`, and one-click restart should
+  default to the main project Workbench URL:
+  `archive/runtime-backend/gulicode_bp_reinstall_workbench_guardrail_2026-06-17.md`
+
+Use this file when the user reports:
+
+- a Workbench URL points at `C:\Users\qiuhaoxuan\.codex\worktrees\...` instead
+  of `F:\src\Package\Script\Python\multi_agent_tcp`.
+- reinstall/restart returns exit code `1` and the cause may be a real build
+  failure.
+- logs mention `command not found: vite`, missing GuLiCode app dist, or
+  `fallback web UI`.
+- the installed Workbench shows the simple fallback page instead of the built
+  GuLiCode app.
+
 For the latest Blueprint slot termination hardening, POPO concurrent session
-write fix, direct Agent reply fallback, `blueprint_reply_popo_user` message id
-regression fix, and POPO `/new` confirmation behavior from 2026-06-10:
+write fix, framework-forwarded start-Agent POPO replies, and POPO `/new`
+confirmation behavior from 2026-06-10:
 
 - Runtime/backend `blueprint.slots.terminate` structure-level forced cleanup,
   `session.json` unique temp writes and Windows retry, ordinary start-Agent
-  reply fallback to POPO with `messageId` / `fallback` transcript fields,
-  corrected `scope.current_message_context` usage in
-  `blueprint_reply_popo_user`, and `/new` returning `已开启新会话`:
+  replies forwarded to POPO with `messageId` transcript fields, and `/new`
+  returning `已开启新会话`:
   `archive/runtime-backend/blueprint_slot_termination_popo_direct_reply_new_session_2026-06-10.md`
 
 Use this file when the user reports:
@@ -113,9 +255,8 @@ Use this file when the user reports:
 - `终止运行槽` only killed one instance or left queued/running sessions behind.
 - POPO callback fails with `[WinError 5] 拒绝访问` while replacing
   `session.json`.
-- POPO sees `思考中....` but no second message even though Workbench shows an
-  ordinary Agent reply.
-- `blueprint_reply_popo_user` raises `name 'context' is not defined`.
+- POPO receives no final reply even though Workbench shows an ordinary start
+  Agent reply.
 - POPO `/new` clears the session but appears stuck because there is no
   confirmation.
 
@@ -148,14 +289,12 @@ Use those files when the user reports:
 - The Agent panel shows task-status/summary/session-maintenance text as a
   normal Agent reply.
 
-For the latest POPO start-Agent reply MCP tool and readable POPO session keys
-from 2026-06-09:
+For readable POPO session keys from 2026-06-09:
 
-- Runtime/backend `blueprint_reply_popo_user(content)` ordinary MCP tool,
-  start-Agent-only visibility, service-side receiver ownership via saved
-  `popoReplyTo`, POPO send helper, transcript `agent_reply` /
-  `popo_reply_sent` events, readable `bps_popo_<user>_<hash>` session keys,
-  and legacy `bps_<hash>` migration:
+- Runtime/backend service-side receiver ownership via saved `popoReplyTo`,
+  POPO send helper, transcript `agent_reply` / `popo_reply_sent` events,
+  readable `bps_popo_<user>_<hash>` session keys, and legacy `bps_<hash>`
+  migration:
   `archive/runtime-backend/blueprint_popo_reply_tool_readable_sessions_2026-06-09.md`
 - Workbench session dropdown `sessionDisplayName` support, session-key-first
   display, and POPO user-readable second-line label:
@@ -163,9 +302,8 @@ from 2026-06-09:
 
 Use those files when the user reports:
 
-- A POPO-started Agent can see the message but cannot reply to the POPO user.
-- `blueprint_reply_popo_user` is missing, visible to the wrong Agent, or
-  appears to require receiver/token/app secret fields.
+- A POPO-started Agent can see the message but its ordinary final reply is not
+  forwarded to the POPO user.
 - POPO reply target selection is wrong for private or group conversations.
 - The session list shows only opaque `bps_<hash>` ids instead of including the
   POPO user such as `qiuhaoxuan`.

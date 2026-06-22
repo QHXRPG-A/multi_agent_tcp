@@ -10,11 +10,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
 
 PLUGIN_NAME = "gulicode-bp"
+RUNTIME_REQUIRED_WHEEL_MEMBERS = (
+    "multi_agent_tcp/desktop_blueprint_service.py",
+    "multi_agent_tcp/blueprint_mcp_runtime.py",
+    "multi_agent_tcp/graph_control.py",
+    "multi_agent_tcp/excel_audit.py",
+)
 MARKETPLACE_ENTRY = {
     "name": PLUGIN_NAME,
     "source": {
@@ -48,14 +55,42 @@ def runtime_package_dir(source_root: Path) -> Path:
     raise RuntimeError("could not locate desktop_blueprint_service.py")
 
 
+def _gulicode_workspace_root(app_root: Path) -> Path:
+    return app_root.parents[1]
+
+
+def _vite_installed(workspace_root: Path) -> bool:
+    bin_dir = workspace_root / "node_modules" / ".bin"
+    return any(path.name.lower().startswith("vite") for path in bin_dir.glob("vite*"))
+
+
+def _is_full_gulicode_app_dist(app_dist: Path) -> bool:
+    return (app_dist / "index.html").is_file() and (app_dist / "assets").is_dir()
+
+
+def _ensure_gulicode_app_dependencies(app_root: Path, bun: str) -> None:
+    workspace_root = _gulicode_workspace_root(app_root)
+    if _vite_installed(workspace_root):
+        return
+    if not (workspace_root / "bun.lock").is_file():
+        raise RuntimeError(f"GuLiCode workspace lockfile is missing: {workspace_root / 'bun.lock'}")
+    subprocess.run([bun, "install"], cwd=workspace_root, check=True)
+    if not _vite_installed(workspace_root):
+        raise RuntimeError(
+            "GuLiCode dependencies were installed but vite is still missing. "
+            f"Check {workspace_root / 'node_modules'}."
+        )
+
+
 def build_gulicode_app(app_root: Path, *, skip_build: bool) -> None:
     if skip_build:
         return
     bun = shutil.which("bun")
     if bun is None:
-        if (app_root / "dist" / "index.html").is_file():
+        if _is_full_gulicode_app_dist(app_root / "dist"):
             return
         raise RuntimeError("bun was not found and GuLiCode app dist is missing")
+    _ensure_gulicode_app_dependencies(app_root, bun)
     subprocess.run([bun, "run", "build"], cwd=app_root, check=True)
 
 
@@ -67,7 +102,21 @@ def copy_web_dist(plugin_root: Path, package_dir: Path, *, skip_build: bool) -> 
 
     if app_root.is_dir():
         build_gulicode_app(app_root, skip_build=skip_build)
-    if app_dist.is_dir() and (app_dist / "index.html").is_file():
+        if not _is_full_gulicode_app_dist(app_dist):
+            if skip_build:
+                raise RuntimeError(
+                    "GuLiCode app dist is missing or incomplete while --skip-web-build was used. "
+                    "Run `bun install` under GuLiCode and `bun run build` under GuLiCode/packages/app, "
+                    "or rerun without --skip-web-build so the installer can build it. "
+                    "Refusing to install the fallback web UI as the plugin Workbench."
+                )
+            raise RuntimeError(f"GuLiCode app build did not produce a complete dist: {app_dist}")
+        if dist.exists():
+            shutil.rmtree(dist)
+        shutil.copytree(app_dist, dist, ignore=shutil.ignore_patterns(".vite"))
+        return str(app_dist)
+
+    if app_dist.is_dir() and _is_full_gulicode_app_dist(app_dist):
         if dist.exists():
             shutil.rmtree(dist)
         shutil.copytree(app_dist, dist, ignore=shutil.ignore_patterns(".vite"))
@@ -201,7 +250,16 @@ def build_runtime_wheel(package_dir: Path, wheelhouse: Path) -> Path:
             raise RuntimeError("runtime wheel build completed but produced no multi_agent_tcp wheel")
         target = wheelhouse / wheels[-1].name
         shutil.copy2(wheels[-1], target)
+        validate_runtime_wheel(target)
         return target
+
+
+def validate_runtime_wheel(wheel: Path) -> None:
+    with zipfile.ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+    missing = [name for name in RUNTIME_REQUIRED_WHEEL_MEMBERS if name not in names]
+    if missing:
+        raise RuntimeError(f"runtime wheel is missing required package files: {missing}")
 
 
 def _install_runtime_wheel(python: Path, wheel: Path) -> None:
@@ -212,7 +270,19 @@ def _install_runtime_wheel(python: Path, wheel: Path) -> None:
             "pip",
             "install",
             "--upgrade",
+            str(wheel),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
             "--force-reinstall",
+            "--no-deps",
             str(wheel),
         ],
         check=True,
@@ -271,6 +341,7 @@ def validate_runtime_imports(python: Path, plugin_root: Path) -> None:
     code = (
         "import flask\n"
         "import multi_agent_tcp\n"
+        "import multi_agent_tcp.excel_audit\n"
         "import requests\n"
         "from Crypto.Cipher import AES\n"
         "from mcp.server.fastmcp import FastMCP\n"
@@ -346,8 +417,10 @@ def validate_release_package(plugin_root: Path) -> None:
     missing = [item for item in required if not (plugin_root / item).is_file()]
     if missing:
         raise RuntimeError(f"release package is missing required files: {missing}")
-    if not list((plugin_root / "runtime" / "wheels").glob("multi_agent_tcp-*.whl")):
+    wheels = list((plugin_root / "runtime" / "wheels").glob("multi_agent_tcp-*.whl"))
+    if not wheels:
         raise RuntimeError(f"release package is missing runtime wheel under {plugin_root / 'runtime' / 'wheels'}")
+    validate_runtime_wheel(sorted(wheels, key=lambda item: item.stat().st_mtime)[-1])
     if (plugin_root / ".runtime").exists():
         raise RuntimeError(f"release package must not include runtime state: {plugin_root / '.runtime'}")
 

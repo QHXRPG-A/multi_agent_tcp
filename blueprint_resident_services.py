@@ -857,7 +857,7 @@ def _catalog_item_from_class(
                 getattr(node, "lineno", None),
             )
         )
-        service_name = _service_name(service_name)
+        service_name = _fallback_service_name(rel_path, node.name, service_name)
     methods: List[ResidentServiceMethod] = []
     for child in node.body:
         if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -996,6 +996,17 @@ def _service_name(value: str) -> str:
     if raw[0].isdigit():
         raw = f"service_{raw}"
     return raw
+
+
+def _fallback_service_name(rel_path: str, class_name: str, invalid_name: str) -> str:
+    file_stem = Path(str(rel_path or "")).stem
+    for candidate in (file_stem, class_name, invalid_name):
+        service_name = _service_name(candidate)
+        if service_name.endswith("_service") and len(service_name) > len("_service"):
+            service_name = service_name[: -len("_service")]
+        if service_name != "service":
+            return service_name
+    return "service"
 
 
 def _snake_case(value: str) -> str:

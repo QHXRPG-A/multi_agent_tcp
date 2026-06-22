@@ -384,6 +384,108 @@ def test_control_plane_default_script_nodes_can_be_bypassed(tmp_path: Path) -> N
     assert writer_body["prompt"] == "direct handoff"
 
 
+def test_control_plane_feedback_script_leaf_can_be_called_from_batch(tmp_path: Path) -> None:
+    script_root = tmp_path / ".multi_agent_workspace" / "scripts"
+    script_root.mkdir(parents=True)
+    (script_root / "table_queue_service.py").write_text(
+        "\n".join(
+            [
+                "from multi_agent_tcp.blueprint_script_nodes import blueprint_node",
+                "",
+                "@blueprint_node(inputs={'action': str, 'arguments': dict}, outputs={'result': dict})",
+                "def table_queue_service(action: str, arguments: dict) -> dict:",
+                "    return {'action': action, 'arguments': arguments}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    graph = graph_definition_from_dict(
+        {
+            "agent_nodes": {
+                "planner": {"agent_id": "planner"},
+            },
+            "script_nodes": {
+                "table_queue_service": {
+                    "script_id": "table_queue_service.py:table_queue_service",
+                    "module_path": "table_queue_service.py",
+                    "function_name": "table_queue_service",
+                    "title": "table_queue_service",
+                    "description": "Call table_queue.",
+                    "inputs": [
+                        {"name": "action", "type": "str"},
+                        {"name": "arguments", "type": "dict"},
+                    ],
+                    "outputs": [{"name": "result", "type": "dict"}],
+                    "feedback_only": True,
+                }
+            },
+            "edges": [
+                {"from": "planner", "to": "table_queue_service", "edge_type": "exec"},
+            ],
+        }
+    )
+    runtime = GraphRuntime(_FakeCluster())
+    control = GraphRuntimeControlPlane(runtime, graph, script_root=script_root)
+
+    batch = control.handle_request(
+        {
+            "command": "message.create_batch",
+            "args": {
+                "source_node_id": "planner",
+                "required_target_node_ids": [],
+                "batch_id": "script-leaf-batch",
+            },
+        }
+    )["batch"]
+    assert batch["required_target_node_ids"] == []
+    assert batch["script_calls"]["table_queue_service"]["direct_call"] is True
+
+    context = control.handle_request(
+        {
+            "command": "agent.context",
+            "args": {"source_node_id": "planner", "batch_id": batch["batch_id"]},
+        }
+    )["context"]
+    envelope = context["message_envelope"]
+    assert envelope["outgoing_batch_id"] == "script-leaf-batch"
+    assert envelope["required_script_calls"][0]["script_node_id"] == "table_queue_service"
+
+    called = control.handle_request(
+        {
+            "command": "script.call",
+            "args": {
+                "source_node_id": "planner",
+                "batch_id": batch["batch_id"],
+                "function_name": "table_queue_service",
+                "arguments": {"action": "help", "arguments": {"action": "occupy"}},
+            },
+        }
+    )
+    assert called["ok"] is True
+    assert called["result"]["result"] == {"action": "help", "arguments": {"action": "occupy"}}
+    assert called["delivery"] == []
+    assert called["dispatch"]["status"] == "dispatched"
+
+    occupied = control.handle_request(
+        {
+            "command": "script.call",
+            "args": {
+                "source_node_id": "planner",
+                "batch_id": batch["batch_id"],
+                "function_name": "table_queue_service",
+                "arguments": {"action": "occupy", "arguments": {"tableNames": ["15-0.xlsx"]}},
+            },
+        }
+    )
+    assert occupied["ok"] is True
+    assert occupied.get("already_called") is not True
+    assert occupied["result"]["result"] == {
+        "action": "occupy",
+        "arguments": {"tableNames": ["15-0.xlsx"]},
+    }
+    assert occupied["delivery"] == []
+
+
 def test_control_plane_forced_script_call_blocks_whole_source_batch(tmp_path: Path) -> None:
     script_root = tmp_path / ".multi_agent_workspace" / "scripts"
     script_root.mkdir(parents=True)
@@ -620,6 +722,68 @@ def test_control_plane_exposes_resident_services_and_queues_call_result() -> Non
     assert queued["context"]["framework_context"]["resident_services"][0]["service_name"] == "echo_service"
 
 
+def test_control_plane_resident_service_call_can_return_without_queueing_result() -> None:
+    graph = graph_definition_from_dict({"agent_nodes": {"planner": {"agent_id": "planner"}}})
+    runtime = GraphRuntime(_FakeCluster())
+    services = _FakeResidentServices(
+        {
+            "ok": True,
+            "service_name": "echo_service",
+            "method_name": "echo",
+            "result": {"message": "hello"},
+        }
+    )
+    control = GraphRuntimeControlPlane(runtime, graph, resident_services=services)
+
+    called = asyncio.run(
+        control.call_resident_service(
+            "planner",
+            "echo_service",
+            "echo",
+            {"message": "hello"},
+            queue_result=False,
+        )
+    )
+
+    assert called["ok"] is True
+    assert called["result"] == {"message": "hello"}
+    assert called["queued_message"] is None
+    assert runtime.status_snapshot()["queues"]["by_agent"] == {}
+
+
+def test_control_plane_file_sender_service_send_delegates_to_framework_callback() -> None:
+    graph = graph_definition_from_dict({"agent_nodes": {"planner": {"agent_id": "planner"}}})
+    runtime = GraphRuntime(_FakeCluster())
+    services = _FakeResidentServices({"ok": False, "code": "SHOULD_NOT_CALL"})
+    calls: list[dict[str, Any]] = []
+
+    def send_file(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {"ok": True, "sent": True, "record": {"fileName": "preview.png"}}
+
+    control = GraphRuntimeControlPlane(
+        runtime,
+        graph,
+        resident_services=services,
+        file_sender_callback=send_file,
+    )
+
+    called = asyncio.run(
+        control.call_resident_service(
+            "planner",
+            "file_sender",
+            "send",
+            {"path": "C:/tmp/preview.png"},
+            queue_result=False,
+        )
+    )
+
+    assert called["ok"] is True
+    assert called["result"] == {"ok": True, "sent": True, "record": {"fileName": "preview.png"}}
+    assert calls == [{"path": "C:/tmp/preview.png", "agent_node_id": "planner", "agent_id": ""}]
+    assert services.calls == []
+
+
 def test_control_plane_queues_resident_service_error_for_stopped_service() -> None:
     graph = graph_definition_from_dict({"agent_nodes": {"planner": {"agent_id": "planner"}}})
     runtime = GraphRuntime(_FakeCluster())
@@ -726,7 +890,18 @@ def test_control_plane_blocks_table_queue_direct_service_calls_and_allows_script
         }
     )
     runtime = GraphRuntime(_FakeCluster())
-    control = GraphRuntimeControlPlane(runtime, graph, script_root=script_root, resident_services=services)
+    session_dir = tmp_path / "state" / "blueprint_sessions" / "session-1"
+    control = GraphRuntimeControlPlane(
+        runtime,
+        graph,
+        script_root=script_root,
+        resident_services=services,
+        excel_audit_context_provider=lambda **kwargs: {
+            "session_key": "session-1",
+            "session_dir": str(session_dir),
+            **kwargs,
+        },
+    )
     batch = control.handle_request(
         {
             "command": "message.create_batch",
@@ -753,6 +928,11 @@ def test_control_plane_blocks_table_queue_direct_service_calls_and_allows_script
     assert proxied["result"]["result"]["ok"] is True
     assert proxied["result"]["result"]["result"] == {"healthy": True, "arguments": {"source": "script"}}
     assert services.calls == [("table_queue", "health", {"source": "script"})]
+    audit_files = list((session_dir / "excel_ops" / "agent").glob("*.json"))
+    assert len(audit_files) == 1
+    audit_text = audit_files[0].read_text(encoding="utf-8")
+    assert '"serviceName": "table_queue"' in audit_text
+    assert '"scriptNodeId": "table_queue_proxy"' in audit_text
     activities = runtime.status_snapshot()["runtime_activities"].values()
     resident_activities = [activity for activity in activities if activity.get("kind") == "resident_service"]
     assert len(resident_activities) == 1

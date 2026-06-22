@@ -286,16 +286,8 @@ const createPlatform = (): Platform => {
     terminateBlueprintSession: (sessionKey: string, reason?: string) =>
       window.api.blueprintTerminateSession(sessionKey, reason),
 
-    startBlueprintSlot: (projectDir: string, blueprintId: string) => window.api.blueprintStartSlot(projectDir, blueprintId),
-
-    blueprintSlotStatus: (projectDir: string, blueprintId: string) =>
-      window.api.blueprintSlotStatus(projectDir, blueprintId) as Promise<any>,
-
-    terminateBlueprintSlot: (projectDir: string, blueprintId: string, reason?: string) =>
-      window.api.blueprintTerminateSlot(projectDir, blueprintId, reason),
-
-    sendBlueprintSlotMessage: (projectDir: string, message: string, input) =>
-      window.api.blueprintSlotMessage(projectDir, message, input),
+    sendBlueprintSessionMessage: (projectDir: string, blueprintId: string, message: string, input) =>
+      window.api.blueprintSessionMessage(projectDir, blueprintId, message, input),
 
     startBlueprintRun: (projectDir: string, blueprintId: string, plan, executionMode) =>
       window.api.blueprintStart(projectDir, blueprintId, plan, executionMode),

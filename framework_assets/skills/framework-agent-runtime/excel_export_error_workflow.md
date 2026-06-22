@@ -12,6 +12,9 @@ Use this workflow when a POPO/user message contains an Excel export failure,
    id/link, ask the user which export flow failed before analyzing tables.
 4. Do not modify planning tables while diagnosing export failures. This workflow
    is read-only unless the user later asks for a confirmed table fix.
+5. Before any refresh, table lookup, generated-data lookup, blame, or diagnosis,
+   verify that the pasted notification contains actionable error details, not
+   only a TOP link and export status footer.
 
 ## Branch Identification
 
@@ -31,6 +34,41 @@ Branch rules:
   files.
 - If the user supplies a different TOP plan id, ask for confirmation unless the
   message also explicitly says trunk or release/re.
+
+## Minimum Error Detail Gate
+
+After branch identification, but before `svn update` or any local investigation,
+check whether the pasted notification includes at least one real diagnostic
+line.
+
+Treat the message as insufficient and do not process it when it only contains:
+
+- notification header, commit author, revision, issue link, or changed workbook
+  paths such as `U ...xlsx`;
+- `导表出错,详情参见：` plus a TOP plan link;
+- a lone numeric/footer/status line such as `1`.
+
+Do not use the changed workbook list as a substitute for the missing error
+details. A trailing `1` is only a status/footer marker; it is not a diagnosable
+export error. If real diagnostic lines are present, ignore a trailing numeric
+footer and continue with the real error text.
+
+When the notification is insufficient, call `agent_task_status` with
+`needs_input` before replying in POPO-bound sessions, and reply in Chinese:
+
+```text
+这段导表通知里没有完整报错信息，只有 TOP 链接/改表列表和末尾的 `1`，无法定位问题。
+请重新粘贴完整的导表报错内容，至少包含 `[Error tips]`、Traceback、`check_rule`/`post_process` 报错，或类似 `【图鉴表】以下物品没有识别到获取方式[5100440170]` 这样的具体报错行。
+```
+
+Only continue when the pasted log includes an actionable diagnostic signal, such
+as:
+
+- `[Error tips] ...`
+- Traceback lines.
+- `check_rule.py` / `post_process.py` error text.
+- A table validation message with a table/module/id/key/field, for example
+  `【图鉴表】以下物品没有识别到获取方式[5100440170]`.
 
 ## Refresh Before Reading
 
@@ -174,6 +212,10 @@ If the user asks to整理导表报错, make a整改清单, 写 POPO 在线表格
 
 - If branch/source is unclear, call `agent_task_status` with `needs_input` before
   replying.
+- If the pasted export notification lacks actionable error details and only has
+  the notification header, changed workbook list, TOP link, or a lone numeric
+  footer such as `1`, call `agent_task_status` with `needs_input` and ask for the
+  complete error log.
 - If local evidence such as vendor tables or ExcelToData toolchain is missing,
   call `agent_task_status` with `blocked` or `needs_input` depending on whether
   user input can resolve it.

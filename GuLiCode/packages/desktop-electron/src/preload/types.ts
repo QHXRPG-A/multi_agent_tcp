@@ -177,18 +177,15 @@ export type ElectronAPI = {
   blueprintSessionTimeline: (sessionKey: string, limit?: number) => Promise<Record<string, unknown>>
   blueprintDeleteSession: (sessionKey: string) => Promise<Record<string, unknown>>
   blueprintTerminateSession: (sessionKey: string, reason?: string) => Promise<Record<string, unknown>>
-  blueprintStartSlot: (projectDir: string, blueprintId: string) => Promise<Record<string, unknown>>
-  blueprintSlotStatus: (projectDir: string, blueprintId: string) => Promise<Record<string, unknown>>
-  blueprintTerminateSlot: (projectDir: string, blueprintId: string, reason?: string) => Promise<Record<string, unknown>>
-  blueprintSlotMessage: (
+  blueprintSessionMessage: (
     projectDir: string,
+    blueprintId: string,
     message: string,
     input?: {
       source?: string
-      blueprintId?: string
-      runId?: string
-      sourceIdentity?: Record<string, unknown>
-      sessionIdentity?: Record<string, unknown>
+      popoUserId?: string
+      popoSessionId?: string
+      popoGroupId?: string
       sessionKey?: string
     },
   ) => Promise<Record<string, unknown>>

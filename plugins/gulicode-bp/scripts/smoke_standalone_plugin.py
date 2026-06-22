@@ -30,6 +30,7 @@ os.environ["GULICODE_BP_SINGLETON_ROLE"] = "proxy"
 import flask
 import gulicode_bp_mcp
 import multi_agent_tcp
+import multi_agent_tcp.excel_audit
 import multi_agent_tcp.popo_agent_bot_run
 import requests
 from Crypto.Cipher import AES
@@ -92,6 +93,7 @@ try:
             "flask": str(Path(flask.__file__).resolve()),
             "requests": str(Path(requests.__file__).resolve()),
             "Crypto": str(Path(AES.__file__).resolve()),
+            "excelAudit": str(Path(multi_agent_tcp.excel_audit.__file__).resolve()),
             "popo": str(Path(multi_agent_tcp.popo_agent_bot_run.__file__).resolve()),
         },
         "popoStatus": popo_status,

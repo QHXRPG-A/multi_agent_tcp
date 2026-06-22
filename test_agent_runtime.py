@@ -20,6 +20,7 @@ from multi_agent_tcp import (
     BlueprintTerminalNode,
     CLIWorkerBackend,
     CommonNode,
+    CodexAppServerAdapter,
     CodexAdapter,
     GuLiCodeTopAgentProfile,
     AgentTCPClient,
@@ -54,6 +55,7 @@ from multi_agent_tcp.codex_bridge import compact_codex_result_for_transport
 from multi_agent_tcp.codex_bridge import load_codex_runtime
 from multi_agent_tcp.agent_launch_context import (
     _apply_local_mcp_proxy_env,
+    _windows_long_path,
     initialize_private_codex_home,
     materialize_full_agent_context,
 )
@@ -955,6 +957,52 @@ def test_adapter_from_agent_config_accepts_codex_worker_mode_without_cli_kind() 
     assert isinstance(adapter, CodexAdapter)
 
 
+def test_adapter_from_agent_config_uses_app_server_backend(tmp_path: Path) -> None:
+    adapter = adapter_from_agent_config(
+        {
+            "agent_id": "agent-cx",
+            "mode": "codex-worker",
+            "codex": {
+                "cwd": str(tmp_path),
+                "codex_backend": "app_server",
+            },
+        }
+    )
+
+    assert isinstance(adapter, CodexAppServerAdapter)
+    assert adapter.conversation_backend == "codex_app_server"
+    assert adapter.supports_steer is True
+
+
+def test_materialize_full_popo_agent_defaults_to_app_server_backend(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    node = AgentNode(
+        node_id="planner",
+        node_type="agent",
+        agent_id="agent-planner",
+        cli_kind="codex",
+        cwd=project,
+        popo_entry={
+            "enabled": True,
+            "robot_app_key": "robot-1",
+            "robot_name": "Robot",
+            "robot_app_secret": "secret",
+            "callback_token": "token",
+            "aes_key": "0123456789abcdef0123456789abcdef",
+        },
+    )
+
+    launch_node = materialize_full_agent_context(
+        node,
+        project_root=project,
+        run=SimpleNamespace(path=tmp_path / "run"),
+    )
+
+    assert launch_node.adapter_options["codex_backend"] == "app_server"
+    assert launch_node.adapter_options["conversation_backend"] == "codex_app_server"
+
+
 def test_codex_runtime_rejects_danger_full_access() -> None:
     with pytest.raises(ValueError, match="danger-full-access"):
         load_codex_runtime(
@@ -1191,6 +1239,35 @@ class _FakeCluster:
     ) -> dict[str, Any]:
         self.sent.append((worker_id, body, timeout_sec))
         return {"type": "message", "from": worker_id, "body": {"ok": True}}
+
+
+class _SteerCluster(_FakeCluster):
+    def __init__(self) -> None:
+        super().__init__()
+        self.steered: list[tuple[str, Any, float, dict[str, Any] | None]] = []
+
+    async def steer_single(
+        self,
+        worker_id: str,
+        body: Any,
+        *,
+        timeout_sec: float = 30.0,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.steered.append((worker_id, body, timeout_sec, meta))
+        return {
+            "type": "control_result",
+            "from": worker_id,
+            "body": {
+                "ok": True,
+                "adapter": {
+                    "conversationBackend": "codex_app_server",
+                    "conversationId": "thr_1",
+                    "activeTurnId": "turn_1",
+                },
+                "codex": {"thread_id": "thr_1", "turn_id": "turn_1"},
+            },
+        }
 
 
 class _FailingThenOkCluster(_FakeCluster):
@@ -1444,6 +1521,29 @@ async def test_graph_runtime_lazy_starts_and_reuses_agent_node() -> None:
     assert reply["node_id"] == "node-a"
     assert reply["said"] == json.dumps({"ok": True}, ensure_ascii=False)
     assert len(runtime.agent_utterances) == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_steers_busy_agent_message() -> None:
+    cluster = _SteerCluster()
+    node = AgentNode(node_id="planner", agent_id="agent-planner", cwd=Path("."))
+    runtime = GraphRuntime(cluster)
+    inst = await runtime.ensure_agent(node)
+    inst.busy_count = 1
+    inst.set_state("waiting_for_reply", message_id="msg-active")
+
+    result = await runtime.steer_agent_message(
+        node,
+        {"prompt": "focus on the latest POPO message", "type": "user_message"},
+        message_id="steer-1",
+    )
+
+    assert result["ok"] is True
+    assert result["steered"] is True
+    assert result["conversationBackend"] == "codex_app_server"
+    assert result["conversationId"] == "thr_1"
+    assert cluster.steered[0][0] == "agent-planner"
+    assert cluster.steered[0][1]["prompt"] == "focus on the latest POPO message"
 
 
 @pytest.mark.asyncio
@@ -3247,11 +3347,20 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
     assert (framework_skill_dir / "SKILL.md").is_file()
     assert selected_skill_index.is_file()
     framework_skill = (framework_skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    with open(_windows_long_path(framework_skill_dir / "remote_client_debugging.md"), encoding="utf-8") as handle:
+        remote_debug_doc = handle.read()
     framework_rule = (support_dir / "rules" / "framework-agent-runtime.md").read_text(encoding="utf-8")
     selected_skill_index_text = selected_skill_index.read_text(encoding="utf-8")
     assert "selected_skills_index.md" in framework_skill
     assert "planning_table_popo_workflow.md" in framework_skill
     assert "trunk_release_table_sync.md" in framework_skill
+    assert "remote_client_debugging.md" in framework_skill
+    assert "py -3.13" in framework_skill
+    assert "Python313\\python.exe" in framework_skill
+    assert "hunter-cli-debug" in remote_debug_doc
+    assert "py -3.13" in remote_debug_doc
+    assert "local` or `本地` alone is not enough" in remote_debug_doc
+    assert "py -3.13 scripts/list_devices.py --filter <term>" in remote_debug_doc
     assert "shared workspace" not in framework_skill
     assert "private checkout" not in framework_skill
     assert "workspace_submit" not in framework_skill
@@ -3260,6 +3369,9 @@ async def test_graph_runtime_full_agent_skips_private_workspace(
     assert "workspace_submit" not in framework_rule
     assert "workspace_publish" not in framework_rule
     assert "blueprint_query_excel_history" in framework_rule
+    assert "remote_client_debugging.md" in framework_rule
+    assert "hunter-cli-debug" in framework_rule
+    assert "`local` or `本地` alone is not enough" in framework_rule
     assert "full-agent-skill" in selected_skill_index_text
     assert "FULL_AGENT_SKILL_DESCRIPTION" in selected_skill_index_text
     assert str(rec.skill_md_path) in selected_skill_index_text
@@ -3479,6 +3591,7 @@ async def test_full_agent_receives_standard_context_and_dispatches_via_message_m
             "blueprint_script_call",
             "blueprint_service_docs",
             "blueprint_service_call",
+            "blueprint_send_popo_file",
             "agent_task_status",
             "join_contribute",
         ]

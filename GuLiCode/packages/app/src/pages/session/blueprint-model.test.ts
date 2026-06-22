@@ -896,7 +896,7 @@ describe("blueprint draft model", () => {
       prompt: "Plan with saved settings.",
       run_prompt: "Use the saved per-run prompt once.",
       execution_mode: "nonblocking",
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       skills: ["business-skill"],
       skill_selection: { mode: "selected", skill_hashes: ["business-skill"] },
       rule_paths: ["policy.md"],
@@ -937,6 +937,7 @@ describe("blueprint draft model", () => {
       prompt: "Plan with saved settings.",
       run_prompt: "Use the saved per-run prompt once.",
       execution_mode: "nonblocking",
+      model: "gpt-5.5",
       skills: ["business-skill"],
       skill_selection: { mode: "selected", skill_hashes: ["business-skill"] },
       rule_paths: ["policy.md"],
@@ -963,6 +964,7 @@ describe("blueprint draft model", () => {
     expect(restored.config).toEqual(draft.config)
     expect(restored.graph.common_nodes.clock).toEqual({ node_id: "clock", kind: "tick", every_n_seconds: 9 })
     expect(restored.graph.agent_nodes.planner.run_prompt).toBe("Use the saved per-run prompt once.")
+    expect(restored.graph.agent_nodes.planner.model).toBe("gpt-5.5")
     expect(restored.graph.agent_nodes.planner.adapter_options).toEqual({
       dangerous_access: false,
       retry: true,

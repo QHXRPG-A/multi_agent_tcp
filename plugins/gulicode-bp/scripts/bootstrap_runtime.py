@@ -185,6 +185,7 @@ def validate_runtime_imports(python: Path, plugin_root: Path, runtime_root: Path
         "from pathlib import Path\n"
         "import flask\n"
         "import multi_agent_tcp\n"
+        "import multi_agent_tcp.excel_audit\n"
         "import requests\n"
         "from Crypto.Cipher import AES\n"
         "from mcp.server.fastmcp import FastMCP\n"

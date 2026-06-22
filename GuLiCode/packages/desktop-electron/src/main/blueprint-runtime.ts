@@ -131,38 +131,26 @@ export class BlueprintRuntime {
     return this.request("blueprint.sessions.terminate", { sessionKey, reason })
   }
 
-  startSlot(projectDir: string, blueprintId: string) {
-    return this.request("blueprint.slots.start", { projectDir, blueprintId })
-  }
-
-  slotStatus(projectDir: string, blueprintId: string) {
-    return this.request("blueprint.slots.status", { projectDir, blueprintId })
-  }
-
-  terminateSlot(projectDir: string, blueprintId: string, reason?: string) {
-    return this.request("blueprint.slots.terminate", { projectDir, blueprintId, reason })
-  }
-
-  slotMessage(
+  sessionMessage(
     projectDir: string,
+    blueprintId: string,
     message: string,
     input: {
       source?: string
-      blueprintId?: string
-      runId?: string
-      sourceIdentity?: Record<string, unknown>
-      sessionIdentity?: Record<string, unknown>
+      popoUserId?: string
+      popoSessionId?: string
+      popoGroupId?: string
       sessionKey?: string
     } = {},
   ) {
-    return this.request("blueprint.slots.message", {
+    return this.request("blueprint.sessions.message", {
       projectDir,
+      blueprintId,
       message,
       source: input.source,
-      blueprintId: input.blueprintId,
-      runId: input.runId,
-      sourceIdentity: input.sourceIdentity,
-      sessionIdentity: input.sessionIdentity,
+      popoUserId: input.popoUserId,
+      popoSessionId: input.popoSessionId,
+      popoGroupId: input.popoGroupId,
       sessionKey: input.sessionKey,
     })
   }

@@ -6,6 +6,9 @@ worker adapters.
 
 Current records:
 
+- `blueprint_popo_persistent_codex_session_steer_cleanup_2026-06-18.md`
+- `blueprint_popo_file_attachment_delay_token_refresh_2026-06-17.md`
+- `blueprint_popo_file_sender_service_2026-06-17.md`
 - `blueprint_framework_worker_runtime_split_restart_2026-06-16.md`
 - `blueprint_session_stop_command_2026-06-12.md`
 - `blueprint_popo_table_queue_internal_notifications_2026-06-12.md`
